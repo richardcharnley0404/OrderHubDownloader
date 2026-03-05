@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OrderHub Downloader</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-frame">
+    <header class="app-header">
+      <img src="../../assets/favicon%20hub.svg" alt="OrderHub" class="header-logo">
+      <span class="header-divider"></span>
+      <span class="header-title">OrderHub Downloader</span>
+      <span id="appVersion" class="app-version"></span>
+      <div class="window-controls">
+        <button type="button" class="window-control-btn" id="minimiseBtn" title="Minimise">&#8722;</button>
+        <button type="button" class="window-control-btn window-control-close" id="closeBtn" title="Close">&#10005;</button>
+      </div>
+    </header>
+
+    <nav class="tab-bar">
+      <button class="tab active" data-tab="jobs">Jobs</button>
+      <button class="tab" data-tab="settings">Settings</button>
+      <button class="tab" data-tab="activity">Activity Log</button>
+    </nav>
+
+    <!-- Update available banner (persists across tab changes) -->
+    <div id="updateBanner" class="update-banner hidden" role="alert">
+      <div class="update-banner-body">
+        <div class="update-banner-text">
+          <strong id="updateBannerVersion"></strong>
+          <span id="updateBannerNotes" class="update-banner-notes"></span>
+        </div>
+        <div class="update-banner-actions">
+          <button type="button" id="updateDownloadBtn" class="btn-primary btn-sm">Download Update</button>
+          <button type="button" id="updateDismissBtn" class="btn-ghost btn-sm">Remind me later</button>
+        </div>
+      </div>
+    </div>
+
+    <main class="app-body">
+
+      <!-- Global toast notification (visible from any tab) -->
+      <div id="toastNotification" class="toast-notification hidden"></div>
+
+      <!-- ═══ JOBS TAB ═══ -->
+      <div class="tab-panel active" id="panel-jobs">
+        <div class="jobs-toolbar">
+          <div class="jobs-filter-bar">
+            <button type="button" class="jobs-filter active" data-filter="awaiting">Awaiting Production</button>
+            <button type="button" class="jobs-filter" data-filter="printed">Printed</button>
+            <button type="button" class="jobs-filter" data-filter="all">All Jobs</button>
+          </div>
+          <div class="jobs-toolbar-right">
+            <input type="text" id="jobSearch" class="jobs-search" placeholder="Search jobs...">
+            <button type="button" id="refreshJobsBtn" class="btn-secondary">Refresh</button>
+          </div>
+        </div>
+
+        <div class="jobs-table-wrap">
+          <table class="jobs-table" id="jobsTable">
+            <thead>
+              <tr>
+                <th class="sortable" data-sort="status">Status</th>
+                <th>Preview</th>
+                <th class="sortable" data-sort="process">Process</th>
+                <th class="sortable" data-sort="category">Category</th>
+                <th>DPI</th>
+                <th>Flags</th>
+                <th class="sortable" data-sort="job_no">Job No</th>
+                <th class="sortable" data-sort="product">Product</th>
+                <th class="sortable" data-sort="quantity">Qty</th>
+                <th>Options</th>
+                <th class="sortable" data-sort="due_date">Due Date</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="jobsTableBody">
+              <!-- Populated by renderer.js -->
+            </tbody>
+          </table>
+        </div>
+
+        <div id="jobsEmptyState" class="jobs-empty-state">
+          <div class="empty-icon">&#128230;</div>
+          <p class="empty-title">No jobs found</p>
+          <p class="empty-desc">Configure your API connection in Settings, then jobs will appear here automatically.</p>
+        </div>
+      </div>
+
+      <!-- ═══ SETTINGS TAB ═══ -->
+      <div class="tab-panel" id="panel-settings">
+        <form id="settingsForm">
+
+          <!-- Settings sub-tabs -->
+          <div class="settings-subtab-bar">
+            <button type="button" class="settings-subtab active" data-subtab="connection">Connection</button>
+            <button type="button" class="settings-subtab" data-subtab="downloads">Downloads</button>
+            <button type="button" class="settings-subtab" data-subtab="filmscans">Film Scans</button>
+            <button type="button" class="settings-subtab" data-subtab="fileuploads">File Uploads</button>
+            <button type="button" class="settings-subtab" data-subtab="general">General</button>
+            <button type="button" class="settings-subtab" data-subtab="printcontrollers">Print Controllers</button>
+          </div>
+
+          <!-- Sub-tab: Connection -->
+          <div class="settings-subtab-panel active" id="subtab-connection">
+            <fieldset class="panel-section">
+              <legend>OrderHub API</legend>
+
+              <div class="form-group">
+                <label>API Endpoint</label>
+                <input type="text" value="https://nazkcvruighrhpgcarxg.supabase.co/functions/v1/ohd-api" readonly class="input-readonly">
+              </div>
+
+              <div class="form-group">
+                <label for="orderhubApiKey">API Key</label>
+                <input type="password" id="orderhubApiKey" name="orderhubApiKey"
+                  placeholder="Your API key">
+              </div>
+
+              <div class="form-group">
+                <label for="organizationId">Organization ID</label>
+                <input type="text" id="organizationId" name="organizationId"
+                  placeholder="Your organization UUID">
+              </div>
+
+              <div class="form-group">
+                <label for="locationId">Location ID</label>
+                <input type="text" id="locationId" name="locationId"
+                  placeholder="Your location UUID">
+              </div>
+
+              <div class="test-row">
+                <button type="button" id="testApiBtn" class="btn-secondary">Test Connection</button>
+                <span id="apiTestStatus" class="test-status"></span>
+              </div>
+            </fieldset>
+
+            <fieldset class="panel-section">
+              <legend>FTP Server</legend>
+
+              <div class="form-row">
+                <div class="form-group form-group-grow">
+                  <label for="ftpHost">Host</label>
+                  <input type="text" id="ftpHost" name="ftpHost" placeholder="ftp.example.com">
+                </div>
+                <div class="form-group form-group-fixed">
+                  <label for="ftpPort">Port</label>
+                  <input type="number" id="ftpPort" name="ftpPort" value="21" min="1" max="65535">
+                </div>
+              </div>
+
+              <div class="form-row">
+                <div class="form-group form-group-grow">
+                  <label for="ftpUsername">Username</label>
+                  <input type="text" id="ftpUsername" name="ftpUsername" placeholder="FTP username">
+                </div>
+                <div class="form-group form-group-grow">
+                  <label for="ftpPassword">Password</label>
+                  <input type="password" id="ftpPassword" name="ftpPassword" placeholder="FTP password">
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label for="ftpRemotePath">Remote Path</label>
+                <input type="text" id="ftpRemotePath" name="ftpRemotePath" placeholder="/the-root" value="/">
+              </div>
+
+              <div class="test-row">
+                <button type="button" id="testFtpBtn" class="btn-secondary">Test Connection</button>
+                <span id="ftpTestStatus" class="test-status"></span>
+              </div>
+            </fieldset>
+
+            <fieldset class="panel-section">
+              <legend>S3 Storage</legend>
+              <p class="section-desc">Cloud storage for Film Scans and File Uploads.</p>
+
+              <div class="form-group">
+                <label for="s3Provider">Storage Provider</label>
+                <select id="s3Provider" name="s3Provider">
+                  <option value="pixfizz">Pixfizz Storage</option>
+                  <option value="amazon">Amazon S3</option>
+                </select>
+              </div>
+
+              <div class="form-group">
+                <label for="s3BucketName">Bucket Name</label>
+                <input type="text" id="s3BucketName" name="s3BucketName" placeholder="my-bucket">
+              </div>
+
+              <div id="s3AmazonFields" style="display:none">
+                <div class="form-group">
+                  <label for="s3Region">AWS Region</label>
+                  <input type="text" id="s3Region" name="s3Region" placeholder="eu-west-2">
+                </div>
+
+                <div class="form-group">
+                  <label for="s3AccessKeyId">Access Key ID</label>
+                  <input type="text" id="s3AccessKeyId" name="s3AccessKeyId" placeholder="AKIA...">
+                </div>
+
+                <div class="form-group">
+                  <label for="s3SecretAccessKey">Secret Access Key</label>
+                  <input type="password" id="s3SecretAccessKey" name="s3SecretAccessKey" placeholder="Your secret access key">
+                </div>
+              </div>
+
+              <div class="test-row">
+                <button type="button" id="testS3Btn" class="btn-secondary">Test Connection</button>
+                <span id="s3TestStatus" class="test-status"></span>
+              </div>
+            </fieldset>
+          </div>
+
+          <!-- Sub-tab: Downloads -->
+          <div class="settings-subtab-panel" id="subtab-downloads">
+            <fieldset class="panel-section">
+              <legend>Download Directory</legend>
+
+              <div class="form-group">
+                <label for="downloadDirectory">Local Folder</label>
+                <div class="input-with-button">
+                  <input type="text" id="downloadDirectory" name="downloadDirectory"
+                    placeholder="C:\Downloads\OrderHub" readonly>
+                  <button type="button" id="selectDirBtn" class="btn-browse">Browse...</button>
+                </div>
+              </div>
+            </fieldset>
+
+            <fieldset class="panel-section">
+              <legend>FTP Scan &amp; Download</legend>
+              <p class="section-desc">Download all folders and files from the FTP remote path to your local directory.</p>
+
+              <div class="scan-controls">
+                <button type="button" id="scanDownloadBtn" class="btn-primary">Scan &amp; Download</button>
+              </div>
+              <div id="downloadProgress" class="download-progress"></div>
+            </fieldset>
+
+            <fieldset class="panel-section">
+              <legend>Process Folders</legend>
+              <p class="section-desc">Route jobs to different folders based on process type. The default folder is used for any unmapped process.</p>
+
+              <div class="form-group">
+                <label for="processFolderPath">Default Folder</label>
+                <div class="input-with-button">
+                  <input type="text" id="processFolderPath" name="processFolderPath"
+                    placeholder="C:\Print\Process" readonly>
+                  <button type="button" id="selectProcessFolderBtn" class="btn-browse">Browse...</button>
+                </div>
+              </div>
+
+              <div id="processMappingsList" class="process-mappings-list">
+                <!-- Rows added dynamically by renderer.js -->
+              </div>
+
+              <button type="button" id="addProcessMappingBtn" class="btn-secondary btn-add-mapping">+ Add Process Mapping</button>
+            </fieldset>
+
+            <fieldset class="panel-section">
+              <legend>Order Artwork Downloads (Mode 1)</legend>
+
+              <div class="form-group checkbox-group">
+                <label>
+                  <input type="checkbox" id="pollingEnabled" name="pollingEnabled">
+                  <span>Enable automatic FTP polling</span>
+                </label>
+              </div>
+            </fieldset>
+
+            <fieldset class="panel-section">
+              <legend>DPI Validation</legend>
+              <p class="section-desc">Validate image resolution before sending jobs to a print controller. Jobs below threshold can be blocked or require manual approval.</p>
+
+              <div class="form-group checkbox-group">
+                <label>
+                  <input type="checkbox" id="dpiValidationEnabled" name="dpiValidationEnabled">
+                  <span>Enable DPI validation</span>
+                </label>
+              </div>
+
+              <div id="dpiValidationFields">
+                <div class="form-group">
+                  <label for="dpiExcellentThreshold">Excellent Quality Threshold (DPI)</label>
+                  <input type="number" id="dpiExcellentThreshold" name="dpiExcellentThreshold"
+                    value="300" min="72" max="1200" style="width:90px;">
+                  <small class="field-hint">Images at or above this DPI are considered perfect quality.</small>
+                </div>
+
+                <div class="dpi-threshold-group">
+                  <div class="dpi-threshold-label">── Warning Threshold ──</div>
+
+                  <div class="form-group">
+                    <label for="dpiWarningThreshold">Warning DPI</label>
+                    <input type="number" id="dpiWarningThreshold" name="dpiWarningThreshold"
+                      value="275" min="72" max="1200" style="width:90px;">
+                    <small class="field-hint">Images between Warning DPI and Excellent DPI trigger a warning.</small>
+                  </div>
+
+                  <div class="form-group checkbox-group">
+                    <label>
+                      <input type="checkbox" id="dpiWarningAllowAutoSubmit" name="dpiWarningAllowAutoSubmit">
+                      <span>Allow auto-submit to print controller</span>
+                    </label>
+                    <small class="field-hint">If checked, jobs with warning-level DPI print automatically without confirmation.</small>
+                  </div>
+                </div>
+
+                <div class="dpi-threshold-group">
+                  <div class="dpi-threshold-label">── Poor Quality Threshold ──</div>
+
+                  <div class="form-group">
+                    <label for="dpiPoorThreshold">Poor DPI</label>
+                    <input type="number" id="dpiPoorThreshold" name="dpiPoorThreshold"
+                      value="200" min="72" max="1200" style="width:90px;">
+                    <small class="field-hint">Images between Poor DPI and Warning DPI are flagged as poor quality.</small>
+                  </div>
+
+                  <div class="form-group checkbox-group">
+                    <label>
+                      <input type="checkbox" id="dpiPoorAllowAutoSubmit" name="dpiPoorAllowAutoSubmit">
+                      <span>Allow auto-submit to print controller</span>
+                    </label>
+                    <small class="field-hint">If unchecked, poor-quality jobs require manual approval before printing.</small>
+                  </div>
+                </div>
+
+                <p class="field-hint" style="margin-top:8px;">
+                  Jobs below the Poor DPI threshold are always blocked and require manual review.
+                </p>
+              </div>
+            </fieldset>
+          </div>
+
+          <!-- Sub-tab: Film Scans -->
+          <div class="settings-subtab-panel" id="subtab-filmscans">
+            <fieldset class="panel-section">
+              <legend>Film Scans (Mode 2)</legend>
+              <p class="section-desc">Monitor a folder for completed film scan folders, copy to storage, and upload to S3.</p>
+
+              <div class="form-group checkbox-group">
+                <label>
+                  <input type="checkbox" id="filmScansEnabled" name="filmScansEnabled">
+                  <span>Enable Film Scans</span>
+                </label>
+              </div>
+
+              <div class="form-group">
+                <label for="filmScansWatchFolder">Watch Folder</label>
+                <div class="input-with-button">
+                  <input type="text" id="filmScansWatchFolder" name="filmScansWatchFolder"
+                    placeholder="C:\Scans\Incoming" readonly>
+                  <button type="button" id="selectFilmScansWatchBtn" class="btn-browse">Browse...</button>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label for="filmScansStorageFolder">Permanent Storage Folder</label>
+                <div class="input-with-button">
+                  <input type="text" id="filmScansStorageFolder" name="filmScansStorageFolder"
+                    placeholder="C:\Scans\Storage" readonly>
+                  <button type="button" id="selectFilmScansStorageBtn" class="btn-browse">Browse...</button>
+                </div>
+              </div>
+
+              <div class="form-row">
+                <div class="form-group form-group-grow">
+                  <label for="filmScansAutoSyncMinutes">Auto-Sync Timer (minutes)</label>
+                  <input type="number" id="filmScansAutoSyncMinutes" name="filmScansAutoSyncMinutes"
+                    value="5" min="1" max="60" style="width: 80px;">
+                  <small class="field-hint">How often to check for new scans.</small>
+                </div>
+                <div class="form-group form-group-grow">
+                  <label for="filmScansWatchguardMinutes">Watchguard Time (minutes)</label>
+                  <input type="number" id="filmScansWatchguardMinutes" name="filmScansWatchguardMinutes"
+                    value="5" min="1" max="60" style="width: 80px;">
+                  <small class="field-hint">Wait time before processing a folder.</small>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label>Last Check</label>
+                <small id="filmScansLastCheck" class="field-hint" style="margin-top: 0;">Never</small>
+              </div>
+
+            </fieldset>
+          </div>
+
+          <!-- Sub-tab: File Uploads -->
+          <div class="settings-subtab-panel" id="subtab-fileuploads">
+            <fieldset class="panel-section">
+              <legend>File Uploads (Mode 3)</legend>
+              <p class="section-desc">Monitor a folder for completed file upload folders, copy to storage, and upload to S3.</p>
+
+              <div class="form-group checkbox-group">
+                <label>
+                  <input type="checkbox" id="fileUploadsEnabled" name="fileUploadsEnabled">
+                  <span>Enable File Uploads</span>
+                </label>
+              </div>
+
+              <div class="form-group">
+                <label for="fileUploadsWatchFolder">Watch Folder</label>
+                <div class="input-with-button">
+                  <input type="text" id="fileUploadsWatchFolder" name="fileUploadsWatchFolder"
+                    placeholder="C:\Uploads\Incoming" readonly>
+                  <button type="button" id="selectFileUploadsWatchBtn" class="btn-browse">Browse...</button>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label for="fileUploadsStorageFolder">Permanent Storage Folder</label>
+                <div class="input-with-button">
+                  <input type="text" id="fileUploadsStorageFolder" name="fileUploadsStorageFolder"
+                    placeholder="C:\Uploads\Storage" readonly>
+                  <button type="button" id="selectFileUploadsStorageBtn" class="btn-browse">Browse...</button>
+                </div>
+              </div>
+
+              <div class="form-row">
+                <div class="form-group form-group-grow">
+                  <label for="fileUploadsAutoSyncMinutes">Auto-Sync Timer (minutes)</label>
+                  <input type="number" id="fileUploadsAutoSyncMinutes" name="fileUploadsAutoSyncMinutes"
+                    value="5" min="1" max="60" style="width: 80px;">
+                  <small class="field-hint">How often to check for new uploads.</small>
+                </div>
+                <div class="form-group form-group-grow">
+                  <label for="fileUploadsWatchguardMinutes">Watchguard Time (minutes)</label>
+                  <input type="number" id="fileUploadsWatchguardMinutes" name="fileUploadsWatchguardMinutes"
+                    value="5" min="1" max="60" style="width: 80px;">
+                  <small class="field-hint">Wait time before processing a folder.</small>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label>Last Check</label>
+                <small id="fileUploadsLastCheck" class="field-hint" style="margin-top: 0;">Never</small>
+              </div>
+            </fieldset>
+          </div>
+
+          <!-- Sub-tab: General -->
+          <div class="settings-subtab-panel" id="subtab-general">
+            <fieldset class="panel-section">
+              <legend>Polling</legend>
+
+              <div class="form-group">
+                <label for="pollingInterval">Polling Interval (seconds)</label>
+                <input type="number" id="pollingInterval" name="pollingInterval"
+                  value="60" min="10" max="600">
+                <small class="field-hint">How often to check for new jobs and files (10-600 seconds).</small>
+              </div>
+            </fieldset>
+
+            <fieldset class="panel-section">
+              <legend>Startup</legend>
+
+              <div class="form-group checkbox-group">
+                <label>
+                  <input type="checkbox" id="launchOnStartup" name="launchOnStartup">
+                  <span>Launch on Windows startup</span>
+                </label>
+              </div>
+            </fieldset>
+          </div>
+
+          <!-- Sub-tab: Print Controllers -->
+          <div class="settings-subtab-panel" id="subtab-printcontrollers">
+            <p class="section-desc">Configure print controllers (Noritsu, Epson, Darkroom Pro) and their paper channels. DPOF controllers use channel numbers; Darkroom Pro controllers use media names and optional border templates.</p>
+
+            <div id="printControllersList">
+              <!-- Controller cards rendered by renderer.js -->
+            </div>
+
+            <button type="button" id="addControllerBtn" class="btn-secondary btn-add-mapping">+ Add Controller</button>
+          </div>
+
+          <div class="form-actions">
+            <button type="submit" id="saveBtn" class="btn-primary">Save Settings</button>
+          </div>
+        </form>
+
+        <div id="statusMessage" class="status-message"></div>
+      </div>
+
+      <!-- ═══ ACTIVITY LOG TAB ═══ -->
+      <div class="tab-panel" id="panel-activity">
+        <div class="activity-toolbar">
+          <h2 class="activity-title">Activity Log</h2>
+          <div class="activity-toolbar-right">
+            <select id="activityLevelFilter" class="activity-filter">
+              <option value="all">All Levels</option>
+              <option value="info">Info</option>
+              <option value="warn">Warning</option>
+              <option value="error">Error</option>
+            </select>
+            <button type="button" id="activityRefreshBtn" class="btn-secondary">Refresh</button>
+            <button type="button" id="activityCopyBtn" class="btn-secondary">Copy</button>
+            <button type="button" id="activityExportBtn" class="btn-secondary">Export</button>
+          </div>
+        </div>
+
+        <div id="activityLogContainer" class="activity-log-container">
+          <!-- Log entries rendered by renderer.js -->
+        </div>
+
+        <div id="activityEmptyState" class="jobs-empty-state hidden">
+          <div class="empty-icon">&#128203;</div>
+          <p class="empty-title">No activity recorded yet</p>
+          <p class="empty-desc">Activity will appear here once the app starts polling for jobs or processing files.</p>
+        </div>
+
+        <div id="activityStatusBar" class="activity-status-bar"></div>
+      </div>
+
+    </main>
+  </div>
+
+  <!-- ═══ Product Mapping Modal ═══ -->
+  <div id="productMappingModal" class="pm-modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="pmModalTitle">
+    <div class="pm-modal">
+      <h3 id="pmModalTitle">Add Product Mapping</h3>
+
+      <div class="form-group">
+        <label>Product Code</label>
+        <input type="text" id="pmProductCode" placeholder="e.g. PRINTS_4X6">
+      </div>
+
+      <div class="form-group">
+        <label>Size</label>
+        <input type="text" id="pmSize" placeholder="e.g. 4x6">
+      </div>
+
+      <div style="margin-bottom:10px;">
+        <div class="pm-options-label">Options</div>
+        <div id="pmOptionsList"></div>
+        <button type="button" id="pmAddOptionBtn" class="btn-secondary" style="font-size:11px;padding:3px 10px;margin-top:4px;">+ Add Option</button>
+      </div>
+
+      <div class="form-group">
+        <label>Channel Number</label>
+        <input type="number" id="pmChannelNumber" placeholder="e.g. 1" min="1">
+      </div>
+
+      <div class="pm-modal-footer">
+        <button type="button" id="pmCancelBtn" class="btn-secondary">Cancel</button>
+        <button type="button" id="pmSaveBtn" class="btn-primary">Save Mapping</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ DPI Validation Modal ═══ -->
+  <div id="dpiModal" class="dpi-modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="dpiModalTitle">
+    <div class="dpi-modal">
+      <div class="dpi-modal-header">
+        <span id="dpiModalIcon" class="dpi-modal-icon">⚠️</span>
+        <h2 id="dpiModalTitle" class="dpi-modal-title">DPI Validation Warning</h2>
+      </div>
+
+      <p id="dpiModalSummary" class="dpi-modal-summary"></p>
+
+      <div class="dpi-table-wrap">
+        <table class="dpi-table">
+          <thead>
+            <tr>
+              <th>Image</th>
+              <th>Pixels</th>
+              <th>Print Size</th>
+              <th>DPI</th>
+              <th>Status</th>
+              <th>Recommendation</th>
+            </tr>
+          </thead>
+          <tbody id="dpiModalTableBody"></tbody>
+        </table>
+      </div>
+
+      <div class="dpi-modal-footer">
+        <button type="button" id="dpiModalCancel" class="btn-secondary">Cancel</button>
+        <button type="button" id="dpiModalSendAnyway" class="btn-warning">Send Anyway</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

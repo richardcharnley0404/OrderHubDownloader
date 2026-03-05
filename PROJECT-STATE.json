@@ -1,0 +1,337 @@
+{
+  "project": "OrderHub Downloader",
+  "version": "1.0.0",
+  "lastUpdated": "2026-02-21",
+  "platform": "Electron 32, Windows",
+
+  "overview": {
+    "description": "Windows system tray app that downloads OrderHub jobs, routes print jobs to controllers via DPOF, and uploads film scans/file uploads to IBM S3.",
+    "stack": ["Electron 32", "electron-store", "Winston", "basic-ftp", "@aws-sdk/client-s3", "Node.js fs.watch"],
+    "modes": {
+      "1": "FTP polling — downloads artwork from FTP server on 60s interval",
+      "2": "Film Scans — watches local folder, copies to storage, uploads to IBM S3",
+      "3": "File Uploads — same pattern as Mode 2, different folders/prefix"
+    }
+  },
+
+  "implementationStatus": {
+    "foundation": {
+      "status": "complete",
+      "notes": "Electron shell, tray, IPC, config, logger, window manager all working"
+    },
+    "mode1_ftp": {
+      "status": "complete",
+      "notes": "FTP polling service, download to local directory, 60s interval"
+    },
+    "mode2_filmScans": {
+      "status": "complete",
+      "notes": "folder-watch-service.js watches local folder, s3-service.js uploads"
+    },
+    "mode3_fileUploads": {
+      "status": "complete",
+      "notes": "Same architecture as Mode 2, different source folder and S3 prefix"
+    },
+    "printControllers": {
+      "status": "complete",
+      "notes": "Full DPOF pipeline: PrintControllerStore, JobStore, DPOFGenerator, OrderFolderWriter, FolderMonitor, PrintControllerService, PrintService. IPC handlers and renderer UI present.",
+      "subComponents": {
+        "PrintControllerStore": "complete — controllers and channels persisted in print-controllers.json",
+        "JobStore": "complete — DPOF job state in jobs.json",
+        "DPOFGenerator": "complete — generates [HDR] and [JOB] sections",
+        "OrderFolderWriter": "complete — creates o{num}_{code}/DPOF.001 + IMAGES/ structure",
+        "FolderMonitor": "complete — fs.watch with 500ms debounce, o/e/q prefix detection",
+        "PrintControllerService": "complete — orchestrates submit + monitoring, one FolderMonitor per controller",
+        "PrintService": "complete — routes by process mapping (DPOF or file-copy pipeline)",
+        "IPC handlers": "complete — printControllers:getAll/add/update/delete, addChannel/updateChannel/deleteChannel, test:printController",
+        "Renderer UI": "complete — Print Controllers subtab in settings"
+      }
+    },
+    "s3Credentials": {
+      "status": "complete",
+      "notes": "s3-credentials.js — XOR-obfuscated, never exposed to renderer. Users configure: endpoint URL, bucket name, location ID only."
+    },
+    "documentation": {
+      "status": "complete",
+      "notes": "docs/print-controllers/ created 2026-02-21",
+      "files": [
+        "docs/print-controllers/README.md",
+        "docs/print-controllers/SETUP.md",
+        "docs/print-controllers/DPOF-FORMAT.md",
+        "docs/print-controllers/TROUBLESHOOTING.md",
+        "docs/print-controllers/API.md",
+        "docs/print-controllers/WORKFLOW.md",
+        "docs/print-controllers/DARKROOM-PRO-FORMAT.md",
+        "docs/print-controllers/VALIDATION.md"
+      ]
+    },
+    "dpiValidation": {
+      "status": "complete",
+      "implementedDate": "2026-02-22",
+      "notes": "Full DPI validation system — no external dependencies (pure Node.js Buffer reads for JPEG/PNG/TIFF). Status levels: excellent/good/warning/poor. Per-threshold allowAutoSubmit flags. Modal for manual approval. DPI badge column in jobs table.",
+      "implementedFiles": [
+        "src/main/services/dpi-validator.js (NEW)",
+        "src/main/services/config-service.js (updated — 6 new DPI schema fields)",
+        "src/main/ipc-handlers.js (updated — jobs:validateDpi and jobs:approveDpi handlers)",
+        "src/preload/preload.js (updated — validateJobDpi and approveDpiJob exposed)",
+        "src/renderer/index.html (updated — DPI settings fieldset + DPI modal)",
+        "src/renderer/renderer.js (updated — populateForm/getFormData, DPI badge column, Send to Print intercept, DPI modal function)",
+        "scripts/test-dpi-validation.js (NEW)",
+        "docs/print-controllers/VALIDATION.md (NEW)"
+      ]
+    }
+  },
+
+  "knownIssues": [
+    {
+      "id": "KI-001",
+      "description": "FolderMonitor regex requires numeric order numbers (/^[oeq](\\d+)_(.+)$/). Alphanumeric order numbers (e.g. PXDEMO-K9MYDG) will not trigger status updates.",
+      "severity": "medium",
+      "workaround": "Ensure order numbers are numeric, or update regex if alphanumeric support is needed",
+      "file": "src/main/services/folder-monitor.js:86"
+    },
+    {
+      "id": "KI-002",
+      "description": "fs.watch is unreliable on network share paths. FolderMonitor may miss rename events if the hot folder is on a UNC/network path.",
+      "severity": "medium",
+      "workaround": "Use local paths for hot folders; use mapped drive letters rather than UNC paths if network share is required",
+      "file": "src/main/services/folder-monitor.js:27"
+    },
+    {
+      "id": "KI-003",
+      "description": "DPOF IMG SRC path uses ../IMAGES/ prefix. This means DPOF.001 is interpreted as being in a subdirectory. Verify with specific controller software.",
+      "severity": "low",
+      "workaround": "Test with real controller; may need to adjust path if controller resolves differently",
+      "file": "src/main/services/dpof-generator.js:48"
+    },
+    {
+      "id": "KI-004",
+      "description": "encryption-service.js exists in services but is unused. It can be removed.",
+      "severity": "low",
+      "workaround": "Delete the file when convenient"
+    },
+    {
+      "id": "KI-005",
+      "description": "FolderMonitor status updates (accepted/failed) are local-only (JobStore) and not pushed back to the OrderHub API.",
+      "severity": "medium",
+      "workaround": "Manual status update on OrderHub may be required when controller accepts/fails a job",
+      "file": "src/main/services/print-controller-service.js:56"
+    },
+    {
+      "id": "KI-006",
+      "description": "Passwords (API key, FTP) stored in plain text in electron-store config.json.",
+      "severity": "low",
+      "workaround": "Noted as Phase 1 deferred item. Future: implement Electron safeStorage API."
+    }
+  ],
+
+  "pendingWork": [
+    {
+      "id": "PW-001",
+      "title": "Push DPOF accepted/failed status back to OrderHub API",
+      "description": "When FolderMonitor detects o→e (accepted) or o→q (failed), currently only JobStore is updated. Consider calling jobService to update the OrderHub API status.",
+      "priority": "medium",
+      "files": ["src/main/services/print-controller-service.js"]
+    },
+    {
+      "id": "PW-002",
+      "title": "Fix alphanumeric order number support in FolderMonitor",
+      "description": "Change regex from /(\\d+)/ to a broader pattern to support non-numeric order numbers. Also update OrderFolderWriter folder naming.",
+      "priority": "medium",
+      "files": ["src/main/services/folder-monitor.js", "src/main/services/order-folder-writer.js"]
+    },
+    {
+      "id": "PW-003",
+      "title": "Remove encryption-service.js",
+      "description": "File exists but is not imported or used anywhere. Safe to delete.",
+      "priority": "low",
+      "files": ["src/main/services/encryption-service.js"]
+    },
+    {
+      "id": "PW-004",
+      "title": "Verify IMG SRC path in DPOF with real Noritsu controller",
+      "description": "The generated path is ../IMAGES/filename.jpg. Confirm this resolves correctly on a physical Noritsu QSS system.",
+      "priority": "high",
+      "files": ["src/main/services/dpof-generator.js:48"]
+    },
+    {
+      "id": "PW-005",
+      "title": "Add monitoring auto-start on app launch",
+      "description": "Currently monitoring must be started explicitly. Consider auto-starting monitoring for all active controllers on app startup.",
+      "priority": "medium",
+      "files": ["src/main/index.js", "src/main/services/print-controller-service.js"]
+    },
+    {
+      "id": "PW-006",
+      "title": "Password encryption using safeStorage",
+      "description": "API bearer token and FTP password are stored in plain text. Implement Electron safeStorage encryption.",
+      "priority": "low",
+      "files": ["src/main/services/config-service.js"]
+    }
+  ],
+
+  "architecture": {
+    "entryPoint": "src/main/index.js",
+    "ipcHandlers": "src/main/ipc-handlers.js",
+    "preloadBridge": "src/preload/preload.js",
+    "rendererUI": "src/renderer/index.html + renderer.js + styles.css",
+    "services": {
+      "config-service": "Settings management, validation, process mappings",
+      "logger": "Winston logger singleton",
+      "polling-service": "Mode 1: 60s interval API polling + FTP download",
+      "ftp-service": "FTP client (basic-ftp)",
+      "folder-watch-service": "Modes 2+3: watches local folders for new files",
+      "s3-service": "IBM S3 upload via @aws-sdk/client-s3",
+      "s3-credentials": "XOR-obfuscated hardcoded S3 credentials (never exposed to renderer)",
+      "print-controller-store": "Persistent controller + channel storage (electron-store)",
+      "job-store": "Persistent DPOF job state (electron-store)",
+      "dpof-generator": "Generates DPOF.001 file content",
+      "order-folder-writer": "Creates hot folder structure (o{num}_{code}/DPOF.001 + IMAGES/)",
+      "folder-monitor": "Watches hot folder for o→e/q renames via fs.watch",
+      "print-controller-service": "Orchestrates DPOF submission + folder monitoring",
+      "print-service": "Routes OrderHub jobs: DPOF pipeline vs file-copy pipeline",
+      "job-service": "OrderHub API job management",
+      "test-print-controller": "Integration test for DPOF pipeline"
+    }
+  },
+
+  "dataStorage": {
+    "location": "%APPDATA%\\Electron\\orderhub-downloader\\",
+    "files": {
+      "config.json": "Main settings (API key, FTP creds, download dir, process mappings, mode settings)",
+      "print-controllers.json": "Controllers and channels",
+      "jobs.json": "DPOF job cache with submission status",
+      "logs/app.log": "All log output (5MB rotation, 5 files)",
+      "logs/error.log": "Error log only"
+    }
+  },
+
+  "keyConventions": {
+    "singletonPattern": "Services exported as `module.exports = new ClassName()`",
+    "ipcNaming": "namespace:action (e.g. config:get, printControllers:add)",
+    "hotFolderNaming": "o{orderNumber}_{productCode} — prefix o/e/q indicates status",
+    "dpofFile": "Always named DPOF.001, placed in order folder root",
+    "imageFolder": "IMAGES/ subdirectory within each order folder",
+    "manifestFilename": "{orderNumber}.json in the order folder",
+    "jobFolderNaming": "{orderNumber}_{jobId} within the order folder"
+  },
+
+  "buildAndRun": {
+    "run_development": "npm start  (must run from project root; npm NOT in PATH from bash)",
+    "run_dev_flag": "npm run dev",
+    "build_unpacked": "npm run build:dir",
+    "build_installer": "npm run build",
+    "output": "dist/win-unpacked/ and dist/OrderHub Downloader Setup 1.0.0.exe"
+  },
+
+  "sessionHistory": [
+    {
+      "date": "2026-02-21",
+      "summary": "Created comprehensive print controller documentation (6 files in docs/print-controllers/) and PROJECT-STATE.json"
+    },
+    {
+      "date": "2026-02-21",
+      "summary": "Darkroom Pro controller type research and specification. Created docs/print-controllers/DARKROOM-PRO-FORMAT.md. Key findings: Darkroom Pro uses a flat key=value .TXT order file (NOT DPOF), dropped into a hot folder. Filename: Order{orderNumber}.TXT. File has two sections: (1) order-level header fields (OrderFirstName, OrderLastName, OrderEmail, Ext* custom extension fields, optional Index=1 for index print); (2) per-image line items using STICKY field inheritance — Qty, Size, Media, Template, Filepath. Only Filepath is mandatory per image; other fields carry forward until overridden. All images for a job go in ONE file. Images referenced by absolute/UNC path — NOT copied. Media= is the channel selector (paper type name). Template= is optional path to .crd border file. Status: success = .TXT moved to 'processed' subfolder; failure = renamed in-place to .err. PENDING IMPLEMENTATION: DarkroomProGenerator (with sticky field logic), DarkroomProFileWriter, DarkroomProMonitor (watches for .TXT disappearance and .err appearance)."
+    },
+    {
+      "date": "2026-02-21",
+      "summary": "Darkroom Pro implementation complete. Created: darkroom-pro-generator.js (sticky field logic, resolveTemplatePath(), _splitName(), filename()), darkroom-pro-file-writer.js (writes Order{n}.TXT to hot folder), darkroom-pro-monitor.js (fs.watch for .TXT disappearance = accepted, .err appearance = failed, trackSubmission() for race prevention). Updated: print-service.js (_sendViaDarkroomPro() branch), print-controller-service.js (renamed folderMonitors→monitors, DarkroomProMonitor branching, getMonitor()), ipc-handlers.js (channel log label fix), index.html (description updated). PROJECT-STATE.json fixed (stray quote removed). Remaining: UI for templateMappings/extFieldMappings; confirm 'processed' subfolder name."
+    },
+    {
+      "date": "2026-02-22",
+      "summary": "DPI Validation system implemented (all 9 parts). NEW: dpi-validator.js — pure Node.js JPEG/PNG/TIFF dimension reading (no npm deps), status levels excellent/good/warning/poor, per-threshold allowAutoSubmit flags, batch validate. config-service.js — 6 new DPI schema fields (dpiValidationEnabled, dpiExcellentThreshold, dpiWarningThreshold, dpiWarningAllowAutoSubmit, dpiPoorThreshold, dpiPoorAllowAutoSubmit). ipc-handlers.js — jobs:validateDpi and jobs:approveDpi IPC handlers. preload.js — validateJobDpi and approveDpiJob exposed. index.html — DPI Validation settings fieldset (Downloads sub-tab) + DPI modal overlay. renderer.js — populateForm/getFormData for DPI fields, DPI badge column in jobs table, Send to Print intercept (checks DPI first, shows modal if manual approval needed), showDpiModal() function, toggleDpiValidationFields(). test script: scripts/test-dpi-validation.js (11 tests, runs without Electron). docs: VALIDATION.md."
+    }
+  ],
+
+  "darkroomPro": {
+    "status": "complete",
+    "implementedDate": "2026-02-21",
+    "implementedFiles": [
+      "src/main/services/darkroom-pro-generator.js (NEW)",
+      "src/main/services/darkroom-pro-file-writer.js (NEW)",
+      "src/main/services/darkroom-pro-monitor.js (NEW)",
+      "src/main/services/print-service.js (updated — branches on controller.type)",
+      "src/main/services/print-controller-service.js (updated — DarkroomProMonitor support, getMonitor())",
+      "src/main/ipc-handlers.js (updated — channel log label fix)",
+      "src/renderer/index.html (updated — description includes Darkroom Pro)"
+    ],
+    "specFile": "docs/print-controllers/DARKROOM-PRO-FORMAT.md",
+    "sourceReference": "https://workdrive.zohoexternal.com/external/6OolXaIKMgx-JtDtd (Order File Processing Spec Generic.pdf — Zoho auth required, could not auto-fetch). Spec confirmed by sample file provided 2026-02-21.",
+    "keyDifferencesFromDPOF": [
+      "Flat key=value .TXT file per job — filename is Order{orderNumber}.TXT",
+      "ALL images for a job go in ONE file (confirmed)",
+      "No folder structure — just a single .TXT file; images stay at their absolute/UNC path (NOT copied)",
+      "File has two sections: order header (OrderFirstName, OrderLastName, OrderEmail, Ext* fields, Index) then image line items",
+      "Image fields are STICKY — Qty/Size/Media/Template carry forward until explicitly overridden; Filepath always triggers a new image",
+      "Channel selector is Media= (paper type name string), NOT a channel number",
+      "Template= is optional path to .crd border file — omit for plain prints",
+      "Index=1 in header triggers a thumbnail index print with all order header data",
+      "Status: success = .TXT moved to 'processed' subfolder by Darkroom Pro",
+      "Status: failure = .TXT renamed in-place to .err (same folder, extension change only)"
+    ],
+    "fileFormat": {
+      "extension": ".TXT (uppercase)",
+      "filename": "Order{orderNumber}.TXT",
+      "encoding": "UTF-8 or ASCII",
+      "structure": "order header fields, then sequential image line items with sticky field inheritance",
+      "orderHeaderFields": {
+        "OrderFirstName": "Customer first name (split from job.customer_name on first space)",
+        "OrderLastName": "Customer last name (remainder after first space)",
+        "OrderEmail": "Customer email address",
+        "Ext*": "Arbitrary extension fields e.g. ExtCabin, ExtFolio — configurable per controller in OHD",
+        "Index": "1 = generate index/thumbnail print; 0 or absent = no index print"
+      },
+      "imageLineItemFields": {
+        "Qty": "Number of copies — sticky, only write when changing",
+        "Size": "Print size e.g. 8x10 — sticky, only write when changing",
+        "Media": "Paper/media type name as configured in Darkroom Pro — sticky, only write when changing. This is the channel selector.",
+        "Template": "Optional: absolute Windows path to .crd border file — sticky, only write when changing",
+        "Tmp.Name": "Optional: customer name for printing on border/template",
+        "Filepath": "Absolute or UNC path to source image — triggers new image using current sticky field values"
+      }
+    },
+    "mappingFromOH": {
+      "OrderFirstName": "First word of job.customer_name",
+      "OrderLastName": "Remainder of job.customer_name after first space",
+      "OrderEmail": "job.customer_email",
+      "Ext*": "Configurable — mapped from job options/custom fields per controller setup",
+      "Index": "Controller config flag indexPrint (true/false)",
+      "Qty": "manifest.images[].quantity (write only when changed from previous image)",
+      "Size": "manifest.images[].size (write only when changed from previous image)",
+      "Media": "Channel config mediaName — looked up by size match (write only when changed)",
+      "Template": "Channel config templatePath — omit if empty (write only when changed)",
+      "Filepath": "Absolute path: {downloadDirectory}\\{orderNum}_{orderId}\\{orderNum}_{jobId}\\{filename}"
+    },
+    "statusMechanism": {
+      "submitted": "OHD writes Order{n}.TXT to watch folder",
+      "accepted": ".TXT file disappears from watch folder root (Darkroom Pro moves it to 'processed' subfolder)",
+      "failed": ".TXT extension changes to .err in same watch folder (Darkroom Pro renames in-place)"
+    },
+    "templateMapping": {
+      "note": "Template= is driven by an OH job OPTION (e.g. option name 'Border', value 'Sports Golf'), NOT a channel property. Media= and Template= coexist — not mutually exclusive. Media= routes to printer/paper; Template= adds border overlay.",
+      "storedOn": "controller.templateMappings array: [{ optionName, optionValue, templatePath }]",
+      "Tmp.Name": "Always written alongside Template= — value is job.customer_name"
+    },
+    "extFieldMapping": {
+      "note": "Ext* field names are arbitrary per Darkroom Pro installation (e.g. ExtCabin, ExtFolio, ExtStudentId). OHD must allow admin to configure mapping: OH option/field name → Ext* key name",
+      "storedOn": "controller.extFieldMappings array: [{ sourceField, extKeyName }]"
+    },
+    "confirmedAnswers": {
+      "Q5_UNCpaths": "CONFIRMED — UNC paths (\\\\server\\share\\...) work fine for Filepath=",
+      "Q8_TemplateAndMedia": "CONFIRMED — Template= and Media= coexist in same line item. Not mutually exclusive."
+    },
+    "pendingWork": [
+      "Confirm exact 'processed' subfolder name from Darkroom Pro installation (currently assumed 'processed', configurable via controller.processedFolderName)"
+    ],
+    "rendererUIComplete": true,
+    "rendererUICompletedDate": "2026-02-21",
+    "rendererUIChanges": [
+      "Type dropdown: added 'Darkroom Pro' option alongside Noritsu / Epson",
+      "DPOF-only fields (Vendor Name, Vendor Attribute, Auto Correct) hidden when type = darkroompro",
+      "Darkroom Pro-only fields shown when type = darkroompro: Processed Folder Name, Index Print checkbox",
+      "Channel header and channel rows are type-aware: DPOF shows Ch#/Size/Finish/Style; Darkroom Pro shows Size/Finish/Media Name",
+      "Template Mappings section (Darkroom Pro only): Option Name + Option Value + Template Path (.crd)",
+      "Ext* Field Mappings section (Darkroom Pro only): OH Option/Field Name + Ext* Key Name",
+      "All sections toggle correctly when Type is changed on an existing or new card"
+    ]
+  }
+}

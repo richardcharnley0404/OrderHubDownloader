@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(npm install)",
+      "Bash(copy C:WindowsSystem32imageres.dll.mui assetsiconsicon.ico)",
+      "Bash(npm install:*)",
+      "Bash(npm start)",
+      "Bash(dir:*)",
+      "Bash(cmd /c \"cd /d C:\\\\Dev\\\\OrderHubDownloader && npm install @aws-sdk/client-s3\")",
+      "Bash(cmd.exe /c \"cd /d C:\\\\Dev\\\\OrderHubDownloader && npm install @aws-sdk/client-s3\")",
+      "Bash(powershell.exe -Command \"cd C:\\\\Dev\\\\OrderHubDownloader; npm install ''@aws-sdk/client-s3''\")",
+      "mcp__c07c006f-65e9-4626-90fa-4492f69ea41a__Calculator",
+      "Bash(cmd /c dir:*)",
+      "Bash(where:*)",
+      "Bash(find:*)",
+      "WebFetch(domain:workdrive.zohoexternal.com)",
+      "WebFetch(domain:previewengine-accl.zohoexternal.com)",
+      "WebFetch(domain:files-accl.zohoexternal.com)",
+      "Bash(node -e:*)",
+      "Bash(if not exist \"C:\\\\Dev\\\\OrderHubDownloader\\\\scripts\" mkdir \"C:\\\\Dev\\\\OrderHubDownloader\\\\scripts\")",
+      "Bash(del \"C:\\\\Dev\\\\OrderHubDownloader\\\\src\\\\main\\\\services\\\\s3-credentials.js\")",
+      "Bash(npm run build)",
+      "Bash(npm version patch)",
+      "Bash(xargs cat)"
+    ]
+  }
+}

@@ -1,0 +1,25 @@
+appId: com.orderhub.downloader
+productName: OrderHub Downloader
+copyright: Copyright © 2026
+
+directories:
+  output: dist
+  buildResources: assets
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: assets/icons/icon.ico
+  sign: scripts/sign.js
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+
+publish:
+  provider: generic
+  url: https://your-s3-bucket.s3.amazonaws.com/ohd/
