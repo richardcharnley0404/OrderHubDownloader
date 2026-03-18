@@ -181,6 +181,31 @@ const schema = {
   dpiPoorAllowAutoSubmit: {
     type: 'boolean',
     default: false
+  },
+  // AI Enhancement (Phase 3)
+  replicateApiKey: {
+    type: 'string',
+    default: ''
+  },
+  enhancementDefaultModel: {
+    type: 'string',
+    default: 'Standard V2'
+  },
+  enhancementFaceEnhancement: {
+    type: 'boolean',
+    default: false
+  },
+  enhancementAutoEnhance: {
+    type: 'boolean',
+    default: false
+  },
+  dismissedJobs: {
+    type: 'array',
+    default: []
+  },
+  jobDateRange: {
+    type: 'number',
+    default: 30
   }
 };
 
@@ -235,7 +260,12 @@ class ConfigService {
       dpiWarningThreshold: this.store.get('dpiWarningThreshold'),
       dpiWarningAllowAutoSubmit: this.store.get('dpiWarningAllowAutoSubmit'),
       dpiPoorThreshold: this.store.get('dpiPoorThreshold'),
-      dpiPoorAllowAutoSubmit: this.store.get('dpiPoorAllowAutoSubmit')
+      dpiPoorAllowAutoSubmit: this.store.get('dpiPoorAllowAutoSubmit'),
+      // AI Enhancement
+      replicateApiKey: this.store.get('replicateApiKey'),
+      enhancementDefaultModel: this.store.get('enhancementDefaultModel'),
+      enhancementFaceEnhancement: this.store.get('enhancementFaceEnhancement'),
+      enhancementAutoEnhance: this.store.get('enhancementAutoEnhance'),
     };
   }
 
@@ -415,6 +445,12 @@ class ConfigService {
       }
     }
     this.store.set('processFolderMappings', cleanMappings);
+
+    // Save AI Enhancement settings
+    this.store.set('replicateApiKey', config.replicateApiKey || '');
+    this.store.set('enhancementDefaultModel', config.enhancementDefaultModel || 'Standard V2');
+    this.store.set('enhancementFaceEnhancement', Boolean(config.enhancementFaceEnhancement));
+    this.store.set('enhancementAutoEnhance', Boolean(config.enhancementAutoEnhance));
 
     return this.getAll();
   }

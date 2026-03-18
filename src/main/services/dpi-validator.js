@@ -146,7 +146,7 @@ class DpiValidator {
       printWidth = parsed.widthIn;
       printHeight = parsed.heightIn;
     } catch (err) {
-      return this._errorResult(img, `Cannot parse print size "${img.size}": ${err.message}`);
+      return this._errorResult(img, `Cannot parse print size "${img.size}": ${err.message}`, settings);
     }
 
     // Read pixel dimensions
@@ -156,7 +156,7 @@ class DpiValidator {
       pixelWidth = dims.width;
       pixelHeight = dims.height;
     } catch (err) {
-      return this._errorResult(img, `Cannot read image dimensions: ${err.message}`);
+      return this._errorResult(img, `Cannot read image dimensions: ${err.message}`, settings);
     }
 
     // Calculate effective DPI
@@ -193,7 +193,11 @@ class DpiValidator {
     };
   }
 
-  _errorResult(img, errorMsg) {
+  _errorResult(img, errorMsg, settings) {
+    // Respect the poor-DPI auto-submit setting even when image parsing fails.
+    // If the operator has enabled "Allow auto-submit" for poor quality, an
+    // unreadable image should not silently block dispatch.
+    const allowAutoSubmit = settings ? settings.poorThreshold.allowAutoSubmit : false;
     return {
       filename: img.filename,
       imageWidth: null,
@@ -202,9 +206,9 @@ class DpiValidator {
       actualDPI: null,
       requiredDPI: null,
       status: 'poor',
-      canAutoSubmit: false,
-      requiresManualApproval: true,
-      valid: false,
+      canAutoSubmit: allowAutoSubmit,
+      requiresManualApproval: !allowAutoSubmit,
+      valid: allowAutoSubmit,
       message: errorMsg,
       recommendation: 'Check that the image file exists and is a valid JPEG, PNG, or TIFF.'
     };
@@ -317,8 +321,10 @@ class DpiValidator {
       throw new Error(`File not found: ${filePath}`);
     }
 
-    // Read a chunk large enough for any header (64 KB covers even complex JPEGs)
-    const CHUNK = 65536;
+    // Read a chunk large enough for any header. 1 MB covers JPEGs with large
+    // EXIF blocks (embedded thumbnails, ICC profiles, Photoshop APP13 data)
+    // that can push the SOF marker well past the old 64 KB boundary.
+    const CHUNK = 1048576;
     const fd = fs.openSync(filePath, 'r');
     let buf;
     try {
@@ -403,7 +409,7 @@ class DpiValidator {
 
     // Buffer was not large enough — need to read more of the file
     // This handles very large JPEG headers (rare, but possible with EXIF)
-    throw new Error(`Could not find JPEG SOF marker in first 64KB of ${path.basename(filePath)}`);
+    throw new Error(`Could not find JPEG SOF marker in first 1MB of ${path.basename(filePath)}`);
   }
 
   // ── PNG ───────────────────────────────────────────────────────────────────

@@ -41,6 +41,21 @@ class WindowManager {
       this.mainWindow = null;
     });
 
+    // Push maximise/unmaximise state to the renderer so the button icon stays
+    // in sync regardless of how the window state changed (button click, OS
+    // title-bar double-click, keyboard shortcut, etc.).
+    this.mainWindow.on('maximize', () => {
+      if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+        this.mainWindow.webContents.send('window:maximised', true);
+      }
+    });
+
+    this.mainWindow.on('unmaximize', () => {
+      if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+        this.mainWindow.webContents.send('window:maximised', false);
+      }
+    });
+
     return this.mainWindow;
   }
 

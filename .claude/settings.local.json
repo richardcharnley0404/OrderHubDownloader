@@ -22,7 +22,9 @@
       "Bash(del \"C:\\\\Dev\\\\OrderHubDownloader\\\\src\\\\main\\\\services\\\\s3-credentials.js\")",
       "Bash(npm run build)",
       "Bash(npm version patch)",
-      "Bash(xargs cat)"
+      "Bash(xargs cat)",
+      "Bash(node scripts/build-renderer.js)",
+      "Bash(grep -E \"\\\\.js$\")"
     ]
   }
 }

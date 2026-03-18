@@ -15,6 +15,7 @@
       <span id="appVersion" class="app-version"></span>
       <div class="window-controls">
         <button type="button" class="window-control-btn" id="minimiseBtn" title="Minimise">&#8722;</button>
+        <button type="button" class="window-control-btn" id="maximiseBtn" title="Maximise"></button>
         <button type="button" class="window-control-btn window-control-close" id="closeBtn" title="Close">&#10005;</button>
       </div>
     </header>
@@ -51,8 +52,19 @@
             <button type="button" class="jobs-filter active" data-filter="awaiting">Awaiting Production</button>
             <button type="button" class="jobs-filter" data-filter="printed">Printed</button>
             <button type="button" class="jobs-filter" data-filter="all">All Jobs</button>
+            <button type="button" class="jobs-filter" data-filter="dismissed" id="dismissedFilterBtn">Dismissed</button>
           </div>
           <div class="jobs-toolbar-right">
+            <div class="date-range-wrap">
+              <select id="jobDateRange" class="jobs-date-range">
+                <option value="7">Last 7 days</option>
+                <option value="30">Last 30 days</option>
+                <option value="60">Last 60 days</option>
+                <option value="90">Last 90 days</option>
+                <option value="0">All time</option>
+              </select>
+              <span id="dateRangeWarning" class="date-range-warning hidden">Loading all jobs may be slow for busy accounts</span>
+            </div>
             <input type="text" id="jobSearch" class="jobs-search" placeholder="Search jobs...">
             <button type="button" id="refreshJobsBtn" class="btn-secondary">Refresh</button>
           </div>
@@ -100,18 +112,15 @@
             <button type="button" class="settings-subtab" data-subtab="filmscans">Film Scans</button>
             <button type="button" class="settings-subtab" data-subtab="fileuploads">File Uploads</button>
             <button type="button" class="settings-subtab" data-subtab="general">General</button>
-            <button type="button" class="settings-subtab" data-subtab="printcontrollers">Print Controllers</button>
+            <!-- Print Controllers (legacy) tab hidden — code retained for Darkroom Pro integration reference -->
+            <button type="button" class="settings-subtab" data-subtab="routing">Routing</button>
+            <button type="button" class="settings-subtab" data-subtab="aienhancement">AI Enhancement</button>
           </div>
 
           <!-- Sub-tab: Connection -->
           <div class="settings-subtab-panel active" id="subtab-connection">
             <fieldset class="panel-section">
               <legend>OrderHub API</legend>
-
-              <div class="form-group">
-                <label>API Endpoint</label>
-                <input type="text" value="https://nazkcvruighrhpgcarxg.supabase.co/functions/v1/ohd-api" readonly class="input-readonly">
-              </div>
 
               <div class="form-group">
                 <label for="orderhubApiKey">API Key</label>
@@ -466,15 +475,130 @@
             </fieldset>
           </div>
 
-          <!-- Sub-tab: Print Controllers -->
+          <!-- Sub-tab: Print Controllers (legacy / Darkroom Pro only) -->
           <div class="settings-subtab-panel" id="subtab-printcontrollers">
-            <p class="section-desc">Configure print controllers (Noritsu, Epson, Darkroom Pro) and their paper channels. DPOF controllers use channel numbers; Darkroom Pro controllers use media names and optional border templates.</p>
+            <div class="deprecated-notice">
+              <strong>DPOF controllers have moved to the Routing tab.</strong>
+              Configure Noritsu / Epson / other DPOF controllers under
+              <em>Settings → Routing → Order Controllers</em>.
+              This section now only manages <strong>Darkroom Pro</strong> controllers.
+            </div>
 
             <div id="printControllersList">
               <!-- Controller cards rendered by renderer.js -->
             </div>
 
-            <button type="button" id="addControllerBtn" class="btn-secondary btn-add-mapping">+ Add Controller</button>
+            <button type="button" id="addControllerBtn" class="btn-secondary btn-add-mapping">+ Add Darkroom Pro Controller</button>
+          </div>
+
+          <!-- Sub-tab: Routing -->
+          <div class="settings-subtab-panel" id="subtab-routing">
+
+            <!-- Section 1: Order Controllers -->
+            <fieldset class="panel-section">
+              <legend>Order Controllers</legend>
+              <p class="section-desc">Configure DPOF print controllers. Each controller has a name and an output path (hot folder) where DPOF job folders are written.</p>
+
+              <div id="orderControllersList">
+                <!-- Rendered by renderer.js -->
+              </div>
+
+              <button type="button" id="addOrderControllerBtn" class="btn-secondary btn-add-mapping">+ Add Controller</button>
+            </fieldset>
+
+            <!-- Section 2: Process Routing -->
+            <fieldset class="panel-section">
+              <legend>Process Routing</legend>
+              <p class="section-desc">Assign each Process type to an Order Controller. Jobs with no controller assigned will wait until configured. Process values are auto-discovered from received jobs.</p>
+
+              <div id="processRoutingList">
+                <!-- Rendered by renderer.js -->
+              </div>
+
+              <button type="button" id="addProcessTypeBtn" class="btn-secondary btn-add-mapping" style="margin-top:10px">+ Add Process Type</button>
+              <div id="addProcessTypeForm" style="display:none;align-items:center;gap:8px;margin-top:8px;">
+                <input type="text" id="newProcessTypeName" placeholder="e.g. Wide Format" class="form-input" style="flex:1;max-width:260px;">
+                <button type="button" id="saveNewProcessTypeBtn" class="btn-primary btn-sm">Add</button>
+                <button type="button" id="cancelNewProcessTypeBtn" class="btn-secondary btn-sm">Cancel</button>
+              </div>
+            </fieldset>
+
+            <!-- Section 3: Channel Mappings -->
+            <fieldset class="panel-section">
+              <legend>Channel Mappings</legend>
+              <p class="section-desc">Maps a product code + options combination to a specific channel number on a controller. Use the <strong>Assign</strong> button on a job to add mappings, or manage them here.</p>
+
+              <div id="channelMappingsList">
+                <!-- Rendered by renderer.js -->
+              </div>
+
+              <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;">
+                <button type="button" id="addChannelMappingBtn" class="btn-secondary btn-add-mapping">+ Add Channel Mapping</button>
+                <button type="button" id="importChannelMappingsCsvBtn" class="btn-secondary btn-add-mapping">Import CSV</button>
+                <button type="button" id="exportChannelMappingsCsvBtn" class="btn-secondary btn-add-mapping">Export CSV</button>
+              </div>
+            </fieldset>
+
+            <!-- Section 4: Process Folder Exceptions -->
+            <fieldset class="panel-section">
+              <legend>Process Folder Exceptions</legend>
+              <p class="section-desc">Jobs matching these product + option combinations will be copied to a folder instead of sent to a controller. Checked first — takes priority over all controller routing.</p>
+
+              <div id="exceptionsList">
+                <!-- Rendered by renderer.js -->
+              </div>
+
+              <button type="button" id="addExceptionBtn" class="btn-secondary btn-add-mapping">+ Add Exception</button>
+            </fieldset>
+
+          </div>
+
+          <!-- Sub-tab: AI Enhancement -->
+          <div class="settings-subtab-panel" id="subtab-aienhancement">
+            <fieldset class="panel-section">
+              <legend>AI Enhancement</legend>
+              <p class="section-desc">Use Replicate (Topaz Labs) to upscale and enhance print images. Requires a Replicate API key — get one free at <span class="link-hint">replicate.com</span>.</p>
+
+              <div class="form-group">
+                <label for="replicateApiKey">Replicate API Key</label>
+                <div class="input-with-button">
+                  <input type="password" id="replicateApiKey" name="replicateApiKey"
+                    placeholder="r8_..." autocomplete="new-password">
+                  <button type="button" id="replicateApiKeyToggle" class="btn-browse">Show</button>
+                </div>
+              </div>
+
+              <div class="test-row">
+                <button type="button" id="testReplicateBtn" class="btn-secondary">Test API Key</button>
+                <span id="replicateTestStatus" class="test-status"></span>
+              </div>
+
+              <div class="form-group" style="margin-top: 16px;">
+                <label for="enhancementDefaultModel">Default Model</label>
+                <select id="enhancementDefaultModel" name="enhancementDefaultModel">
+                  <option value="Standard V2">Standard V2 (recommended — best for most photos)</option>
+                  <option value="High Fidelity V2">High Fidelity V2 (preserves fine detail)</option>
+                  <option value="Low Resolution V2">Low Resolution V2 (for very small inputs)</option>
+                  <option value="Recovery V2">Recovery V2 (for heavily compressed images)</option>
+                </select>
+              </div>
+
+              <div class="form-group checkbox-group">
+                <label>
+                  <input type="checkbox" id="enhancementFaceEnhancement" name="enhancementFaceEnhancement">
+                  <span>Enable face enhancement</span>
+                </label>
+                <small class="field-hint">Applies Topaz face recovery. Recommended for portrait prints.</small>
+              </div>
+
+              <div class="form-group checkbox-group">
+                <label>
+                  <input type="checkbox" id="enhancementAutoEnhance" name="enhancementAutoEnhance">
+                  <span>Auto-enhance when a job is opened in Job Review</span>
+                </label>
+                <small class="field-hint">Automatically starts enhancement for each image when the Job Review panel is opened. Requires a valid API key.</small>
+              </div>
+            </fieldset>
           </div>
 
           <div class="form-actions">
@@ -584,6 +708,239 @@
     </div>
   </div>
 
+  <!-- ═══ Order Controller Modal ═══ -->
+  <div id="orderControllerModal" class="pm-modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="ocModalTitle">
+    <div class="pm-modal">
+      <h3 id="ocModalTitle">Add Controller</h3>
+
+      <div class="form-group">
+        <label for="ocName">Name</label>
+        <input type="text" id="ocName" placeholder="e.g. Epson SureLab">
+      </div>
+
+      <div class="form-group">
+        <label for="ocType">Type</label>
+        <select id="ocType">
+          <option value="dpof">Epson / Noritsu (DPOF)</option>
+          <option value="folder_copy">Folder Copy</option>
+          <option value="pdf_copy">PDF Copy</option>
+          <option value="darkroompro">Darkroom Pro</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label for="ocOutputPath">Output Path</label>
+        <div class="input-with-button">
+          <input type="text" id="ocOutputPath" placeholder="C:\OrderHub Controllers\Epson" readonly>
+          <button type="button" id="ocBrowseBtn" class="btn-browse">Browse...</button>
+        </div>
+      </div>
+
+      <div class="form-group" id="ocProcessedFolderGroup">
+        <label for="ocProcessedFolderName">Processed Folder Name</label>
+        <div class="input-with-button">
+          <input type="text" id="ocProcessedFolderName" placeholder="e.g. processed" readonly>
+          <button type="button" id="ocProcessedFolderBrowseBtn" class="btn-browse">Browse...</button>
+        </div>
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Sub-folder name where Darkroom Pro moves completed jobs</small>
+      </div>
+
+      <div class="form-group">
+        <label class="modal-checkbox">
+          <input type="checkbox" id="ocAutoPrint">
+          <span>Auto Print — Send jobs to print automatically</span>
+        </label>
+      </div>
+
+      <div class="form-group" id="ocBannerSheetGroup">
+        <label class="modal-checkbox">
+          <input type="checkbox" id="ocBannerSheet">
+          <span>Banner Sheet — Insert separator page before each job</span>
+        </label>
+      </div>
+
+      <!-- PDF Pipeline Builder (pdf_copy controllers only) -->
+      <div class="form-group" id="ocPipelineGroup" style="display:none">
+        <label style="font-weight:600;margin-bottom:8px;display:block">PDF Pipeline</label>
+        <div id="ocPipelineSteps" class="pipeline-steps-list"></div>
+        <div class="pipeline-add-row" style="display:flex;gap:8px;margin-top:8px;align-items:center">
+          <select id="ocPipelineAddType">
+            <option value="">Select step to add...</option>
+            <option value="interleaveBlanks">Interleave Blanks</option>
+            <option value="insertBlanks">Insert Blanks</option>
+            <option value="insertPages">Insert Pages from PDF</option>
+            <option value="addOrderIdentifier">Add Order Identifier</option>
+            <option value="addBannerSheet">Add Banner Sheet</option>
+          </select>
+          <button type="button" id="ocPipelineAddBtn" class="btn-secondary btn-sm">Add Step</button>
+        </div>
+        <div id="ocPageSimulator" class="page-simulator" style="display:none"></div>
+      </div>
+
+      <div class="pm-modal-footer">
+        <button type="button" id="ocCancelBtn" class="btn-secondary">Cancel</button>
+        <button type="button" id="ocSaveBtn" class="btn-primary">Save Controller</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ Channel Mapping Modal ═══ -->
+  <div id="channelMappingModal" class="pm-modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="cmModalTitle">
+    <div class="pm-modal">
+      <h3 id="cmModalTitle">Add Channel Mapping</h3>
+
+      <div class="form-group">
+        <label for="cmControllerId">Controller</label>
+        <select id="cmControllerId">
+          <option value="">Select controller...</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label for="cmProductCode">Product Code</label>
+        <input type="text" id="cmProductCode" placeholder="e.g. 0406-cut-print">
+      </div>
+
+      <div style="margin-bottom:10px;">
+        <div class="pm-options-label">Options (name : value pairs)</div>
+        <div id="cmOptionsList"></div>
+        <button type="button" id="cmAddOptionBtn" class="btn-secondary" style="font-size:11px;padding:3px 10px;margin-top:4px;">+ Add Option</button>
+      </div>
+
+      <div class="form-group">
+        <label for="cmChannelNumber">Channel Number</label>
+        <input type="number" id="cmChannelNumber" placeholder="e.g. 1" min="1" style="width:90px;">
+      </div>
+
+      <div class="form-group">
+        <label for="cmPrintSizeCode">Print Size Code <span style="font-weight:normal;color:#888">(optional)</span></label>
+        <input type="text" id="cmPrintSizeCode" placeholder='e.g. KG, 2L, NML -PSIZE "8x4"' style="width:100%;">
+        <div style="font-size:11px;color:#888;margin-top:3px;">Leave blank to use the product size as NML fallback. Common codes: KG (6×4), 2L (5×7), A4.</div>
+      </div>
+
+      <div class="pm-modal-footer">
+        <button type="button" id="cmCancelBtn" class="btn-secondary">Cancel</button>
+        <button type="button" id="cmSaveBtn" class="btn-primary">Save Mapping</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ CSV Import Modal ═══ -->
+  <div id="csvImportModal" class="pm-modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="csvImportModalTitle">
+    <div class="pm-modal" style="min-width:460px;max-width:560px;">
+      <h3 id="csvImportModalTitle">Import Channel Mappings from CSV</h3>
+
+      <div class="form-group">
+        <label for="csvImportControllerId">Controller</label>
+        <select id="csvImportControllerId">
+          <option value="">Select controller...</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label>CSV File</label>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <button type="button" id="csvChooseFileBtn" class="btn-secondary">Choose CSV File</button>
+          <span id="csvFileName" style="color:#888;font-size:13px;">No file selected</span>
+        </div>
+        <div style="font-size:11px;color:#888;margin-top:4px;">
+          Format: <code>channel,product_code,option,option,…</code> — options as <code>name:value</code> pairs
+        </div>
+      </div>
+
+      <div id="csvImportSummary" style="display:none;margin-top:8px;padding:10px 12px;background:#f4f4f4;border-radius:4px;font-size:13px;max-height:200px;overflow-y:auto;"></div>
+
+      <div class="pm-modal-footer">
+        <button type="button" id="csvImportCancelBtn" class="btn-secondary">Cancel</button>
+        <button type="button" id="csvImportDoBtn" class="btn-primary" disabled>Import</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ Process Folder Exception Modal ═══ -->
+  <div id="exceptionModal" class="pm-modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="excModalTitle">
+    <div class="pm-modal">
+      <h3 id="excModalTitle">Add Exception</h3>
+
+      <div class="form-group">
+        <label for="excProductCode">Product Code</label>
+        <input type="text" id="excProductCode" placeholder="e.g. 0808-photo-print">
+      </div>
+
+      <div style="margin-bottom:10px;">
+        <div class="pm-options-label">Options (name : value pairs)</div>
+        <div id="excOptionsList"></div>
+        <button type="button" id="excAddOptionBtn" class="btn-secondary" style="font-size:11px;padding:3px 10px;margin-top:4px;">+ Add Option</button>
+      </div>
+
+      <div class="form-group">
+        <label for="excFolderPath">Folder Path</label>
+        <div class="input-with-button">
+          <input type="text" id="excFolderPath" placeholder="C:\Process Folders\8x8" readonly>
+          <button type="button" id="excBrowseBtn" class="btn-browse">Browse...</button>
+        </div>
+      </div>
+
+      <div class="pm-modal-footer">
+        <button type="button" id="excCancelBtn" class="btn-secondary">Cancel</button>
+        <button type="button" id="excSaveBtn" class="btn-primary">Save Exception</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Assign Channel Modal (Steps 9 & 10) -->
+  <div id="assignChannelModal" class="pm-modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="assignChannelModalTitle">
+    <div class="pm-modal">
+      <h3 id="assignChannelModalTitle">Assign Channel</h3>
+      <p class="section-desc" style="margin-top:0;margin-bottom:14px;">Save a channel mapping for this job so it can be sent to the printer.</p>
+
+      <div class="form-group">
+        <label class="form-label">Product</label>
+        <div id="assignModalProduct" class="modal-readonly-value">—</div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Product Code</label>
+        <div id="assignModalProductCode" class="modal-readonly-value">—</div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Controller</label>
+        <div id="assignModalController" class="modal-readonly-value">—</div>
+      </div>
+
+      <div class="form-group" id="assignModalOptionsGroup">
+        <label class="form-label">Options</label>
+        <div id="assignModalOptions" class="modal-readonly-value">—</div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="assignChannelNumber">Channel Number <span style="color:#e05252">*</span></label>
+        <input type="number" id="assignChannelNumber" class="form-control" min="1" max="999" placeholder="e.g. 1" style="width:120px">
+        <p class="field-hint">The channel number configured on the printer for this product and finish.</p>
+      </div>
+
+      <div class="pm-modal-footer">
+        <button type="button" id="assignChannelCancelBtn" class="btn-secondary">Cancel</button>
+        <button type="button" id="assignChannelSaveBtn" class="btn-primary">Save &amp; Assign</button>
+      </div>
+    </div>
+  </div>
+
   <script src="renderer.js"></script>
+
+  <!--
+    Job Review Panel — React bundle.
+    Built by:  npm run build:renderer
+    Watches:   npm run watch:renderer  (dev mode, rebuilds on change)
+
+    The <div> is the React mount point. The drawer renders as a fixed overlay
+    (z-index 100) so the job list stays mounted behind it.
+    Communication with renderer.js uses CustomEvents:
+      open:   new CustomEvent('ohd:open-job-review', { detail: { jobId, jobPath } })
+      close:  new CustomEvent('ohd:close-job-review')
+  -->
+  <div id="job-review-root"></div>
+  <script src="job-review.bundle.js"></script>
 </body>
 </html>

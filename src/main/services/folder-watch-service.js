@@ -32,9 +32,14 @@ class FolderWatchService {
   /**
    * Film Scans processing:
    * 1. Wait for folder stability
-   * 2. Copy folder from watch → storage
+   * 2. Copy folder from watch → storage/{MMDDYYYY}/{folderName}
    * 3. Delete folder from watch
    * 4. Upload from storage → S3 (path: film-scans/{locationId}/{folderName}/...)
+   *
+   * The date subfolder (MMDDYYYY) is derived from the system clock at the
+   * moment each folder is processed. If a folder with the same name already
+   * exists under today's date subfolder, a numeric suffix (_1, _2, …) is
+   * appended to avoid silent overwrites.
    *
    * No upload tracker — duplicate folder names are expected over time.
    */
@@ -71,11 +76,19 @@ class FolderWatchService {
         }
 
         try {
-          const storagePath = path.join(storageFolder, folder.name);
+          // Build date-based subfolder (MMDDYYYY) from the current system clock.
+          // mkdirSync with recursive:true is a no-op if the folder already exists.
+          const dateSubfolder = this._getDateSubfolder();
+          const dateStorageDir = path.join(storageFolder, dateSubfolder);
+          fs.mkdirSync(dateStorageDir, { recursive: true });
+
+          // Resolve the final destination, adding _1/_2/… if a same-name folder
+          // already exists under today's date subfolder.
+          const storagePath = this._resolveStoragePath(dateStorageDir, folder.name);
 
           // Step 1: Copy to permanent storage
           await this._copyFolder(watchPath, storagePath);
-          logger.info(`filmScans: copied ${folder.name} to storage`);
+          logger.info(`filmScans: copied ${folder.name} to storage (${storagePath})`);
 
           // Step 2: Delete from watch folder
           this._deleteFolderRecursive(watchPath);
@@ -191,6 +204,34 @@ class FolderWatchService {
     }
 
     return summary;
+  }
+
+  /**
+   * Return today's date as a zero-padded MMDDYYYY string, e.g. "03112026".
+   * Uses the local system clock at call time.
+   */
+  _getDateSubfolder() {
+    const now  = new Date();
+    const mm   = String(now.getMonth() + 1).padStart(2, '0');
+    const dd   = String(now.getDate()).padStart(2, '0');
+    const yyyy = String(now.getFullYear());
+    return `${mm}${dd}${yyyy}`;
+  }
+
+  /**
+   * Return a conflict-free destination path under dateStorageDir for folderName.
+   * If {dateStorageDir}/{folderName} does not exist it is returned unchanged.
+   * Otherwise {folderName}_1, {folderName}_2, … are tried until a free name is found.
+   */
+  _resolveStoragePath(dateStorageDir, folderName) {
+    let candidate = path.join(dateStorageDir, folderName);
+    if (!fs.existsSync(candidate)) return candidate;
+    let n = 1;
+    while (true) { // eslint-disable-line no-constant-condition
+      candidate = path.join(dateStorageDir, `${folderName}_${n}`);
+      if (!fs.existsSync(candidate)) return candidate;
+      n++;
+    }
   }
 
   _isFolderStable(folderPath, stabilityMinutes) {

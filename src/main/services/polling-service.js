@@ -5,6 +5,7 @@ const folderWatchService = require('./folder-watch-service');
 const jobService = require('./job-service');
 const jobDownloadService = require('./job-download-service');
 const { printControllerStore } = require('./print-controller-store');
+const routingService = require('./routing-service');
 const { FolderMonitor } = require('./folder-monitor');
 const logger = require('./logger');
 
@@ -17,6 +18,7 @@ class PollingService {
     this.lastFolderWatchSummary = null;
     this.lastJobPollSummary = null;
     this.onJobsUpdated = null; // callback to notify renderer
+    this.onAutoPrint   = null; // callback to trigger auto-print check
     // Independent Film Scans timer
     this.filmScansIntervalId = null;
     this.lastFilmScansCheckTime = null;
@@ -194,6 +196,11 @@ class PollingService {
       // Notify renderer of updated job list
       this._notifyJobsUpdated();
 
+      // Trigger auto-print check for any newly-received jobs
+      if (this.onAutoPrint) {
+        this.onAutoPrint().catch(err => logger.logError('[auto-print] callback error', err));
+      }
+
     } catch (error) {
       logger.logError('Polling: error polling jobs', error);
     }
@@ -319,6 +326,14 @@ class PollingService {
   }
 
   /**
+   * Set callback invoked after each job poll cycle completes.
+   * Used by the auto-print feature to dispatch eligible jobs.
+   */
+  setAutoPrintCallback(callback) {
+    this.onAutoPrint = callback;
+  }
+
+  /**
    * Notify renderer of updated jobs
    */
   _notifyJobsUpdated() {
@@ -359,28 +374,50 @@ class PollingService {
   /**
    * Start monitoring hot folders for all active print controllers.
    * Detects when the printer renames folders (o->e accepted, o->q failed).
+   *
+   * Sources:
+   *  - DPOF controllers: routingService.orderControllers (outputPath)
+   *  - Darkroom Pro + legacy DPOF controllers: printControllerStore (hotFolderPath)
+   *    Darkroom Pro entries are only in printControllerStore, never migrated.
    */
   _startFolderMonitors() {
     this._stopFolderMonitors(); // clean up any existing
 
     try {
-      const controllers = printControllerStore.getAllControllers();
-      const active = controllers.filter(c => c.isActive && c.hotFolderPath);
+      // Build a unified list of { id, name, folderPath } for all active DPOF controllers.
+      // New routing-system controllers take precedence; old store fills the gaps.
+      const monitorTargets = new Map(); // id → { id, name, folderPath }
 
-      if (active.length === 0) return;
+      // 1. New routing-system DPOF controllers
+      const orderControllers = routingService.getControllers();
+      for (const c of orderControllers) {
+        if (c.outputPath) {
+          monitorTargets.set(c.id, { id: c.id, name: c.name, folderPath: c.outputPath });
+        }
+      }
 
-      for (const controller of active) {
+      // 2. Old printControllerStore — Darkroom Pro entries (and any not yet migrated)
+      const legacyControllers = printControllerStore.getAllControllers();
+      for (const c of legacyControllers) {
+        if (c.isActive && c.hotFolderPath && !monitorTargets.has(c.id)) {
+          monitorTargets.set(c.id, { id: c.id, name: c.name, folderPath: c.hotFolderPath });
+        }
+      }
+
+      if (monitorTargets.size === 0) return;
+
+      for (const target of monitorTargets.values()) {
         const monitor = new FolderMonitor();
 
-        monitor.startMonitoring(controller.hotFolderPath, (statusUpdate) => {
-          this._handleFolderStatusChange(statusUpdate, controller);
+        monitor.startMonitoring(target.folderPath, (statusUpdate) => {
+          this._handleFolderStatusChange(statusUpdate, target);
         });
 
-        this.folderMonitors.set(controller.id, monitor);
+        this.folderMonitors.set(target.id, monitor);
 
         logger.info('Hot folder monitor started', {
-          controller: controller.name,
-          path: controller.hotFolderPath
+          controller: target.name,
+          path: target.folderPath,
         });
       }
 

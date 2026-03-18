@@ -8,7 +8,9 @@
     "dev": "electron . --dev",
     "build": "electron-builder",
     "build:dir": "electron-builder --dir",
-    "generate-icons": "node scripts/generate-icons.js"
+    "generate-icons": "node scripts/generate-icons.js",
+    "build:renderer": "node scripts/build-renderer.js",
+    "watch:renderer": "node scripts/build-renderer.js --watch"
   },
   "keywords": [
     "electron",
@@ -21,17 +23,25 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.700.0",
     "basic-ftp": "^5.0.0",
+    "jimp": "^0.22.12",
+    "qrcode": "^1.5.4",
     "chokidar": "^5.0.0",
     "electron-store": "^8.1.0",
     "electron-updater": "^6.3.0",
     "fast-xml-parser": "^5.4.1",
     "mime-types": "^2.1.35",
+    "pdf-lib": "^1.17.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "replicate": "^1.4.0",
+    "sharp": "^0.34.5",
     "uuid": "^13.0.0",
     "winston": "^3.11.0"
   },
   "devDependencies": {
     "electron": "^40.6.1",
-    "electron-builder": "^26.8.1"
+    "electron-builder": "^26.8.1",
+    "esbuild": "^0.24.2"
   },
   "overrides": {
     "fast-xml-parser": "^5.4.1"

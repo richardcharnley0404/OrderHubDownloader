@@ -29,7 +29,15 @@ class PrintControllerService {
     if (!mapping) throw new Error(`Product mapping ${job.mappingId} not found`);
 
     // Generate DPOF content
-    const dpofContent = dpofGenerator.generate(controller, mapping, job);
+    const printSizeCode = mapping.printSizeCode ||
+      (mapping.size ? `NML -PSIZE "${mapping.size}"` : 'KG');
+    const dpofContent = dpofGenerator.generate({
+      orderNumber:   job.orderNumber  || '',
+      customerName:  job.customerName || '',
+      channelNumber: mapping.channelNumber,
+      printSizeCode,
+      images: (job.lineItems || []).map(li => ({ filename: li.filename, quantity: li.quantity })),
+    });
 
     // Write order folder
     const folderPath = await orderFolderWriter.writeOrderFolder(

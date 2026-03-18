@@ -125,7 +125,15 @@ async function runTest() {
     // ── Step 4: Generate DPOF and write to hot folder ──
     separator('Step 4: Generate DPOF & Write Order Folder');
 
-    const dpofContent = dpofGenerator.generate(controller, mapping, job);
+    const printSizeCode = mapping.printSizeCode ||
+      (mapping.size ? `NML -PSIZE "${mapping.size}"` : 'KG');
+    const dpofContent = dpofGenerator.generate({
+      orderNumber:   job.orderNumber  || '',
+      customerName:  job.customerName || '',
+      channelNumber: mapping.channelNumber,
+      printSizeCode,
+      images: (job.lineItems || []).map(li => ({ filename: li.filename, quantity: li.quantity })),
+    });
     log('DPOF Content', `\n${dpofContent}`);
 
     const folderPath = await orderFolderWriter.writeOrderFolder(
@@ -138,14 +146,14 @@ async function runTest() {
 
     log('Order folder created', folderPath);
 
-    const dpofExists = fs.existsSync(path.join(folderPath, 'DPOF.001'));
-    const imageExists = fs.existsSync(path.join(folderPath, 'IMAGES', 'test-photo-001.jpg'));
-    log('DPOF.001 exists', dpofExists ? 'PASS' : 'FAIL');
-    log('Image copied', imageExists ? 'PASS' : 'FAIL');
+    const autprintExists = fs.existsSync(path.join(folderPath, 'MISC', 'AUTPRINT.MRK'));
+    const imageExists    = fs.existsSync(path.join(folderPath, 'IMAGE', 'test-photo-001.jpg'));
+    log('AUTPRINT.MRK exists', autprintExists ? 'PASS' : 'FAIL');
+    log('Image copied',        imageExists    ? 'PASS' : 'FAIL');
 
-    if (dpofExists) {
-      const written = fs.readFileSync(path.join(folderPath, 'DPOF.001'), 'utf-8');
-      log('DPOF.001 size', `${written.length} bytes`);
+    if (autprintExists) {
+      const written = fs.readFileSync(path.join(folderPath, 'MISC', 'AUTPRINT.MRK'), 'utf-8');
+      log('AUTPRINT.MRK size', `${written.length} bytes`);
     }
 
     jobStore.updateJob(jobId, {

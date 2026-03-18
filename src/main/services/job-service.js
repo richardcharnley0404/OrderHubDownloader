@@ -160,14 +160,21 @@ class JobService {
     const existingMap = new Map(this.jobs.map(j => [j.id, j]));
     const newJobIds = new Set(newJobs.map(j => j.id));
 
-    // Map new jobs, preserving local status where appropriate
+    // Map new jobs, preserving local-only fields where appropriate
     const merged = newJobs.map(newJob => {
       const existing = existingMap.get(newJob.id);
-      if (existing && existing._status && existing._status !== 'pending') {
+      if (!existing) return newJob;
+      const preserved = {};
+      if (existing._status && existing._status !== 'pending') {
         // Preserve local status (received, in_production) — don't overwrite with 'pending'
-        return { ...newJob, _status: existing._status };
+        preserved._status = existing._status;
       }
-      return newJob;
+      if (existing._dpofNotified) {
+        // Preserve the DPOF terminal-notification flag so re-fetching from the API
+        // does not cause the "Imported" toast to fire again on the next poll cycle.
+        preserved._dpofNotified = existing._dpofNotified;
+      }
+      return { ...newJob, ...preserved };
     });
 
     // Keep locally-tracked jobs that are no longer returned by API
