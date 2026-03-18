@@ -27,3 +27,4 @@ config.json
 # Electron
 *.asar
 nul
+.claude/
