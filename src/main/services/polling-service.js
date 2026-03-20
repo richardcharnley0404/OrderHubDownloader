@@ -427,6 +427,8 @@ class PollingService {
       for (const c of orderControllers) {
         if (c.outputPath) {
           monitorTargets.set(c.id, { id: c.id, name: c.name, folderPath: c.outputPath });
+        } else {
+          logger.logWarning('Hot folder monitor skipped — no output path configured', { controller: c.name, id: c.id });
         }
       }
 
@@ -459,6 +461,16 @@ class PollingService {
     } catch (error) {
       logger.logError('Error starting folder monitors', error);
     }
+  }
+
+  /**
+   * Public: stop and restart all hot folder monitors.
+   * Called whenever the controller list changes (save or delete) so monitors
+   * reflect the current configuration without requiring an app restart.
+   */
+  restartFolderMonitors() {
+    logger.info('Restarting hot folder monitors');
+    this._startFolderMonitors();
   }
 
   /**

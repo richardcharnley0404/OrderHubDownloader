@@ -835,6 +835,7 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
         logger.info('Darkroom Pro controller synced to printControllerStore', { id: controller.id });
       }
 
+      pollingService.restartFolderMonitors();
       return { success: true };
     } catch (error) {
       logger.logError('ohd:routing:save-controller error', error);
@@ -856,6 +857,7 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
         logger.info('Darkroom Pro controller removed from printControllerStore', { id });
       }
 
+      pollingService.restartFolderMonitors();
       return { success: true };
     } catch (error) {
       logger.logError('ohd:routing:delete-controller error', error);
