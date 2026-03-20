@@ -50,7 +50,9 @@ class S3Service {
 
   async _uploadFolderPixfizz(localFolderPath, s3Prefix, credentials, progressCallback) {
     const folderName = path.basename(localFolderPath);
-    const files = this._getAllFiles(localFolderPath);
+    const S3_EXCLUDED_EXTENSIONS = ['.thm', '.txt'];
+    const files = this._getAllFiles(localFolderPath)
+      .filter(f => !S3_EXCLUDED_EXTENSIONS.includes(path.extname(f).toLowerCase()));
 
     if (files.length === 0) {
       return { uploaded: 0, failed: 0, total: 0 };
@@ -60,78 +62,137 @@ class S3Service {
     // full S3 keys. Extract it from the leading segment of s3Prefix.
     const s3Folder = s3Prefix.split('/')[0]; // e.g. 'film-scans' or 'file-uploads'
 
-    // Build file descriptors for the presign request.
-    // sub_path = folderName[/relativeDir] so the server reconstructs the full key as:
-    //   {s3Folder}/{locationId}/{sub_path}/{name}
-    const fileDescriptors = files.map(filePath => {
+    let uploaded = 0;
+    let failed = 0;
+
+    for (const filePath of files) {
+      // Build descriptor for this single file.
+      // sub_path = folderName[/relativeDir] so the server reconstructs the full key as:
+      //   {s3Folder}/{locationId}/{sub_path}/{name}
       const relPath = path.relative(localFolderPath, filePath).replace(/\\/g, '/');
       const name = path.basename(relPath);
       const relDir = path.dirname(relPath);
       const sub_path = relDir === '.' ? folderName : `${folderName}/${relDir}`;
       const stat = fs.statSync(filePath);
-      return {
-        _localPath: filePath,           // local only — stripped before sending to API
-        name,
-        folder: s3Folder,
-        sub_path,
-        size: stat.size,
-        type: this._getContentType(filePath)
-      };
-    });
+      const apiDescriptor = { name, folder: s3Folder, sub_path, size: stat.size, type: this._getContentType(filePath) };
 
-    // Request all pre-signed URLs in one round-trip.
-    // Send only the fields the API expects; strip the local _localPath.
-    const apiDescriptors = fileDescriptors.map(({ name, folder, sub_path, size, type }) =>
-      ({ name, folder, sub_path, size, type })
-    );
-
-    let presigned;
-    try {
-      presigned = await presignService.getPresignedUrls(apiDescriptors, credentials.locationId || null);
-    } catch (error) {
-      logger.logError('Failed to obtain pre-signed upload URLs', error);
-      throw error;
-    }
-
-    // Index presign results by name for O(1) lookup.
-    // NOTE: if two files share a basename across different sub_paths the Map will
-    // collide — the diagnostic block below will surface that case.
-    const presignByName = new Map(presigned.map(p => [p.name, p]));
-
-    // Identify any files the API silently dropped and log full descriptor details
-    const missingDescs = fileDescriptors.filter(d => !presignByName.has(d.name));
-    if (missingDescs.length > 0) {
-      logger.logWarning(
-        `presignService returned no URL for ${missingDescs.length}/${fileDescriptors.length} file(s) — these will not be uploaded`,
-        { missing: missingDescs.map(d => ({ name: d.name, sub_path: d.sub_path, size: d.size, type: d.type })) }
-      );
-    }
-
-    let uploaded = 0;
-    let failed = 0;
-
-    for (const desc of fileDescriptors) {
-      const presignEntry = presignByName.get(desc.name);
-      if (!presignEntry) {
+      // Request a fresh pre-signed URL for this file immediately before uploading.
+      let presignEntry;
+      try {
+        const presigned = await presignService.getPresignedUrls([apiDescriptor], credentials.locationId || null);
+        presignEntry = presigned[0];
+      } catch (error) {
         failed++;
-        // Already reported in the batch diagnostic above — no duplicate warning needed
+        logger.logError(`Failed to obtain pre-signed URL for ${name}`, error);
+        continue;
+      }
+
+      if (!presignEntry || !presignEntry.upload_url) {
+        failed++;
+        logger.logWarning(`presignService returned no URL for ${name}`, { name, sub_path, size: stat.size, type: apiDescriptor.type });
         continue;
       }
 
       try {
-        await this._uploadFileViaPresignedUrl(desc._localPath, presignEntry.upload_url);
+        await this._uploadFileViaPresignedUrl(filePath, presignEntry.upload_url);
         uploaded++;
         if (progressCallback) {
-          const rel = path.relative(localFolderPath, desc._localPath).replace(/\\/g, '/');
-          progressCallback({ message: `Uploaded ${uploaded}/${files.length}: ${rel}`, status: 'uploading' });
+          progressCallback({ message: `Uploaded ${uploaded}/${files.length}: ${relPath}`, status: 'uploading' });
         }
       } catch (error) {
         failed++;
-        logger.logError(`Failed to upload ${presignEntry.s3_key || desc.name}`, error);
+        logger.logError(`Failed to upload ${presignEntry.s3_key || name}`, error);
+      }
+    }
+
+    // ── Completion sentinel ──────────────────────────────────────────────────
+    // Only written when every file uploaded successfully.
+    if (failed === 0) {
+      try {
+        const { app } = require('electron');
+        const tiffExts  = new Set(['.tif', '.tiff']);
+        const jpegExts  = new Set(['.jpg', '.jpeg']);
+        const tiffCount = files.filter(f => tiffExts.has(path.extname(f).toLowerCase())).length;
+        const jpgCount  = files.filter(f => jpegExts.has(path.extname(f).toLowerCase())).length;
+
+        const sentinelName = `${folderName}_folder_complete.json`;
+        const sentinelBody = JSON.stringify({
+          folder:      folderName,
+          total_files: files.length,
+          tiff_count:  tiffCount,
+          jpg_count:   jpgCount,
+          completed_at: new Date().toISOString(),
+          ohd_version: app.getVersion()
+        });
+        const sentinelBuffer = Buffer.from(sentinelBody, 'utf8');
+
+        const sentinelDescriptor = {
+          name:     sentinelName,
+          folder:   s3Folder,
+          sub_path: folderName,
+          size:     sentinelBuffer.length,
+          type:     'application/json'
+        };
+
+        const presigned = await presignService.getPresignedUrls([sentinelDescriptor], credentials.locationId || null);
+        const sentinelEntry = presigned[0];
+
+        if (sentinelEntry && sentinelEntry.upload_url) {
+          await this._uploadBufferViaPresignedUrl(sentinelBuffer, 'application/json', sentinelEntry.upload_url);
+          logger.info(`filmScans: sentinel uploaded — ${sentinelName}`);
+        } else {
+          logger.logWarning(`filmScans: no pre-signed URL returned for sentinel ${sentinelName}`, {});
+        }
+      } catch (sentinelError) {
+        // Sentinel failure must never affect the reported upload result
+        logger.logError('filmScans: failed to upload completion sentinel', sentinelError);
       }
     }
 
     return { uploaded, failed, total: files.length };
+  }
+
+  /**
+   * PUT an in-memory Buffer to a pre-signed URL.
+   */
+  _uploadBufferViaPresignedUrl(buffer, contentType, presignedUrl) {
+    return new Promise((resolve, reject) => {
+      const urlObj   = new URL(presignedUrl);
+      const protocol = urlObj.protocol === 'https:' ? https : http;
+
+      const options = {
+        hostname: urlObj.hostname,
+        port:     urlObj.port || (urlObj.protocol === 'https:' ? 443 : 80),
+        path:     urlObj.pathname + urlObj.search,
+        method:   'PUT',
+        headers: {
+          'Content-Type':   contentType,
+          'Content-Length': buffer.length
+        },
+        timeout: 30000
+      };
+
+      const req = protocol.request(options, (res) => {
+        let body = '';
+        res.on('data', chunk => { body += chunk; });
+        res.on('end', () => {
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            resolve();
+          } else {
+            reject(new Error(`Sentinel upload failed: HTTP ${res.statusCode} — ${body.substring(0, 200)}`));
+          }
+        });
+      });
+
+      req.on('error', reject);
+      req.on('timeout', () => {
+        req.destroy();
+        reject(new Error('Sentinel upload request timed out'));
+      });
+
+      req.write(buffer);
+      req.end();
+    });
   }
 
   /**
@@ -210,8 +271,10 @@ class S3Service {
 
   async _uploadFolderAmazon(localFolderPath, s3Prefix, credentials, progressCallback) {
     const client = this._createAmazonClient(credentials);
+    const S3_EXCLUDED_EXTENSIONS = ['.thm', '.txt'];
     const folderName = path.basename(localFolderPath);
-    const files = this._getAllFiles(localFolderPath);
+    const files = this._getAllFiles(localFolderPath)
+      .filter(f => !S3_EXCLUDED_EXTENSIONS.includes(path.extname(f).toLowerCase()));
     let uploaded = 0;
     let failed = 0;
 

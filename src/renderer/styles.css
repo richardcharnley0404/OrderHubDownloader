@@ -1119,6 +1119,50 @@ button {
   box-shadow: 0 0 0 2px rgba(30, 123, 143, 0.12);
 }
 
+.activity-search-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.activity-search {
+  width: 220px;
+  padding: 6px 28px 6px 10px;
+  border: 1px solid #c2c9d1;
+  border-radius: 3px;
+  font-size: 12px;
+  font-family: inherit;
+  color: #2c3e50;
+  background: #ffffff;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.activity-search:focus {
+  outline: none;
+  border-color: #1e7b8f;
+  box-shadow: 0 0 0 2px rgba(30, 123, 143, 0.12);
+}
+
+.activity-search-clear {
+  position: absolute;
+  right: 6px;
+  background: none;
+  border: none;
+  padding: 0;
+  line-height: 1;
+  font-size: 15px;
+  color: #8a96a3;
+  cursor: pointer;
+}
+
+.activity-search-clear:hover {
+  color: #2c3e50;
+}
+
+.activity-search-clear.hidden {
+  display: none;
+}
+
 /* ── Log container ── */
 .activity-log-container {
   flex: 1;
@@ -1840,6 +1884,24 @@ button {
   font-weight: 600;
   color: #3b4a5a;
   margin-bottom: 3px;
+}
+
+/* Checkbox groups inside modals — override the block/width:100% rules above */
+.pm-modal .form-group.checkbox-group label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: normal;
+  margin-bottom: 0;
+  cursor: pointer;
+}
+
+.pm-modal .form-group.checkbox-group input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  accent-color: #1e7b8f;
+  cursor: pointer;
 }
 
 .pm-modal .form-group input,

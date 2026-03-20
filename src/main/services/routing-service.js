@@ -122,6 +122,7 @@ function resolveRoute(job) {
     channelNumber:  channelMapping.channelNumber,
     printSizeCode,
     bannerSheet:    controller.bannerSheet || false,
+    skipAutoPrint:  channelMapping.skipAutoPrint || false,
   };
 }
 

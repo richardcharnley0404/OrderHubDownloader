@@ -1189,17 +1189,19 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
 
   /**
    * ohd:enhancement:test
-   * Payload:  { apiKey }
+   * Payload:  { apiKey, provider? }
    * Returns:  { valid: true } | { valid: false, error: string }
    *
-   * Validates the supplied Replicate API key without running any inference.
-   * The key is passed directly from the Settings form so the operator can
-   * test it before saving.  It is never written to the activity log.
+   * Validates the supplied API key for the given provider without running any
+   * inference.  The key is passed directly from the Settings form so the
+   * operator can test it before saving.  Never written to the activity log.
+   *
+   * provider: 'replicate' | 'topaz' — defaults to the configured provider.
    */
-  ipcMain.handle('ohd:enhancement:test', async (event, { apiKey }) => {
+  ipcMain.handle('ohd:enhancement:test', async (event, { apiKey, provider }) => {
     try {
       // validateApiKey is a pure network check — no file I/O, no sidecar.
-      return await enhancementManager.validateApiKey(apiKey);
+      return await enhancementManager.validateApiKey(apiKey, provider);
     } catch (error) {
       // Do NOT log apiKey — keep it out of the activity log.
       logger.logError('ohd:enhancement:test error', error);
@@ -1430,6 +1432,12 @@ async function runAutoPrint() {
       // DPOF controllers require a channel mapping; folder_copy does not
       const isDpof = (ctrl.type || 'dpof') !== 'folder_copy';
       if (isDpof && !route.channelNumber) continue;
+
+      // Channel-level opt-out — skip without logging an error
+      if (route.skipAutoPrint) {
+        logger.info('[auto-print] Skipping job — channel marked skip auto-print', { jobId: job.id, controller: ctrl.name });
+        continue;
+      }
 
       logger.info('[auto-print] Dispatching job', { jobId: job.id, controller: ctrl.name });
 

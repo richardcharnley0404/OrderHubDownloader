@@ -8,6 +8,7 @@ const testFtpBtn = document.getElementById('testFtpBtn');
 const selectDirBtn = document.getElementById('selectDirBtn');
 const testS3Btn = document.getElementById('testS3Btn');
 const testReplicateBtn = document.getElementById('testReplicateBtn');
+const testTopazBtn     = document.getElementById('testTopazBtn');
 const selectFilmScansWatchBtn = document.getElementById('selectFilmScansWatchBtn');
 const selectFilmScansStorageBtn = document.getElementById('selectFilmScansStorageBtn');
 const selectFileUploadsWatchBtn = document.getElementById('selectFileUploadsWatchBtn');
@@ -908,9 +909,10 @@ function openAssignModal(job, route) {
     document.getElementById('assignModalOptionsGroup').style.display = 'none';
   }
 
-  // Clear channel number input
+  // Clear channel number input and reset checkbox
   const channelInput = document.getElementById('assignChannelNumber');
   channelInput.value = '';
+  document.getElementById('assignSkipAutoPrint').checked = false;
 
   // Store context on the modal element for the save handler
   modal.dataset.jobId = String(job.id);
@@ -962,6 +964,8 @@ function openAssignModal(job, route) {
     saveBtn.disabled   = true;
     saveBtn.textContent = 'Saving...';
 
+    const skipAutoPrint = document.getElementById('assignSkipAutoPrint').checked;
+
     try {
       const result = await window.electronAPI.saveChannelMapping({
         id:            crypto.randomUUID(),
@@ -969,6 +973,7 @@ function openAssignModal(job, route) {
         productCode,
         options:       jobOptions,   // Array<{name,value}> — match this job's options
         channelNumber,
+        skipAutoPrint,
       });
 
       if (result && result.success === false) {
@@ -1176,10 +1181,14 @@ function populateForm(config) {
   toggleDpiValidationFields();
 
   // AI Enhancement
+  document.getElementById('enhancementProvider').value = config.enhancementProvider || 'replicate';
   document.getElementById('replicateApiKey').value = config.replicateApiKey || '';
   document.getElementById('enhancementDefaultModel').value = config.enhancementDefaultModel || 'Standard V2';
+  document.getElementById('topazApiKey').value = config.topazApiKey || '';
+  document.getElementById('topazDefaultModel').value = config.topazDefaultModel || 'Standard V2';
   document.getElementById('enhancementFaceEnhancement').checked = config.enhancementFaceEnhancement || false;
   document.getElementById('enhancementAutoEnhance').checked = config.enhancementAutoEnhance || false;
+  updateEnhancementProviderSections();
 
   // Update enable states based on folders
   updateFilmScansEnableState();
@@ -1230,8 +1239,11 @@ function getFormData() {
     dpiPoorThreshold: parseInt(document.getElementById('dpiPoorThreshold').value, 10) || 200,
     dpiPoorAllowAutoSubmit: document.getElementById('dpiPoorAllowAutoSubmit').checked,
     // AI Enhancement
+    enhancementProvider: document.getElementById('enhancementProvider').value,
     replicateApiKey: document.getElementById('replicateApiKey').value,
     enhancementDefaultModel: document.getElementById('enhancementDefaultModel').value,
+    topazApiKey: document.getElementById('topazApiKey').value,
+    topazDefaultModel: document.getElementById('topazDefaultModel').value,
     enhancementFaceEnhancement: document.getElementById('enhancementFaceEnhancement').checked,
     enhancementAutoEnhance: document.getElementById('enhancementAutoEnhance').checked,
   };
@@ -1727,34 +1739,40 @@ testFtpBtn.addEventListener('click', async () => {
   }
 });
 
-// Show/Hide toggle for Replicate API key
+// ── AI Enhancement — provider section toggle ──────────────────────────────────
+
+function updateEnhancementProviderSections() {
+  const provider = document.getElementById('enhancementProvider').value;
+  document.getElementById('replicateSection').style.display = (provider === 'replicate') ? '' : 'none';
+  document.getElementById('topazSection').style.display     = (provider === 'topaz')     ? '' : 'none';
+}
+
+document.getElementById('enhancementProvider').addEventListener('change', updateEnhancementProviderSections);
+
+// ── Replicate API key — show/hide toggle and test ─────────────────────────────
+
 document.getElementById('replicateApiKeyToggle').addEventListener('click', () => {
   const input = document.getElementById('replicateApiKey');
   const btn   = document.getElementById('replicateApiKeyToggle');
   if (input.type === 'password') {
-    input.type    = 'text';
+    input.type      = 'text';
     btn.textContent = 'Hide';
   } else {
-    input.type    = 'password';
+    input.type      = 'password';
     btn.textContent = 'Show';
   }
 });
 
-// Test Replicate API Key
 testReplicateBtn.addEventListener('click', async () => {
   const apiKey = document.getElementById('replicateApiKey').value.trim();
-
   if (!apiKey) {
     showTestStatus('replicateTestStatus', 'Please enter an API key first', 'error');
     return;
   }
-
   try {
     testReplicateBtn.disabled    = true;
     testReplicateBtn.textContent = 'Testing...';
-
-    const result = await window.electronAPI.enhancementTest({ apiKey });
-
+    const result = await window.electronAPI.enhancementTest({ apiKey, provider: 'replicate' });
     if (result.valid) {
       showTestStatus('replicateTestStatus', '✓ API key is valid', 'success');
     } else {
@@ -1765,6 +1783,43 @@ testReplicateBtn.addEventListener('click', async () => {
   } finally {
     testReplicateBtn.disabled    = false;
     testReplicateBtn.textContent = 'Test API Key';
+  }
+});
+
+// ── Topaz API key — show/hide toggle and test ─────────────────────────────────
+
+document.getElementById('topazApiKeyToggle').addEventListener('click', () => {
+  const input = document.getElementById('topazApiKey');
+  const btn   = document.getElementById('topazApiKeyToggle');
+  if (input.type === 'password') {
+    input.type      = 'text';
+    btn.textContent = 'Hide';
+  } else {
+    input.type      = 'password';
+    btn.textContent = 'Show';
+  }
+});
+
+testTopazBtn.addEventListener('click', async () => {
+  const apiKey = document.getElementById('topazApiKey').value.trim();
+  if (!apiKey) {
+    showTestStatus('topazTestStatus', 'Please enter an API key first', 'error');
+    return;
+  }
+  try {
+    testTopazBtn.disabled    = true;
+    testTopazBtn.textContent = 'Testing...';
+    const result = await window.electronAPI.enhancementTest({ apiKey, provider: 'topaz' });
+    if (result.valid) {
+      showTestStatus('topazTestStatus', '✓ API key is valid', 'success');
+    } else {
+      showTestStatus('topazTestStatus', 'Invalid: ' + (result.error || 'Unknown error'), 'error');
+    }
+  } catch (error) {
+    showTestStatus('topazTestStatus', 'Error: ' + error.message, 'error');
+  } finally {
+    testTopazBtn.disabled    = false;
+    testTopazBtn.textContent = 'Test API Key';
   }
 });
 
@@ -1841,6 +1896,8 @@ scanDownloadBtn.addEventListener('click', async () => {
 const activityLogContainer = document.getElementById('activityLogContainer');
 const activityEmptyState = document.getElementById('activityEmptyState');
 const activityLevelFilter = document.getElementById('activityLevelFilter');
+const activityTextFilter = document.getElementById('activityTextFilter');
+const activityTextFilterClear = document.getElementById('activityTextFilterClear');
 const activityRefreshBtn = document.getElementById('activityRefreshBtn');
 const activityCopyBtn = document.getElementById('activityCopyBtn');
 const activityExportBtn = document.getElementById('activityExportBtn');
@@ -1848,6 +1905,8 @@ const activityStatusBar = document.getElementById('activityStatusBar');
 
 let activityLogsPath = '';
 let activityLoaded = false;
+let allActivityEntries = [];   // full result from last readLogs call
+let activityTotalLines = 0;    // raw line count from last readLogs call
 
 // Load logs path on startup
 (async () => {
@@ -1863,70 +1922,81 @@ async function loadActivityLog() {
 
   try {
     const data = await window.electronAPI.readLogs({ level });
-    const entries = data.entries || [];
-    const totalLines = data.totalLines || 0;
-
-    if (entries.length === 0) {
-      activityLogContainer.style.display = 'none';
-      activityEmptyState.classList.remove('hidden');
-    } else {
-      activityEmptyState.classList.add('hidden');
-      activityLogContainer.style.display = '';
-
-      activityLogContainer.innerHTML = '';
-      for (const entry of entries) {
-        const div = document.createElement('div');
-        div.className = `log-entry log-level-${entry.level}`;
-
-        const ts = document.createElement('span');
-        ts.className = 'log-timestamp';
-        ts.textContent = entry.timestamp;
-
-        const badge = document.createElement('span');
-        badge.className = 'log-level-badge';
-        badge.textContent = entry.level.toUpperCase();
-
-        const msg = document.createElement('span');
-        msg.className = 'log-message';
-        msg.textContent = entry.message;
-
-        div.appendChild(ts);
-        div.appendChild(badge);
-        div.appendChild(msg);
-
-        // Show expandable stack trace if present
-        if (entry.stack) {
-          const toggleBtn = document.createElement('button');
-          toggleBtn.className = 'log-details-toggle';
-          toggleBtn.textContent = '▶';
-          toggleBtn.title = 'Show stack trace';
-          div.appendChild(toggleBtn);
-
-          const details = document.createElement('pre');
-          details.className = 'log-details hidden';
-          details.textContent = entry.stack;
-
-          toggleBtn.addEventListener('click', () => {
-            const isHidden = details.classList.toggle('hidden');
-            toggleBtn.textContent = isHidden ? '▶' : '▼';
-            toggleBtn.title = isHidden ? 'Show stack trace' : 'Hide stack trace';
-          });
-
-          div.appendChild(details);
-        }
-
-        activityLogContainer.appendChild(div);
-      }
-    }
-
-    // Update status bar
-    const filterLabel = level === 'all' ? '' : ` (filtered: ${level})`;
-    const rawInfo = data.rawLineCount ? ` (${data.rawLineCount} raw lines)` : '';
-    activityStatusBar.textContent = `Showing ${entries.length} of ${totalLines} entries${rawInfo}${filterLabel} \u2014 ${activityLogsPath}`;
+    allActivityEntries = data.entries || [];
+    activityTotalLines = data.totalLines || 0;
+    applyActivityFilters(data);
   } catch (error) {
     console.error('Error loading activity log:', error);
     activityStatusBar.textContent = 'Error loading log: ' + error.message;
   }
+}
+
+function applyActivityFilters(data) {
+  const level    = activityLevelFilter.value;
+  const textRaw  = activityTextFilter ? activityTextFilter.value : '';
+  const needle   = textRaw.trim().toLowerCase();
+  const entries  = needle
+    ? allActivityEntries.filter(e => (e.message || '').toLowerCase().includes(needle))
+    : allActivityEntries;
+
+  if (entries.length === 0) {
+    activityLogContainer.style.display = 'none';
+    activityEmptyState.classList.remove('hidden');
+  } else {
+    activityEmptyState.classList.add('hidden');
+    activityLogContainer.style.display = '';
+
+    activityLogContainer.innerHTML = '';
+    for (const entry of entries) {
+      const div = document.createElement('div');
+      div.className = `log-entry log-level-${entry.level}`;
+
+      const ts = document.createElement('span');
+      ts.className = 'log-timestamp';
+      ts.textContent = entry.timestamp;
+
+      const badge = document.createElement('span');
+      badge.className = 'log-level-badge';
+      badge.textContent = entry.level.toUpperCase();
+
+      const msg = document.createElement('span');
+      msg.className = 'log-message';
+      msg.textContent = entry.message;
+
+      div.appendChild(ts);
+      div.appendChild(badge);
+      div.appendChild(msg);
+
+      // Show expandable stack trace if present
+      if (entry.stack) {
+        const toggleBtn = document.createElement('button');
+        toggleBtn.className = 'log-details-toggle';
+        toggleBtn.textContent = '▶';
+        toggleBtn.title = 'Show stack trace';
+        div.appendChild(toggleBtn);
+
+        const details = document.createElement('pre');
+        details.className = 'log-details hidden';
+        details.textContent = entry.stack;
+
+        toggleBtn.addEventListener('click', () => {
+          const isHidden = details.classList.toggle('hidden');
+          toggleBtn.textContent = isHidden ? '▶' : '▼';
+          toggleBtn.title = isHidden ? 'Show stack trace' : 'Hide stack trace';
+        });
+
+        div.appendChild(details);
+      }
+
+      activityLogContainer.appendChild(div);
+    }
+  }
+
+  // Update status bar
+  const levelLabel = level === 'all' ? '' : ` (level: ${level})`;
+  const textLabel  = needle ? ` (text: "${textRaw.trim()}")` : '';
+  const rawInfo    = (data || {}).rawLineCount ? ` (${data.rawLineCount} raw lines)` : '';
+  activityStatusBar.textContent = `Showing ${entries.length} of ${activityTotalLines} entries${rawInfo}${levelLabel}${textLabel} \u2014 ${activityLogsPath}`;
 }
 
 // Auto-load when Activity Log tab is clicked
@@ -1938,9 +2008,23 @@ document.querySelectorAll('.tab-bar .tab').forEach(tab => {
   });
 });
 
-// Level filter
+// Level filter — re-fetches from main process (server-side level filter)
 activityLevelFilter.addEventListener('change', () => {
   loadActivityLog();
+});
+
+// Text filter — client-side only, no re-fetch needed
+activityTextFilter.addEventListener('input', () => {
+  const hasText = activityTextFilter.value.length > 0;
+  activityTextFilterClear.classList.toggle('hidden', !hasText);
+  applyActivityFilters();
+});
+
+activityTextFilterClear.addEventListener('click', () => {
+  activityTextFilter.value = '';
+  activityTextFilterClear.classList.add('hidden');
+  applyActivityFilters();
+  activityTextFilter.focus();
 });
 
 // Refresh
@@ -2788,12 +2872,14 @@ function renderOrderControllers(controllers) {
 }
 
 function getControllerTypeLabel(type) {
-  switch ((type || 'dpof').toLowerCase()) {
-    case 'dpof':        return 'Epson / Noritsu (DPOF)';
+  switch ((type || 'noritsu').toLowerCase()) {
+    case 'noritsu':     return 'Noritsu (DPOF)';
+    case 'epson':       return 'Epson Surelab (DPOF)';
+    case 'dpof':        return 'Epson / Noritsu (DPOF)'; // legacy — pre-split controllers
     case 'folder_copy': return 'Folder Copy';
     case 'pdf_copy':    return 'PDF Copy';
     case 'darkroompro': return 'Darkroom Pro';
-    default:            return (type || 'dpof').toUpperCase();
+    default:            return (type || 'noritsu').toUpperCase();
   }
 }
 
@@ -2850,7 +2936,7 @@ function buildOrderControllerCard(ctrl) {
 function updateOcTypeFields() {
   const type = document.getElementById('ocType').value;
   document.getElementById('ocProcessedFolderGroup').style.display = type === 'darkroompro'                     ? '' : 'none';
-  document.getElementById('ocBannerSheetGroup').style.display     = (type === 'dpof' || type === 'pdf_copy') ? '' : 'none';
+  document.getElementById('ocBannerSheetGroup').style.display     = (type === 'noritsu' || type === 'epson' || type === 'dpof' || type === 'pdf_copy') ? '' : 'none';
   document.getElementById('ocPipelineGroup').style.display        = type === 'pdf_copy'                       ? '' : 'none';
 }
 
@@ -2858,7 +2944,7 @@ function openOrderControllerModal(ctrl = null) {
   const modal = document.getElementById('orderControllerModal');
   document.getElementById('ocModalTitle').textContent = ctrl ? 'Edit Controller' : 'Add Controller';
   document.getElementById('ocName').value       = ctrl ? ctrl.name       : '';
-  document.getElementById('ocType').value       = ctrl ? ctrl.type       : 'dpof';
+  document.getElementById('ocType').value       = ctrl ? ctrl.type       : 'noritsu';
   document.getElementById('ocOutputPath').value = ctrl ? (ctrl.outputPath || '') : '';
   document.getElementById('ocProcessedFolderName').value = ctrl ? (ctrl.processedFolderName || '') : '';
   document.getElementById('ocAutoPrint').checked   = ctrl ? !!ctrl.autoprint   : false;
@@ -3434,7 +3520,8 @@ function renderChannelMappings(mappings, controllers) {
         `<span class="channel-mapping-product">${escapeHtml(mapping.productCode)}</span>` +
         (optionStr ? `<span class="channel-mapping-options">${escapeHtml(optionStr)}</span>` : '') +
         `<span class="channel-mapping-channel">→ Ch ${mapping.channelNumber}</span>` +
-        (mapping.printSizeCode ? `<span class="channel-mapping-options">${escapeHtml(mapping.printSizeCode)}</span>` : '');
+        (mapping.printSizeCode ? `<span class="channel-mapping-options">${escapeHtml(mapping.printSizeCode)}</span>` : '') +
+        (mapping.skipAutoPrint ? `<span class="channel-mapping-options" title="This channel is excluded from Auto Print">skip auto-print</span>` : '');
 
       const actionsDiv = document.createElement('div');
       actionsDiv.className = 'channel-mapping-actions';
@@ -3486,9 +3573,10 @@ function openChannelMappingModal(mapping = null, controllers = null) {
   }
   ctrlSel.value = mapping ? mapping.controllerId : '';
 
-  document.getElementById('cmProductCode').value    = mapping ? mapping.productCode   : '';
-  document.getElementById('cmChannelNumber').value  = mapping ? mapping.channelNumber : '';
-  document.getElementById('cmPrintSizeCode').value  = mapping ? (mapping.printSizeCode || '') : '';
+  document.getElementById('cmProductCode').value      = mapping ? mapping.productCode          : '';
+  document.getElementById('cmChannelNumber').value    = mapping ? mapping.channelNumber        : '';
+  document.getElementById('cmSkipAutoPrint').checked  = mapping ? Boolean(mapping.skipAutoPrint) : false;
+  document.getElementById('cmPrintSizeCode').value    = mapping ? (mapping.printSizeCode || '') : '';
 
   const optsList = document.getElementById('cmOptionsList');
   optsList.innerHTML = '';
@@ -3539,6 +3627,7 @@ document.getElementById('cmSaveBtn').addEventListener('click', async () => {
     if (name && value) options.push({ name, value });
   });
 
+  const skipAutoPrint = document.getElementById('cmSkipAutoPrint').checked;
   const editingId = modal.dataset.editingId;
   try {
     await window.electronAPI.saveChannelMapping({
@@ -3547,7 +3636,8 @@ document.getElementById('cmSaveBtn').addEventListener('click', async () => {
       productCode,
       options,
       channelNumber,
-      printSizeCode: printSizeCode || '',
+      printSizeCode:  printSizeCode || '',
+      skipAutoPrint:  skipAutoPrint,
     });
     modal.classList.add('hidden');
     await loadChannelMappings();

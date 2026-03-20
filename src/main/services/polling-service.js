@@ -1,3 +1,4 @@
+const fs = require('fs');
 const path = require('path');
 const configService = require('./config-service');
 const ftpService = require('./ftp-service');
@@ -173,6 +174,39 @@ class PollingService {
         const result = jobDownloadService.checkLocalFiles(job);
 
         if (result.found) {
+          // Check manifest for images with missing size fields before marking received.
+          // A missing size means the product is misconfigured in Pixfizz Core and the
+          // job cannot be printed — flag it as a warning rather than receiving it.
+          let hasMissingSize = false;
+          const orderFolderPath = path.dirname(result.localPath);
+          const manifestPath = path.join(orderFolderPath, `${job.order_number}.json`);
+          try {
+            const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+            const jobEntry = (manifest.jobs || []).find(j => String(j.jobId) === String(job.id));
+            if (jobEntry && Array.isArray(jobEntry.images) && jobEntry.images.some(img => !img.size)) {
+              hasMissingSize = true;
+            }
+          } catch (manifestErr) {
+            // Manifest not yet present or unreadable — proceed and let markReceived handle it
+            logger.logWarning('Polling: could not read manifest for size check', {
+              jobId: job.id,
+              error: manifestErr.message
+            });
+          }
+
+          if (hasMissingSize) {
+            jobService.updateJobLocally(job.id, {
+              _status: 'warning',
+              _warningMessage: 'One or more images are missing a size — check product configuration in Pixfizz Core'
+            });
+            logger.logWarning('Polling: job has missing image sizes, marking as warning', {
+              jobId: job.id,
+              orderNumber: job.order_number
+            });
+            this.lastJobPollSummary.failedCount++;
+            continue;
+          }
+
           try {
             await jobService.markReceived(job.id, {
               timestamp: new Date().toISOString(),

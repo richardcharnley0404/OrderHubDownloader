@@ -183,6 +183,11 @@ const schema = {
     default: false
   },
   // AI Enhancement (Phase 3)
+  enhancementProvider: {
+    type: 'string',
+    default: 'replicate'
+  },
+  // Replicate provider
   replicateApiKey: {
     type: 'string',
     default: ''
@@ -198,6 +203,15 @@ const schema = {
   enhancementAutoEnhance: {
     type: 'boolean',
     default: false
+  },
+  // Topaz Direct provider
+  topazApiKey: {
+    type: 'string',
+    default: ''
+  },
+  topazDefaultModel: {
+    type: 'string',
+    default: 'Standard V2'
   },
   dismissedJobs: {
     type: 'array',
@@ -262,10 +276,13 @@ class ConfigService {
       dpiPoorThreshold: this.store.get('dpiPoorThreshold'),
       dpiPoorAllowAutoSubmit: this.store.get('dpiPoorAllowAutoSubmit'),
       // AI Enhancement
+      enhancementProvider: this.store.get('enhancementProvider'),
       replicateApiKey: this.store.get('replicateApiKey'),
       enhancementDefaultModel: this.store.get('enhancementDefaultModel'),
       enhancementFaceEnhancement: this.store.get('enhancementFaceEnhancement'),
       enhancementAutoEnhance: this.store.get('enhancementAutoEnhance'),
+      topazApiKey: this.store.get('topazApiKey'),
+      topazDefaultModel: this.store.get('topazDefaultModel'),
     };
   }
 
@@ -447,10 +464,13 @@ class ConfigService {
     this.store.set('processFolderMappings', cleanMappings);
 
     // Save AI Enhancement settings
+    this.store.set('enhancementProvider', config.enhancementProvider || 'replicate');
     this.store.set('replicateApiKey', config.replicateApiKey || '');
     this.store.set('enhancementDefaultModel', config.enhancementDefaultModel || 'Standard V2');
     this.store.set('enhancementFaceEnhancement', Boolean(config.enhancementFaceEnhancement));
     this.store.set('enhancementAutoEnhance', Boolean(config.enhancementAutoEnhance));
+    this.store.set('topazApiKey', config.topazApiKey || '');
+    this.store.set('topazDefaultModel', config.topazDefaultModel || 'Standard V2');
 
     return this.getAll();
   }

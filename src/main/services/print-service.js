@@ -216,6 +216,10 @@ class PrintService {
       throw new Error(`Job ${job.id} not found in order manifest. Manifest has ${manifest.jobs ? manifest.jobs.length : 0} jobs.`);
     }
 
+    if (Array.isArray(jobManifest.images) && jobManifest.images.some(img => !img.size)) {
+      throw new Error('Cannot print — size is missing on one or more images. Check product configuration in Pixfizz Core.');
+    }
+
     const enhancedMap    = await this._getEnhancedPathMap(jobFolderName, jobFolderPath);
     const correctionsMap = await this._getCorrectionsMap(jobFolderName, jobFolderPath);
 
@@ -276,11 +280,12 @@ class PrintService {
     }
 
     const dpofContent = dpofGenerator.generate({
-      orderNumber:   job.order_number || manifest.orderNumber || '',
-      customerName:  job.customer_name || '',
-      channelNumber: route.channelNumber,
-      printSizeCode: route.printSizeCode,
-      images: lineItems.map(li => ({ filename: li.filename, quantity: li.quantity })),
+      orderNumber:    job.order_number || manifest.orderNumber || '',
+      customerName:   job.customer_name || '',
+      channelNumber:  route.channelNumber,
+      printSizeCode:  route.printSizeCode,
+      images:         lineItems.map(li => ({ filename: li.filename, quantity: li.quantity })),
+      controllerType: route.controllerType || 'noritsu',
     });
 
     let writeResult;
@@ -430,11 +435,12 @@ class PrintService {
 
     // Generate DPOF content
     const dpofContent = dpofGenerator.generate({
-      orderNumber:  job.order_number || manifest.orderNumber || '',
-      customerName: job.customer_name || '',
-      channelNumber: mapping.channelNumber,
+      orderNumber:    job.order_number || manifest.orderNumber || '',
+      customerName:   job.customer_name || '',
+      channelNumber:  mapping.channelNumber,
       printSizeCode,
-      images: lineItems.map(li => ({ filename: li.filename, quantity: li.quantity })),
+      images:         lineItems.map(li => ({ filename: li.filename, quantity: li.quantity })),
+      controllerType: controller.type,
     });
 
     // Write to hot folder using prefix-swap pattern (p → o on success)
@@ -565,11 +571,12 @@ class PrintService {
       (channelMapping.size ? `NML -PSIZE "${channelMapping.size}"` : 'KG');
 
     const dpofContent = dpofGenerator.generate({
-      orderNumber:   parentJob.order_number  || '',
-      customerName:  parentJob.customer_name || '',
-      channelNumber: channelMapping.channelNumber,
-      printSizeCode: reprintPrintSizeCode,
-      images: lineItems.map(li => ({ filename: li.filename, quantity: li.quantity })),
+      orderNumber:    parentJob.order_number  || '',
+      customerName:   parentJob.customer_name || '',
+      channelNumber:  channelMapping.channelNumber,
+      printSizeCode:  reprintPrintSizeCode,
+      images:         lineItems.map(li => ({ filename: li.filename, quantity: li.quantity })),
+      controllerType: controller.type,
     });
 
     // Write to hot folder using prefix-swap pattern (p → o on success)

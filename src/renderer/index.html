@@ -557,33 +557,80 @@
           <div class="settings-subtab-panel" id="subtab-aienhancement">
             <fieldset class="panel-section">
               <legend>AI Enhancement</legend>
-              <p class="section-desc">Use Replicate (Topaz Labs) to upscale and enhance print images. Requires a Replicate API key — get one free at <span class="link-hint">replicate.com</span>.</p>
+              <p class="section-desc">Use AI to upscale and enhance print images. Choose your enhancement provider below.</p>
 
+              <!-- Provider selection -->
               <div class="form-group">
-                <label for="replicateApiKey">Replicate API Key</label>
-                <div class="input-with-button">
-                  <input type="password" id="replicateApiKey" name="replicateApiKey"
-                    placeholder="r8_..." autocomplete="new-password">
-                  <button type="button" id="replicateApiKeyToggle" class="btn-browse">Show</button>
-                </div>
-              </div>
-
-              <div class="test-row">
-                <button type="button" id="testReplicateBtn" class="btn-secondary">Test API Key</button>
-                <span id="replicateTestStatus" class="test-status"></span>
-              </div>
-
-              <div class="form-group" style="margin-top: 16px;">
-                <label for="enhancementDefaultModel">Default Model</label>
-                <select id="enhancementDefaultModel" name="enhancementDefaultModel">
-                  <option value="Standard V2">Standard V2 (recommended — best for most photos)</option>
-                  <option value="High Fidelity V2">High Fidelity V2 (preserves fine detail)</option>
-                  <option value="Low Resolution V2">Low Resolution V2 (for very small inputs)</option>
-                  <option value="Recovery V2">Recovery V2 (for heavily compressed images)</option>
+                <label for="enhancementProvider">Enhancement Provider</label>
+                <select id="enhancementProvider" name="enhancementProvider">
+                  <option value="replicate">Replicate (Topaz via Replicate)</option>
+                  <option value="topaz">Topaz Direct</option>
                 </select>
               </div>
 
-              <div class="form-group checkbox-group">
+              <!-- ── Replicate section ── -->
+              <div id="replicateSection">
+                <p class="section-desc" style="margin-top:8px;">Requires a Replicate API key — get one free at <span class="link-hint">replicate.com</span>.</p>
+
+                <div class="form-group">
+                  <label for="replicateApiKey">Replicate API Key</label>
+                  <div class="input-with-button">
+                    <input type="password" id="replicateApiKey" name="replicateApiKey"
+                      placeholder="r8_..." autocomplete="new-password">
+                    <button type="button" id="replicateApiKeyToggle" class="btn-browse">Show</button>
+                  </div>
+                </div>
+
+                <div class="test-row">
+                  <button type="button" id="testReplicateBtn" class="btn-secondary">Test API Key</button>
+                  <span id="replicateTestStatus" class="test-status"></span>
+                </div>
+
+                <div class="form-group" style="margin-top: 16px;">
+                  <label for="enhancementDefaultModel">Default Model</label>
+                  <select id="enhancementDefaultModel" name="enhancementDefaultModel">
+                    <option value="Standard V2">Standard V2 (recommended — best for most photos)</option>
+                    <option value="High Fidelity V2">High Fidelity V2 (preserves fine detail)</option>
+                    <option value="Low Resolution V2">Low Resolution V2 (for very small inputs)</option>
+                    <option value="Recovery V2">Recovery V2 (for heavily compressed images)</option>
+                  </select>
+                </div>
+              </div>
+
+              <!-- ── Topaz Direct section ── -->
+              <div id="topazSection" style="display:none;">
+                <p class="section-desc" style="margin-top:8px;">Requires a Topaz Labs API key — get one at <span class="link-hint">topazlabs.com</span>.</p>
+
+                <div class="form-group">
+                  <label for="topazApiKey">Topaz API Key</label>
+                  <div class="input-with-button">
+                    <input type="password" id="topazApiKey" name="topazApiKey"
+                      placeholder="tpz-..." autocomplete="new-password">
+                    <button type="button" id="topazApiKeyToggle" class="btn-browse">Show</button>
+                  </div>
+                </div>
+
+                <div class="test-row">
+                  <button type="button" id="testTopazBtn" class="btn-secondary">Test API Key</button>
+                  <span id="topazTestStatus" class="test-status"></span>
+                </div>
+
+                <div class="form-group" style="margin-top: 16px;">
+                  <label for="topazDefaultModel">Default Model</label>
+                  <select id="topazDefaultModel" name="topazDefaultModel">
+                    <option value="Standard V2">Standard V2 (recommended — best for most photos)</option>
+                    <option value="High Fidelity V2">High Fidelity V2 (preserves fine detail)</option>
+                    <option value="Low Resolution V2">Low Resolution V2 (for very small inputs)</option>
+                    <option value="Standard MAX">Standard MAX (maximum quality)</option>
+                    <option value="Recovery V2">Recovery V2 (for heavily compressed images)</option>
+                    <option value="Wonder">Wonder (creative enhancement)</option>
+                    <option value="Redefine">Redefine (generative upscale)</option>
+                  </select>
+                </div>
+              </div>
+
+              <!-- ── Shared options (both providers) ── -->
+              <div class="form-group checkbox-group" style="margin-top: 16px;">
                 <label>
                   <input type="checkbox" id="enhancementFaceEnhancement" name="enhancementFaceEnhancement">
                   <span>Enable face enhancement</span>
@@ -614,6 +661,10 @@
         <div class="activity-toolbar">
           <h2 class="activity-title">Activity Log</h2>
           <div class="activity-toolbar-right">
+            <div class="activity-search-wrap">
+              <input type="text" id="activityTextFilter" class="activity-search" placeholder="Filter logs..." autocomplete="off" spellcheck="false">
+              <button type="button" id="activityTextFilterClear" class="activity-search-clear hidden" title="Clear filter">&#x00D7;</button>
+            </div>
             <select id="activityLevelFilter" class="activity-filter">
               <option value="all">All Levels</option>
               <option value="info">Info</option>
@@ -721,7 +772,8 @@
       <div class="form-group">
         <label for="ocType">Type</label>
         <select id="ocType">
-          <option value="dpof">Epson / Noritsu (DPOF)</option>
+          <option value="noritsu">Noritsu (DPOF)</option>
+          <option value="epson">Epson Surelab (DPOF)</option>
           <option value="folder_copy">Folder Copy</option>
           <option value="pdf_copy">PDF Copy</option>
           <option value="darkroompro">Darkroom Pro</option>
@@ -810,6 +862,14 @@
       <div class="form-group">
         <label for="cmChannelNumber">Channel Number</label>
         <input type="number" id="cmChannelNumber" placeholder="e.g. 1" min="1" style="width:90px;">
+      </div>
+
+      <div class="form-group checkbox-group">
+        <label for="cmSkipAutoPrint">
+          <input type="checkbox" id="cmSkipAutoPrint">
+          Skip Auto Print
+        </label>
+        <small class="field-hint">Jobs routed to this channel will not be dispatched by Auto Print, even if the controller has Auto Print enabled.</small>
       </div>
 
       <div class="form-group">
@@ -918,6 +978,14 @@
         <label class="form-label" for="assignChannelNumber">Channel Number <span style="color:#e05252">*</span></label>
         <input type="number" id="assignChannelNumber" class="form-control" min="1" max="999" placeholder="e.g. 1" style="width:120px">
         <p class="field-hint">The channel number configured on the printer for this product and finish.</p>
+      </div>
+
+      <div class="form-group checkbox-group">
+        <label for="assignSkipAutoPrint">
+          <input type="checkbox" id="assignSkipAutoPrint">
+          Skip Auto Print
+        </label>
+        <small class="field-hint">Jobs routed to this channel will not be dispatched by Auto Print, even if the controller has Auto Print enabled.</small>
       </div>
 
       <div class="pm-modal-footer">

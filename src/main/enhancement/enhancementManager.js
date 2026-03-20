@@ -5,70 +5,69 @@
  *
  * Orchestration layer for AI image enhancement.
  *
- * Reads the Replicate API key from electron-store via configService, delegates
- * to replicateClient for API calls, saves results to /cache/, and updates the
- * job sidecar.
+ * Routes enhancement calls to the correct provider based on the
+ * 'enhancementProvider' config key ('replicate' or 'topaz').
  *
- * Two operation modes:
+ * Two operation modes (shared by both providers):
  *
  *   Blocking  — enhanceImage()       runs a full enhancement pipeline in one
  *               await.  Suitable for scripted or test use.
  *
- *   Polling   — startEnhancement()   starts a prediction and returns a
- *               predictionId immediately (does not block).
- *               checkEnhancement()   polls status; when 'succeeded' it
- *               downloads the result and updates the sidecar automatically.
- *               cancelEnhancement()  cancels and cleans up.
+ *   Polling   — startEnhancement()   starts an enhancement job and returns a
+ *               job ID immediately (does not block the caller).
+ *               checkEnhancement()   polls status; when 'succeeded' the
+ *               result is already on disk and the sidecar is updated.
+ *               cancelEnhancement()  cancels / removes from registry.
  *
- * The polling mode is used by the IPC handlers so the main process is never
- * blocked for the 30–60 s that a Topaz enhancement takes.
+ * Provider behaviour:
+ *
+ *   replicate — startUpscale() returns a Replicate prediction ID immediately;
+ *               the renderer polls checkEnhancement() which in turn polls the
+ *               Replicate API.  IDs are plain strings like "abc123xyz".
+ *
+ *   topaz     — topazClient.enhance() blocks internally (polls Topaz API).
+ *               A synthetic ID prefixed "topaz_" is returned immediately;
+ *               the job runs in a background promise tracked in topazJobs.
+ *               The renderer polls checkEnhancement() which reads topazJobs.
+ *               IDs look like "topaz_1712345678901_a3f".
  *
  * Exports:
  *   enhanceImage(jobId, jobPath, filename, options)          → cachePath
- *   startEnhancement(jobId, jobPath, filename, options)      → predictionId
- *   checkEnhancement(predictionId)                           → { status, outputPath? }
- *   cancelEnhancement(predictionId)                          → void
- *   validateApiKey(apiKey)                                   → { valid, error? }
+ *   startEnhancement(jobId, jobPath, filename, options)      → jobId string
+ *   checkEnhancement(jobId)                                  → { status, outputPath? }
+ *   cancelEnhancement(jobId)                                 → void
+ *   validateApiKey(apiKey, provider)                         → { valid, error? }
  */
 
 const path = require('path');
 const fs   = require('fs/promises');
+const fsSync = require('fs');
 
-const {
-  runUpscale,
-  startUpscale,
-  getPrediction,
-  cancelPrediction,
-  downloadFile,
-  validateApiKey,
-} = require('./replicateClient');
+const replicateClient = require('./replicateClient');
+const topazClient     = require('./topazClient');
 
 const { loadSidecar, saveSidecar } = require('../jobs/sidecarManager');
 const configService = require('../services/config-service');
 
-// ── In-memory prediction registry ────────────────────────────────────────────
-//
-// Tracks active (in-progress) predictions for the current process lifetime.
-// Each entry maps a Replicate predictionId to the metadata needed to
-// download and record the result once the prediction succeeds.
-//
-// Entry shape: { jobId, jobPath, filename, cachePath, model }
-//
-// Note: this map is lost if the Electron process restarts mid-enhancement.
-// That is acceptable for Phase 3 — the operator sees "processing" turn into
-// nothing and can re-run if needed.
+// ── In-memory registries ──────────────────────────────────────────────────────
 
+/**
+ * Replicate: maps predictionId → { jobId, jobPath, filename, cachePath, model }
+ * Lost if Electron restarts — acceptable, operator can re-run.
+ */
 const activePredictions = new Map();
+
+/**
+ * Topaz: maps syntheticId → { status, jobId, jobPath, filename, cachePath, model, outputPath?, error? }
+ * 'status' values: 'processing' | 'succeeded' | 'failed'
+ */
+const topazJobs = new Map();
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /**
  * Return the /cache/ path where the enhanced version of a file is stored.
  * Pattern: {jobPath}/cache/{baseName}_enhanced.jpg
- *
- * @param {string} jobPath
- * @param {string} filename  Bare filename, e.g. "IMG_001.jpg"
- * @returns {string}
  */
 function buildCachePath(jobPath, filename) {
   const ext      = path.extname(filename);
@@ -77,18 +76,16 @@ function buildCachePath(jobPath, filename) {
 }
 
 /**
- * Update the sidecar for a successfully enhanced image.
- * Marks enhanced: true, records the model, cache path, and timestamp.
- * Uses immutable update — never mutates the loaded sidecar object.
+ * Mark an image in the sidecar as successfully enhanced.
  *
  * @param {string} jobId
  * @param {string} jobPath
  * @param {string} filename
- * @param {string} cachePath   Absolute path to the saved enhanced file
+ * @param {string} cachePath   Absolute path to the enhanced file
  * @param {string} [model]     Model display name, e.g. "Standard V2"
- * @returns {Promise<void>}
+ * @param {string} [source]    Provider label, e.g. "Replicate/Topaz" or "Topaz Direct"
  */
-async function updateSidecarEnhancement(jobId, jobPath, filename, cachePath, model) {
+async function updateSidecarEnhancement(jobId, jobPath, filename, cachePath, model, source) {
   const { sidecar } = await loadSidecar(jobId, jobPath);
 
   const updatedImages = sidecar.images.map(img => {
@@ -96,7 +93,7 @@ async function updateSidecarEnhancement(jobId, jobPath, filename, cachePath, mod
     return {
       ...img,
       enhanced:          true,
-      enhancementSource: 'Replicate/Topaz',
+      enhancementSource: source || 'Replicate/Topaz',
       enhancedPath:      cachePath,
       enhancedAt:        new Date().toISOString(),
       enhancementModel:  model || null,
@@ -107,13 +104,17 @@ async function updateSidecarEnhancement(jobId, jobPath, filename, cachePath, mod
 }
 
 /**
- * Read the Replicate API key from electron-store.
- * Throws a descriptive error if the key is not configured so callers can
- * surface a clear message to the operator.
- *
- * @returns {string}
+ * Return the active enhancement provider ('replicate' or 'topaz').
+ * Defaults to 'replicate' if not configured.
  */
-function requireApiKey() {
+function getProvider() {
+  return configService.get('enhancementProvider') || 'replicate';
+}
+
+/**
+ * Read the Replicate API key from config; throw if missing.
+ */
+function requireReplicateApiKey() {
   const apiKey = configService.get('replicateApiKey');
   if (!apiKey) {
     throw new Error('Replicate API key is not configured. Add it in Settings → AI Enhancement.');
@@ -121,31 +122,52 @@ function requireApiKey() {
   return apiKey;
 }
 
-// ── Public API — blocking ────────────────────────────────────────────────────
+/**
+ * Read the Topaz API key from config; throw if missing.
+ */
+function requireTopazApiKey() {
+  const apiKey = configService.get('topazApiKey');
+  if (!apiKey) {
+    throw new Error('Topaz API key is not configured. Add it in Settings → AI Enhancement.');
+  }
+  return apiKey;
+}
+
+// ── Public API — blocking ─────────────────────────────────────────────────────
 
 /**
- * Run a full enhancement pipeline synchronously (blocking — ~30–60 s).
- *
- * Reads the API key from settings, runs the Topaz upscale via Replicate,
- * saves the result to /cache/, and updates the sidecar.
+ * Run a full enhancement pipeline synchronously (blocking).
+ * Routes to the configured provider.
  *
  * @param {string} jobId
  * @param {string} jobPath
  * @param {string} filename  Bare filename, e.g. "IMG_001.jpg"
- * @param {object} [options] { model, faceEnhancement, sharpen, denoise, fixCompression }
+ * @param {object} [options] { model, faceEnhancement, ... }
  * @returns {Promise<string>} Absolute path to the cached enhanced file
  */
 async function enhanceImage(jobId, jobPath, filename, options = {}) {
-  const apiKey    = requireApiKey();
-  const inputPath = path.join(jobPath, 'working', filename);
+  const provider  = getProvider();
   const cacheDir  = path.join(jobPath, 'cache');
+  const cachePath = buildCachePath(jobPath, filename);
 
   await fs.mkdir(cacheDir, { recursive: true });
 
-  const cachePath = buildCachePath(jobPath, filename);
-
-  await runUpscale(apiKey, inputPath, cachePath, options);
-  await updateSidecarEnhancement(jobId, jobPath, filename, cachePath, options.model);
+  if (provider === 'topaz') {
+    const apiKey    = requireTopazApiKey();
+    const inputPath = path.join(jobPath, 'working', filename);
+    // Copy working file to cache as the source; enhance() overwrites it in place.
+    await fs.copyFile(inputPath, cachePath);
+    await topazClient.enhance(cachePath, {
+      model:            options.model           || configService.get('topazDefaultModel') || 'Standard V2',
+      face_enhancement: Boolean(options.faceEnhancement),
+    }, apiKey);
+    await updateSidecarEnhancement(jobId, jobPath, filename, cachePath, options.model, 'Topaz Direct');
+  } else {
+    const apiKey    = requireReplicateApiKey();
+    const inputPath = path.join(jobPath, 'working', filename);
+    await replicateClient.runUpscale(apiKey, inputPath, cachePath, options);
+    await updateSidecarEnhancement(jobId, jobPath, filename, cachePath, options.model, 'Replicate/Topaz');
+  }
 
   return cachePath;
 }
@@ -153,30 +175,63 @@ async function enhanceImage(jobId, jobPath, filename, options = {}) {
 // ── Public API — non-blocking polling ────────────────────────────────────────
 
 /**
- * Start an enhancement prediction without waiting for it to finish.
- * Returns the Replicate prediction ID so the caller can poll via
- * checkEnhancement().
+ * Start an enhancement job without waiting for it to finish.
+ * Returns a job ID string immediately; the caller polls checkEnhancement().
  *
- * Used by the ohd:enhancement:run IPC handler.
+ * Replicate: returns a Replicate prediction ID.
+ * Topaz:     returns a synthetic "topaz_..." ID; the job runs in the background.
  *
  * @param {string} jobId
  * @param {string} jobPath
  * @param {string} filename
  * @param {object} [options]  { model, faceEnhancement, ... }
- * @returns {Promise<string>} predictionId
+ * @returns {Promise<string>} Job/prediction ID
  */
 async function startEnhancement(jobId, jobPath, filename, options = {}) {
-  const apiKey    = requireApiKey();
-  const inputPath = path.join(jobPath, 'working', filename);
+  const provider  = getProvider();
   const cacheDir  = path.join(jobPath, 'cache');
+  const cachePath = buildCachePath(jobPath, filename);
 
   await fs.mkdir(cacheDir, { recursive: true });
 
-  const cachePath    = buildCachePath(jobPath, filename);
-  const predictionId = await startUpscale(apiKey, inputPath, options);
+  // ── Topaz Direct path ──────────────────────────────────────────────────────
+  if (provider === 'topaz') {
+    const apiKey    = requireTopazApiKey();
+    const inputPath = path.join(jobPath, 'working', filename);
+    const model     = options.model || configService.get('topazDefaultModel') || 'Standard V2';
 
-  // Register in the in-memory map so checkEnhancement() knows what to do
-  // when the prediction succeeds.
+    // Copy working file to the cache path — topazClient.enhance() will upload
+    // that file and overwrite it with the enhanced result.
+    await fs.copyFile(inputPath, cachePath);
+
+    const syntheticId = `topaz_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    topazJobs.set(syntheticId, {
+      status: 'processing',
+      jobId, jobPath, filename, cachePath, model,
+    });
+
+    // Fire and forget — the IPC caller will poll checkEnhancement()
+    topazClient.enhance(cachePath, {
+      model,
+      face_enhancement: Boolean(options.faceEnhancement),
+    }, apiKey)
+      .then(async () => {
+        await updateSidecarEnhancement(jobId, jobPath, filename, cachePath, model, 'Topaz Direct');
+        topazJobs.set(syntheticId, { status: 'succeeded', outputPath: cachePath });
+      })
+      .catch(err => {
+        topazJobs.set(syntheticId, { status: 'failed', error: err.message });
+      });
+
+    return syntheticId;
+  }
+
+  // ── Replicate path ─────────────────────────────────────────────────────────
+  const apiKey    = requireReplicateApiKey();
+  const inputPath = path.join(jobPath, 'working', filename);
+
+  const predictionId = await replicateClient.startUpscale(apiKey, inputPath, options);
+
   activePredictions.set(predictionId, {
     jobId,
     jobPath,
@@ -189,73 +244,108 @@ async function startEnhancement(jobId, jobPath, filename, options = {}) {
 }
 
 /**
- * Poll the status of an active prediction.
+ * Poll the status of an active enhancement job.
+ *
+ * For Topaz jobs (ID starts with "topaz_"): reads from the in-memory topazJobs Map.
+ * For Replicate jobs: polls the Replicate API.
  *
  * When status is 'succeeded':
- *   - Downloads the output image to /cache/
- *   - Updates the sidecar (enhanced: true, model, path, timestamp)
- *   - Removes the prediction from the in-memory registry
- *   - Returns { status: 'succeeded', outputPath }
+ *   - outputPath is set (absolute path to enhanced file)
+ *   - sidecar has already been updated
+ *   - Job is removed from the registry
  *
- * When status is 'starting' or 'processing':
- *   - Returns { status } with no outputPath (still in progress)
- *
- * When status is 'failed' or 'canceled':
- *   - Removes from registry
- *   - Returns { status, error? }
- *
- * Used by the ohd:enhancement:status IPC handler (called on a ~3 s interval
- * by the renderer).
- *
- * @param {string} predictionId
+ * @param {string} id  Job/prediction ID returned by startEnhancement()
  * @returns {Promise<{ status: string, outputPath?: string, error?: string }>}
  */
-async function checkEnhancement(predictionId) {
-  const apiKey = requireApiKey();
-  const meta   = activePredictions.get(predictionId);
+async function checkEnhancement(id) {
+  // ── Topaz path ─────────────────────────────────────────────────────────────
+  if (id.startsWith('topaz_')) {
+    const job = topazJobs.get(id);
+    if (!job) {
+      return { status: 'failed', error: 'Enhancement job not found — the app may have restarted.' };
+    }
+    if (job.status === 'succeeded') {
+      topazJobs.delete(id);
+      return { status: 'succeeded', outputPath: job.outputPath };
+    }
+    if (job.status === 'failed') {
+      topazJobs.delete(id);
+      return { status: 'failed', error: job.error };
+    }
+    // 'processing' — still running
+    return { status: 'processing' };
+  }
 
-  const prediction = await getPrediction(apiKey, predictionId);
+  // ── Replicate path ─────────────────────────────────────────────────────────
+  const apiKey = requireReplicateApiKey();
+  const meta   = activePredictions.get(id);
+
+  const prediction = await replicateClient.getPrediction(apiKey, id);
   const { status, outputUrl, error } = prediction;
 
   if (status === 'succeeded') {
     if (meta && outputUrl) {
-      await downloadFile(outputUrl, meta.cachePath);
+      await replicateClient.downloadFile(outputUrl, meta.cachePath);
       await updateSidecarEnhancement(
-        meta.jobId, meta.jobPath, meta.filename, meta.cachePath, meta.model,
+        meta.jobId, meta.jobPath, meta.filename, meta.cachePath, meta.model, 'Replicate/Topaz',
       );
     }
-    activePredictions.delete(predictionId);
+    activePredictions.delete(id);
     return { status: 'succeeded', outputPath: meta ? meta.cachePath : undefined };
   }
 
   if (status === 'failed' || status === 'canceled') {
-    activePredictions.delete(predictionId);
+    activePredictions.delete(id);
     return { status, error };
   }
 
-  // 'starting' or 'processing' — still in progress.
+  // 'starting' or 'processing' — still in progress
   return { status };
 }
 
 /**
- * Cancel an in-progress prediction.
- * Removes it from the in-memory registry regardless of the API result.
+ * Cancel an in-progress enhancement job.
  *
- * Used by the ohd:enhancement:cancel IPC handler.
+ * For Topaz jobs: removes from the registry (the HTTP pipeline cannot be
+ * interrupted, but the result will simply be discarded when it arrives).
+ * For Replicate jobs: calls the cancel API, then removes from registry.
  *
- * @param {string} predictionId
+ * @param {string} id  Job/prediction ID returned by startEnhancement()
  * @returns {Promise<void>}
  */
-async function cancelEnhancement(predictionId) {
-  const apiKey = requireApiKey();
-
-  try {
-    await cancelPrediction(apiKey, predictionId);
-  } finally {
-    // Always remove from registry — even if the cancel API call fails (e.g.
-    // the prediction already completed between the UI click and this call).
-    activePredictions.delete(predictionId);
+async function cancelEnhancement(id) {
+  // ── Topaz path ─────────────────────────────────────────────────────────────
+  if (id.startsWith('topaz_')) {
+    // Cannot interrupt in-flight HTTP; just deregister so checkEnhancement()
+    // returns 'not found' if the renderer ever polls again.
+    topazJobs.delete(id);
+    return;
   }
+
+  // ── Replicate path ─────────────────────────────────────────────────────────
+  const apiKey = requireReplicateApiKey();
+  try {
+    await replicateClient.cancelPrediction(apiKey, id);
+  } finally {
+    activePredictions.delete(id);
+  }
+}
+
+/**
+ * Validate an API key for the given provider.
+ * Used by the ohd:enhancement:test IPC handler.
+ * The key is passed directly from the Settings form — requireXxxApiKey() is NOT used.
+ *
+ * @param {string} apiKey
+ * @param {string} [provider]  'replicate' | 'topaz' — defaults to configured provider
+ * @returns {Promise<{ valid: boolean, error?: string }>}
+ */
+async function validateApiKey(apiKey, provider) {
+  const p = provider || getProvider();
+  if (p === 'topaz') {
+    return topazClient.testApiKey(apiKey);
+  }
+  return replicateClient.validateApiKey(apiKey);
 }
 
 // ── Exports ───────────────────────────────────────────────────────────────────
@@ -269,8 +359,6 @@ module.exports = {
   checkEnhancement,
   cancelEnhancement,
 
-  // Re-exported for the ohd:enhancement:test IPC handler.
-  // Note: the IPC handler passes the apiKey directly from the Settings form
-  // so the user can test a key before saving it — requireApiKey() is not used.
+  // Key validation (re-exported for ohd:enhancement:test IPC handler)
   validateApiKey,
 };

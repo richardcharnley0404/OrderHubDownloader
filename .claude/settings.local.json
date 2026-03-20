@@ -24,7 +24,10 @@
       "Bash(npm version patch)",
       "Bash(xargs cat)",
       "Bash(node scripts/build-renderer.js)",
-      "Bash(grep -E \"\\\\.js$\")"
+      "Bash(grep -E \"\\\\.js$\")",
+      "Bash(grep -r \"AUTPRINT\\\\|\\\\.mrk\\\\|\\\\.MRK\" /c/Dev/OrderHubDownloader --include=*.js)",
+      "Bash(grep -r \"dpof\\\\|DPOF\" /c/Dev/OrderHubDownloader/src --include=*.js)",
+      "Bash(grep -n \"generateMrk\\\\|writeMrk\\\\|_mrk\\\\|mrkContent\\\\|\\\\.MRK\\\\|\\\\.mrk\" /c/Dev/OrderHubDownloader/src/main/services/*.js)"
     ]
   }
 }

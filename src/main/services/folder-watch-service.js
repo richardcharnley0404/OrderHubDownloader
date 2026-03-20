@@ -7,6 +7,7 @@ const logger = require('./logger');
 class FolderWatchService {
   constructor() {
     this.lastSummary = { filmScans: null, fileUploads: null };
+    this._filmScanProcessing = false;
   }
 
   async processAll() {
@@ -44,86 +45,123 @@ class FolderWatchService {
    * No upload tracker — duplicate folder names are expected over time.
    */
   async _processFilmScans(config) {
+    if (this._filmScanProcessing) {
+      logger.info('filmScans: previous processing still running, skipping this cycle');
+      return { processed: 0, skipped: 0, failed: 0, errors: [] };
+    }
+
+    this._filmScanProcessing = true;
     const summary = { processed: 0, skipped: 0, failed: 0, errors: [] };
-    const watchFolder = config.filmScansWatchFolder;
-    const storageFolder = config.filmScansStorageFolder;
-    const stabilityMinutes = config.filmScansWatchguardMinutes || config.fileStabilityMinutes;
-    const locationId = config.locationId;
-
-    if (!watchFolder || !fs.existsSync(watchFolder)) {
-      logger.logWarning(`filmScans: watch folder not configured or missing: ${watchFolder}`);
-      return summary;
-    }
-
-    if (!storageFolder) {
-      logger.logWarning('filmScans: storage folder not configured');
-      return summary;
-    }
-
-    // Build S3 prefix using locationId
-    const s3Prefix = `film-scans/${locationId}/`;
-
     try {
-      const entries = fs.readdirSync(watchFolder, { withFileTypes: true });
-      const folders = entries.filter((e) => e.isDirectory());
+      const watchFolder = config.filmScansWatchFolder;
+      const storageFolder = config.filmScansStorageFolder;
+      const stabilityMinutes = config.filmScansWatchguardMinutes || config.fileStabilityMinutes;
+      const locationId = config.locationId;
 
-      for (const folder of folders) {
-        const watchPath = path.join(watchFolder, folder.name);
+      if (!watchFolder || !fs.existsSync(watchFolder)) {
+        logger.logWarning(`filmScans: watch folder not configured or missing: ${watchFolder}`);
+        return summary;
+      }
 
-        if (!this._isFolderStable(watchPath, stabilityMinutes)) {
-          logger.info(`filmScans: folder not yet stable: ${folder.name}`);
-          continue;
-        }
+      if (!storageFolder) {
+        logger.logWarning('filmScans: storage folder not configured');
+        return summary;
+      }
 
-        try {
-          // Build date-based subfolder (MMDDYYYY) from the current system clock.
-          // mkdirSync with recursive:true is a no-op if the folder already exists.
-          const dateSubfolder = this._getDateSubfolder();
-          const dateStorageDir = path.join(storageFolder, dateSubfolder);
-          fs.mkdirSync(dateStorageDir, { recursive: true });
+      // Build S3 prefix using locationId
+      const s3Prefix = `film-scans/${locationId}/`;
 
-          // Resolve the final destination, adding _1/_2/… if a same-name folder
-          // already exists under today's date subfolder.
-          const storagePath = this._resolveStoragePath(dateStorageDir, folder.name);
+      try {
+        const entries = fs.readdirSync(watchFolder, { withFileTypes: true });
+        const folders = entries.filter((e) => e.isDirectory());
 
-          // Step 1: Copy to permanent storage
-          await this._copyFolder(watchPath, storagePath);
-          logger.info(`filmScans: copied ${folder.name} to storage (${storagePath})`);
+        for (const folder of folders) {
+          const watchPath = path.join(watchFolder, folder.name);
 
-          // Step 2: Delete from watch folder
-          this._deleteFolderRecursive(watchPath);
-          logger.info(`filmScans: deleted ${folder.name} from watch folder`);
+          if (!this._isFolderStable(watchPath, stabilityMinutes)) {
+            logger.info(`filmScans: folder not yet stable: ${folder.name}`);
+            continue;
+          }
 
-          // Step 3: Upload from storage to S3
-          const s3Config = this._buildS3Config(config, locationId);
-          if (s3Config) {
-            const result = await s3Service.uploadFolder(storagePath, s3Prefix, s3Config, (progress) => {
-              logger.info(`filmScans: ${progress.message}`);
-            });
+          try {
+            // Build date-based subfolder (MMDDYYYY) from the current system clock.
+            // mkdirSync with recursive:true is a no-op if the folder already exists.
+            const dateSubfolder = this._getDateSubfolder();
+            const dateStorageDir = path.join(storageFolder, dateSubfolder);
+            fs.mkdirSync(dateStorageDir, { recursive: true });
 
-            if (result.failed > 0) {
-              const msg = `S3 upload incomplete for ${folder.name}: ${result.uploaded}/${result.total} uploaded, ${result.failed} file(s) had no pre-signed URL and were skipped`;
-              logger.logWarning(`filmScans: ${msg}`, result);
-              summary.failed++;
-              summary.errors.push(msg);
+            // Resolve the final destination, adding _1/_2/… if a same-name folder
+            // already exists under today's date subfolder.
+            const storagePath = this._resolveStoragePath(dateStorageDir, folder.name);
+
+            // Step 1: Copy to permanent storage
+            await this._copyFolder(watchPath, storagePath);
+            logger.info(`filmScans: copied ${folder.name} to storage (${storagePath})`);
+
+            // Step 2: Delete from watch folder
+            this._deleteFolderRecursive(watchPath);
+            logger.info(`filmScans: deleted ${folder.name} from watch folder`);
+
+            // Step 2b: Convert any TIFF files in storage to JPEG (quality 90).
+            // JPEGs are written alongside the originals and will be picked up
+            // automatically by the S3 upload in Step 3.
+            // Process sequentially — each TIFF can be ~140 MB decoded in memory.
+            {
+              const sharp = require('sharp');
+              const tiffFiles = fs.readdirSync(storagePath).filter(f => {
+                const ext = path.extname(f).toLowerCase();
+                return ext === '.tif' || ext === '.tiff';
+              });
+              for (const tiffFile of tiffFiles) {
+                const srcPath  = path.join(storagePath, tiffFile);
+                const jpgFile  = path.basename(tiffFile, path.extname(tiffFile)) + '.jpg';
+                const destPath = path.join(storagePath, jpgFile);
+                try {
+                  await sharp(srcPath).jpeg({ quality: 90 }).toFile(destPath);
+                  logger.info(`filmScans: converted ${tiffFile} → ${jpgFile}`);
+                } catch (convErr) {
+                  logger.logError(`filmScans: failed to convert ${tiffFile} to JPEG — skipping`, convErr);
+                }
+              }
+            }
+
+            // Step 3: Upload from storage to S3
+            const s3Config = this._buildS3Config(config, locationId);
+            if (s3Config) {
+              const result = await s3Service.uploadFolder(storagePath, s3Prefix, s3Config, (progress) => {
+                logger.info(`filmScans: ${progress.message}`);
+              });
+
+              if (result.failed > 0) {
+                const msg = `S3 upload incomplete for ${folder.name}: ${result.uploaded}/${result.total} uploaded, ${result.failed} file(s) had no pre-signed URL and were skipped`;
+                logger.logWarning(`filmScans: ${msg}`, result);
+                summary.failed++;
+                summary.errors.push(msg);
+              } else {
+                logger.info(`filmScans: S3 upload complete for ${folder.name}`, result);
+                summary.processed++;
+              }
             } else {
-              logger.info(`filmScans: S3 upload complete for ${folder.name}`, result);
               summary.processed++;
             }
-          } else {
-            summary.processed++;
+          } catch (error) {
+            summary.failed++;
+            summary.errors.push(`${folder.name}: ${error.message}`);
+            logger.logError(`filmScans: error processing ${folder.name}`, error);
           }
-        } catch (error) {
-          summary.failed++;
-          summary.errors.push(`${folder.name}: ${error.message}`);
-          logger.logError(`filmScans: error processing ${folder.name}`, error);
-        }
-      }
-    } catch (error) {
-      logger.logError('filmScans: error scanning watch folder', error);
-    }
 
-    return summary;
+          // Process one folder per poll cycle — break after the first stable folder
+          // regardless of success or failure.
+          break;
+        }
+      } catch (error) {
+        logger.logError('filmScans: error scanning watch folder', error);
+      }
+
+      return summary;
+    } finally {
+      this._filmScanProcessing = false;
+    }
   }
 
   /**

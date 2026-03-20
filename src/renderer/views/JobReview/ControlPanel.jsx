@@ -236,8 +236,15 @@ function EnhancementPanel({ selected, jobId, jobPath, onRefreshSidecar }) {
   useEffect(() => {
     window.electronAPI.getConfig()
       .then(cfg => {
-        setHasKey(Boolean(cfg.replicateApiKey));
-        setModel(cfg.enhancementDefaultModel || 'Standard V2');
+        // hasKey is true if the configured provider has a key set
+        const provider = cfg.enhancementProvider || 'replicate';
+        const key      = provider === 'topaz' ? cfg.topazApiKey : cfg.replicateApiKey;
+        setHasKey(Boolean(key));
+        // Default model comes from whichever provider is active
+        const defaultModel = provider === 'topaz'
+          ? (cfg.topazDefaultModel        || 'Standard V2')
+          : (cfg.enhancementDefaultModel  || 'Standard V2');
+        setModel(defaultModel);
         setFaceEnhancement(Boolean(cfg.enhancementFaceEnhancement));
       })
       .catch(() => {});
