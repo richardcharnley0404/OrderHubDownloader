@@ -65,88 +65,98 @@ class S3Service {
     let uploaded = 0;
     let failed = 0;
 
-    for (const filePath of files) {
-      // Build descriptor for this single file.
-      // sub_path = folderName[/relativeDir] so the server reconstructs the full key as:
-      //   {s3Folder}/{locationId}/{sub_path}/{name}
-      const relPath = path.relative(localFolderPath, filePath).replace(/\\/g, '/');
-      const name = path.basename(relPath);
-      const relDir = path.dirname(relPath);
-      const sub_path = relDir === '.' ? folderName : `${folderName}/${relDir}`;
-      const stat = fs.statSync(filePath);
-      const apiDescriptor = { name, folder: s3Folder, sub_path, size: stat.size, type: this._getContentType(filePath) };
+    try {
+      for (const filePath of files) {
+        // Build descriptor for this single file.
+        // sub_path = folderName[/relativeDir] so the server reconstructs the full key as:
+        //   {s3Folder}/{locationId}/{sub_path}/{name}
+        const relPath = path.relative(localFolderPath, filePath).replace(/\\/g, '/');
+        const name = path.basename(relPath);
+        const relDir = path.dirname(relPath);
+        const sub_path = relDir === '.' ? folderName : `${folderName}/${relDir}`;
+        const stat = fs.statSync(filePath);
+        const apiDescriptor = { name, folder: s3Folder, sub_path, size: stat.size, type: this._getContentType(filePath) };
 
-      // Request a fresh pre-signed URL for this file immediately before uploading.
-      let presignEntry;
-      try {
-        const presigned = await presignService.getPresignedUrls([apiDescriptor], credentials.locationId || null);
-        presignEntry = presigned[0];
-      } catch (error) {
-        failed++;
-        logger.logError(`Failed to obtain pre-signed URL for ${name}`, error);
-        continue;
-      }
-
-      if (!presignEntry || !presignEntry.upload_url) {
-        failed++;
-        logger.logWarning(`presignService returned no URL for ${name}`, { name, sub_path, size: stat.size, type: apiDescriptor.type });
-        continue;
-      }
-
-      try {
-        await this._uploadFileViaPresignedUrl(filePath, presignEntry.upload_url);
-        uploaded++;
-        if (progressCallback) {
-          progressCallback({ message: `Uploaded ${uploaded}/${files.length}: ${relPath}`, status: 'uploading' });
+        // Request a fresh pre-signed URL for this file immediately before uploading.
+        let presignEntry;
+        try {
+          const presigned = await presignService.getPresignedUrls([apiDescriptor], credentials.locationId || null);
+          presignEntry = presigned[0];
+        } catch (error) {
+          failed++;
+          logger.logError(`Failed to obtain pre-signed URL for ${name}`, error);
+          continue;
         }
-      } catch (error) {
-        failed++;
-        logger.logError(`Failed to upload ${presignEntry.s3_key || name}`, error);
+
+        if (!presignEntry || !presignEntry.upload_url) {
+          failed++;
+          logger.logWarning(`presignService returned no URL for ${name}`, { name, sub_path, size: stat.size, type: apiDescriptor.type });
+          continue;
+        }
+
+        try {
+          await this._uploadFileViaPresignedUrl(filePath, presignEntry.upload_url);
+          uploaded++;
+          if (progressCallback) {
+            progressCallback({ message: `Uploaded ${uploaded}/${files.length}: ${relPath}`, status: 'uploading' });
+          }
+        } catch (error) {
+          failed++;
+          logger.logError(`Failed to upload ${presignEntry.s3_key || name}`, error);
+        }
       }
+    } catch (outerError) {
+      // Unexpected error outside per-file handling (e.g. fs failure mid-loop).
+      // Treat all remaining files as failed and fall through to manifest write.
+      failed = files.length - uploaded;
+      logger.logError(`filmScans: unexpected error during upload loop for ${folderName} — falling through to manifest`, outerError);
     }
 
-    // ── Completion sentinel ──────────────────────────────────────────────────
-    // Only written when every file uploaded successfully.
-    if (failed === 0) {
-      try {
-        const { app } = require('electron');
-        const tiffExts  = new Set(['.tif', '.tiff']);
-        const jpegExts  = new Set(['.jpg', '.jpeg']);
-        const tiffCount = files.filter(f => tiffExts.has(path.extname(f).toLowerCase())).length;
-        const jpgCount  = files.filter(f => jpegExts.has(path.extname(f).toLowerCase())).length;
+    // ── Manifest ─────────────────────────────────────────────────────────────
+    // Always written, regardless of upload errors, so OH always knows the folder exists.
+    try {
+      const { app } = require('electron');
+      const tiffExts  = new Set(['.tif', '.tiff']);
+      const jpegExts  = new Set(['.jpg', '.jpeg']);
+      const tiffCount = files.filter(f => tiffExts.has(path.extname(f).toLowerCase())).length;
+      const jpgCount  = files.filter(f => jpegExts.has(path.extname(f).toLowerCase())).length;
 
-        const sentinelName = `${folderName}_folder_complete.json`;
-        const sentinelBody = JSON.stringify({
-          folder:      folderName,
-          total_files: files.length,
-          tiff_count:  tiffCount,
-          jpg_count:   jpgCount,
-          completed_at: new Date().toISOString(),
-          ohd_version: app.getVersion()
-        });
-        const sentinelBuffer = Buffer.from(sentinelBody, 'utf8');
+      const manifestName = `${folderName}.json`;
+      const manifestBody = JSON.stringify({
+        folder:       folderName,
+        total_files:  files.length,
+        tiff_count:   tiffCount,
+        jpg_count:    jpgCount,
+        errors:       failed,
+        completed_at: new Date().toISOString(),
+        ohd_version:  app.getVersion()
+      });
+      const manifestBuffer = Buffer.from(manifestBody, 'utf8');
 
-        const sentinelDescriptor = {
-          name:     sentinelName,
-          folder:   s3Folder,
-          sub_path: folderName,
-          size:     sentinelBuffer.length,
-          type:     'application/json'
-        };
+      const manifestDescriptor = {
+        name:     manifestName,
+        folder:   s3Folder,
+        sub_path: folderName,
+        size:     manifestBuffer.length,
+        type:     'application/json'
+      };
 
-        const presigned = await presignService.getPresignedUrls([sentinelDescriptor], credentials.locationId || null);
-        const sentinelEntry = presigned[0];
+      const presigned = await presignService.getPresignedUrls([manifestDescriptor], credentials.locationId || null);
+      const manifestEntry = presigned[0];
 
-        if (sentinelEntry && sentinelEntry.upload_url) {
-          await this._uploadBufferViaPresignedUrl(sentinelBuffer, 'application/json', sentinelEntry.upload_url);
-          logger.info(`filmScans: sentinel uploaded — ${sentinelName}`);
+      if (manifestEntry && manifestEntry.upload_url) {
+        await this._uploadBufferViaPresignedUrl(manifestBuffer, 'application/json', manifestEntry.upload_url);
+        if (failed > 0) {
+          logger.logWarning(`filmScans: manifest written with ${failed} error(s) for folder ${folderName} — lab must re-upload after deleting in OH`);
         } else {
-          logger.logWarning(`filmScans: no pre-signed URL returned for sentinel ${sentinelName}`, {});
+          logger.info(`filmScans: manifest uploaded — ${manifestName}`);
         }
-      } catch (sentinelError) {
-        // Sentinel failure must never affect the reported upload result
-        logger.logError('filmScans: failed to upload completion sentinel', sentinelError);
+      } else {
+        logger.logWarning(`filmScans: no pre-signed URL returned for manifest ${manifestName}`, {});
       }
+    } catch (manifestError) {
+      // Manifest failure must never affect the reported upload result
+      logger.logError('filmScans: failed to upload manifest', manifestError);
     }
 
     return { uploaded, failed, total: files.length };

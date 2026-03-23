@@ -128,12 +128,21 @@ class FolderWatchService {
             // Step 3: Upload from storage to S3
             const s3Config = this._buildS3Config(config, locationId);
             if (s3Config) {
-              const result = await s3Service.uploadFolder(storagePath, s3Prefix, s3Config, (progress) => {
-                logger.info(`filmScans: ${progress.message}`);
-              });
+              let result;
+              try {
+                result = await s3Service.uploadFolder(storagePath, s3Prefix, s3Config, (progress) => {
+                  logger.info(`filmScans: ${progress.message}`);
+                });
+              } catch (uploadError) {
+                // uploadFolder should never throw after the outer try/catch added in s3-service,
+                // but guard here so a summary is still recorded if it somehow does.
+                const totalFiles = require('fs').readdirSync(storagePath).length;
+                logger.logError(`filmScans: uploadFolder threw unexpectedly for ${folder.name}`, uploadError);
+                result = { uploaded: 0, failed: totalFiles, total: totalFiles };
+              }
 
               if (result.failed > 0) {
-                const msg = `S3 upload incomplete for ${folder.name}: ${result.uploaded}/${result.total} uploaded, ${result.failed} file(s) had no pre-signed URL and were skipped`;
+                const msg = `S3 upload incomplete for ${folder.name}: ${result.uploaded}/${result.total} uploaded, ${result.failed} file(s) failed`;
                 logger.logWarning(`filmScans: ${msg}`, result);
                 summary.failed++;
                 summary.errors.push(msg);

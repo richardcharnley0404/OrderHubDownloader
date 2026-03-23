@@ -70,11 +70,16 @@ async function resolveRoutesForReceivedJobs(jobs) {
 // Tab switching (main tabs)
 // ══════════════════════════════════════
 document.querySelectorAll('.tab-bar .tab').forEach(tab => {
-  tab.addEventListener('click', () => {
+  tab.addEventListener('click', async () => {
     document.querySelectorAll('.tab-bar .tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
     tab.classList.add('active');
     document.getElementById('panel-' + tab.dataset.tab).classList.add('active');
+    // Refresh routing data when returning to Settings so changes made elsewhere
+    // (e.g. via the Assign Channel modal on the Jobs tab) are always visible.
+    if (tab.dataset.tab === 'settings' && routingLoaded) {
+      await loadRoutingSection();
+    }
   });
 });
 
