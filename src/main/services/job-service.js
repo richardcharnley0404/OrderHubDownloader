@@ -364,6 +364,59 @@ class JobService {
   }
 
   /**
+   * Sync in_production jobs against the OrderHub API.
+   *
+   * For each locally-cached job with _status === 'in_production', fetches the
+   * current status from GET /jobs/{jobId}. If OH reports the job as "completed"
+   * (case-insensitive), the local status is updated to 'completed' directly —
+   * without POSTing back to OH (OH already knows).
+   *
+   * Individual job failures are logged and skipped; they never abort the loop.
+   *
+   * @returns {Promise<number>} Count of jobs auto-completed in this run
+   */
+  async syncInProductionFromOH() {
+    const { baseUrl, key: apiKey, organizationId, locationId } = configService.getApiSettings();
+    if (!apiKey) return 0;
+
+    const inProdJobs = this.getJobsByStatus('in_production');
+    if (inProdJobs.length === 0) return 0;
+
+    const extraHeaders = {};
+    if (organizationId) extraHeaders['X-Organization-ID'] = organizationId;
+    if (locationId)     extraHeaders['X-Location-ID']     = locationId;
+
+    let autoCompleted = 0;
+
+    for (const job of inProdJobs) {
+      try {
+        const response = await this._httpRequest(
+          'GET', `${baseUrl}/jobs/${job.id}`, apiKey, null, extraHeaders
+        );
+
+        if (response.statusCode >= 200 && response.statusCode < 300) {
+          const data = JSON.parse(response.body);
+          if ((data.status || '').toLowerCase() === 'completed') {
+            this.updateJobLocally(job.id, { _status: 'completed' });
+            logger.info(`[sync] Job ${job.id} auto-completed from OH status`);
+            autoCompleted++;
+          }
+        } else {
+          logger.logWarning('[sync] Failed to fetch job status from OH', {
+            jobId: job.id, statusCode: response.statusCode,
+          });
+        }
+      } catch (err) {
+        logger.logWarning('[sync] Error fetching job status from OH — skipping', {
+          jobId: job.id, error: err.message,
+        });
+      }
+    }
+
+    return autoCompleted;
+  }
+
+  /**
    * HTTP request helper
    */
   _httpRequest(method, url, apiKey, body = null, extraHeaders = {}) {

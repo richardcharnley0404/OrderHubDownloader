@@ -14,8 +14,6 @@ const selectFilmScansStorageBtn = document.getElementById('selectFilmScansStorag
 const selectFileUploadsWatchBtn = document.getElementById('selectFileUploadsWatchBtn');
 const selectFileUploadsStorageBtn = document.getElementById('selectFileUploadsStorageBtn');
 const selectProcessFolderBtn = document.getElementById('selectProcessFolderBtn');
-const processMappingsList = document.getElementById('processMappingsList');
-const addProcessMappingBtn = document.getElementById('addProcessMappingBtn');
 const printControllersList = document.getElementById('printControllersList');
 const addControllerBtn = document.getElementById('addControllerBtn');
 const statusMessage = document.getElementById('statusMessage');
@@ -41,7 +39,7 @@ let downloadDirectory = ''; // Kept in sync with saved config — used to comput
 
 // DPOF output-status cache: jobId (string) → { prefix, folderName, folderPath }
 // Populated after each table render via async folder scan.
-// Prefix meanings: p=Import Error, o=Awaiting Import, q=Failed Import, e=Printed
+// Prefix meanings: p=Import Error, o=Awaiting Import, q=Failed Import, e=Imported (auto-processed)
 const outputStatusCache = new Map();
 
 // Routing cache: jobId (string) → route object from routingService.resolveRoute()
@@ -277,7 +275,7 @@ jobDateRangeSelect.addEventListener('change', async () => {
   renderJobTable(getFilteredJobs());
 });
 
-// Job filter buttons (All / Awaiting Production / Printed)
+// Job filter buttons (All / Awaiting Processing / Processed)
 document.querySelectorAll('.jobs-filter[data-filter]').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.jobs-filter').forEach(b => b.classList.remove('active'));
@@ -382,7 +380,7 @@ function getStatusLabel(status) {
     case 'pending': return 'Pending';
     case 'received': return 'Received';
     case 'in_production': return 'In Production';
-    case 'completed': return 'Printed';
+    case 'completed': return 'Processed';
     default: return status || 'Unknown';
   }
 }
@@ -487,9 +485,9 @@ function renderJobTable(jobs) {
       // DPOF prefix-driven action buttons
       actionHtml = getDpofOutputActionHtml(reviewBtn, String(job.id), outputStatus.prefix);
     } else if (job._status === 'completed') {
-      actionHtml = `${reviewBtn}<button class="btn-action btn-printed" disabled>Printed</button>`;
+      actionHtml = `${reviewBtn}<button class="btn-action btn-printed" disabled>Processed</button>`;
     } else if (job._status === 'in_production') {
-      actionHtml = `${reviewBtn}<button class="btn-action btn-mark-printed" data-job-id="${escapeHtml(String(job.id))}">Mark as Printed</button>`;
+      actionHtml = reviewBtn;
     } else if (job._status === 'received') {
       const route = jobRouteCache.get(String(job.id));
       if (route && route.type === 'unrouted') {
@@ -497,12 +495,12 @@ function renderJobTable(jobs) {
           // Controller is assigned but no channel mapping yet — show Assign button
           actionHtml = `${reviewBtn}<button class="btn-action btn-assign-channel" data-job-id="${escapeHtml(String(job.id))}">Assign</button>`;
         } else {
-          // No controller assigned to this process at all — inline guidance
-          actionHtml = `${reviewBtn}<span class="route-unassigned-msg">No controller — configure in Settings → Routing</span>`;
+          // No controller AND no default folder configured
+          actionHtml = `${reviewBtn}<span class="route-unassigned-msg">No default folder — configure in Settings → Process Folders</span>`;
         }
       } else {
-        // Routed (controller / process-folder) or not yet resolved — normal Send to Print
-        actionHtml = `${reviewBtn}<button class="btn-action btn-send-print" data-job-id="${escapeHtml(String(job.id))}">Send to Print</button>`;
+        // Routed (controller / default-folder / process-folder) or not yet resolved — normal Send to Print
+        actionHtml = `${reviewBtn}<button class="btn-action btn-send-print" data-job-id="${escapeHtml(String(job.id))}">Process</button>`;
       }
     } else if (job._status === 'pending') {
       const route = jobRouteCache.get(String(job.id));
@@ -511,15 +509,18 @@ function renderJobTable(jobs) {
           // Controller assigned but no channel mapping yet — show Assign
           actionHtml = `${reviewBtn}<button class="btn-action btn-assign-channel" data-job-id="${escapeHtml(String(job.id))}">Assign</button>`;
         } else {
-          // No controller assigned to this process at all
-          actionHtml = `${reviewBtn}<span class="route-unassigned-msg">No controller — configure in Settings → Routing</span>`;
+          // No controller AND no default folder configured
+          actionHtml = `${reviewBtn}<span class="route-unassigned-msg">No default folder — configure in Settings → Process Folders</span>`;
         }
       } else if (route && route.type !== 'unrouted') {
         // Valid route — show Review + Send to Print (same as received)
-        actionHtml = `${reviewBtn}<button class="btn-action btn-send-print" data-job-id="${escapeHtml(String(job.id))}">Send to Print</button>`;
+        actionHtml = `${reviewBtn}<button class="btn-action btn-send-print" data-job-id="${escapeHtml(String(job.id))}">Process</button>`;
       } else {
         actionHtml = '<span style="color:#a0aec0;font-size:11px">--</span>';
       }
+    } else if (job._status === 'warning') {
+      const msg = job._warningMessage || 'Unknown warning — check Activity Log';
+      actionHtml = `<span class="route-unassigned-msg">⚠ ${escapeHtml(msg)}</span>`;
     } else {
       actionHtml = '<span style="color:#a0aec0;font-size:11px">--</span>';
     }
@@ -604,7 +605,7 @@ function renderJobTable(jobs) {
 
           if (!dpiResult.canAutoSubmit) {
             // Show the DPI warning modal — user must confirm
-            btn.textContent = 'Send to Print';
+            btn.textContent = 'Process';
             const proceed = await showDpiModal(dpiResult);
             if (!proceed) {
               btn.disabled = false;
@@ -627,40 +628,13 @@ function renderJobTable(jobs) {
           loadJobs();
         } else {
           btn.disabled = false;
-          btn.textContent = 'Send to Print';
-          showToast('Send to Print failed: ' + (result.error || 'Unknown error'), 'error', 10000);
+          btn.textContent = 'Process';
+          showToast('Process failed: ' + (result.error || 'Unknown error'), 'error', 10000);
         }
       } catch (error) {
         btn.disabled = false;
-        btn.textContent = 'Send to Print';
-        showToast('Send to Print error: ' + error.message, 'error', 10000);
-      }
-    });
-  });
-
-  // Attach Mark as Printed handlers
-  document.querySelectorAll('.btn-mark-printed[data-job-id]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const jobId = btn.dataset.jobId;
-      btn.disabled = true;
-      btn.textContent = 'Marking...';
-
-      try {
-        const result = await window.electronAPI.markCompleted(jobId);
-
-        if (result.success) {
-          btn.textContent = 'Printed';
-          btn.className = 'btn-action btn-printed';
-          loadJobs();
-        } else {
-          btn.disabled = false;
-          btn.textContent = 'Mark as Printed';
-          showStatus('Mark as Printed failed: ' + (result.error || 'Unknown error'), 'error');
-        }
-      } catch (error) {
-        btn.disabled = false;
-        btn.textContent = 'Mark as Printed';
-        showStatus('Mark as Printed error: ' + error.message, 'error');
+        btn.textContent = 'Process';
+        showToast('Process error: ' + error.message, 'error', 10000);
       }
     });
   });
@@ -677,35 +651,6 @@ function renderJobTable(jobs) {
   });
 
   // ── DPOF output-status action handlers ──
-
-  // "Mark as Printed" (e / Imported status) — OHD-internal flag only, no disk changes
-  document.querySelectorAll('.btn-mark-printed-dpof[data-job-id]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const jobId = btn.dataset.jobId;
-      btn.disabled = true;
-      btn.textContent = 'Marking...';
-      try {
-        const result = await window.electronAPI.markPrinted(jobId);
-        if (!result.success) {
-          btn.disabled = false;
-          btn.textContent = 'Mark as Printed';
-          showToast('Mark as Printed failed: ' + (result.error || 'Unknown error'), 'error', 8000);
-          return;
-        }
-        // Update cache to virtual 'printed' prefix and re-render this row in-place
-        const current = outputStatusCache.get(jobId) || {};
-        const printedStatus = { ...current, prefix: 'printed' };
-        outputStatusCache.set(jobId, printedStatus);
-        const job = allJobs.find(j => String(j.id) === String(jobId));
-        updateJobRowStatus(jobId, printedStatus, job || null);
-        showToast('Job marked as printed', 'success');
-      } catch (error) {
-        btn.disabled = false;
-        btn.textContent = 'Mark as Printed';
-        showToast('Mark as Printed error: ' + error.message, 'error', 8000);
-      }
-    });
-  });
 
   // "Resend" (q status) — full re-send through DPOF pipeline
   document.querySelectorAll('.btn-resend-dpof[data-job-id]').forEach(btn => {
@@ -841,7 +786,7 @@ function getDpofOutputBadge(prefix) {
     o:       { statusClass: 'badge badge-awaiting_import', statusLabel: 'Awaiting Import' },
     q:       { statusClass: 'badge badge-failed_import',   statusLabel: 'Failed Import' },
     e:       { statusClass: 'badge badge-imported',        statusLabel: 'Imported' },
-    printed: { statusClass: 'badge badge-printed',         statusLabel: 'Printed' },
+    printed: { statusClass: 'badge badge-printed',         statusLabel: 'Processed' },
   };
   return map[prefix] || { statusClass: 'badge badge-unknown', statusLabel: 'Unknown' };
 }
@@ -852,7 +797,7 @@ function getDpofOutputBadge(prefix) {
  *   p (Import Error)    → Retry
  *   o (Awaiting Import) → no action (waiting for controller)
  *   q (Failed Import)   → Resend
- *   e (Imported)        → Mark as Printed
+ *   e (Imported)        → no action (auto-marked Processed by hot folder watcher)
  *   printed (internal)  → no action (complete)
  * @param {string} reviewBtnHtml - Pre-built Review button HTML
  * @param {string} jobId
@@ -869,7 +814,7 @@ function getDpofOutputActionHtml(reviewBtnHtml, jobId, prefix) {
     case 'q':
       return `${reviewBtnHtml}<button class="btn-action btn-resend-dpof" data-job-id="${id}">Resend</button>`;
     case 'e':
-      return `${reviewBtnHtml}<button class="btn-action btn-mark-printed-dpof" data-job-id="${id}">Mark as Printed</button>`;
+      return reviewBtnHtml; // Accepted by controller — auto-marked Processed by hot folder watcher
     case 'printed':
       return reviewBtnHtml; // Complete — no further action
     default:
@@ -1045,24 +990,28 @@ function updateJobRowStatus(jobId, status, job) {
       ? `${downloadDirectory}\\${jobFolderName}\\${sidecarJobId}`
       : '';
     const reviewBtn = `<button class="btn-action btn-review" data-sidecar-job-id="${escapeHtml(sidecarJobId)}" data-job-path="${escapeHtml(jobFolderPath)}">Review</button>`;
-    actionCell.innerHTML = getDpofOutputActionHtml(reviewBtn, jobId, status.prefix);
+    const dpofInnerHtml = getDpofOutputActionHtml(reviewBtn, jobId, status.prefix);
+    if (currentFilter !== 'dismissed') {
+      actionCell.innerHTML = `<div class="actions-cell-wrap">${dpofInnerHtml}<button class="btn-dismiss" data-job-id="${escapeHtml(jobId)}" title="Hide this job from the list">Dismiss</button></div>`;
+      const dismissBtn = actionCell.querySelector('.btn-dismiss');
+      if (dismissBtn) dismissBtn.addEventListener('click', async () => {
+        dismissBtn.disabled = true;
+        try {
+          dismissedJobs = await window.electronAPI.dismissJob(jobId);
+          updateDismissedBadge();
+          const row = jobsTableBody.querySelector(`tr[data-job-id="${CSS.escape(jobId)}"]`);
+          if (row) row.remove();
+          showToast('Job dismissed', 'success');
+        } catch (error) {
+          dismissBtn.disabled = false;
+          showToast('Dismiss error: ' + error.message, 'error', 5000);
+        }
+      });
+    } else {
+      actionCell.innerHTML = dpofInnerHtml;
+    }
 
     // Re-attach listeners for the new buttons
-    const markBtn = actionCell.querySelector('.btn-mark-printed-dpof');
-    if (markBtn) markBtn.addEventListener('click', async () => {
-      markBtn.disabled = true; markBtn.textContent = 'Marking...';
-      const r = await window.electronAPI.markPrinted(jobId);
-      if (r.success) {
-        const current = outputStatusCache.get(jobId) || {};
-        const printedStatus = { ...current, prefix: 'printed' };
-        outputStatusCache.set(jobId, printedStatus);
-        updateJobRowStatus(jobId, printedStatus, allJobs.find(j => String(j.id) === String(jobId)) || null);
-        showToast('Job marked as printed', 'success');
-      } else {
-        markBtn.disabled = false; markBtn.textContent = 'Mark as Printed';
-        showToast('Failed: ' + r.error, 'error', 8000);
-      }
-    });
     const resendBtn = actionCell.querySelector('.btn-resend-dpof');
     if (resendBtn) resendBtn.addEventListener('click', async () => {
       resendBtn.disabled = true; resendBtn.textContent = 'Resending...';
@@ -1173,9 +1122,6 @@ function populateForm(config) {
   // Process folder
   document.getElementById('processFolderPath').value = config.processFolderPath || '';
 
-  // Process folder mappings
-  renderProcessMappings(config.processFolderMappings || {});
-
   // DPI Validation
   document.getElementById('dpiValidationEnabled').checked = config.dpiValidationEnabled !== false;
   document.getElementById('dpiExcellentThreshold').value = config.dpiExcellentThreshold || 300;
@@ -1235,7 +1181,6 @@ function getFormData() {
     pollingInterval: parseInt(document.getElementById('pollingInterval').value, 10) || 60,
     // Process folder
     processFolderPath: document.getElementById('processFolderPath').value.trim(),
-    processFolderMappings: collectProcessMappings(),
     // DPI Validation
     dpiValidationEnabled: document.getElementById('dpiValidationEnabled').checked,
     dpiExcellentThreshold: parseInt(document.getElementById('dpiExcellentThreshold').value, 10) || 300,
@@ -1424,6 +1369,8 @@ form.addEventListener('submit', async (e) => {
 
     await window.electronAPI.saveConfig(config);
     downloadDirectory = config.downloadDirectory || '';
+    // Default folder change may unblock previously-warning jobs — re-evaluate immediately
+    resolveRoutesForReceivedJobs(allJobs).then(() => renderJobTable(getFilteredJobs()));
     showStatus('Settings saved successfully!', 'success');
   } catch (error) {
     showStatus('Error saving settings: ' + error.message, 'error');
@@ -1445,126 +1392,6 @@ function toggleDpiValidationFields() {
 
 document.getElementById('dpiValidationEnabled').addEventListener('change', toggleDpiValidationFields);
 
-// ══════════════════════════════════════
-// SETTINGS: Process folder mappings
-// ══════════════════════════════════════
-
-function renderProcessMappings(mappings) {
-  processMappingsList.innerHTML = '';
-  for (const [processName, value] of Object.entries(mappings)) {
-    // Backwards compatible: string → { folderPath }
-    const mapping = typeof value === 'string' ? { folderPath: value } : value;
-    addProcessMappingRow(processName, mapping.folderPath || '', mapping.controllerId || '');
-  }
-}
-
-function addProcessMappingRow(processName = '', folderPath = '', controllerId = '') {
-  const row = document.createElement('div');
-  row.className = 'process-mapping-row';
-
-  const nameInput = document.createElement('input');
-  nameInput.type = 'text';
-  nameInput.className = 'mapping-process-name';
-  nameInput.placeholder = 'Process name';
-  nameInput.value = processName;
-
-  // Controller dropdown
-  const controllerSelect = document.createElement('select');
-  controllerSelect.className = 'mapping-controller-select';
-
-  const noneOption = document.createElement('option');
-  noneOption.value = '';
-  noneOption.textContent = 'File Copy';
-  controllerSelect.appendChild(noneOption);
-
-  for (const ctrl of cachedControllers) {
-    const opt = document.createElement('option');
-    opt.value = ctrl.id;
-    opt.textContent = ctrl.name;
-    if (ctrl.id === controllerId) opt.selected = true;
-    controllerSelect.appendChild(opt);
-  }
-
-  const folderInput = document.createElement('input');
-  folderInput.type = 'text';
-  folderInput.className = 'mapping-folder-path';
-  folderInput.placeholder = 'Select folder...';
-  folderInput.value = folderPath;
-  folderInput.readOnly = true;
-
-  const browseBtn = document.createElement('button');
-  browseBtn.type = 'button';
-  browseBtn.className = 'btn-browse';
-  browseBtn.textContent = 'Browse...';
-  browseBtn.addEventListener('click', async () => {
-    try {
-      const result = await window.electronAPI.selectDirectory();
-      if (result) {
-        folderInput.value = result;
-      }
-    } catch (error) {
-      showStatus('Error selecting directory: ' + error.message, 'error');
-    }
-  });
-
-  // When a controller is selected, auto-fill its hot folder and disable browse
-  function updateControllerState() {
-    const selectedId = controllerSelect.value;
-    if (selectedId) {
-      const ctrl = cachedControllers.find(c => c.id === selectedId);
-      if (ctrl) {
-        folderInput.value = ctrl.hotFolderPath || '';
-        folderInput.placeholder = 'Controller hot folder';
-      }
-      browseBtn.style.display = 'none';
-    } else {
-      if (!controllerId) folderInput.value = '';
-      folderInput.placeholder = 'Select folder...';
-      browseBtn.style.display = '';
-    }
-  }
-
-  controllerSelect.addEventListener('change', updateControllerState);
-
-  const removeBtn = document.createElement('button');
-  removeBtn.type = 'button';
-  removeBtn.className = 'btn-remove-mapping';
-  removeBtn.textContent = '\u00D7';
-  removeBtn.title = 'Remove mapping';
-  removeBtn.addEventListener('click', () => {
-    row.remove();
-  });
-
-  row.appendChild(nameInput);
-  row.appendChild(controllerSelect);
-  row.appendChild(folderInput);
-  row.appendChild(browseBtn);
-  row.appendChild(removeBtn);
-  processMappingsList.appendChild(row);
-
-  // Set initial state
-  updateControllerState();
-}
-
-function collectProcessMappings() {
-  const mappings = {};
-  const rows = processMappingsList.querySelectorAll('.process-mapping-row');
-  for (const row of rows) {
-    const name = row.querySelector('.mapping-process-name').value.trim();
-    const folder = row.querySelector('.mapping-folder-path').value.trim();
-    const ctrlId = row.querySelector('.mapping-controller-select').value;
-    if (name && (folder || ctrlId)) {
-      const entry = { folderPath: folder };
-      if (ctrlId) entry.controllerId = ctrlId;
-      mappings[name] = entry;
-    }
-  }
-  return mappings;
-}
-
-addProcessMappingBtn.addEventListener('click', () => {
-  addProcessMappingRow();
-});
 
 // ══════════════════════════════════════
 // SETTINGS: Directory pickers
@@ -2940,9 +2767,10 @@ function buildOrderControllerCard(ctrl) {
 
 function updateOcTypeFields() {
   const type = document.getElementById('ocType').value;
-  document.getElementById('ocProcessedFolderGroup').style.display = type === 'darkroompro'                     ? '' : 'none';
-  document.getElementById('ocBannerSheetGroup').style.display     = (type === 'noritsu' || type === 'epson' || type === 'dpof' || type === 'pdf_copy') ? '' : 'none';
-  document.getElementById('ocPipelineGroup').style.display        = type === 'pdf_copy'                       ? '' : 'none';
+  document.getElementById('ocProcessedFolderGroup').style.display    = type === 'darkroompro'                                                              ? '' : 'none';
+  document.getElementById('ocBannerSheetGroup').style.display        = (type === 'noritsu' || type === 'epson' || type === 'dpof' || type === 'pdf_copy') ? '' : 'none';
+  document.getElementById('ocPipelineGroup').style.display           = type === 'pdf_copy'                                                                 ? '' : 'none';
+  document.getElementById('ocCheckOrderStatusGroup').style.display   = (type === 'noritsu' || type === 'epson' || type === 'dpof' || type === 'darkroompro') ? '' : 'none';
 }
 
 function openOrderControllerModal(ctrl = null) {
@@ -2952,8 +2780,9 @@ function openOrderControllerModal(ctrl = null) {
   document.getElementById('ocType').value       = ctrl ? ctrl.type       : 'noritsu';
   document.getElementById('ocOutputPath').value = ctrl ? (ctrl.outputPath || '') : '';
   document.getElementById('ocProcessedFolderName').value = ctrl ? (ctrl.processedFolderName || '') : '';
-  document.getElementById('ocAutoPrint').checked   = ctrl ? !!ctrl.autoprint   : false;
-  document.getElementById('ocBannerSheet').checked = ctrl ? !!ctrl.bannerSheet : false;
+  document.getElementById('ocAutoPrint').checked        = ctrl ? !!ctrl.autoprint                      : false;
+  document.getElementById('ocBannerSheet').checked      = ctrl ? !!ctrl.bannerSheet                    : false;
+  document.getElementById('ocCheckOrderStatus').checked = ctrl ? (ctrl.checkOrderStatus === true)      : false;
   // Load pipeline steps
   pipelineSteps = (ctrl && ctrl.pdfPipeline && ctrl.pdfPipeline.steps) ? JSON.parse(JSON.stringify(ctrl.pdfPipeline.steps)) : [];
   renderPipelineSteps();
@@ -3337,7 +3166,10 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
     name,
     type,
     outputPath,
-    autoprint: document.getElementById('ocAutoPrint').checked,
+    autoprint:        document.getElementById('ocAutoPrint').checked,
+    checkOrderStatus: (['noritsu', 'epson', 'dpof', 'darkroompro'].includes(type))
+      ? document.getElementById('ocCheckOrderStatus').checked
+      : true,
   };
   if (type === 'dpof' || type === 'pdf_copy') {
     controller.bannerSheet = document.getElementById('ocBannerSheet').checked;
@@ -3422,14 +3254,31 @@ function renderProcessRouting(processValues, mappings, controllers) {
           process,
           controllerId: select.value || null,
         });
+        // Re-resolve routes so previously-warning jobs update immediately
+        await resolveRoutesForReceivedJobs(allJobs);
+        renderJobTable(getFilteredJobs());
       } catch (err) {
         showToast('Error saving process mapping: ' + err.message, 'error');
+      }
+    });
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.type = 'button';
+    deleteBtn.className = 'btn-secondary btn-sm btn-danger-text';
+    deleteBtn.textContent = 'Delete';
+    deleteBtn.addEventListener('click', async () => {
+      try {
+        await window.electronAPI.deleteProcessMapping(process);
+        row.remove();
+      } catch (err) {
+        showToast('Error deleting process mapping: ' + err.message, 'error');
       }
     });
 
     row.appendChild(label);
     row.appendChild(arrow);
     row.appendChild(select);
+    row.appendChild(deleteBtn);
     list.appendChild(row);
   }
 }

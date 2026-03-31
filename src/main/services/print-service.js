@@ -160,8 +160,8 @@ class PrintService {
       template: templatePath || 'none'
     });
 
-    // Mark job as in_production
-    await this._markInProduction(job.id);
+    // Mark job as completed — no prefix lifecycle for Darkroom Pro jobs
+    await this._markCompleted(job.id);
 
     return {
       success: true,
@@ -314,7 +314,12 @@ class PrintService {
       images:     imageFiles.length
     });
 
-    await this._markInProduction(job.id);
+    if (route.checkOrderStatus === false) {
+      logger.info('[auto-print] checkOrderStatus disabled — marking job as completed immediately', { jobId: job.id });
+      await this._markCompleted(job.id);
+    } else {
+      await this._markInProduction(job.id);
+    }
 
     return {
       success:    true,
@@ -686,7 +691,7 @@ class PrintService {
       images:     imageFiles.length,
     });
 
-    await this._markInProduction(job.id);
+    await this._markCompleted(job.id);
 
     return {
       success:    true,
@@ -787,7 +792,7 @@ class PrintService {
       files:      pdfFiles.length,
     });
 
-    await this._markInProduction(job.id);
+    await this._markCompleted(job.id);
 
     return {
       success:    true,
@@ -888,8 +893,7 @@ class PrintService {
       throw new Error(`Failed to copy job folder: ${error.message}`);
     }
 
-    // Mark job as in_production
-    await this._markInProduction(jobId);
+    await this._markCompleted(jobId);
 
     return {
       success: true,
@@ -970,6 +974,19 @@ class PrintService {
         error: error.message
       });
       jobService.updateJobLocally(jobId, { _status: 'in_production' });
+    }
+  }
+
+  async _markCompleted(jobId) {
+    try {
+      await jobService.markCompleted(jobId);
+      logger.info('Job marked as completed', { jobId });
+    } catch (error) {
+      logger.logWarning('Job sent but API completed status update failed', {
+        jobId,
+        error: error.message
+      });
+      jobService.updateJobLocally(jobId, { _status: 'completed' });
     }
   }
 

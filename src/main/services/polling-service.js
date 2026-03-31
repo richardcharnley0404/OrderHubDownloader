@@ -425,6 +425,10 @@ class PollingService {
       // 1. New routing-system DPOF controllers
       const orderControllers = routingService.getControllers();
       for (const c of orderControllers) {
+        if (c.checkOrderStatus === false) {
+          logger.info('Hot folder monitor skipped — checkOrderStatus disabled', { controller: c.name, id: c.id });
+          continue;
+        }
         if (c.outputPath) {
           monitorTargets.set(c.id, { id: c.id, name: c.name, folderPath: c.outputPath });
         } else {
@@ -518,7 +522,16 @@ class PollingService {
         _dpofAccepted: true,
         _dpofAcceptedAt: timestamp.toISOString()
       });
-      logger.info('Job DPOF accepted by printer', { jobId: job.id, orderNumber });
+      logger.info('Job DPOF accepted by printer — auto-marking as processed', { jobId: job.id, orderNumber });
+      jobService.markCompleted(job.id)
+        .then(() => this._notifyJobsUpdated())
+        .catch(err => {
+          logger.logWarning('DPOF auto-complete API call failed — updating locally', {
+            jobId: job.id, error: err.message,
+          });
+          jobService.updateJobLocally(job.id, { _status: 'completed' });
+          this._notifyJobsUpdated();
+        });
     } else if (status === 'failed') {
       jobService.updateJobLocally(job.id, {
         _dpofFailed: true,

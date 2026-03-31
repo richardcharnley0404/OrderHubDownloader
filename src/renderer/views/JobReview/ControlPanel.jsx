@@ -225,6 +225,8 @@ function enhBtnStyle(variant) {
 
 function EnhancementPanel({ selected, jobId, jobPath, onRefreshSidecar }) {
   const [hasKey,          setHasKey]          = useState(false);
+  const [provider,        setProvider]        = useState('replicate');
+  const [autoEnhance,     setAutoEnhance]     = useState(false);
   const [model,           setModel]           = useState('Standard V2');
   const [faceEnhancement, setFaceEnhancement] = useState(false);
   const [phase,           setPhase]           = useState('idle'); // 'idle' | 'processing' | 'error'
@@ -237,11 +239,13 @@ function EnhancementPanel({ selected, jobId, jobPath, onRefreshSidecar }) {
     window.electronAPI.getConfig()
       .then(cfg => {
         // hasKey is true if the configured provider has a key set
-        const provider = cfg.enhancementProvider || 'replicate';
-        const key      = provider === 'topaz' ? cfg.topazApiKey : cfg.replicateApiKey;
+        const p   = cfg.enhancementProvider || 'replicate';
+        const key = p === 'topaz' ? cfg.topazApiKey : cfg.replicateApiKey;
         setHasKey(Boolean(key));
+        setProvider(p);
+        setAutoEnhance(Boolean(cfg.autoEnhance));
         // Default model comes from whichever provider is active
-        const defaultModel = provider === 'topaz'
+        const defaultModel = p === 'topaz'
           ? (cfg.topazDefaultModel        || 'Standard V2')
           : (cfg.enhancementDefaultModel  || 'Standard V2');
         setModel(defaultModel);
@@ -257,6 +261,14 @@ function EnhancementPanel({ selected, jobId, jobPath, onRefreshSidecar }) {
     setPhase('idle');
     setPredictionId(null);
     setError(null);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filename]);
+
+  // Auto-enhance: trigger when image changes if enabled and not already enhanced
+  useEffect(() => {
+    if (autoEnhance && hasKey && filename && !selected?.enhanced && phase === 'idle') {
+      handleRun();
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filename]);
 
@@ -339,7 +351,7 @@ function EnhancementPanel({ selected, jobId, jobPath, onRefreshSidecar }) {
           borderRadius: 5, padding: '12px 14px',
         }}>
           <div style={{ fontSize: 11, color: TEXT_MUTED, marginBottom: 10, lineHeight: 1.5 }}>
-            Configure a Replicate API key in Settings to enable AI upscaling.
+            Configure {provider === 'topaz' ? 'a Topaz' : 'a Replicate'} API key in Settings to enable AI {provider === 'topaz' ? 'enhancement' : 'upscaling'}.
           </div>
           <button
             onClick={() => {
@@ -373,7 +385,7 @@ function EnhancementPanel({ selected, jobId, jobPath, onRefreshSidecar }) {
           borderRadius: 5, padding: '12px 14px',
         }}>
           <div style={{ fontSize: 12, color: '#7ec8e3', fontWeight: 600, marginBottom: 4 }}>
-            ⟳ Enhancing via Topaz...
+            ⟳ Enhancing via {provider === 'topaz' ? 'Topaz' : 'Replicate'}...
           </div>
           <div style={{
             fontSize: 10, color: TEXT_MUTED,
@@ -399,7 +411,7 @@ function EnhancementPanel({ selected, jobId, jobPath, onRefreshSidecar }) {
           borderRadius: 5, padding: '12px 14px',
         }}>
           <div style={{ fontSize: 12, color: PURPLE_AI, fontWeight: 600, marginBottom: 2 }}>
-            ✓ Enhanced via Topaz
+            ✓ Enhanced via {selected.enhancementSource === 'topaz-direct' ? 'Topaz' : 'Replicate'}
           </div>
           <div style={{
             fontSize: 10, color: TEXT_MUTED,

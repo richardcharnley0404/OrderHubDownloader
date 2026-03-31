@@ -161,7 +161,8 @@ async function enhanceImage(jobId, jobPath, filename, options = {}) {
       model:            options.model           || configService.get('topazDefaultModel') || 'Standard V2',
       face_enhancement: Boolean(options.faceEnhancement),
     }, apiKey);
-    await updateSidecarEnhancement(jobId, jobPath, filename, cachePath, options.model, 'Topaz Direct');
+    await fs.copyFile(cachePath, path.join(jobPath, 'working', filename));
+    await updateSidecarEnhancement(jobId, jobPath, filename, cachePath, options.model, 'topaz-direct');
   } else {
     const apiKey    = requireReplicateApiKey();
     const inputPath = path.join(jobPath, 'working', filename);
@@ -216,7 +217,8 @@ async function startEnhancement(jobId, jobPath, filename, options = {}) {
       face_enhancement: Boolean(options.faceEnhancement),
     }, apiKey)
       .then(async () => {
-        await updateSidecarEnhancement(jobId, jobPath, filename, cachePath, model, 'Topaz Direct');
+        await fs.copyFile(cachePath, path.join(jobPath, 'working', filename));
+        await updateSidecarEnhancement(jobId, jobPath, filename, cachePath, model, 'topaz-direct');
         topazJobs.set(syntheticId, { status: 'succeeded', outputPath: cachePath });
       })
       .catch(err => {

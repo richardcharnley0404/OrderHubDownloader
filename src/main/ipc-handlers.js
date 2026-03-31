@@ -75,6 +75,8 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
       }
 
       logger.info('Configuration saved successfully');
+      // A changed default folder may unblock previously-unrouted jobs
+      runAutoPrint().catch(err => logger.logError('[auto-print] post-config-save check failed', err));
       return savedConfig;
     } catch (error) {
       logger.logError('Error saving config', error);
@@ -292,8 +294,24 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
   });
 
   // Refresh jobs from API
+  // Sync in_production jobs against OH and push jobs:updated if any were auto-completed
+  async function syncAndNotify() {
+    try {
+      const count = await jobService.syncInProductionFromOH();
+      if (count > 0 && windowManager) {
+        const win = windowManager.getWindow();
+        if (win && !win.isDestroyed()) {
+          win.webContents.send('jobs:updated', jobService.getLocalJobs());
+        }
+      }
+    } catch (err) {
+      logger.logWarning('[sync] syncAndNotify error', { error: err.message });
+    }
+  }
+
   ipcMain.handle('jobs:refresh', async () => {
     try {
+      await syncAndNotify();
       const jobs = await jobService.fetchJobs();
       return { jobs, lastFetchTime: jobService.lastFetchTime };
     } catch (error) {
@@ -872,9 +890,21 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
   ipcMain.handle('ohd:routing:save-process-mapping', async (event, mapping) => {
     try {
       routingService.saveProcessMapping(mapping);
+      // A changed process→controller mapping may unblock previously-unrouted jobs
+      runAutoPrint().catch(err => logger.logError('[auto-print] post-process-mapping check failed', err));
       return { success: true };
     } catch (error) {
       logger.logError('ohd:routing:save-process-mapping error', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('ohd:routing:delete-process-mapping', async (event, { process }) => {
+    try {
+      routingService.deleteProcessMapping(process);
+      return { success: true };
+    } catch (error) {
+      logger.logError('ohd:routing:delete-process-mapping error', error);
       return { success: false, error: error.message };
     }
   });
@@ -1017,6 +1047,7 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
    * quantity rather than defaulting to 1.
    */
   ipcMain.handle('ohd:job:load', async (event, { jobId, jobPath }) => {
+    console.log('[job:load] jobPath received:', jobPath);
     try {
       // First-run setup: if images sit in the job root (no /working/ yet),
       // copy them into /working/ and /originals/ before loadSidecar runs.
@@ -1281,6 +1312,13 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
   // resume each time a job is successfully sent to a DPOF controller.
   startStatusPolling(windowManager);
 
+  // OH→OHD background sync: wait 30 s for the app to settle, then run once,
+  // then repeat every 5 minutes.
+  setTimeout(async () => {
+    await syncAndNotify();
+    setInterval(syncAndNotify, 5 * 60 * 1000);
+  }, 30000);
+
   logger.info('IPC handlers registered');
 }
 
@@ -1413,20 +1451,54 @@ function stopStatusPolling() {
 
 let _autoPrintWindowManager = null;
 
+let _autoPrintRunning = false;
+
 async function runAutoPrint() {
+  if (_autoPrintRunning) return;
+  _autoPrintRunning = true;
   try {
     const { jobs } = jobService.getLocalJobs();
     const controllers = routingService.getControllers();
 
+    const daysBack = configService.get('jobDateRange') ?? 30;
     const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - 30);
+    cutoff.setDate(cutoff.getDate() - daysBack);
 
     for (const job of jobs) {
       if (job._status !== 'received' && job._status !== 'pending') continue;
       if (job.created_at && new Date(job.created_at) < cutoff) continue;
 
       const route = routingService.resolveRoute(job);
-      if (route.type !== 'controller') continue;
+
+      // --- NEW: default-folder / process-folder dispatch ---
+      if (route.type === 'default-folder' || route.type === 'process-folder') {
+        const labelName = route.type === 'default-folder' ? 'Default Folder' : 'Process Folder';
+        let result;
+        try {
+          result = await printService._sendViaFolderCopyRouted(job, {
+            outputPath:     route.folderPath,
+            controllerName: labelName,
+          });
+        } catch (err) {
+          logger.logError('[auto-print] Folder copy failed for job ' + job.id, err, { jobId: job.id });
+          continue;
+        }
+        if (result.success) {
+          logger.info(`[auto-print] No controller for process "${job.process}" — copied to ${labelName}: ${route.folderPath}`, { jobId: job.id });
+          if (_autoPrintWindowManager) {
+            const mainWindow = _autoPrintWindowManager.getWindow();
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('jobs:updated', jobService.getLocalJobs());
+            }
+          }
+        } else {
+          logger.logError('[auto-print] Folder copy returned failure for job ' + job.id, null, { jobId: job.id, error: result.error });
+        }
+        continue;
+      }
+      // --- END NEW ---
+
+      if (route.type !== 'controller') continue; // unrouted — skip silently
 
       const ctrl = controllers.find(c => c.id === route.controllerId);
       if (!ctrl || !ctrl.autoprint) continue;
@@ -1481,6 +1553,8 @@ async function runAutoPrint() {
     }
   } catch (err) {
     logger.logError('[auto-print] runAutoPrint error', err);
+  } finally {
+    _autoPrintRunning = false;
   }
 }
 

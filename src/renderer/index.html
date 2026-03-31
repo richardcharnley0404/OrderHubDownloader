@@ -49,8 +49,8 @@
       <div class="tab-panel active" id="panel-jobs">
         <div class="jobs-toolbar">
           <div class="jobs-filter-bar">
-            <button type="button" class="jobs-filter active" data-filter="awaiting">Awaiting Production</button>
-            <button type="button" class="jobs-filter" data-filter="printed">Printed</button>
+            <button type="button" class="jobs-filter active" data-filter="awaiting">Awaiting Processing</button>
+            <button type="button" class="jobs-filter" data-filter="printed">Processed</button>
             <button type="button" class="jobs-filter" data-filter="all">All Jobs</button>
             <button type="button" class="jobs-filter" data-filter="dismissed" id="dismissedFilterBtn">Dismissed</button>
           </div>
@@ -250,7 +250,7 @@
 
             <fieldset class="panel-section">
               <legend>Process Folders</legend>
-              <p class="section-desc">Route jobs to different folders based on process type. The default folder is used for any unmapped process.</p>
+              <p class="section-desc">Jobs whose process type is not assigned to a controller in Routing are automatically copied here. No warning — just copy and mark as sent.</p>
 
               <div class="form-group">
                 <label for="processFolderPath">Default Folder</label>
@@ -260,12 +260,6 @@
                   <button type="button" id="selectProcessFolderBtn" class="btn-browse">Browse...</button>
                 </div>
               </div>
-
-              <div id="processMappingsList" class="process-mappings-list">
-                <!-- Rows added dynamically by renderer.js -->
-              </div>
-
-              <button type="button" id="addProcessMappingBtn" class="btn-secondary btn-add-mapping">+ Add Process Mapping</button>
             </fieldset>
 
             <fieldset class="panel-section">
@@ -509,11 +503,13 @@
             <!-- Section 2: Process Routing -->
             <fieldset class="panel-section">
               <legend>Process Routing</legend>
-              <p class="section-desc">Assign each Process type to an Order Controller. Jobs with no controller assigned will wait until configured. Process values are auto-discovered from received jobs.</p>
+              <p class="section-desc">Assign each Process type to an Order Controller. Process values are auto-discovered from received jobs.</p>
 
               <div id="processRoutingList">
                 <!-- Rendered by renderer.js -->
               </div>
+
+              <p class="routing-fallback-note">Processes not listed here will be copied to the default folder.</p>
 
               <button type="button" id="addProcessTypeBtn" class="btn-secondary btn-add-mapping" style="margin-top:10px">+ Add Process Type</button>
               <div id="addProcessTypeForm" style="display:none;align-items:center;gap:8px;margin-top:8px;">
@@ -801,6 +797,13 @@
         <label class="modal-checkbox">
           <input type="checkbox" id="ocAutoPrint">
           <span>Auto Print — Send jobs to print automatically</span>
+        </label>
+      </div>
+
+      <div class="form-group" id="ocCheckOrderStatusGroup">
+        <label class="modal-checkbox">
+          <input type="checkbox" id="ocCheckOrderStatus" checked>
+          <span>Check Order Status — Monitor hot folder for printer acceptance/rejection after dispatch. If unticked, the job is assumed received and marked as Processed immediately.</span>
         </label>
       </div>
 

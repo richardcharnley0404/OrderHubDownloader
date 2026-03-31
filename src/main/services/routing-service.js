@@ -56,17 +56,36 @@ function resolveRoute(job) {
   // Trim whitespace AND strip any surrounding quote characters that the API
   // may embed in the process field value (e.g. "\"Lab\"" → "Lab").
   const processCleaned = (process || '').trim().replace(/^"|"$/g, '');
+
+  console.log('[resolveRoute] job process raw:', JSON.stringify(job.process));
+  console.log('[resolveRoute] job process cleaned:', JSON.stringify(processCleaned));
+  console.log('[resolveRoute] stored mapping processes:', processMap.map(m => JSON.stringify((m.process || '').trim().replace(/^"|"$/g, ''))));
+
   const processMapping = processMap.find(
-    m => (m.process || '').trim().replace(/^"|"$/g, '') === processCleaned
+    m => (m.process || '').trim().replace(/^"|"$/g, '').toLowerCase() === processCleaned.toLowerCase()
   );
+
+  console.log('[resolveRoute] processMapping found:', processMapping ? 'YES' : 'NO');
+
+  // Helper: resolve to the default folder if one is configured, or mark truly unrouted.
+  const defaultFolderFallback = () => {
+    const defaultFolder = (store.get('processFolderPath') || '').trim();
+    if (defaultFolder) return { type: 'default-folder', folderPath: defaultFolder };
+    return { type: 'unrouted', reason: 'no-default-folder' };
+  };
+
   if (!processMapping) {
-    return { type: 'unrouted', reason: 'no-controller' };
+    return defaultFolderFallback();
   }
 
   const controllers = store.get('orderControllers', []);
   const controller  = controllers.find(c => c.id === processMapping.controllerId);
+
+  console.log('[resolveRoute] controllerId from mapping:', processMapping?.controllerId);
+  console.log('[resolveRoute] controller found:', controller ? 'YES' : 'NO');
+
   if (!controller) {
-    return { type: 'unrouted', reason: 'no-controller' };
+    return defaultFolderFallback();
   }
 
   // ── PDF-copy controllers skip Layer 3 (no channel mapping needed) ────────
@@ -79,22 +98,24 @@ function resolveRoute(job) {
       outputPath:     controller.outputPath,
       channelNumber:  null,
       printSizeCode:  null,
-      bannerSheet:    controller.bannerSheet || false,
-      pdfPipeline:    controller.pdfPipeline || null,
+      bannerSheet:      controller.bannerSheet || false,
+      pdfPipeline:      controller.pdfPipeline || null,
+      checkOrderStatus: controller.checkOrderStatus !== false,
     };
   }
 
   // ── Folder-copy and Darkroom Pro controllers skip Layer 3 (no channel mapping needed) ─────
   if (controller.type === 'folder_copy' || controller.type === 'darkroompro') {
     return {
-      type:           'controller',
-      controllerType: controller.type,
-      controllerId:   controller.id,
-      controllerName: controller.name,
-      outputPath:     controller.outputPath,
-      channelNumber:  null,
-      printSizeCode:  null,
-      bannerSheet:    false,
+      type:             'controller',
+      controllerType:   controller.type,
+      controllerId:     controller.id,
+      controllerName:   controller.name,
+      outputPath:       controller.outputPath,
+      channelNumber:    null,
+      printSizeCode:    null,
+      bannerSheet:      false,
+      checkOrderStatus: controller.checkOrderStatus !== false,
     };
   }
 
@@ -121,8 +142,9 @@ function resolveRoute(job) {
     outputPath:     controller.outputPath,
     channelNumber:  channelMapping.channelNumber,
     printSizeCode,
-    bannerSheet:    controller.bannerSheet || false,
-    skipAutoPrint:  channelMapping.skipAutoPrint || false,
+    bannerSheet:      controller.bannerSheet || false,
+    skipAutoPrint:    channelMapping.skipAutoPrint || false,
+    checkOrderStatus: controller.checkOrderStatus !== false,
   };
 }
 
@@ -183,6 +205,11 @@ function saveProcessMapping(mapping) {
     mappings.push(cleanedMapping);
   }
   store.set('processControllerMappings', mappings);
+}
+
+function deleteProcessMapping(process) {
+  const mappings = store.get('processControllerMappings', []);
+  store.set('processControllerMappings', mappings.filter(m => m.process !== process));
 }
 
 // -- Channel Mappings ---------------------------------------------------------
@@ -341,6 +368,7 @@ module.exports = {
   // Process mappings
   getProcessMappings,
   saveProcessMapping,
+  deleteProcessMapping,
   // Channel mappings
   getChannelMappings,
   saveChannelMapping,

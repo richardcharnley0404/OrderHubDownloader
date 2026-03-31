@@ -107,15 +107,15 @@ class ProcessFolderService {
       return { success: false, error: `Copy failed: ${err.message}` };
     }
 
-    // Mark as in_production immediately — no p/o/q/e lifecycle for process-folder jobs.
+    // Mark as completed immediately — no p/o/q/e lifecycle for process-folder jobs.
     try {
-      await jobService.markInProduction(job.id);
+      await jobService.markCompleted(job.id);
     } catch (err) {
       logger.logWarning('Process folder job sent but API status update failed', {
         jobId: job.id,
         error: err.message,
       });
-      jobService.updateJobLocally(job.id, { _status: 'in_production' });
+      jobService.updateJobLocally(job.id, { _status: 'completed' });
     }
 
     return { success: true, folderPath: destPath };

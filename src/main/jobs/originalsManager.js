@@ -66,69 +66,78 @@ const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.tif', '.tiff']);
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/**
- * First-run setup for a job that was downloaded directly into its root folder.
- *
- * OHD's FTP polling places image files directly in the job root rather than
- * in a /working/ sub-folder.  On the first Review Panel open we need to
- * create the expected folder structure before loadSidecar runs.
- *
- * Behaviour:
- *   - If /working/ already exists → no-op (safe to call on every open).
- *   - If /working/ does not exist:
- *       1. Scan the job root for recognised image files.
- *       2. Create /working/ and /originals/.
- *       3. Copy every found image into BOTH sub-folders.
- *
- * After this call, loadSidecar will find images in /working/ and
- * ensureOriginals() becomes a no-op because /originals/ is already populated.
- *
- * @param {string} jobPath - Root folder of the job
- * @returns {Promise<void>}
- */
+// ─── HELPER ───────────────────────────────────────────────────────────────
+async function copyFileWithRetry(src, dest, attempts = 3, delayMs = 500) {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      await fs.copyFile(src, dest);
+      return;
+    } catch (err) {
+      const isLast = i === attempts - 1;
+      const isTransient = ['ECANCELED', 'EBUSY', 'ETIMEDOUT', 'ECONNRESET'].includes(err.code);
+      if (isLast || !isTransient) {
+        err.message = `Failed to copy ${path.basename(src)} after ${i + 1} attempt(s): ${err.message}`;
+        throw err;
+      }
+      console.warn(`[originalsManager] copyFile attempt ${i + 1} failed (${err.code}), retrying in ${delayMs * (i + 1)}ms...`);
+      await new Promise(resolve => setTimeout(resolve, delayMs * (i + 1)));
+    }
+  }
+}
+
+// ─── UPDATED ensureWorkingSetup ───────────────────────────────────────────
 async function ensureWorkingSetup(jobPath) {
-  // No-op if /working/ already exists.
+  const workingDir   = path.join(jobPath, 'working');
+  const originalsDir = path.join(jobPath, 'originals');
+
+  console.log('[ensureWorkingSetup] called with:', jobPath);
+  console.log('[ensureWorkingSetup] workingDir:', workingDir);
+
+  // Check if working/ already contains at least one image — if so, already initialised
   try {
-    await fs.access(workingDir(jobPath));
-    return;
+    const existing  = await fs.readdir(workingDir);
+    console.log('[ensureWorkingSetup] working/ contents:', existing);
+    const hasImages = existing.some(f => /\.(jpg|jpeg|png|tif|tiff)$/i.test(f));
+    if (hasImages) return; // already healthy, nothing to do
   } catch {
-    // /working/ does not exist — proceed with first-run setup.
+    // working/ doesn't exist — fall through to create it
   }
 
-  // Scan the job root for image files.
-  let entries;
-  try {
-    entries = await fs.readdir(jobPath, { withFileTypes: true });
-  } catch (err) {
-    if (err.code === 'ENOENT') return; // Job root doesn't exist — nothing to do.
-    throw err;
+  // Create working/ and originals/ if needed (safe if already exists)
+  await fs.mkdir(workingDir,   { recursive: true });
+  await fs.mkdir(originalsDir, { recursive: true });
+
+  // Find all images in the job root
+  const jobRootFiles = await fs.readdir(jobPath);
+  console.log('[ensureWorkingSetup] job root contents:', jobRootFiles);
+  const imageFiles   = jobRootFiles.filter(f => /\.(jpg|jpeg|png|tif|tiff)$/i.test(f));
+  console.log('[ensureWorkingSetup] imageFiles found:', imageFiles);
+
+  if (imageFiles.length === 0) {
+    console.warn(`[originalsManager] No images found in job root: ${jobPath}`);
+    return;
   }
 
-  const imageFiles = entries.filter(
-    e => e.isFile() && IMAGE_EXTENSIONS.has(path.extname(e.name).toLowerCase())
-  );
+  // Copy each image into both working/ and originals/ with retry
+  const errors = [];
+  for (const filename of imageFiles) {
+    const src = path.join(jobPath, filename);
+    try {
+      await copyFileWithRetry(src, path.join(workingDir,   filename));
+      await copyFileWithRetry(src, path.join(originalsDir, filename));
+    } catch (err) {
+      console.error(`[originalsManager] ${err.message}`);
+      errors.push(filename);
+    }
+  }
 
-  if (imageFiles.length === 0) return; // No images in root — nothing to set up.
-
-  // Create /working/ and /originals/ in parallel.
-  await Promise.all([
-    fs.mkdir(workingDir(jobPath),    { recursive: true }),
-    fs.mkdir(originalsDir(jobPath),  { recursive: true }),
-  ]);
-
-  // Copy each image into both sub-folders.
-  await Promise.all(
-    imageFiles.flatMap(e => [
-      fs.copyFile(
-        path.join(jobPath, e.name),
-        path.join(workingDir(jobPath),   e.name),
-      ),
-      fs.copyFile(
-        path.join(jobPath, e.name),
-        path.join(originalsDir(jobPath), e.name),
-      ),
-    ])
-  );
+  if (errors.length > 0) {
+    // Partial failure — log clearly but don't throw, so Job Review can
+    // still open with whatever images did copy successfully
+    console.error(`[originalsManager] ${errors.length} image(s) failed to copy: ${errors.join(', ')}`);
+  } else {
+    console.log(`[originalsManager] Initialised working/ and originals/ for ${path.basename(jobPath)} (${imageFiles.length} image(s))`);
+  }
 }
 
 /**
