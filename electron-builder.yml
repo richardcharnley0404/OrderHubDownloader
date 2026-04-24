@@ -6,6 +6,15 @@ directories:
   output: dist
   buildResources: assets
 
+# Ship the ONNX orientation model alongside the app.
+# asarUnpack is mandatory: onnxruntime-node loads the model by filesystem
+# path and cannot read from inside an asar archive.
+extraResources:
+  - from: resources/models
+    to: models
+asarUnpack:
+  - resources/models/**
+
 win:
   target:
     - target: nsis

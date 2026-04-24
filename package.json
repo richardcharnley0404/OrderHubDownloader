@@ -30,6 +30,7 @@
     "electron-updater": "^6.3.0",
     "fast-xml-parser": "^5.4.1",
     "mime-types": "^2.1.35",
+    "onnxruntime-node": "^1.20.0",
     "pdf-lib": "^1.17.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
@@ -45,25 +46,5 @@
   },
   "overrides": {
     "fast-xml-parser": "^5.4.1"
-  },
-  "build": {
-    "appId": "com.pixfizz.orderhub-downloader",
-    "productName": "OrderHub Downloader",
-    "directories": {
-      "output": "dist"
-    },
-    "files": [
-      "src/**/*",
-      "assets/**/*",
-      "package.json"
-    ],
-    "win": {
-      "target": "nsis",
-      "icon": "assets/icon.ico"
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true
-    }
   }
 }

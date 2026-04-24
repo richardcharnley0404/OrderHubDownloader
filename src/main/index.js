@@ -5,6 +5,7 @@ const { setupIpcHandlers } = require('./ipc-handlers');
 const pollingService = require('./services/polling-service');
 const ftpService = require('./services/ftp-service');
 const configService = require('./services/config-service');
+const orientationService = require('./services/orientation-service');
 const logger = require('./services/logger');
 const updater = require('./updater');
 
@@ -50,6 +51,21 @@ if (!gotTheLock) {
       }
     }
 
+    // Film Scan AI Rotation (PW-007 Phase 1) — warm the ONNX orientation
+    // service at startup when the feature flag is ON. init() is idempotent
+    // and flag-gated internally, so calling it unconditionally is safe and
+    // becomes a no-op when the flag is OFF. Fire-and-forget: boot must not
+    // block on model loading (in Milestone 2 this will load ~77 MB of ONNX).
+    orientationService.init()
+      .then((ready) => {
+        if (ready) {
+          logger.info('[orientation] service warmed at startup');
+        }
+      })
+      .catch((err) => {
+        logger.logError('[orientation] startup init threw — feature will stay off at runtime', err);
+      });
+
     // Update tray status periodically
     setInterval(() => {
       trayManager.updateStatus();
@@ -79,6 +95,12 @@ if (!gotTheLock) {
     if (pollingService.isRunning()) {
       pollingService.stop();
     }
+
+    // Release the ONNX inference session (no-op in the Milestone 1 skeleton).
+    // Fire-and-forget - we don't want a slow .release() blocking app shutdown.
+    try {
+      orientationService.shutdown().catch(() => { /* ignored */ });
+    } catch (_) { /* ignored */ }
 
     // Allow window to close
     const mainWindow = windowManager.getWindow();

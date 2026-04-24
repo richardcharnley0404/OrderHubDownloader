@@ -102,6 +102,25 @@ const schema = {
     minimum: 1,
     maximum: 60
   },
+  // Film Scan AI Rotation (PW-007 Phase 1) — flag-gated, default OFF
+  filmScanRotationEnabled: {
+    type: 'boolean',
+    default: false
+  },
+  filmScanRotationConfidenceThreshold: {
+    type: 'number',
+    default: 0.9,
+    minimum: 0,
+    maximum: 1
+  },
+  filmScanRotationModelPath: {
+    type: 'string',
+    default: ''        // empty = use bundled default in resources/models/orientation/
+  },
+  filmScanRotationDebugLog: {
+    type: 'boolean',
+    default: false
+  },
   // File Uploads (Mode 3)
   fileUploadsEnabled: {
     type: 'boolean',
@@ -256,6 +275,11 @@ class ConfigService {
       filmScansStorageFolder: this.store.get('filmScansStorageFolder'),
       filmScansAutoSyncMinutes: this.store.get('filmScansAutoSyncMinutes'),
       filmScansWatchguardMinutes: this.store.get('filmScansWatchguardMinutes'),
+      // Film Scan AI Rotation
+      filmScanRotationEnabled: this.store.get('filmScanRotationEnabled'),
+      filmScanRotationConfidenceThreshold: this.store.get('filmScanRotationConfidenceThreshold'),
+      filmScanRotationModelPath: this.store.get('filmScanRotationModelPath'),
+      filmScanRotationDebugLog: this.store.get('filmScanRotationDebugLog'),
       // File Uploads
       fileUploadsEnabled: this.store.get('fileUploadsEnabled'),
       fileUploadsWatchFolder: this.store.get('fileUploadsWatchFolder'),
@@ -391,6 +415,15 @@ class ConfigService {
     if (!isNaN(filmWatchguard) && filmWatchguard >= 1 && filmWatchguard <= 60) {
       this.store.set('filmScansWatchguardMinutes', filmWatchguard);
     }
+
+    // Save Film Scan AI Rotation settings
+    this.store.set('filmScanRotationEnabled', Boolean(config.filmScanRotationEnabled));
+    const confThreshold = parseFloat(config.filmScanRotationConfidenceThreshold);
+    if (!isNaN(confThreshold) && confThreshold >= 0 && confThreshold <= 1) {
+      this.store.set('filmScanRotationConfidenceThreshold', confThreshold);
+    }
+    this.store.set('filmScanRotationModelPath', (config.filmScanRotationModelPath || '').trim());
+    this.store.set('filmScanRotationDebugLog', Boolean(config.filmScanRotationDebugLog));
 
     // Save File Uploads settings
     this.store.set('fileUploadsEnabled', Boolean(config.fileUploadsEnabled));

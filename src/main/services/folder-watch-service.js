@@ -30,20 +30,6 @@ class FolderWatchService {
     return this.lastSummary.fileUploads;
   }
 
-  /**
-   * Film Scans processing:
-   * 1. Wait for folder stability
-   * 2. Copy folder from watch → storage/{MMDDYYYY}/{folderName}
-   * 3. Delete folder from watch
-   * 4. Upload from storage → S3 (path: film-scans/{locationId}/{folderName}/...)
-   *
-   * The date subfolder (MMDDYYYY) is derived from the system clock at the
-   * moment each folder is processed. If a folder with the same name already
-   * exists under today's date subfolder, a numeric suffix (_1, _2, …) is
-   * appended to avoid silent overwrites.
-   *
-   * No upload tracker — duplicate folder names are expected over time.
-   */
   async _processFilmScans(config) {
     if (this._filmScanProcessing) {
       logger.info('filmScans: previous processing still running, skipping this cycle');
@@ -68,7 +54,6 @@ class FolderWatchService {
         return summary;
       }
 
-      // Build S3 prefix using locationId
       const s3Prefix = `film-scans/${locationId}/`;
 
       try {
@@ -84,14 +69,10 @@ class FolderWatchService {
           }
 
           try {
-            // Build date-based subfolder (MMDDYYYY) from the current system clock.
-            // mkdirSync with recursive:true is a no-op if the folder already exists.
             const dateSubfolder = this._getDateSubfolder();
             const dateStorageDir = path.join(storageFolder, dateSubfolder);
             fs.mkdirSync(dateStorageDir, { recursive: true });
 
-            // Resolve the final destination, adding _1/_2/… if a same-name folder
-            // already exists under today's date subfolder.
             const storagePath = this._resolveStoragePath(dateStorageDir, folder.name);
 
             // Step 1: Copy to permanent storage
@@ -102,10 +83,107 @@ class FolderWatchService {
             this._deleteFolderRecursive(watchPath);
             logger.info(`filmScans: deleted ${folder.name} from watch folder`);
 
+            // Step 2a.5: Film Scan AI Rotation (PW-007 Phase 1, feature-flag gated).
+            // MILESTONE 1 NOTE: orientation-service is a skeleton - predictOrientation()
+            // always returns class 0 / angle 0, so no TIFF is actually rotated even
+            // with the flag ON. Wrapped in try/catch so failures never break the pipeline.
+            if (config.filmScanRotationEnabled) {
+              try {
+                const orientationService = require('./orientation-service');
+                const frameMetadataStore = require('./frame-metadata-store');
+                const sharpRot = require('sharp');
+
+                const ready = await orientationService.init();
+                if (!ready) {
+                  logger.info('filmScans: orientation service not ready - skipping rotation step for this folder');
+                } else {
+                  const rollId    = path.basename(storagePath);
+                  const threshold = typeof config.filmScanRotationConfidenceThreshold === 'number'
+                    ? config.filmScanRotationConfidenceThreshold
+                    : 0.9;
+                  const modelVersion = orientationService.getModelVersion();
+
+                  const tiffFiles = fs.readdirSync(storagePath)
+                    .filter(f => {
+                      const ext = path.extname(f).toLowerCase();
+                      return ext === '.tif' || ext === '.tiff';
+                    })
+                    .sort();
+
+                  for (let frameIndex = 0; frameIndex < tiffFiles.length; frameIndex++) {
+                    const tiffFile = tiffFiles[frameIndex];
+                    const tiffPath = path.join(storagePath, tiffFile);
+                    const frameId  = `${rollId}_${frameIndex}`;
+
+                    try {
+                      const prediction = await orientationService.predictOrientation(tiffPath);
+
+                      let applied = false;
+                      let rotationError = prediction.error;
+
+                      if (!prediction.error
+                          && prediction.predictedAngle > 0
+                          && prediction.confidence >= threshold) {
+                        const tmpPath = tiffPath + '.rot.tmp';
+                        try {
+                          await sharpRot(tiffPath).rotate(prediction.predictedAngle).toFile(tmpPath);
+                          fs.renameSync(tmpPath, tiffPath);
+                          applied = true;
+                          logger.info(`filmScans: rotated ${tiffFile} by ${prediction.predictedAngle} deg (confidence ${prediction.confidence.toFixed(3)})`);
+                        } catch (rotErr) {
+                          rotationError = rotErr.message || String(rotErr);
+                          logger.logError(`filmScans: failed to rotate ${tiffFile} - leaving original`, rotErr);
+                          try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch (_) { /* ignored */ }
+                        }
+                      }
+
+                      frameMetadataStore.record(frameId, {
+                        rollId,
+                        frameIndex,
+                        fileName: tiffFile,
+                        originalPath: tiffPath,
+                        rotation: {
+                          applied,
+                          predictedClass: prediction.predictedClass,
+                          predictedAngle: prediction.predictedAngle,
+                          confidence: prediction.confidence,
+                          classScores: prediction.classScores,
+                          confidenceThreshold: threshold,
+                          modelVersion,
+                          inferenceMs: prediction.inferenceMs,
+                          error: rotationError,
+                        },
+                        flags: {},
+                      });
+
+                      if (config.filmScanRotationDebugLog) {
+                        logger.info(`filmScans: frame ${frameId} -> class ${prediction.predictedClass} angle ${prediction.predictedAngle} conf ${prediction.confidence.toFixed(3)} applied=${applied}`);
+                      }
+                    } catch (frameErr) {
+                      logger.logError(`filmScans: orientation pipeline failed for ${tiffFile} - continuing`, frameErr);
+                      try {
+                        frameMetadataStore.record(frameId, {
+                          rollId,
+                          frameIndex,
+                          fileName: tiffFile,
+                          originalPath: tiffPath,
+                          rotation: {
+                            applied: false,
+                            modelVersion,
+                            error: frameErr.message || String(frameErr),
+                          },
+                          flags: {},
+                        });
+                      } catch (_) { /* ignored */ }
+                    }
+                  }
+                }
+              } catch (outerErr) {
+                logger.logError('filmScans: rotation step failed outright - continuing without rotation', outerErr);
+              }
+            }
+
             // Step 2b: Convert any TIFF files in storage to JPEG (quality 90).
-            // JPEGs are written alongside the originals and will be picked up
-            // automatically by the S3 upload in Step 3.
-            // Process sequentially — each TIFF can be ~140 MB decoded in memory.
             {
               const sharp = require('sharp');
               const tiffFiles = fs.readdirSync(storagePath).filter(f => {
@@ -118,9 +196,9 @@ class FolderWatchService {
                 const destPath = path.join(storagePath, jpgFile);
                 try {
                   await sharp(srcPath).jpeg({ quality: 90 }).toFile(destPath);
-                  logger.info(`filmScans: converted ${tiffFile} → ${jpgFile}`);
+                  logger.info(`filmScans: converted ${tiffFile} -> ${jpgFile}`);
                 } catch (convErr) {
-                  logger.logError(`filmScans: failed to convert ${tiffFile} to JPEG — skipping`, convErr);
+                  logger.logError(`filmScans: failed to convert ${tiffFile} to JPEG - skipping`, convErr);
                 }
               }
             }
@@ -134,8 +212,6 @@ class FolderWatchService {
                   logger.info(`filmScans: ${progress.message}`);
                 });
               } catch (uploadError) {
-                // uploadFolder should never throw after the outer try/catch added in s3-service,
-                // but guard here so a summary is still recorded if it somehow does.
                 const totalFiles = require('fs').readdirSync(storagePath).length;
                 logger.logError(`filmScans: uploadFolder threw unexpectedly for ${folder.name}`, uploadError);
                 result = { uploaded: 0, failed: totalFiles, total: totalFiles };
@@ -159,8 +235,6 @@ class FolderWatchService {
             logger.logError(`filmScans: error processing ${folder.name}`, error);
           }
 
-          // Process one folder per poll cycle — break after the first stable folder
-          // regardless of success or failure.
           break;
         }
       } catch (error) {
@@ -173,13 +247,6 @@ class FolderWatchService {
     }
   }
 
-  /**
-   * File Uploads processing (mirrors Film Scans):
-   * 1. Wait for folder stability (uses fileUploadsWatchguardMinutes)
-   * 2. Copy folder from watch → storage
-   * 3. Delete folder from watch
-   * 4. Upload from storage → S3 (path: media-uploads/{folderName}/...)
-   */
   async _processFileUploads(config) {
     const summary = { processed: 0, skipped: 0, failed: 0, errors: [] };
     const watchFolder = config.fileUploadsWatchFolder;
@@ -213,15 +280,12 @@ class FolderWatchService {
         try {
           const storagePath = path.join(storageFolder, folder.name);
 
-          // Step 1: Copy to permanent storage
           await this._copyFolder(watchPath, storagePath);
           logger.info(`fileUploads: copied ${folder.name} to storage`);
 
-          // Step 2: Delete from watch folder
           this._deleteFolderRecursive(watchPath);
           logger.info(`fileUploads: deleted ${folder.name} from watch folder`);
 
-          // Step 3: Upload from storage to S3
           const s3Config = this._buildS3Config(config, null);
           if (s3Config) {
             const result = await s3Service.uploadFolder(storagePath, s3Prefix, s3Config, (progress) => {
@@ -253,10 +317,6 @@ class FolderWatchService {
     return summary;
   }
 
-  /**
-   * Return today's date as a zero-padded MMDDYYYY string, e.g. "03112026".
-   * Uses the local system clock at call time.
-   */
   _getDateSubfolder() {
     const now  = new Date();
     const mm   = String(now.getMonth() + 1).padStart(2, '0');
@@ -265,11 +325,6 @@ class FolderWatchService {
     return `${mm}${dd}${yyyy}`;
   }
 
-  /**
-   * Return a conflict-free destination path under dateStorageDir for folderName.
-   * If {dateStorageDir}/{folderName} does not exist it is returned unchanged.
-   * Otherwise {folderName}_1, {folderName}_2, … are tried until a free name is found.
-   */
   _resolveStoragePath(dateStorageDir, folderName) {
     let candidate = path.join(dateStorageDir, folderName);
     if (!fs.existsSync(candidate)) return candidate;
@@ -289,7 +344,7 @@ class FolderWatchService {
   _checkAllFilesOlderThan(dirPath, cutoffMs) {
     try {
       const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-      if (entries.length === 0) return false; // empty folder not considered stable
+      if (entries.length === 0) return false;
 
       for (const entry of entries) {
         const fullPath = path.join(dirPath, entry.name);
@@ -297,10 +352,6 @@ class FolderWatchService {
           if (!this._checkAllFilesOlderThan(fullPath, cutoffMs)) return false;
         } else {
           const stat = fs.statSync(fullPath);
-          // Use the most recent of mtime and birthtime.
-          // mtime = last modification (preserved from source on copy).
-          // birthtime = when the file was created on THIS filesystem (i.e. when the copy started).
-          // This ensures old files freshly copied into the watch folder are detected as recent.
           const latestMs = Math.max(stat.mtimeMs, stat.birthtimeMs);
           if (latestMs > cutoffMs) return false;
         }
@@ -327,9 +378,6 @@ class FolderWatchService {
     }
   }
 
-  /**
-   * Recursively delete a folder and all its contents
-   */
   _deleteFolderRecursive(folderPath) {
     if (!fs.existsSync(folderPath)) return;
 
@@ -345,13 +393,6 @@ class FolderWatchService {
     fs.rmdirSync(folderPath);
   }
 
-  /**
-   * Build the S3 provider config object for the current config.
-   * For Pixfizz, no credentials are needed here — the presign service handles auth.
-   * @param {object} config - result of configService.getAll()
-   * @param {string|null} locationId - passed through for Pixfizz presign requests
-   * @returns {object|null}
-   */
   _buildS3Config(config, locationId) {
     if (!config.s3BucketName) {
       return null;
@@ -372,7 +413,6 @@ class FolderWatchService {
       };
     }
 
-    // Pixfizz — credentials are managed server-side via pre-signed URLs
     return {
       provider: 'pixfizz',
       bucketName: config.s3BucketName,
