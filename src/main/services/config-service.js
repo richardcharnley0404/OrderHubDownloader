@@ -416,14 +416,25 @@ class ConfigService {
       this.store.set('filmScansWatchguardMinutes', filmWatchguard);
     }
 
-    // Save Film Scan AI Rotation settings
-    this.store.set('filmScanRotationEnabled', Boolean(config.filmScanRotationEnabled));
-    const confThreshold = parseFloat(config.filmScanRotationConfidenceThreshold);
-    if (!isNaN(confThreshold) && confThreshold >= 0 && confThreshold <= 1) {
-      this.store.set('filmScanRotationConfidenceThreshold', confThreshold);
+    // Save Film Scan AI Rotation settings — these keys have no dedicated UI yet,
+    // so only write them when the caller explicitly passes them. Otherwise an
+    // unrelated settings save (e.g. from the Film Scans tab which doesn't know
+    // about these keys) would silently reset them to defaults (flag -> false, etc).
+    if (Object.prototype.hasOwnProperty.call(config, 'filmScanRotationEnabled')) {
+      this.store.set('filmScanRotationEnabled', Boolean(config.filmScanRotationEnabled));
     }
-    this.store.set('filmScanRotationModelPath', (config.filmScanRotationModelPath || '').trim());
-    this.store.set('filmScanRotationDebugLog', Boolean(config.filmScanRotationDebugLog));
+    if (Object.prototype.hasOwnProperty.call(config, 'filmScanRotationConfidenceThreshold')) {
+      const confThreshold = parseFloat(config.filmScanRotationConfidenceThreshold);
+      if (!isNaN(confThreshold) && confThreshold >= 0 && confThreshold <= 1) {
+        this.store.set('filmScanRotationConfidenceThreshold', confThreshold);
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(config, 'filmScanRotationModelPath')) {
+      this.store.set('filmScanRotationModelPath', (config.filmScanRotationModelPath || '').trim());
+    }
+    if (Object.prototype.hasOwnProperty.call(config, 'filmScanRotationDebugLog')) {
+      this.store.set('filmScanRotationDebugLog', Boolean(config.filmScanRotationDebugLog));
+    }
 
     // Save File Uploads settings
     this.store.set('fileUploadsEnabled', Boolean(config.fileUploadsEnabled));

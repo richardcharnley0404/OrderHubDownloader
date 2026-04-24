@@ -84,9 +84,8 @@ class FolderWatchService {
             logger.info(`filmScans: deleted ${folder.name} from watch folder`);
 
             // Step 2a.5: Film Scan AI Rotation (PW-007 Phase 1, feature-flag gated).
-            // MILESTONE 1 NOTE: orientation-service is a skeleton - predictOrientation()
-            // always returns class 0 / angle 0, so no TIFF is actually rotated even
-            // with the flag ON. Wrapped in try/catch so failures never break the pipeline.
+            // Uses ONNX EfficientNetV2-S orientation model; only rotates when confidence
+            // >= threshold. Wrapped in try/catch so failures never break the pipeline.
             if (config.filmScanRotationEnabled) {
               try {
                 const orientationService = require('./orientation-service');
@@ -126,7 +125,12 @@ class FolderWatchService {
                           && prediction.confidence >= threshold) {
                         const tmpPath = tiffPath + '.rot.tmp';
                         try {
-                          await sharpRot(tiffPath).rotate(prediction.predictedAngle).toFile(tmpPath);
+                          // Lossless TIFF output: LZW + horizontal predictor preserves full
+                          // fidelity of source scans (sharp's default is JPEG-in-TIFF q80, lossy).
+                          await sharpRot(tiffPath, { limitInputPixels: false })
+                            .rotate(prediction.predictedAngle)
+                            .tiff({ compression: 'lzw', predictor: 'horizontal' })
+                            .toFile(tmpPath);
                           fs.renameSync(tmpPath, tiffPath);
                           applied = true;
                           logger.info(`filmScans: rotated ${tiffFile} by ${prediction.predictedAngle} deg (confidence ${prediction.confidence.toFixed(3)})`);
