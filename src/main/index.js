@@ -6,6 +6,7 @@ const pollingService = require('./services/polling-service');
 const ftpService = require('./services/ftp-service');
 const configService = require('./services/config-service');
 const orientationService = require('./services/orientation-service');
+const aiInferenceClient = require('./services/ai-inference-client');
 const logger = require('./services/logger');
 const updater = require('./updater');
 
@@ -76,6 +77,7 @@ if (!gotTheLock) {
         logger.logError('[orientation] startup init threw — feature will stay off at runtime', err);
       });
 
+
     // Update tray status periodically
     setInterval(() => {
       trayManager.updateStatus();
@@ -106,10 +108,15 @@ if (!gotTheLock) {
       pollingService.stop();
     }
 
-    // Release the ONNX inference session (no-op in the Milestone 1 skeleton).
-    // Fire-and-forget - we don't want a slow .release() blocking app shutdown.
+    // Release the orientation-service handle and tear down the AI inference
+    // host (utilityProcess). Fire-and-forget — we don't want a slow shutdown
+    // blocking app quit. The host's own 2-second grace window will hard-kill
+    // it if it doesn't honour the shutdown message.
     try {
       orientationService.shutdown().catch(() => { /* ignored */ });
+    } catch (_) { /* ignored */ }
+    try {
+      aiInferenceClient.shutdown().catch(() => { /* ignored */ });
     } catch (_) { /* ignored */ }
 
     // Allow window to close

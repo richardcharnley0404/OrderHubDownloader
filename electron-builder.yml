@@ -21,7 +21,8 @@ win:
       arch:
         - x64
   icon: assets/icons/icon.ico
-  sign: scripts/sign.js
+  signtoolOptions:
+    sign: scripts/sign.js
 
 nsis:
   oneClick: false

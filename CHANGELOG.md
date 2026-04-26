@@ -1,3 +1,29 @@
+## v1.1.1 - 2026-04-26
+
+### Changed — ONNX inference moved to a dedicated utility process
+- **AI inference host** (`src/main/services/ai-inference-host.js`,
+  `src/main/services/ai-inference-client.js`,
+  `src/main/services/ai-inference-models/orientation-loader.js`).
+  The orientation model now loads and runs inside an Electron
+  `utilityProcess`, not the main Node process. Prediction results,
+  rotation behaviour, Film Review Panel display, and config schema are
+  unchanged from v1.1.0 — verified by parity check against historical
+  log timings (~870ms median per frame on the same hardware before and
+  after the move). The benefit is forward-looking: a future AI feature
+  (Quality Gate) cannot starve FTP polling, S3 uploads, or the renderer
+  by running long inferences, because they share this single host.
+- **Crash recovery.** If the inference host crashes once, it is
+  auto-restarted after a 250ms delay. A second crash within 30 seconds
+  trips a session-level kill-switch — AI features become unavailable
+  until OHD is restarted, but the rest of OHD continues running normally.
+- **Graceful shutdown.** `app.before-quit` now sends a typed shutdown
+  message to the host with a 2-second grace window before the host is
+  killed. No orphan utility-process leaks on quit.
+
+### Fixed
+- (electron-builder) `win.sign` moved under `win.signtoolOptions.sign`
+  to match electron-builder v26's renamed schema.
+
 ## v1.1.0 - 2026-04-26
 
 ### Added — Film Scan Auto-Rotation (PW-007)
