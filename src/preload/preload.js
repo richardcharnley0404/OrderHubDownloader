@@ -141,4 +141,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   filmReviewSetTweak:         (key, value)             => ipcRenderer.invoke('ohd:filmReview:set-tweak',  { key, value }),
   onFilmReviewRollProcessed:  (callback) =>
     ipcRenderer.on('ohd:filmReview:roll-processed', (event, data) => callback(data)),
+
+  // AI Quality Gate (v1.2.0)
+  aiQualityListHeldJobs:    ()                                => ipcRenderer.invoke('aiQuality:listHeldJobs'),
+  aiQualityGetJobQuality:   (jobId)                           => ipcRenderer.invoke('aiQuality:getJobQuality', jobId),
+  aiQualityReleaseJob:      (jobId, note)                     => ipcRenderer.invoke('aiQuality:releaseJob', { jobId, note }),
+  aiQualityApproveImage:    (jobId, filename, note)           => ipcRenderer.invoke('aiQuality:approveImage', { jobId, filename, note }),
+  onAiQualityJobHeld:       (callback) =>
+    ipcRenderer.on('aiQuality:jobHeld', (event, data) => callback(data)),
 });

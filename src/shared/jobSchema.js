@@ -58,6 +58,28 @@ function createImageEntry(filename, qty = 1) {
     enhancedPath:      null,   // absolute path to /cache/{baseName}_enhanced.jpg
     enhancedAt:        null,   // ISO 8601 timestamp of enhancement
     enhancementModel:  null,   // e.g. 'Standard V2'
+
+    // AI Quality Gate (v1.2.0) — written by ai-job-quality-orchestrator.js
+    // after each scoring pass. `scored: false` means scoring hasn't been
+    // attempted yet (or was skipped because the feature flag is OFF).
+    aiQuality: {
+      scored:               false,
+      score:                null,    // 0–100 (MUSIQ); null until scored
+      thresholdAtScoreTime: null,    // threshold in effect when scored
+      passed:               true,    // true if score >= threshold OR not scored
+      modelVersion:         null,    // e.g. 'musiq-spaq-v1.0.0'
+      inferenceMs:          null,
+      scoredAt:             null,    // ISO 8601 timestamp
+      error:                null,    // graceful-failure message; null on success
+      // Fixup history populated in M4. Empty array on Phase 1 / no-fixups runs.
+      fixupHistory:         [],
+      // Operator decision populated when operator overrides the gate.
+      operatorDecision:     {
+        kind:      'none',  // 'none' | 'fixed' | 'approved_as_is' | 'reverted'
+        decidedAt: null,
+        note:      null,
+      },
+    },
   };
 }
 

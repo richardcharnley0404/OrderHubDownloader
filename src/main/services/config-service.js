@@ -147,6 +147,38 @@ const schema = {
     type: 'boolean',
     default: false
   },
+  // AI Quality Gate (v1.2.0) — flag-gated, default OFF.
+  // When ON, every image in every Mode-1 job is scored by MUSIQ before the
+  // job is dispatched. Jobs with any image scoring below the threshold are
+  // held for operator review. See docs/phase-1-implementation-plan-ai-quality.md.
+  aiQualityEnabled: {
+    type: 'boolean',
+    default: false
+  },
+  aiQualityThreshold: {
+    type: 'number',
+    default: 75,
+    minimum: 1,
+    maximum: 100
+  },
+  aiQualityModelPath: {
+    type: 'string',
+    default: ''        // empty = use bundled default in resources/models/musiq/
+  },
+  aiQualityDebugLog: {
+    type: 'boolean',
+    default: false
+  },
+  // Debug-only override. When non-zero, scoring returns this fixed value
+  // instead of running real MUSIQ inference. Useful for testing the held-job
+  // path without needing to find a deliberately-bad image. Operators should
+  // never set this in production — there's no UI for it.
+  aiQualityForceScore: {
+    type: 'number',
+    default: 0,
+    minimum: 0,
+    maximum: 100
+  },
   // File Uploads (Mode 3)
   fileUploadsEnabled: {
     type: 'boolean',
@@ -324,6 +356,12 @@ class ConfigService {
       filmScanRotationModelPath: this.store.get('filmScanRotationModelPath'),
       filmScanRotationDebugLog: this.store.get('filmScanRotationDebugLog'),
       filmScanReviewMode: this.store.get('filmScanReviewMode'),
+      // AI Quality Gate
+      aiQualityEnabled: this.store.get('aiQualityEnabled'),
+      aiQualityThreshold: this.store.get('aiQualityThreshold'),
+      aiQualityModelPath: this.store.get('aiQualityModelPath'),
+      aiQualityDebugLog: this.store.get('aiQualityDebugLog'),
+      aiQualityForceScore: this.store.get('aiQualityForceScore'),
       // File Uploads
       fileUploadsEnabled: this.store.get('fileUploadsEnabled'),
       fileUploadsWatchFolder: this.store.get('fileUploadsWatchFolder'),
@@ -478,6 +516,27 @@ class ConfigService {
     }
     if (Object.prototype.hasOwnProperty.call(config, 'filmScanRotationDebugLog')) {
       this.store.set('filmScanRotationDebugLog', Boolean(config.filmScanRotationDebugLog));
+    }
+    if (Object.prototype.hasOwnProperty.call(config, 'aiQualityEnabled')) {
+      this.store.set('aiQualityEnabled', Boolean(config.aiQualityEnabled));
+    }
+    if (Object.prototype.hasOwnProperty.call(config, 'aiQualityThreshold')) {
+      const t = parseInt(config.aiQualityThreshold, 10);
+      if (!isNaN(t) && t >= 1 && t <= 100) {
+        this.store.set('aiQualityThreshold', t);
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(config, 'aiQualityModelPath')) {
+      this.store.set('aiQualityModelPath', (config.aiQualityModelPath || '').trim());
+    }
+    if (Object.prototype.hasOwnProperty.call(config, 'aiQualityDebugLog')) {
+      this.store.set('aiQualityDebugLog', Boolean(config.aiQualityDebugLog));
+    }
+    if (Object.prototype.hasOwnProperty.call(config, 'aiQualityForceScore')) {
+      const f = parseInt(config.aiQualityForceScore, 10);
+      if (!isNaN(f) && f >= 0 && f <= 100) {
+        this.store.set('aiQualityForceScore', f);
+      }
     }
     if (Object.prototype.hasOwnProperty.call(config, 'filmScanReviewMode')) {
       const mode = String(config.filmScanReviewMode);

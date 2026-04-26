@@ -450,6 +450,48 @@
                 </small>
               </div>
             </fieldset>
+
+            <fieldset class="panel-section">
+              <legend>AI Quality Gate</legend>
+              <p class="section-desc">
+                Score every image in every job before it dispatches to a printer.
+                Jobs with any image scoring below the threshold are held for
+                operator review and surface as a flag on the Jobs grid. No
+                images are altered automatically — operators approve, fix, or
+                reject from the held-job view.
+              </p>
+
+              <div class="form-group checkbox-group">
+                <label>
+                  <input type="checkbox" id="aiQualityEnabled" name="aiQualityEnabled">
+                  <span>Enable AI Quality Gate</span>
+                </label>
+              </div>
+
+              <div class="form-group">
+                <label class="form-group__label" for="aiQualityThreshold">Quality threshold</label>
+                <input type="number" id="aiQualityThreshold" name="aiQualityThreshold"
+                       min="1" max="100" step="1" style="width: 6em;">
+                <small class="field-hint">
+                  Images scoring below this number are flagged for review.
+                  Default 75. Adjust based on your lab's print quality bar.
+                </small>
+                <small class="field-hint" style="margin-top: 0.5em;">
+                  <strong>Guidance:</strong><br>
+                  &bull; Below 50 — significant quality issues likely<br>
+                  &bull; 50–70 — borderline; some labs accept, some don't<br>
+                  &bull; 70–85 — typical phone uploads, usually fine for print<br>
+                  &bull; Above 85 — high-quality images
+                </small>
+              </div>
+
+              <div class="form-group checkbox-group">
+                <label>
+                  <input type="checkbox" id="aiQualityDebugLog" name="aiQualityDebugLog">
+                  <span>Verbose logging (per-image scoring detail to log)</span>
+                </label>
+              </div>
+            </fieldset>
           </div>
 
           <!-- Sub-tab: File Uploads -->

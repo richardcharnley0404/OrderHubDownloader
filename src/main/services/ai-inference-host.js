@@ -149,7 +149,7 @@ async function loadAllModels(modelOverrides) {
     return;
   }
 
-  // Register each known model loader. New models (musiq, fbcnn, realesrgan)
+  // Register each known model loader. New models (fbcnn, realesrgan)
   // get added here in their respective milestones.
   let orientationLoader;
   try {
@@ -157,6 +157,14 @@ async function loadAllModels(modelOverrides) {
     loaders.set(orientationLoader.modelId, orientationLoader);
   } catch (err) {
     log('error', `failed to require orientation-loader: ${err && err.message}`, { stack: err && err.stack });
+  }
+
+  let musiqLoader;
+  try {
+    musiqLoader = require('./ai-inference-models/musiq-loader');
+    loaders.set(musiqLoader.modelId, musiqLoader);
+  } catch (err) {
+    log('error', `failed to require musiq-loader: ${err && err.message}`, { stack: err && err.stack });
   }
 
   // Attempt to create a session for each registered model.

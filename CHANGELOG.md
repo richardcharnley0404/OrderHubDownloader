@@ -1,3 +1,51 @@
+## v1.2.0 - 2026-04-26
+
+### Added — AI Quality Gate (M1+M2)
+
+A new opt-in pipeline that scores every image in every Mode-1 job before
+dispatch and holds jobs whose images fall below an operator-configurable
+quality threshold. **Default OFF** — existing labs see no behaviour change
+until the operator explicitly enables it.
+
+- **Settings UI**: new "AI Quality Gate" section under Settings → Film Scans
+  with an Enable checkbox, threshold input (default 75), guidance text, and
+  a verbose-logging toggle.
+- **Backend services**:
+  - `ai-quality-service.js` — single chokepoint between callers and the
+    inference host. Honours the feature flag and the `aiQualityForceScore`
+    debug knob; fails open (treats inference failures as "pass") so
+    infrastructure issues never block routing.
+  - `ai-quality-store.js` — sidecar wrapper for the per-image `aiQuality`
+    block (score, threshold, passed, fixupHistory, operatorDecision).
+    Upserts entries for jobs whose sidecars don't already list images.
+  - `ai-job-quality-orchestrator.js` — job-level scoring + held-state
+    derivation. Scans the job folder directly for image files (covers both
+    Mode-1 jobs at root level and Job-Review-touched jobs in `/working/`).
+- **Pipeline gate**: `runAutoPrint` and the manual "Process" IPC handler
+  now call the orchestrator before dispatch. Held jobs are skipped this
+  pass; releasing the operator override clears the hold.
+- **Jobs grid Quality flag**: a red `⚠ N/M` badge appears in the FLAGS
+  column for held jobs. Clicking the badge opens a confirm dialog and,
+  on approval, marks every failed image `approved_as_is` so the job
+  routes on the next pass.
+- **IPC API**: `aiQuality.listHeldJobs`, `getJobQuality`, `releaseJob`,
+  `approveImage`, plus an `aiQuality:jobHeld` push event for live UI
+  updates.
+- **Inference host**: `musiq-loader.js` registered alongside
+  `orientation-loader.js`. The MUSIQ ONNX model is *not* bundled yet —
+  when it's added at `resources/models/musiq/model.onnx`, real scoring
+  starts automatically. Until then, scoring returns 100 (always pass)
+  and the feature is effectively a no-op even when enabled.
+
+### Out of scope for v1.2.0 (deferred to v1.3.0+)
+
+- The MUSIQ model itself (Phase 1 ships the operator workflow
+  independent of the model-quality decision).
+- The dedicated Quality Review tab (M3) — released held-jobs use the
+  Jobs-grid badge for now.
+- Fixup actions (M4) — operators can release-as-is or skip; FBCNN /
+  Real-ESRGAN come later.
+
 ## v1.1.1 - 2026-04-26
 
 ### Changed — ONNX inference moved to a dedicated utility process

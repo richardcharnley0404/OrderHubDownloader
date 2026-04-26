@@ -37,6 +37,30 @@ let currentDateRange = 30; // days back to show; 0 = all time
 let cachedControllers = []; // For process mapping controller dropdowns
 let downloadDirectory = ''; // Kept in sync with saved config — used to compute jobPath for Job Review
 
+// AI Quality Gate (v1.2.0) — populated by refreshAiQualityHeldJobs().
+// Map<jobIdString, { failedImages, totalImages }>. Empty when feature is OFF.
+let aiQualityHeldByJobId = new Map();
+
+async function refreshAiQualityHeldJobs() {
+  try {
+    if (!window.electronAPI || !window.electronAPI.aiQualityListHeldJobs) {
+      aiQualityHeldByJobId = new Map();
+      return;
+    }
+    const list = await window.electronAPI.aiQualityListHeldJobs();
+    const next = new Map();
+    (list || []).forEach((row) => {
+      next.set(String(row.jobId), {
+        failedImages: row.failedImages,
+        totalImages: row.totalImages,
+      });
+    });
+    aiQualityHeldByJobId = next;
+  } catch (err) {
+    console.error('[ai-quality] refresh held-jobs failed', err);
+  }
+}
+
 // DPOF output-status cache: jobId (string) → { prefix, folderName, folderPath }
 // Populated after each table render via async folder scan.
 // Prefix meanings: p=Import Error, o=Awaiting Import, q=Failed Import, e=Imported (auto-processed)
@@ -199,9 +223,18 @@ window.electronAPI.onJobsUpdated(async (data) => {
   if (data && data.jobs) {
     allJobs = data.jobs;
     await resolveRoutesForReceivedJobs(allJobs);
+    await refreshAiQualityHeldJobs();
     renderJobTable(getFilteredJobs());
   }
 });
+
+// AI Quality Gate (v1.2.0) — refresh badges when autoprint reports a hold
+if (window.electronAPI.onAiQualityJobHeld) {
+  window.electronAPI.onAiQualityJobHeld(async () => {
+    await refreshAiQualityHeldJobs();
+    renderJobTable(getFilteredJobs());
+  });
+}
 
 // Listen for DPOF output-status changes pushed from the main process polling loop.
 // Updates the specific job row in-place without a full table re-render.
@@ -235,6 +268,7 @@ async function loadJobs() {
     dismissedJobs = dismissed || [];
     updateDismissedBadge();
     await resolveRoutesForReceivedJobs(allJobs);
+    await refreshAiQualityHeldJobs();
     renderJobTable(getFilteredJobs());
   } catch (error) {
     console.error('Error loading jobs:', error);
@@ -532,13 +566,18 @@ function renderJobTable(jobs) {
 
     const jobNo = formatJobNo(job);
 
-    // Flags: rush + order notes icons
+    // Flags: rush + order notes + AI quality hold icons
     let flagsHtml = '';
     if (job.is_rush) {
       flagsHtml += '<span class="flag-icon flag-rush" title="Rush Order">&#9889;</span>';
     }
     if (job.order_notes) {
       flagsHtml += `<span class="flag-icon flag-notes" title="${escapeHtml(job.order_notes)}">&#128196;</span>`;
+    }
+    const heldQuality = aiQualityHeldByJobId.get(String(job.id));
+    if (heldQuality) {
+      const tip = `AI Quality: ${heldQuality.failedImages}/${heldQuality.totalImages} images failed — click to release`;
+      flagsHtml += `<span class="flag-icon flag-quality" title="${escapeHtml(tip)}" data-quality-job="${escapeHtml(String(job.id))}" style="cursor:pointer;color:#dc2626;font-weight:600;">&#9888; ${heldQuality.failedImages}/${heldQuality.totalImages}</span>`;
     }
 
     // DPI indicator cell
@@ -581,6 +620,31 @@ function renderJobTable(jobs) {
       navigator.clipboard.writeText(text).then(() => {
         showCopiedTooltip(e, text);
       });
+    });
+  });
+
+  // AI Quality flag — clicking the badge releases the held job
+  // (M1+M2 minimal UX; M3 will replace this with the Quality Review tab).
+  document.querySelectorAll('.flag-quality[data-quality-job]').forEach(el => {
+    el.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const jobId = el.dataset.qualityJob;
+      const meta = aiQualityHeldByJobId.get(String(jobId));
+      const failed = meta ? `${meta.failedImages}/${meta.totalImages}` : '?';
+      const ok = window.confirm(
+        `Release this job for printing?\n\n` +
+        `${failed} images failed the AI quality check. ` +
+        `Approving means these images will print as-is without further review.`
+      );
+      if (!ok) return;
+      try {
+        await window.electronAPI.aiQualityReleaseJob(jobId, 'released from Jobs grid');
+        await refreshAiQualityHeldJobs();
+        renderJobTable(getFilteredJobs());
+      } catch (err) {
+        console.error('[ai-quality] releaseJob failed', err);
+        window.alert('Release failed — see logs for details.');
+      }
     });
   });
 
@@ -1293,6 +1357,14 @@ function populateForm(config) {
   if (reviewRadio) reviewRadio.checked = true;
   updateFilmScanRotationEnableState();
 
+  // AI Quality Gate (v1.2.0)
+  const aiQEnabled = document.getElementById('aiQualityEnabled');
+  const aiQThreshold = document.getElementById('aiQualityThreshold');
+  const aiQDebug = document.getElementById('aiQualityDebugLog');
+  if (aiQEnabled)   aiQEnabled.checked   = !!config.aiQualityEnabled;
+  if (aiQThreshold) aiQThreshold.value   = config.aiQualityThreshold || 75;
+  if (aiQDebug)     aiQDebug.checked     = !!config.aiQualityDebugLog;
+
   // File Uploads
   document.getElementById('fileUploadsEnabled').checked = config.fileUploadsEnabled || false;
   document.getElementById('fileUploadsWatchFolder').value = config.fileUploadsWatchFolder || '';
@@ -1367,6 +1439,10 @@ function getFormData() {
       const v = checked ? checked.value : 'never';
       return (v === 'smart' || v === 'always') ? v : 'never';
     })(),
+    // AI Quality Gate (v1.2.0)
+    aiQualityEnabled:    document.getElementById('aiQualityEnabled')?.checked || false,
+    aiQualityThreshold:  parseInt(document.getElementById('aiQualityThreshold')?.value, 10) || 75,
+    aiQualityDebugLog:   document.getElementById('aiQualityDebugLog')?.checked || false,
     // File Uploads
     fileUploadsEnabled: document.getElementById('fileUploadsEnabled').checked,
     fileUploadsWatchFolder: document.getElementById('fileUploadsWatchFolder').value.trim(),

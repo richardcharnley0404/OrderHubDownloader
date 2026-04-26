@@ -14,6 +14,10 @@ const logger = require('./services/logger');
 const frameMetadataStore = require('./services/frame-metadata-store');
 const filmReviewPrefsStore = require('./services/film-review-prefs-store');
 const folderWatchService = require('./services/folder-watch-service');
+// AI Quality Gate (v1.2.0)
+const jobDownloadService = require('./services/job-download-service');
+const aiJobQualityOrchestrator = require('./services/ai-job-quality-orchestrator');
+const aiQualityStore = require('./services/ai-quality-store');
 const fs = require('fs');
 const fsPromises = require('fs/promises');
 const path = require('path');
@@ -463,6 +467,38 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
 
       if (job._status !== 'received' && job._status !== 'pending') {
         return { success: false, error: `Job cannot be sent to print (status: ${job._status})` };
+      }
+
+      // AI Quality Gate (v1.2.0) — also gate manual Process clicks so the
+      // workflow is consistent: operators must release a held job via the
+      // Quality flag before manual dispatch will work.
+      if (configService.get('aiQualityEnabled')) {
+        const local = jobDownloadService.checkLocalFiles(job);
+        if (local.found) {
+          try {
+            const scoring = await aiJobQualityOrchestrator.scoreJob(job.id, local.localPath);
+            if (scoring.held) {
+              logger.info('[ai-quality] manual dispatch blocked — job held', { jobId: job.id, summary: scoring.summary });
+              if (windowManager) {
+                const mainWindow = windowManager.getWindow();
+                if (mainWindow && !mainWindow.isDestroyed()) {
+                  mainWindow.webContents.send('aiQuality:jobHeld', {
+                    jobId: job.id,
+                    summary: scoring.summary,
+                  });
+                }
+              }
+              return {
+                success: false,
+                error: `Job held by AI Quality Gate — ${scoring.summary.failed}/${scoring.summary.total} images below threshold ${scoring.summary.threshold}. Release via the Quality flag in the Jobs grid.`,
+                held: true,
+                summary: scoring.summary,
+              };
+            }
+          } catch (err) {
+            logger.logError('[ai-quality] scoreJob threw on manual dispatch — passing through', err, { jobId: job.id });
+          }
+        }
       }
 
       // ── New routing system ─────────────────────────────────────────────────
@@ -1727,6 +1763,43 @@ async function runAutoPrint() {
       if (job._status !== 'received' && job._status !== 'pending') continue;
       if (job.created_at && new Date(job.created_at) < cutoff) continue;
 
+      // AI Quality Gate (v1.2.0) — score the job before dispatching. If
+      // any image fails the threshold, the job is held this pass.
+      // Operator releases via the Quality flag on the Jobs grid (M2).
+      // Flag-OFF behaviour: this whole block is skipped, byte-identical
+      // to pre-feature behaviour.
+      if (configService.get('aiQualityEnabled')) {
+        const local = jobDownloadService.checkLocalFiles(job);
+        if (!local.found) {
+          // Files not local yet — the next autoprint cycle will pick this
+          // job up after download completes. Don't dispatch unscored work.
+          continue;
+        }
+        try {
+          const scoring = await aiJobQualityOrchestrator.scoreJob(job.id, local.localPath);
+          if (scoring.held) {
+            logger.info('[auto-print] job held by AI Quality Gate', {
+              jobId: job.id,
+              summary: scoring.summary,
+            });
+            // Push the held state to the renderer so the Jobs grid badge
+            // refreshes without waiting for the next polling tick.
+            if (_autoPrintWindowManager) {
+              const mainWindow = _autoPrintWindowManager.getWindow();
+              if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('aiQuality:jobHeld', {
+                  jobId: job.id,
+                  summary: scoring.summary,
+                });
+              }
+            }
+            continue;
+          }
+        } catch (err) {
+          logger.logError('[ai-quality] scoreJob threw — passing through', err, { jobId: job.id });
+        }
+      }
+
       const route = routingService.resolveRoute(job);
 
       // --- NEW: default-folder / process-folder dispatch ---
@@ -2330,6 +2403,144 @@ ipcMain.handle('ohd:filmReview:approve-roll', async (event, rollIdRaw) => {
     try { frameMetadataStore.updateRoll(rollId, { uploadStatus: 'failed', uploadError: msg }); } catch (_) { /* ignored */ }
     emitFilmReviewRollUpdate(rollId);
     return { ok: false, error: msg };
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// AI Quality Gate (v1.2.0) — held-job IPC
+// ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Build the absolute job folder path for a given job. Mirrors
+ * job-download-service.checkLocalFiles' resolution logic but returns the
+ * path even when the folder doesn't yet exist (so callers can decide
+ * how to handle missing-folder errors themselves).
+ */
+function _resolveJobPath(job) {
+  const downloadDirectory = configService.get('downloadDirectory');
+  if (!downloadDirectory) return null;
+  const orderNumber = job.order_number || '';
+  const orderId = job.order_id;
+  const jobId = job.id;
+  if (!orderNumber || !orderId || !jobId) return null;
+  return path.join(
+    downloadDirectory,
+    `${orderNumber}_${orderId}`,
+    `${orderNumber}_${jobId}`
+  );
+}
+
+/**
+ * Return the held-jobs list for the Quality Review tab (M3) and the
+ * Jobs grid badge (M2). Each entry includes enough info for the badge
+ * to render without further IPC.
+ */
+ipcMain.handle('aiQuality:listHeldJobs', async () => {
+  try {
+    const { jobs } = jobService.getLocalJobs();
+    const out = [];
+    for (const job of jobs) {
+      // Only surface held state for jobs the autoprint loop is still
+      // considering. A held flag on a job that's already been Printed
+      // (or marked error) is stale noise and would clutter the badge UI.
+      if (job._status !== 'received' && job._status !== 'pending') continue;
+      const jobPath = _resolveJobPath(job);
+      if (!jobPath || !fs.existsSync(jobPath)) continue;
+      let rows;
+      try {
+        rows = await aiQualityStore.getJobQuality(job.id, jobPath);
+      } catch (_) {
+        continue;
+      }
+      const total = rows.length;
+      const failed = rows.filter((r) => {
+        const aq = r.aiQuality || {};
+        if (!aq.scored || aq.passed) return false;
+        const decision = (aq.operatorDecision && aq.operatorDecision.kind) || 'none';
+        return decision !== 'fixed' && decision !== 'approved_as_is';
+      }).length;
+      if (failed === 0) continue;
+      out.push({
+        jobId: job.id,
+        jobCode: job.order_number || '',
+        customer: job.customer_name || '',
+        totalImages: total,
+        failedImages: failed,
+        oldestHoldAt: job.created_at || null,
+      });
+    }
+    return out;
+  } catch (err) {
+    logger.logError('[aiQuality] listHeldJobs failed', err);
+    return [];
+  }
+});
+
+/**
+ * Per-image quality detail for a single job — drives the M3 Quality
+ * Review focused-image view. Phase 1 returns score + passed + history.
+ */
+ipcMain.handle('aiQuality:getJobQuality', async (event, jobId) => {
+  try {
+    const { jobs } = jobService.getLocalJobs();
+    const job = jobs.find((j) => String(j.id) === String(jobId));
+    if (!job) return { jobId, held: false, images: [] };
+    const jobPath = _resolveJobPath(job);
+    if (!jobPath || !fs.existsSync(jobPath)) {
+      return { jobId, held: false, images: [] };
+    }
+    const rows = await aiQualityStore.getJobQuality(jobId, jobPath);
+    return {
+      jobId,
+      held: aiQualityStore.deriveHeld(rows),
+      images: rows,
+    };
+  } catch (err) {
+    logger.logError(`[aiQuality] getJobQuality failed for ${jobId}`, err);
+    return { jobId, held: false, images: [], error: err.message };
+  }
+});
+
+/**
+ * Operator action: release the entire job. Marks every failed image as
+ * approved-as-is. Subsequent autoprint cycles will route normally.
+ */
+ipcMain.handle('aiQuality:releaseJob', async (event, payload) => {
+  try {
+    const jobId = payload && payload.jobId;
+    const note = payload && payload.note;
+    if (!jobId) return { ok: false, error: 'jobId required' };
+    const { jobs } = jobService.getLocalJobs();
+    const job = jobs.find((j) => String(j.id) === String(jobId));
+    if (!job) return { ok: false, error: 'job not found' };
+    const jobPath = _resolveJobPath(job);
+    if (!jobPath) return { ok: false, error: 'job path unresolvable' };
+    return await aiJobQualityOrchestrator.releaseJob(jobId, jobPath, note);
+  } catch (err) {
+    logger.logError('[aiQuality] releaseJob failed', err);
+    return { ok: false, error: err.message };
+  }
+});
+
+/**
+ * Operator action: approve a single image as-is (override the gate
+ * for that image only). Used by M3's FocusedImage view.
+ */
+ipcMain.handle('aiQuality:approveImage', async (event, payload) => {
+  try {
+    const jobId = payload && payload.jobId;
+    const filename = payload && payload.filename;
+    const note = payload && payload.note;
+    if (!jobId || !filename) return { ok: false, error: 'jobId and filename required' };
+    const { jobs } = jobService.getLocalJobs();
+    const job = jobs.find((j) => String(j.id) === String(jobId));
+    if (!job) return { ok: false, error: 'job not found' };
+    const jobPath = _resolveJobPath(job);
+    if (!jobPath) return { ok: false, error: 'job path unresolvable' };
+    return await aiJobQualityOrchestrator.approveImage(jobId, jobPath, filename, note);
+  } catch (err) {
+    logger.logError('[aiQuality] approveImage failed', err);
+    return { ok: false, error: err.message };
   }
 });
 
