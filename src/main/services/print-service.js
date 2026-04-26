@@ -10,6 +10,9 @@ const { dpofGenerator } = require('./dpof-generator');
 const { orderFolderWriter } = require('./order-folder-writer');
 const { darkroomProGenerator } = require('./darkroom-pro-generator');
 const { darkroomProFileWriter } = require('./darkroom-pro-file-writer');
+const { generateDarkroomProFile } = require('./darkroom-pro-output');
+const { frontlineGenerator } = require('./frontline-generator');
+const { frontlineFileWriter } = require('./frontline-file-writer');
 const { printControllerService } = require('./print-controller-service');
 const logger = require('./logger');
 const { buildFolderName } = require('../../shared/printUtils');
@@ -193,6 +196,12 @@ class PrintService {
     }
     if (route.controllerType === 'folder_copy') {
       return this._sendViaFolderCopyRouted(job, route);
+    }
+    if (route.controllerType === 'darkroompro') {
+      return this._sendViaDarkroomProRouted(job, route);
+    }
+    if (route.controllerType === 'frontline') {
+      return this._sendViaFrontlineRouted(job, route);
     }
 
     const downloadDirectory = configService.get('downloadDirectory');
@@ -701,6 +710,141 @@ class PrintService {
     };
   }
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // Darkroom Pro — new routing-system pipeline
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Darkroom Pro pipeline for controllers configured via the new routing system.
+   *
+   * Reads the job manifest, builds a structured job object for the generator,
+   * and writes {orderRef}.txt to controller.outputPath.
+   *
+   * Images are referenced by absolute path (artworkRootPath\{orderRef}\Darkroom\{filename})
+   * and are NOT copied. Size and Media come from the matched channel mapping's options.
+   */
+  async _sendViaDarkroomProRouted(job, route) {
+    const downloadDirectory = configService.get('downloadDirectory');
+    if (!downloadDirectory) {
+      throw new Error('Download directory is not configured.');
+    }
+
+    const orderFolderName = `${job.order_number}_${job.order_id}`;
+    const jobFolderName   = `${job.order_number}_${job.id}`;
+    const orderFolderPath = path.join(downloadDirectory, orderFolderName);
+    const jobFolderPath   = path.join(orderFolderPath, jobFolderName);
+
+    if (!fs.existsSync(jobFolderPath)) {
+      throw new Error(`Job folder not found: ${jobFolderPath}`);
+    }
+
+    const manifest    = this._readManifest(orderFolderPath, job.order_number);
+    const jobManifest = this._findJobInManifest(manifest, job);
+
+    if (!jobManifest) {
+      throw new Error(`Job ${job.id} not found in order manifest.`);
+    }
+
+    // Split customer name into first / last on the first space
+    const fullName   = (job.customer_name || '').trim();
+    const spaceIdx   = fullName.indexOf(' ');
+    const firstName  = spaceIdx === -1 ? fullName : fullName.substring(0, spaceIdx);
+    const lastName   = spaceIdx === -1 ? ''        : fullName.substring(spaceIdx + 1).trim();
+
+    // Job-level options (e.g. finish-options: lustre) are used for Media resolution
+    const jobOptions     = job.options || [];
+    const manifestImages = jobManifest.images || [];
+
+    // ── Resolve final sourcePaths using the same three-step priority chain as DPOF ──
+    // Step 1: AI-enhanced image (absolute path from sidecar, if it exists on disk)
+    const enhancedMap    = await this._getEnhancedPathMap(jobFolderName, jobFolderPath);
+    // Step 2: CMY colour corrections (writes working/{basename}_corrected.jpg on demand)
+    const correctionsMap = await this._getCorrectionsMap(jobFolderName, jobFolderPath);
+
+    // Build imageFiles in manifest order: prefer enhanced, fall back to raw download path
+    let imageFiles = manifestImages.map(img => {
+      const basename     = path.basename(img.filename);
+      const enhancedPath = enhancedMap.get(basename);
+      return {
+        sourcePath: enhancedPath || path.join(orderFolderPath, img.filename),
+        filename:   basename,
+      };
+    });
+
+    // Apply CMY corrections — replaces sourcePath with the corrected JPEG where needed
+    imageFiles = await this._applyCorrectionsToImageFiles(
+      imageFiles,
+      path.join(jobFolderPath, 'working'),
+      correctionsMap
+    );
+
+    // Group by quantity for the Darkroom Pro line-item blocks.
+    // imageFiles is parallel to manifestImages so we can read qty by index.
+    const imagesByQty = new Map();
+    manifestImages.forEach((manifestImg, i) => {
+      const qty = manifestImg.quantity || 1;
+      if (!imagesByQty.has(qty)) imagesByQty.set(qty, []);
+      imagesByQty.get(qty).push({
+        filename:   imageFiles[i].filename,
+        sourcePath: imageFiles[i].sourcePath,
+      });
+    });
+
+    const lineItems = [];
+    for (const [qty, images] of imagesByQty) {
+      lineItems.push({ qty, options: jobOptions, images });
+    }
+
+    const dpJob = {
+      orderRef:      job.order_number || '',
+      productCode:   job.product_code || '',
+      customer:      { firstName, lastName, email: job.customer_email || '' },
+      labCode:       job.website || '',
+      orderDate:     job.created_at ? new Date(job.created_at) : new Date(),
+      lineItems,
+      // Per-job manual overrides from the Assign modal (take priority over
+      // translation tables inside resolveSize / resolveMedia).
+      _sizeOverride:  job._darkroomProSize  || null,
+      _mediaOverride: job._darkroomProMedia || null,
+    };
+
+    // Fetch the full controller record to get translation tables
+    const { getControllers } = require('./routing-service');
+    const fullController = getControllers().find(c => c.id === route.controllerId);
+
+    const controller = {
+      artworkRootPath:     route.artworkRootPath,
+      orderLastNameFormat: route.orderLastNameFormat,
+      outputPath:          route.outputPath,
+      sizeTranslations:    fullController?.sizeTranslations  || [],
+      mediaOptionKey:      fullController?.mediaOptionKey    || '',
+      mediaTranslations:   fullController?.mediaTranslations || [],
+    };
+
+    const destPath = await generateDarkroomProFile(dpJob, controller);
+
+    logger.info('Job sent via Darkroom Pro (routed)', {
+      jobId:      job.id,
+      controller: route.controllerName,
+      destPath,
+      lineItems:  lineItems.length,
+    });
+
+    if (route.checkOrderStatus === false) {
+      logger.info('[DarkroomPro] checkOrderStatus disabled — marking job as completed immediately', { jobId: job.id });
+      await this._markCompleted(job.id);
+    } else {
+      await this._markInProduction(job.id);
+    }
+
+    return {
+      success:    true,
+      method:     'darkroompro-routed',
+      sourcePath: jobFolderPath,
+      destPath,
+    };
+  }
+
   /**
    * PDF-copy pipeline for "pdf_copy" controllers.
    *
@@ -848,6 +992,118 @@ class PrintService {
     }
 
     return Buffer.from(await bannerPdf.save());
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Frontline pipeline
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Frontline pipeline:
+   * Generates an XML order file and copies all images into a job folder
+   * named by job ID, placed inside the controller's hot folder path.
+   * Fire-and-forget — no status monitoring required.
+   */
+  async _sendViaFrontlineRouted(job, route) {
+    const downloadDirectory = configService.get('downloadDirectory');
+    if (!downloadDirectory) {
+      throw new Error('Download directory is not configured.');
+    }
+
+    const orderFolderName = `${job.order_number}_${job.order_id}`;
+    const jobFolderName   = `${job.order_number}_${job.id}`;
+    const orderFolderPath = path.join(downloadDirectory, orderFolderName);
+    const jobFolderPath   = path.join(orderFolderPath, jobFolderName);
+
+    if (!fs.existsSync(jobFolderPath)) {
+      throw new Error(`Job folder not found: ${jobFolderPath}`);
+    }
+
+    const manifest    = this._readManifest(orderFolderPath, job.order_number);
+    const jobManifest = this._findJobInManifest(manifest, job);
+
+    if (!jobManifest) {
+      throw new Error(`Job ${job.id} not found in order manifest.`);
+    }
+
+    // Resolve enhanced/corrected image paths (same priority chain as DPOF / Darkroom Pro)
+    const enhancedMap    = await this._getEnhancedPathMap(jobFolderName, jobFolderPath);
+    const correctionsMap = await this._getCorrectionsMap(jobFolderName, jobFolderPath);
+
+    let imageFiles = (jobManifest.images || []).map(img => {
+      const basename     = path.basename(img.filename);
+      const enhancedPath = enhancedMap.get(basename);
+      return {
+        sourcePath: enhancedPath || path.join(orderFolderPath, img.filename),
+        filename:   basename,
+      };
+    });
+
+    imageFiles = await this._applyCorrectionsToImageFiles(
+      imageFiles,
+      path.join(jobFolderPath, 'working'),
+      correctionsMap
+    );
+
+    for (const img of imageFiles) {
+      if (!fs.existsSync(img.sourcePath)) {
+        throw new Error(`Image not found: ${img.sourcePath}`);
+      }
+    }
+
+    // Build the job object for the generator
+    const frontlineJob = {
+      id:            job.id,
+      order_number:  job.order_number  || '',
+      job_name:      job.job_name      || job.order_number || '',
+      customer_name: job.customer_name || '',
+      images: (jobManifest.images || []).map((img, idx) => ({
+        filename:      path.basename(img.filename),
+        quantity:      img.quantity || 1,
+        rotationAngle: 0,
+      })),
+    };
+
+    // Controller config fields carried through the route object
+    const controllerConfig = {
+      device:     route.device     || 'Pixfizz',
+      backPrint1: route.backPrint1 || '{jobName}  {customerName}',
+      backPrint2: route.backPrint2 || '{jobId}  {filename}',
+    };
+
+    const channelConfig = {
+      batchCode:  route.batchCode  || '',
+      sortString: route.sortString || '',
+    };
+
+    // Generate XML content
+    const xmlContent = frontlineGenerator.generate(controllerConfig, channelConfig, frontlineJob);
+
+    // Write job folder + XML + images to hot folder
+    const { jobFolderPath: destFolderPath, xmlPath } = await frontlineFileWriter.writeJobFolder(
+      route.outputPath,
+      job.id,
+      xmlContent,
+      imageFiles
+    );
+
+    logger.info('Job sent to print via Frontline', {
+      jobId:      job.id,
+      controller: route.controllerName,
+      destFolder: destFolderPath,
+      xmlFile:    xmlPath,
+      images:     imageFiles.length,
+    });
+
+    // Fire-and-forget — mark as completed immediately
+    await this._markCompleted(job.id);
+
+    return {
+      success:    true,
+      method:     'frontline',
+      sourcePath: jobFolderPath,
+      destPath:   destFolderPath,
+    };
   }
 
   /**
@@ -1006,7 +1262,10 @@ class PrintService {
       const { sidecar } = await loadSidecar(jobId, jobFolderPath);
       const map = new Map();
       for (const img of (sidecar.images || [])) {
-        if (img.enhanced && img.enhancedPath && fs.existsSync(img.enhancedPath)) {
+        // croppedPath takes highest priority — user explicitly cropped this image.
+        if (img.cropApplied && img.croppedPath && fs.existsSync(img.croppedPath)) {
+          map.set(img.filename, img.croppedPath);
+        } else if (img.enhanced && img.enhancedPath && fs.existsSync(img.enhancedPath)) {
           map.set(img.filename, img.enhancedPath);
         }
       }

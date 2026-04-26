@@ -505,6 +505,127 @@ function EnhancementPanel({ selected, jobId, jobPath, onRefreshSidecar }) {
   );
 }
 
+
+// ── Crop-to-size section ──────────────────────────────────────────────────────────────────
+
+// Built-in common print sizes always available in the dropdown.
+// If a channel mapping exists with the same dimensions it replaces the entry
+// so that the routing override is also applied after cropping.
+const COMMON_PRINT_SIZES = [
+  { id: '__3x3',   w: 3,    h: 3,    label: '3×3"'   },
+  { id: '__4x4',   w: 4,    h: 4,    label: '4×4"'   },
+  { id: '__4x6',   w: 4,    h: 6,    label: '4×6"'   },
+  { id: '__5x5',   w: 5,    h: 5,    label: '5×5"'   },
+  { id: '__5x7',   w: 5,    h: 7,    label: '5×7"'   },
+  { id: '__6x6',   w: 6,    h: 6,    label: '6×6"'   },
+  { id: '__6x8',   w: 6,    h: 8,    label: '6×8"'   },
+  { id: '__8x8',   w: 8,    h: 8,    label: '8×8"'   },
+  { id: '__8x10',  w: 8,    h: 10,   label: '8×10"'  },
+  { id: '__10x10', w: 10,   h: 10,   label: '10×10"' },
+  { id: '__10x13', w: 10,   h: 13,   label: '10×13"' },
+  { id: '__12x12', w: 12,   h: 12,   label: '12×12"' },
+];
+
+function buildSizeOptions(allSizeOptions) {
+  const options = COMMON_PRINT_SIZES.map(s => ({ ...s }));
+  for (const opt of allSizeOptions) {
+    const idx = options.findIndex(s => s.w === opt.w && s.h === opt.h);
+    if (idx >= 0) options[idx] = { ...options[idx], ...opt };
+    else options.push({ ...opt });
+  }
+  return options;
+}
+
+function CropSection({ selected, allSizeOptions, cropSizeOption, onOpenCropEditor }) {
+  const sizeOptions = buildSizeOptions(allSizeOptions);
+
+  const [selectedId, setSelectedId] = useState(cropSizeOption?.id || '');
+
+  useEffect(() => {
+    setSelectedId(cropSizeOption?.id || '');
+  }, [cropSizeOption?.id]);
+
+  const selectedOption = sizeOptions.find(s => s.id === selectedId) || null;
+  const cropApplied    = selected?.cropApplied && selected?.cropRect;
+
+  return (
+    <div>
+      <SectionLabel>Crop to Size</SectionLabel>
+      <div style={{
+        background: BG_BASE, border: `1px solid ${BORDER_DIM}`,
+        borderRadius: 5, padding: '12px 14px',
+      }}>
+        <>
+          {/* Size dropdown */}
+          <div style={{ marginBottom: 10 }}>
+            <div style={{
+              fontSize: 9, color: TEXT_MUTED,
+              fontFamily: "'DM Mono', monospace",
+              letterSpacing: '0.08em', marginBottom: 4,
+            }}>
+              TARGET SIZE
+            </div>
+            <select
+              value={selectedId}
+              onChange={e => setSelectedId(e.target.value)}
+              style={{
+                width: '100%', background: BG_DEEP, color: '#c8d8e0',
+                border: `1px solid ${BORDER_DIM}`, borderRadius: 4,
+                fontSize: 11, padding: '4px 6px', cursor: 'pointer',
+              }}
+            >
+              <option value="">\u2014 select size \u2014</option>
+              {sizeOptions.map(opt => (
+                <option key={opt.id} value={opt.id}>
+                  {opt.label}{opt.channelNumber != null ? ` — ch.${opt.channelNumber} \u2713` : ''}
+                </option>
+              ))}
+            </select>
+            {selectedOption?.channelMappingId && (
+              <div style={{ fontSize: 9, color: '#55aa77', marginTop: 3 }}>
+                Channel {selectedOption.channelNumber} \u2014 routing will be overridden
+              </div>
+            )}
+          </div>
+
+          {/* Crop applied badge */}
+          {cropApplied && (
+            <div style={{
+              display: 'inline-flex', alignItems: 'center', gap: 4,
+              fontSize: 9, color: '#55cc88',
+              fontFamily: "'DM Mono', monospace",
+              letterSpacing: '0.06em',
+              marginBottom: 8,
+            }}>
+              \u2702 CROPPED
+            </div>
+          )}
+
+          {/* Crop / re-crop button */}
+          <button
+            disabled={!selectedOption}
+            onClick={() => onOpenCropEditor(selectedOption)}
+            style={{
+              width: '100%',
+              padding: '7px 12px',
+              fontSize: 11,
+              fontFamily: "'DM Mono', monospace",
+              letterSpacing: '0.05em',
+              background: selectedOption ? '#1a3a4a' : BG_DEEP,
+              color: selectedOption ? '#a8d8f0' : TEXT_MUTED,
+              border: `1px solid ${selectedOption ? '#2a5a7a' : BORDER_DIM}`,
+              borderRadius: 4,
+              cursor: selectedOption ? 'pointer' : 'not-allowed',
+            }}
+          >
+            {cropApplied ? '\u2702 Re-Crop' : '\u2702 Crop Image'}
+          </button>
+        </>
+      </div>
+    </div>
+  );
+}
+
 // ── Sidebar (exported separately so index.jsx composes it) ────────────────────
 
 export function ControlSidebar({
@@ -522,6 +643,9 @@ export function ControlSidebar({
   onToggleHold,
   onResetImage,
   onRefreshSidecar,
+  allSizeOptions,
+  cropSizeOption,
+  onOpenCropEditor,
 }) {
   const [resetting, setResetting] = useState(false);
 
@@ -569,7 +693,7 @@ export function ControlSidebar({
                 opacity: resetting ? 0.5 : 1,
               }}
             >
-              {resetting ? '…' : 'RESET'}
+              {resetting ? '\u2026' : 'RESET'}
             </button>
           )}
         </div>
@@ -594,14 +718,23 @@ export function ControlSidebar({
 
       <Divider />
 
+      {/* Crop to size */}
+      <CropSection
+        selected={selected}
+        allSizeOptions={allSizeOptions}
+        cropSizeOption={cropSizeOption}
+        onOpenCropEditor={onOpenCropEditor}
+      />
+
+      <Divider />
+
       {/* AI Enhancement */}
       <EnhancementPanel
         selected={selected}
         jobId={jobId}
-        jobPath={jobPath}
+                jobPath={jobPath}
         onRefreshSidecar={onRefreshSidecar}
       />
     </div>
   );
 }
-

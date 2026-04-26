@@ -1,9 +1,13 @@
 /**
  * scripts/build-renderer.js
  *
- * Bundles the Job Review Panel React components into a single JS file
- * that is loaded by the Electron renderer alongside the existing vanilla
- * renderer.js.
+ * Bundles the React views (Job Review Panel + Film Review Panel) into
+ * per-view IIFE bundles that are loaded by the Electron renderer alongside
+ * the existing vanilla renderer.js.
+ *
+ * Each bundle has its own mount.jsx entry point and writes to a sibling
+ * .bundle.js file; they share node_modules (React etc.) but esbuild
+ * inlines React into each IIFE so they don't need a shared runtime.
  *
  * Usage:
  *   node scripts/build-renderer.js           — one-shot production build
@@ -17,30 +21,56 @@ const path    = require('path');
 
 const isWatch = process.argv.includes('--watch');
 
-const buildOptions = {
-  entryPoints: [
-    path.join(__dirname, '../src/renderer/views/JobReview/mount.jsx'),
-  ],
+// Shared esbuild options — only entry point / outfile / globalName differ
+// between bundles. Keeping these defined in one place means new views get
+// added by pushing another entry to `bundles` below.
+const sharedOptions = {
   bundle:   true,
-  outfile:  path.join(__dirname, '../src/renderer/job-review.bundle.js'),
   platform: 'browser',
   target:   ['chrome120'],   // Electron 32 ships Chromium ~128, 120 is safe
   format:   'iife',
-  globalName: 'OHDJobReview', // not really used but keeps the IIFE tidy
   external: [],               // React is bundled in (not available via require in renderer)
   sourcemap: !isWatch ? false : 'inline',
   minify:   !isWatch,
   logLevel: 'info',
-  jsx:      'automatic',     // uses the React 18 automatic JSX transform (no import needed)
+  jsx:      'automatic',     // React 18 automatic JSX transform (no import needed)
 };
+
+const bundles = [
+  {
+    label:      'Job Review Panel',
+    entry:      path.join(__dirname, '../src/renderer/views/JobReview/mount.jsx'),
+    outfile:    path.join(__dirname, '../src/renderer/job-review.bundle.js'),
+    globalName: 'OHDJobReview',
+  },
+  {
+    label:      'Film Review Panel',
+    entry:      path.join(__dirname, '../src/renderer/views/FilmReview/mount.jsx'),
+    outfile:    path.join(__dirname, '../src/renderer/film-review.bundle.js'),
+    globalName: 'OHDFilmReview',
+  },
+];
+
+function buildOptionsFor(b) {
+  return {
+    ...sharedOptions,
+    entryPoints: [b.entry],
+    outfile:     b.outfile,
+    globalName:  b.globalName,
+  };
+}
 
 (async () => {
   if (isWatch) {
-    const ctx = await esbuild.context(buildOptions);
-    await ctx.watch();
-    console.log('esbuild: watching for changes…');
+    for (const b of bundles) {
+      const ctx = await esbuild.context(buildOptionsFor(b));
+      await ctx.watch();
+      console.log(`esbuild: watching ${b.label} for changes...`);
+    }
   } else {
-    await esbuild.build(buildOptions);
-    console.log('esbuild: Job Review Panel bundle built successfully.');
+    for (const b of bundles) {
+      await esbuild.build(buildOptionsFor(b));
+      console.log(`esbuild: ${b.label} bundle built successfully.`);
+    }
   }
 })();

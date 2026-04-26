@@ -23,15 +23,17 @@ import { JobReviewDrawer } from './index.jsx';
 // ── App shell ─────────────────────────────────────────────────────────────────
 
 function JobReviewApp() {
-  const [open,    setOpen]    = useState(false);
-  const [jobId,   setJobId]   = useState(null);
-  const [jobPath, setJobPath] = useState(null);
+  const [open,     setOpen]     = useState(false);
+  const [jobId,    setJobId]    = useState(null);
+  const [jobPath,  setJobPath]  = useState(null);
+  const [ohJobId,  setOhJobId]  = useState(null);
 
   // Listen for open events from vanilla renderer.js.
   React.useEffect(() => {
     function onOpen(e) {
       setJobId(e.detail.jobId);
       setJobPath(e.detail.jobPath);
+      setOhJobId(e.detail.ohJobId || null);
       setOpen(true);
     }
 
@@ -53,6 +55,7 @@ function JobReviewApp() {
     <JobReviewDrawer
       jobId={jobId}
       jobPath={jobPath}
+      ohJobId={ohJobId}
       onClose={() => setOpen(false)}
     />
   );

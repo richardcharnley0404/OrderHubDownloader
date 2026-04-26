@@ -257,7 +257,19 @@ class OrientationService {
    * discard rotation-indicating features near the image edges.
    */
   async _prepareTensor(imagePath) {
-    const { data } = await sharp(imagePath)
+    // limitInputPixels: false — high-res scanner JPGs (especially 6×7 / large
+    // format) routinely exceed sharp's default 268MP cap, which would throw
+    // "Input image exceeds pixel limit" and bubble up as `rotation.error` on
+    // the frame. The rest of the pipeline (folder-watch rotate + thumbnail)
+    // already disables the cap; matching that here removes the false-failure
+    // mode for high-res rolls.
+    //
+    // failOn: 'none' — sharp's default rejects images with truncated trailers
+    // or recoverable warnings (common on scanner output where the tail bytes
+    // are sometimes incomplete). 'none' tells libvips to swallow non-fatal
+    // warnings and decode whatever it can, which matches what an image viewer
+    // would do. We'd rather classify a slightly-degraded image than fail it.
+    const { data } = await sharp(imagePath, { limitInputPixels: false, failOn: 'none' })
       .removeAlpha()
       .flatten({ background: '#ffffff' })
       .resize(IMG_SIZE, IMG_SIZE, { fit: 'fill' })

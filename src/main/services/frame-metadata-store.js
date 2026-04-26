@@ -25,6 +25,24 @@
  *   listByRoll(rollId)           → array of records for one roll, frameIndex-sorted
  *   listRolls()                  → array of { rollId, count, firstSeenAt, lastSeenAt }
  *
+ * Roll/flag helpers for the Film Review panel (Milestone 4):
+ *   listRollsWithSummary()       → listRolls() plus per-roll counts + review status
+ *   getRollWithFrames(rollId)    → one roll's summary plus its full frame array
+ *   appendFlag(frameId, flag)    → add a typed operator flag (stamps flaggedAt)
+ *   removeFlag(frameId, idx)     → remove an operator flag by array index
+ *   markRollReviewed(rollId)     → set reviewStatus=reviewed on every frame in a roll
+ *
+ * Roll-level state for Manual Review mode (PW-007 M7):
+ *   recordRoll(rollId, data)     → write/replace a roll's metadata record
+ *   updateRoll(rollId, patch)    → shallow-merge a patch into the roll record
+ *   getRoll(rollId)              → roll record (uploadStatus, paths, error) or null
+ *
+ * Roll record holds the deferred-upload context that's needed when the
+ * operator presses "Approve & Upload" — storagePath, locationId, s3Prefix —
+ * plus uploadStatus ('pending' | 'uploading' | 'uploaded' | 'failed'),
+ * uploadError, uploadedAt. Stored separately from frames because it's
+ * roll-scoped, not per-frame.
+ *
  * Typical record shape (as written by folder-watch-service in Milestone 1):
  *   {
  *     frameId: "<rollId>_<index>",
@@ -51,8 +69,81 @@ class FrameMetadataStore {
     // any risk of schema validation kicking in as the record shape evolves.
     this.store = new Store({
       name: 'frame-metadata',
-      defaults: { frames: {} },
+      defaults: { frames: {}, rolls: {} },
     });
+  }
+
+  /**
+   * Write (or replace) the roll-level metadata record. Roll records hold
+   * upload state and the paths needed to perform a deferred S3 upload.
+   *
+   * Sets `createdAt` on first write, always refreshes `updatedAt`.
+   */
+  recordRoll(rollId, data = {}) {
+    if (!rollId) throw new Error('frame-metadata-store.recordRoll: rollId is required');
+
+    const rolls = this.store.get('rolls', {});
+    const existing = rolls[rollId] || null;
+    const now = new Date().toISOString();
+
+    rolls[rollId] = {
+      ...data,
+      rollId,
+      createdAt: existing ? existing.createdAt : now,
+      updatedAt: now,
+    };
+
+    this.store.set('rolls', rolls);
+    return rolls[rollId];
+  }
+
+  /**
+   * Shallow-merge a patch into an existing roll record. Creates the record
+   * if it doesn't exist yet. Top-level only — no nested merge here, since
+   * the upload-state fields are flat.
+   */
+  updateRoll(rollId, patch = {}) {
+    if (!rollId) throw new Error('frame-metadata-store.updateRoll: rollId is required');
+
+    const rolls = this.store.get('rolls', {});
+    const existing = rolls[rollId] || null;
+    const now = new Date().toISOString();
+
+    if (!existing) {
+      this.store.set('rolls', rolls);
+      return this.recordRoll(rollId, patch);
+    }
+
+    const merged = { ...existing, ...patch, rollId, updatedAt: now };
+    rolls[rollId] = merged;
+    this.store.set('rolls', rolls);
+    return merged;
+  }
+
+  /**
+   * Fetch the roll-level record. Returns null if no roll record exists —
+   * this is the case for legacy rolls that pre-date M7, OR for rolls
+   * processed in Off/Auto modes where no roll record was written.
+   */
+  getRoll(rollId) {
+    if (!rollId) return null;
+    const rolls = this.store.get('rolls', {});
+    return rolls[rollId] || null;
+  }
+
+  /**
+   * Remove a roll-level record. Used in M8-3 to clean up provisional
+   * "detected/processing" records once the real roll record is written
+   * under a different rollId (e.g. when _resolveStoragePath disambiguates
+   * with a `_1` suffix). No-op if the rollId is unknown.
+   */
+  deleteRoll(rollId) {
+    if (!rollId) return false;
+    const rolls = this.store.get('rolls', {});
+    if (!rolls[rollId]) return false;
+    delete rolls[rollId];
+    this.store.set('rolls', rolls);
+    return true;
   }
 
   /**
@@ -186,6 +277,220 @@ class FrameMetadataStore {
       return at < bt ? 1 : -1;
     });
     return rolls;
+  }
+
+  /**
+   * Roll summaries with the full set of counts the Film Review panel needs.
+   * Status derivation is deliberately simple at Phase 1:
+   *   - reviewed          → every frame in the roll has reviewStatus 'reviewed'
+   *   - ready_for_review  → otherwise (any roll with records is post-ingest)
+   * A 'processing' status would require live coordination with the pipeline
+   * and is deferred to a later milestone.
+   *
+   * Low-confidence threshold (0.75) matches the design brief's visual
+   * treatment — the UI paints these amber. Keep the threshold here in sync
+   * with the renderer's ConfidenceDot bucketing.
+   */
+  listRollsWithSummary() {
+    const frames = this.store.get('frames', {});
+    const byRoll = new Map();
+
+    for (const rec of Object.values(frames)) {
+      if (!rec || !rec.rollId) continue;
+      let entry = byRoll.get(rec.rollId);
+      if (!entry) {
+        entry = {
+          rollId: rec.rollId,
+          frameCount: 0,
+          autoRotatedCount: 0,
+          lowConfidenceCount: 0,
+          rotationErrorCount: 0,
+          flaggedCount: 0,
+          reviewedCount: 0,
+          firstSeenAt: rec.createdAt || null,
+          lastSeenAt: rec.updatedAt || rec.createdAt || null,
+          status: 'ready_for_review',
+        };
+        byRoll.set(rec.rollId, entry);
+      }
+
+      entry.frameCount += 1;
+
+      const rot = rec.rotation || {};
+      if (rot.applied === true) entry.autoRotatedCount += 1;
+      if (rot.error) entry.rotationErrorCount += 1;
+      if (typeof rot.confidence === 'number' && rot.confidence < 0.75) {
+        entry.lowConfidenceCount += 1;
+      }
+
+      const flags = Array.isArray(rec.operatorFlags) ? rec.operatorFlags : [];
+      if (flags.length > 0) entry.flaggedCount += 1;
+
+      if (rec.reviewStatus === 'reviewed') entry.reviewedCount += 1;
+
+      if (rec.createdAt && (!entry.firstSeenAt || rec.createdAt < entry.firstSeenAt)) {
+        entry.firstSeenAt = rec.createdAt;
+      }
+      const touched = rec.updatedAt || rec.createdAt;
+      if (touched && (!entry.lastSeenAt || touched > entry.lastSeenAt)) {
+        entry.lastSeenAt = touched;
+      }
+    }
+
+    // Merge in roll-level state (upload fields) for any roll that has a
+    // record. Legacy rolls (pre-M7) won't have one — they get undefined
+    // upload fields and the renderer treats that as "no upload tracking",
+    // i.e. behaves the same as before.
+    const rollRecords = this.store.get('rolls', {});
+
+    const rolls = [...byRoll.values()].map((r) => {
+      const rollRec = rollRecords[r.rollId] || null;
+      return {
+        ...r,
+        status: r.frameCount > 0 && r.reviewedCount === r.frameCount
+          ? 'reviewed'
+          : 'ready_for_review',
+        uploadStatus:    rollRec ? rollRec.uploadStatus    : undefined,
+        uploadError:     rollRec ? rollRec.uploadError     : undefined,
+        uploadedAt:      rollRec ? rollRec.uploadedAt      : undefined,
+        storagePath:     rollRec ? rollRec.storagePath     : undefined,
+        processingStatus: rollRec ? rollRec.processingStatus || null : null,
+        detectedAt:      rollRec ? rollRec.detectedAt      : undefined,
+      };
+    });
+
+    // M8-3: surface provisional roll records (detected / processing) that
+    // exist in the rolls map but have zero frames yet. These render as
+    // non-clickable placeholders in the panel so the operator can see that
+    // their scan is queued — "watching" while the watchguard timer ticks
+    // down, "processing" while the AI rotation pass + thumbnails run.
+    const seenRollIds = new Set(rolls.map((r) => r.rollId));
+    for (const rollRec of Object.values(rollRecords)) {
+      if (!rollRec || !rollRec.rollId) continue;
+      if (seenRollIds.has(rollRec.rollId)) continue;
+      if (!rollRec.processingStatus) continue;  // only surface in-flight rolls
+      rolls.push({
+        rollId: rollRec.rollId,
+        frameCount: 0,
+        autoRotatedCount: 0,
+        lowConfidenceCount: 0,
+        rotationErrorCount: 0,
+        flaggedCount: 0,
+        reviewedCount: 0,
+        firstSeenAt: rollRec.detectedAt || rollRec.createdAt || null,
+        lastSeenAt:  rollRec.updatedAt || rollRec.detectedAt || rollRec.createdAt || null,
+        status: 'ready_for_review',
+        uploadStatus:    rollRec.uploadStatus,
+        uploadError:     rollRec.uploadError,
+        uploadedAt:      rollRec.uploadedAt,
+        storagePath:     rollRec.storagePath,
+        processingStatus: rollRec.processingStatus,
+        detectedAt:      rollRec.detectedAt,
+      });
+    }
+
+    rolls.sort((a, b) => {
+      const at = a.lastSeenAt || '';
+      const bt = b.lastSeenAt || '';
+      if (at === bt) return 0;
+      return at < bt ? 1 : -1;
+    });
+    return rolls;
+  }
+
+  /**
+   * Full roll detail — the summary entry plus the complete array of frame
+   * records sorted by frameIndex. Returns null if the roll is unknown.
+   */
+  getRollWithFrames(rollId) {
+    if (!rollId) return null;
+    const rollFrames = this.listByRoll(rollId);
+    if (rollFrames.length === 0) return null;
+
+    const summary = this.listRollsWithSummary().find((r) => r.rollId === rollId);
+    if (!summary) return null;
+
+    // Roll record is already merged into summary by listRollsWithSummary, so
+    // uploadStatus/uploadError/uploadedAt/storagePath are present here too.
+    return { ...summary, frames: rollFrames };
+  }
+
+  /**
+   * Append an operator flag to a frame's operatorFlags array. Stamps
+   * flaggedAt automatically so the renderer doesn't have to.
+   *
+   * `flag` shape:
+   *   {
+   *     type: 'rotation'|'scan_quality'|'exposure'|'other',
+   *     note?: string,
+   *     correctRotation?: 0 | 90 | 180 | 270  // only meaningful when type==='rotation'
+   *   }
+   *
+   * `correctRotation` is the training-signal field: it's the rotation (in degrees,
+   * relative to what the operator currently sees on screen) that would make the
+   * frame appear upright. Null means "operator flagged but didn't label" — useful
+   * as negative signal (model got it wrong) but not as positive training data.
+   * When present, a flag is a fully-labelled training example.
+   *
+   * Returns the updated record, or null if the frame is unknown or the flag
+   * is missing a required field.
+   */
+  appendFlag(frameId, flag) {
+    if (!frameId || !flag || !flag.type) return null;
+    const existing = this.get(frameId);
+    if (!existing) return null;
+
+    // Only accept correctRotation on rotation-type flags, and only if it's a
+    // known canonical value. Anything else → null (unlabelled).
+    const VALID_ROTATIONS = [0, 90, 180, 270];
+    const correctRotation =
+      flag.type === 'rotation' && VALID_ROTATIONS.includes(flag.correctRotation)
+        ? flag.correctRotation
+        : null;
+
+    const operatorFlags = Array.isArray(existing.operatorFlags)
+      ? [...existing.operatorFlags]
+      : [];
+    operatorFlags.push({
+      type: flag.type,
+      note: flag.note || null,
+      correctRotation,
+      flaggedAt: new Date().toISOString(),
+    });
+
+    return this.update(frameId, { operatorFlags });
+  }
+
+  /**
+   * Remove an operator flag by array index (the flag-menu's "undo" path).
+   * Returns the updated record, or null if frame/index is invalid.
+   */
+  removeFlag(frameId, flagIndex) {
+    if (!frameId || typeof flagIndex !== 'number') return null;
+    const existing = this.get(frameId);
+    if (!existing) return null;
+    if (!Array.isArray(existing.operatorFlags)) return null;
+    if (flagIndex < 0 || flagIndex >= existing.operatorFlags.length) return null;
+
+    const operatorFlags = [...existing.operatorFlags];
+    operatorFlags.splice(flagIndex, 1);
+    return this.update(frameId, { operatorFlags });
+  }
+
+  /**
+   * Mark every frame in a roll as reviewed. Stamps reviewedAt on each.
+   * Returns the number of frames touched; 0 if the roll has no records.
+   */
+  markRollReviewed(rollId) {
+    if (!rollId) return 0;
+    const rollFrames = this.listByRoll(rollId);
+    const now = new Date().toISOString();
+    let count = 0;
+    for (const rec of rollFrames) {
+      this.update(rec.frameId, { reviewStatus: 'reviewed', reviewedAt: now });
+      count += 1;
+    }
+    return count;
   }
 
   /**

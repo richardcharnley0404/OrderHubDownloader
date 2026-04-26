@@ -9,6 +9,16 @@ const orientationService = require('./services/orientation-service');
 const logger = require('./services/logger');
 const updater = require('./updater');
 
+// Disable libvips' operation cache. The cache retains file descriptors on
+// recently-read images so subsequent passes are faster — but on a slow SMB
+// share (Synology) the retained handle on a JPG races with our write+rename
+// cycle in the rotation pipeline, surfacing as EPERM on rename. JPGs hit
+// this much harder than TIFFs because libvips uses different loaders for
+// the two formats. Throughput cost is small for our workload (each frame
+// is read at most twice — once for prediction, once for rotation/thumb)
+// and avoids the EPERM rabbit hole entirely. See M8-4 in the smoke-test doc.
+require('sharp').cache(false);
+
 // Prevent multiple instances
 const gotTheLock = app.requestSingleInstanceLock();
 

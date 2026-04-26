@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>OrderHub Downloader</title>
   <link rel="stylesheet" href="styles.css">
+  <!-- Film Review Panel — scoped under .film-review-panel so no leak into legacy UI -->
+  <link rel="stylesheet" href="film-review.css">
 </head>
 <body>
   <div class="app-frame">
@@ -22,6 +24,7 @@
 
     <nav class="tab-bar">
       <button class="tab active" data-tab="jobs">Jobs</button>
+      <button class="tab" data-tab="film">Film Review</button>
       <button class="tab" data-tab="settings">Settings</button>
       <button class="tab" data-tab="activity">Activity Log</button>
     </nav>
@@ -99,6 +102,22 @@
           <p class="empty-title">No jobs found</p>
           <p class="empty-desc">Configure your API connection in Settings, then jobs will appear here automatically.</p>
         </div>
+      </div>
+
+      <!-- ═══ FILM REVIEW TAB ═══ -->
+      <!--
+        Film Review Panel — React view (PW-007 Phase 1, Milestone 4).
+        Built by:  npm run build:renderer
+        Watches:   npm run watch:renderer
+
+        Unlike Job Review (which is a modal drawer), Film Review is a full
+        tab surface. React mounts into #film-review-root and fills the panel
+        whenever the tab is active. No CustomEvent protocol — the panel owns
+        its own routing (rolls list <-> focused roll) and pulls data via
+        window.electronAPI.filmReview*.
+      -->
+      <div class="tab-panel" id="panel-film">
+        <div id="film-review-root" class="film-review-root"></div>
       </div>
 
       <!-- ═══ SETTINGS TAB ═══ -->
@@ -388,6 +407,48 @@
                 <small id="filmScansLastCheck" class="field-hint" style="margin-top: 0;">Never</small>
               </div>
 
+            </fieldset>
+
+            <!-- M7-8: AI Rotation toggles. Two settings drive the three Film
+                 Review modes (Off / Auto / Manual). Manual is force-disabled
+                 when AI Rotation is off — there is no human-in-the-loop step
+                 to gate when there's nothing to review. -->
+            <fieldset class="panel-section">
+              <legend>AI Rotation</legend>
+              <p class="section-desc">
+                Auto-orient scanned frames using the on-device ML model.
+                Operators can review and correct AI decisions in the Film tab
+                before rolls are uploaded to S3.
+              </p>
+
+              <div class="form-group checkbox-group">
+                <label>
+                  <input type="checkbox" id="filmScanRotationEnabled" name="filmScanRotationEnabled">
+                  <span>Enable AI Rotation</span>
+                </label>
+                <small class="field-hint">
+                  When off, scans upload to S3 as-is with no orientation step.
+                </small>
+              </div>
+
+              <div class="form-group" id="filmScanReviewModeGroup">
+                <label class="form-group__label">Review Mode</label>
+                <label class="radio-row">
+                  <input type="radio" name="filmScanReviewMode" value="never" id="filmScanReviewMode_never">
+                  <span><strong>Auto</strong> — upload all rolls immediately after AI rotation.</span>
+                </label>
+                <label class="radio-row">
+                  <input type="radio" name="filmScanReviewMode" value="smart" id="filmScanReviewMode_smart">
+                  <span><strong>Smart Check</strong> — only hold rolls with at least one low-confidence frame or rotation error. Confident rolls upload automatically.</span>
+                </label>
+                <label class="radio-row">
+                  <input type="radio" name="filmScanReviewMode" value="always" id="filmScanReviewMode_always">
+                  <span><strong>Manual Check</strong> — every roll waits in the Film tab for operator approval before uploading.</span>
+                </label>
+                <small class="field-hint">
+                  Requires AI Rotation to be enabled. With AI off, rolls always upload as-is.
+                </small>
+              </div>
             </fieldset>
           </div>
 
@@ -773,7 +834,27 @@
           <option value="folder_copy">Folder Copy</option>
           <option value="pdf_copy">PDF Copy</option>
           <option value="darkroompro">Darkroom Pro</option>
+          <option value="frontline">Frontline</option>
         </select>
+      </div>
+
+      <!-- Frontline-specific fields -->
+      <div class="form-group" id="ocDeviceGroup" style="display:none">
+        <label for="ocDevice">Device Name</label>
+        <input type="text" id="ocDevice" placeholder="e.g. Pixfizz" style="width:200px;">
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Written into the &lt;device&gt; field of the Frontline XML.</small>
+      </div>
+
+      <div class="form-group" id="ocBackPrint1Group" style="display:none">
+        <label for="ocBackPrint1">Back Print 1 Template</label>
+        <input type="text" id="ocBackPrint1" placeholder="{jobName}  {customerName}" style="width:100%;">
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Tokens: <code>{customerName}</code> <code>{jobId}</code> <code>{orderNumber}</code> <code>{jobName}</code> <code>{filename}</code></small>
+      </div>
+
+      <div class="form-group" id="ocBackPrint2Group" style="display:none">
+        <label for="ocBackPrint2">Back Print 2 Template</label>
+        <input type="text" id="ocBackPrint2" placeholder="{jobId}  {filename}" style="width:100%;">
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Tokens: <code>{customerName}</code> <code>{jobId}</code> <code>{orderNumber}</code> <code>{jobName}</code> <code>{filename}</code></small>
       </div>
 
       <div class="form-group">
@@ -791,6 +872,42 @@
           <button type="button" id="ocProcessedFolderBrowseBtn" class="btn-browse">Browse...</button>
         </div>
         <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Sub-folder name where Darkroom Pro moves completed jobs</small>
+      </div>
+
+      <div class="form-group" id="ocArtworkRootPathGroup" style="display:none">
+        <label for="ocArtworkRootPath">Artwork Root Path</label>
+        <div class="input-with-button">
+          <input type="text" id="ocArtworkRootPath" placeholder="e.g. Z:\Pixfizz\Artwork" readonly>
+          <button type="button" id="ocArtworkRootPathBrowseBtn" class="btn-browse">Browse...</button>
+        </div>
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Base path to artwork files. OHD will append \{OrderRef}\Darkroom\ to this.</small>
+      </div>
+
+      <div class="form-group" id="ocOrderLastNameFormatGroup" style="display:none">
+        <label for="ocOrderLastNameFormat">OrderLastName Format</label>
+        <select id="ocOrderLastNameFormat">
+          <option value="orderRef_lastName">{OrderRef} - {LastName}</option>
+          <option value="lastName">Customer Last Name only</option>
+          <option value="labCode_orderRef_lastName">{LabCode}-{OrderRef} - {LastName}</option>
+        </select>
+      </div>
+
+      <div class="form-group" id="ocSizeTranslationsGroup" style="display:none">
+        <label style="font-weight:600;margin-bottom:4px;display:block">Size Translations</label>
+        <small style="color:var(--text-muted,#888);display:block;margin-bottom:8px">Map an exact product code to the size string Darkroom Pro expects.</small>
+        <div id="ocSizeTranslationsList"></div>
+        <button type="button" id="ocAddSizeTranslationBtn" class="btn-secondary btn-sm" style="margin-top:6px">+ Add Size</button>
+      </div>
+
+      <div class="form-group" id="ocMediaTranslationsGroup" style="display:none">
+        <label style="font-weight:600;margin-bottom:4px;display:block">Media Translations</label>
+        <small style="color:var(--text-muted,#888);display:block;margin-bottom:8px">Specify which job option carries the paper type, and translate its values.</small>
+        <div style="margin-bottom:8px">
+          <label for="ocMediaOptionKey" style="font-size:12px;display:block;margin-bottom:3px">Paper Type Option Key</label>
+          <input type="text" id="ocMediaOptionKey" placeholder="e.g. finish-options" style="width:200px">
+        </div>
+        <div id="ocMediaTranslationsList"></div>
+        <button type="button" id="ocAddMediaTranslationBtn" class="btn-secondary btn-sm" style="margin-top:6px">+ Add Media Translation</button>
       </div>
 
       <div class="form-group">
@@ -862,12 +979,13 @@
         <button type="button" id="cmAddOptionBtn" class="btn-secondary" style="font-size:11px;padding:3px 10px;margin-top:4px;">+ Add Option</button>
       </div>
 
-      <div class="form-group">
+      <!-- DPOF / standard controller fields -->
+      <div class="form-group" id="cmChannelNumberGroup">
         <label for="cmChannelNumber">Channel Number</label>
         <input type="number" id="cmChannelNumber" placeholder="e.g. 1" min="1" style="width:90px;">
       </div>
 
-      <div class="form-group checkbox-group">
+      <div class="form-group checkbox-group" id="cmSkipAutoPrintGroup">
         <label for="cmSkipAutoPrint">
           <input type="checkbox" id="cmSkipAutoPrint">
           Skip Auto Print
@@ -875,10 +993,23 @@
         <small class="field-hint">Jobs routed to this channel will not be dispatched by Auto Print, even if the controller has Auto Print enabled.</small>
       </div>
 
-      <div class="form-group">
+      <div class="form-group" id="cmPrintSizeCodeGroup">
         <label for="cmPrintSizeCode">Print Size Code <span style="font-weight:normal;color:#888">(optional)</span></label>
         <input type="text" id="cmPrintSizeCode" placeholder='e.g. KG, 2L, NML -PSIZE "8x4"' style="width:100%;">
         <div style="font-size:11px;color:#888;margin-top:3px;">Leave blank to use the product size as NML fallback. Common codes: KG (6×4), 2L (5×7), A4.</div>
+      </div>
+
+      <!-- Frontline-specific channel mapping fields -->
+      <div class="form-group" id="cmBatchCodeGroup" style="display:none">
+        <label for="cmBatchCode">Batch Code</label>
+        <input type="text" id="cmBatchCode" placeholder="e.g. #aa#$" style="width:200px;">
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Written into the &lt;batch code="…"&gt; attribute of the Frontline XML. Encodes the print size and surface finish.</small>
+      </div>
+
+      <div class="form-group" id="cmSortStringGroup" style="display:none">
+        <label for="cmSortString">Sort String <span style="font-weight:normal;color:#888">(optional)</span></label>
+        <input type="text" id="cmSortString" placeholder='e.g. 4x6    3 Day' style="width:100%;">
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Written into the &lt;order sort="…"&gt; attribute. Describes the product and service level.</small>
       </div>
 
       <div class="pm-modal-footer">
@@ -977,18 +1108,47 @@
         <div id="assignModalOptions" class="modal-readonly-value">—</div>
       </div>
 
-      <div class="form-group">
+      <!-- DPOF mode: channel number entry -->
+      <div class="form-group" id="assignDpofGroup">
         <label class="form-label" for="assignChannelNumber">Channel Number <span style="color:#e05252">*</span></label>
         <input type="number" id="assignChannelNumber" class="form-control" min="1" max="999" placeholder="e.g. 1" style="width:120px">
         <p class="field-hint">The channel number configured on the printer for this product and finish.</p>
       </div>
 
-      <div class="form-group checkbox-group">
+      <div class="form-group checkbox-group" id="assignSkipAutoPrintGroup">
         <label for="assignSkipAutoPrint">
           <input type="checkbox" id="assignSkipAutoPrint">
           Skip Auto Print
         </label>
         <small class="field-hint">Jobs routed to this channel will not be dispatched by Auto Print, even if the controller has Auto Print enabled.</small>
+      </div>
+
+      <!-- Darkroom Pro mode: direct Size / Media entry -->
+      <div id="assignDpGroup" style="display:none">
+
+        <div class="form-group" id="dpSizeGroup">
+          <label class="form-label">Size <span style="color:#e05252">*</span></label>
+          <p id="dpProductCode" class="field-hint" style="margin-bottom:4px"></p>
+          <input type="text" id="dpSizeInput" class="form-control" placeholder="e.g. 8x8" style="width:180px">
+          <label style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:0.85em;cursor:pointer">
+            <input type="checkbox" id="dpSaveSizeTranslation">
+            <span>Save size translation for future orders</span>
+          </label>
+        </div>
+
+        <div class="form-group" id="dpMediaGroup">
+          <label class="form-label">Media</label>
+          <p id="dpMediaResolved" class="field-hint" style="margin-bottom:4px"></p>
+          <div id="dpMediaInputGroup" style="display:none">
+            <p id="dpMediaOptionHint" class="field-hint" style="margin-bottom:4px"></p>
+            <input type="text" id="dpMediaInput" class="form-control" placeholder="e.g. Luster" style="width:180px">
+            <label style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:0.85em;cursor:pointer">
+              <input type="checkbox" id="dpSaveMediaTranslation">
+              <span>Save media translation for future orders</span>
+            </label>
+          </div>
+        </div>
+
       </div>
 
       <div class="pm-modal-footer">
@@ -1013,5 +1173,13 @@
   -->
   <div id="job-review-root"></div>
   <script src="job-review.bundle.js"></script>
+
+  <!--
+    Film Review Panel — React bundle.
+    The panel's root div lives inside #panel-film (above); React finds it
+    on DOMContentLoaded. This script is placed at the end of <body> so the
+    target node is guaranteed to exist when the bundle runs.
+  -->
+  <script src="film-review.bundle.js"></script>
 </body>
 </html>

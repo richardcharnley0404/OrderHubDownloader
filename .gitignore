@@ -28,3 +28,6 @@ config.json
 *.asar
 nul
 .claude/
+# Cowork workspace folder (accidental nested copy of repo)
+/OrderHub Dowloader/
+git rm --cached .claude/settings.local.json

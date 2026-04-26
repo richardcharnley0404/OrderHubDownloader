@@ -174,6 +174,8 @@ class JobService {
         // does not cause the "Imported" toast to fire again on the next poll cycle.
         preserved._dpofNotified = existing._dpofNotified;
       }
+      if (existing._darkroomProSize)  preserved._darkroomProSize  = existing._darkroomProSize;
+      if (existing._darkroomProMedia) preserved._darkroomProMedia = existing._darkroomProMedia;
       return { ...newJob, ...preserved };
     });
 

@@ -121,6 +121,32 @@ const schema = {
     type: 'boolean',
     default: false
   },
+  // PW-007 M7 — Manual Review mode (legacy; superseded by filmScanReviewMode).
+  // Kept in the schema only for migration on first load; no code reads it.
+  filmScanManualReview: {
+    type: 'boolean',
+    default: false
+  },
+  // PW-007 M9 — Review mode tri-state. Drives whether processed rolls are held
+  // back from S3 upload pending operator approval in the Film Review panel.
+  //   'never'  — Auto: rotate then upload immediately.
+  //   'smart'  — Smart Check: rotate, then defer upload only if the roll has
+  //              any low-confidence frame (confidence < threshold) OR any
+  //              rotation-error frame. Confident rolls upload immediately.
+  //   'always' — Manual: every roll waits for operator approval.
+  // Forced to no-op when filmScanRotationEnabled is false — the panel only
+  // surfaces rolls that have AI metadata to review.
+  filmScanReviewMode: {
+    type: 'string',
+    enum: ['never', 'smart', 'always'],
+    default: 'never'
+  },
+  // One-shot flag used by the constructor to migrate old filmScanManualReview
+  // values into filmScanReviewMode exactly once. Internal — not surfaced in UI.
+  _filmScanReviewModeMigrated: {
+    type: 'boolean',
+    default: false
+  },
   // File Uploads (Mode 3)
   fileUploadsEnabled: {
     type: 'boolean',
@@ -245,6 +271,23 @@ const schema = {
 class ConfigService {
   constructor() {
     this.store = new Store({ schema });
+    this._migrateReviewMode();
+  }
+
+  /**
+   * One-shot migration from the old `filmScanManualReview` boolean to the new
+   * `filmScanReviewMode` enum. Runs once per install — guarded by an internal
+   * `_filmScanReviewModeMigrated` flag so subsequent UI saves don't get
+   * stomped. If the user previously enabled Manual Rotation Check, they land
+   * in 'always' mode; otherwise 'never' (== old default behavior).
+   */
+  _migrateReviewMode() {
+    if (this.store.get('_filmScanReviewModeMigrated')) return;
+    const legacy = this.store.get('filmScanManualReview');
+    if (legacy === true) {
+      this.store.set('filmScanReviewMode', 'always');
+    }
+    this.store.set('_filmScanReviewModeMigrated', true);
   }
 
   /**
@@ -280,6 +323,7 @@ class ConfigService {
       filmScanRotationConfidenceThreshold: this.store.get('filmScanRotationConfidenceThreshold'),
       filmScanRotationModelPath: this.store.get('filmScanRotationModelPath'),
       filmScanRotationDebugLog: this.store.get('filmScanRotationDebugLog'),
+      filmScanReviewMode: this.store.get('filmScanReviewMode'),
       // File Uploads
       fileUploadsEnabled: this.store.get('fileUploadsEnabled'),
       fileUploadsWatchFolder: this.store.get('fileUploadsWatchFolder'),
@@ -434,6 +478,12 @@ class ConfigService {
     }
     if (Object.prototype.hasOwnProperty.call(config, 'filmScanRotationDebugLog')) {
       this.store.set('filmScanRotationDebugLog', Boolean(config.filmScanRotationDebugLog));
+    }
+    if (Object.prototype.hasOwnProperty.call(config, 'filmScanReviewMode')) {
+      const mode = String(config.filmScanReviewMode);
+      if (mode === 'never' || mode === 'smart' || mode === 'always') {
+        this.store.set('filmScanReviewMode', mode);
+      }
     }
 
     // Save File Uploads settings

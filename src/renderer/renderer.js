@@ -476,7 +476,7 @@ function renderJobTable(jobs) {
       ? `${downloadDirectory}\\${jobFolderName}\\${sidecarJobId}`
       : '';
     // Review button shown alongside any downloaded job (received / in_production / completed).
-    const reviewBtn = `<button class="btn-action btn-review" data-sidecar-job-id="${escapeHtml(sidecarJobId)}" data-job-path="${escapeHtml(jobFolderPath)}">Review</button>`;
+    const reviewBtn = `<button class="btn-action btn-review" data-sidecar-job-id="${escapeHtml(sidecarJobId)}" data-job-path="${escapeHtml(jobFolderPath)}" data-oh-job-id="${escapeHtml(String(job.id))}">Review</button>`;
 
     let actionHtml = '';
     if (currentFilter === 'dismissed') {
@@ -644,8 +644,9 @@ function renderJobTable(jobs) {
     btn.addEventListener('click', () => {
       const jobId   = btn.dataset.sidecarJobId;
       const jobPath = btn.dataset.jobPath;
+      const ohJobId = btn.dataset.ohJobId || null;
       window.dispatchEvent(new CustomEvent('ohd:open-job-review', {
-        detail: { jobId, jobPath },
+        detail: { jobId, jobPath, ohJobId },
       }));
     });
   });
@@ -829,7 +830,8 @@ function getDpofOutputActionHtml(reviewBtnHtml, jobId, prefix) {
  * channel mapping yet (route.reason === 'no-channel').
  *
  * Pre-fills product, product code, controller name, and options (all read-only).
- * The operator enters a channel number and clicks Save.
+ * For DPOF controllers: operator enters a channel number and clicks Save (creates a new mapping).
+ * For Darkroom Pro controllers: operator picks from the controller's existing channel mappings.
  *
  * @param {object} job   - Job object from allJobs
  * @param {object} route - Route from jobRouteCache: { type:'unrouted', reason:'no-channel', controller }
@@ -837,6 +839,8 @@ function getDpofOutputActionHtml(reviewBtnHtml, jobId, prefix) {
 function openAssignModal(job, route) {
   const modal = document.getElementById('assignChannelModal');
   if (!modal) return;
+
+  const isDarkroomPro = route.controller && route.controller.type === 'darkroompro';
 
   // Populate read-only fields
   document.getElementById('assignModalProduct').textContent     = job.product     || '—';
@@ -859,20 +863,99 @@ function openAssignModal(job, route) {
     document.getElementById('assignModalOptionsGroup').style.display = 'none';
   }
 
-  // Clear channel number input and reset checkbox
-  const channelInput = document.getElementById('assignChannelNumber');
-  channelInput.value = '';
-  document.getElementById('assignSkipAutoPrint').checked = false;
+  // Show DPOF or Darkroom Pro input section
+  document.getElementById('assignDpofGroup').style.display          = isDarkroomPro ? 'none' : '';
+  document.getElementById('assignSkipAutoPrintGroup').style.display  = isDarkroomPro ? 'none' : '';
+  document.getElementById('assignDpGroup').style.display             = isDarkroomPro ? '' : 'none';
+
+  if (isDarkroomPro) {
+    // ── Populate the Size / Media fields ──────────────────────────────────
+    const controller = cachedOrderControllers.find(c => c.id === route.controller.id) || route.controller;
+    const productCode = job.product_code || '';
+
+    // Size: find existing translation, or pre-fill from previous job override
+    document.getElementById('dpProductCode').textContent = `Product Code: ${productCode}`;
+    const existingSize = (controller.sizeTranslations || []).find(
+      t => t.productCodePrefix && t.productCodePrefix.toLowerCase() === productCode.toLowerCase()
+    );
+    const sizeInput = document.getElementById('dpSizeInput');
+    sizeInput.value = existingSize ? existingSize.darkroomSize : (job._darkroomProSize || '');
+    sizeInput.setCustomValidity('');
+    document.getElementById('dpSaveSizeTranslation').checked = false;
+
+    // Media: attempt to resolve via translation table
+    const mediaOptionKey = (controller.mediaOptionKey || '').trim();
+    const jobOptions     = job.options || [];
+    let resolvedMediaValue = '';
+    let mediaOptionEntry   = null; // the raw job option that looks like a paper type
+
+    if (mediaOptionKey) {
+      mediaOptionEntry = jobOptions.find(
+        o => o.name && o.name.toLowerCase() === mediaOptionKey.toLowerCase()
+      );
+    }
+    // Fall back to first option when key not configured or not found on job
+    if (!mediaOptionEntry && jobOptions.length > 0) {
+      mediaOptionEntry = jobOptions[0];
+    }
+
+    if (mediaOptionEntry) {
+      const translation = (controller.mediaTranslations || []).find(
+        t => t.from && t.from.toLowerCase() === (mediaOptionEntry.value || '').toLowerCase()
+      );
+      if (translation) resolvedMediaValue = translation.to;
+    }
+
+    // Also accept a previous per-job media override as "resolved"
+    if (!resolvedMediaValue && job._darkroomProMedia) {
+      resolvedMediaValue = job._darkroomProMedia;
+    }
+
+    const mediaAutoResolved = !!resolvedMediaValue;
+    document.getElementById('dpMediaResolved').textContent =
+      mediaAutoResolved ? `Media: ${resolvedMediaValue}` : '';
+    document.getElementById('dpMediaInputGroup').style.display = mediaAutoResolved ? 'none' : '';
+
+    if (!mediaAutoResolved) {
+      // Show hint about which raw option was found
+      if (mediaOptionEntry) {
+        const optKey = mediaOptionEntry.name || mediaOptionEntry.key || '';
+        document.getElementById('dpMediaOptionHint').textContent =
+          `Option: ${optKey}: ${mediaOptionEntry.value}`;
+      } else {
+        document.getElementById('dpMediaOptionHint').textContent =
+          mediaOptionKey
+            ? `Option "${mediaOptionKey}" not found on this job`
+            : 'No media option key configured on this controller';
+      }
+      const mediaInput = document.getElementById('dpMediaInput');
+      mediaInput.value = '';
+      mediaInput.setCustomValidity('');
+      document.getElementById('dpSaveMediaTranslation').checked = false;
+    }
+
+    // Stash context for save handler
+    modal.dataset.dpMediaAutoResolved  = mediaAutoResolved ? '1' : '0';
+    modal.dataset.dpMediaResolvedValue = resolvedMediaValue;
+    modal.dataset.dpMediaFrom          = mediaOptionEntry ? (mediaOptionEntry.value || '') : '';
+  } else {
+    // Clear DPOF inputs
+    document.getElementById('assignChannelNumber').value = '';
+    document.getElementById('assignSkipAutoPrint').checked = false;
+  }
 
   // Store context on the modal element for the save handler
-  modal.dataset.jobId = String(job.id);
-  modal.dataset.controllerId = route.controller ? route.controller.id : '';
-  modal.dataset.productCode  = job.product_code || '';
+  modal.dataset.jobId         = String(job.id);
+  modal.dataset.controllerId  = route.controller ? route.controller.id : '';
+  modal.dataset.productCode   = job.product_code || '';
+  modal.dataset.isDarkroomPro = isDarkroomPro ? '1' : '';
   // Serialise job options for save handler (JSON)
-  modal.dataset.jobOptions   = JSON.stringify(job.options || []);
+  modal.dataset.jobOptions    = JSON.stringify(job.options || []);
 
   modal.classList.remove('hidden');
-  channelInput.focus();
+  if (!isDarkroomPro) {
+    document.getElementById('assignChannelNumber').focus();
+  }
 }
 
 // Wire up Assign modal save / cancel once (outside renderJobTable — handlers are permanent)
@@ -890,56 +973,145 @@ function openAssignModal(job, route) {
   });
 
   saveBtn.addEventListener('click', async () => {
-    const channelInput  = document.getElementById('assignChannelNumber');
-    const channelNumber = parseInt(channelInput.value, 10);
-
-    if (!channelNumber || channelNumber < 1) {
-      channelInput.focus();
-      channelInput.setCustomValidity('Enter a valid channel number.');
-      channelInput.reportValidity();
-      return;
-    }
-    channelInput.setCustomValidity('');
-
-    const controllerId = modal.dataset.controllerId;
-    const productCode  = modal.dataset.productCode;
-    const jobId        = modal.dataset.jobId;
-    const jobOptions   = JSON.parse(modal.dataset.jobOptions || '[]');
+    const controllerId  = modal.dataset.controllerId;
+    const productCode   = modal.dataset.productCode;
+    const jobId         = modal.dataset.jobId;
+    const jobOptions    = JSON.parse(modal.dataset.jobOptions || '[]');
+    const isDarkroomPro = modal.dataset.isDarkroomPro === '1';
 
     if (!controllerId) {
       showToast('No controller found — check Routing settings.', 'error');
       return;
     }
 
-    saveBtn.disabled   = true;
-    saveBtn.textContent = 'Saving...';
+    if (isDarkroomPro) {
+      // ── Darkroom Pro flow: validate size + media, optionally save translations,
+      //    store overrides on the job, then dispatch immediately ────────────────
 
-    const skipAutoPrint = document.getElementById('assignSkipAutoPrint').checked;
+      // Capture all user inputs immediately — before any async operations or
+      // state changes that could affect DOM reads.
+      const sizeInput        = document.getElementById('dpSizeInput');
+      const sizeValue        = sizeInput.value.trim();
+      const saveSizeTick     = !!document.getElementById('dpSaveSizeTranslation')?.checked;
+      const mediaAutoResolved = modal.dataset.dpMediaAutoResolved === '1';
+      const mediaInput       = mediaAutoResolved ? null : document.getElementById('dpMediaInput');
+      const saveMediaTick    = !mediaAutoResolved && !!document.getElementById('dpSaveMediaTranslation')?.checked;
 
-    try {
-      const result = await window.electronAPI.saveChannelMapping({
-        id:            crypto.randomUUID(),
-        controllerId,
-        productCode,
-        options:       jobOptions,   // Array<{name,value}> — match this job's options
-        channelNumber,
-        skipAutoPrint,
-      });
-
-      if (result && result.success === false) {
-        throw new Error(result.error || 'Save failed');
+      // Resolve media value — either auto-resolved or from the manual input
+      let mediaValue;
+      if (mediaAutoResolved) {
+        mediaValue = modal.dataset.dpMediaResolvedValue;
+      } else {
+        mediaValue = mediaInput ? mediaInput.value.trim() : '';
       }
 
-      // Re-resolve all routes (picks up the newly saved channel mapping) then re-render
-      modal.classList.add('hidden');
-      showToast('Channel mapping saved — job is ready to print', 'success');
-      await resolveRoutesForReceivedJobs(allJobs);
-      renderJobTable(getFilteredJobs());
-    } catch (err) {
-      showToast('Error saving channel mapping: ' + err.message, 'error', 8000);
-    } finally {
-      saveBtn.disabled    = false;
-      saveBtn.textContent = 'Save & Assign';
+      // Validate before disabling the button so the user can correct errors
+      if (!sizeValue) {
+        sizeInput.setCustomValidity('Please enter a size value');
+        sizeInput.reportValidity();
+        return;
+      }
+      sizeInput.setCustomValidity('');
+
+      if (!mediaValue) {
+        if (mediaInput) {
+          mediaInput.setCustomValidity('Please enter a media value');
+          mediaInput.reportValidity();
+        }
+        return;
+      }
+      if (mediaInput) mediaInput.setCustomValidity('');
+
+      saveBtn.disabled    = true;
+      saveBtn.textContent = 'Saving...';
+
+      try {
+        // 1. Optionally persist translation entries to the controller
+
+        if (saveSizeTick || saveMediaTick) {
+          const transResult = await window.electronAPI.updateDarkroomTranslations({
+            controllerId,
+            sizeTranslation:  saveSizeTick  ? { productCodePrefix: productCode, darkroomSize: sizeValue } : null,
+            mediaTranslation: saveMediaTick ? { from: modal.dataset.dpMediaFrom, to: mediaValue }         : null,
+          });
+          if (transResult && transResult.success === false) {
+            throw new Error(transResult.error || 'Failed to save translations');
+          }
+          // Keep cachedOrderControllers in sync and re-render the controller cards
+          // so the translation summary in Settings updates without a restart.
+          if (transResult && transResult.controller) {
+            cachedOrderControllers = cachedOrderControllers.map(c =>
+              c.id === transResult.controller.id ? transResult.controller : c
+            );
+            renderOrderControllers(cachedOrderControllers);
+          }
+        }
+
+        // 2. Store per-job size/media overrides in the job record
+        const assignResult = await window.electronAPI.assignDarkroomSizeMedia(jobId, sizeValue, mediaValue);
+        if (assignResult && assignResult.success === false) {
+          throw new Error(assignResult.error || 'Failed to store assignment');
+        }
+
+        // 3. Dispatch the job immediately
+        const printResult = await window.electronAPI.sendToPrint(jobId);
+        if (printResult && printResult.success === false) {
+          throw new Error(printResult.error || 'Dispatch failed');
+        }
+
+        modal.classList.add('hidden');
+        showToast('Darkroom Pro job sent to output folder', 'success');
+        await resolveRoutesForReceivedJobs(allJobs);
+        renderJobTable(getFilteredJobs());
+      } catch (err) {
+        showToast('Error: ' + err.message, 'error', 8000);
+      } finally {
+        saveBtn.disabled    = false;
+        saveBtn.textContent = 'Save & Assign';
+      }
+    } else {
+      // ── DPOF flow: create a new permanent channel mapping ─────────────────
+      const channelInput  = document.getElementById('assignChannelNumber');
+      const channelNumber = parseInt(channelInput.value, 10);
+
+      if (!channelNumber || channelNumber < 1) {
+        channelInput.focus();
+        channelInput.setCustomValidity('Enter a valid channel number.');
+        channelInput.reportValidity();
+        return;
+      }
+      channelInput.setCustomValidity('');
+
+      saveBtn.disabled    = true;
+      saveBtn.textContent = 'Saving...';
+
+      const skipAutoPrint = document.getElementById('assignSkipAutoPrint').checked;
+
+      try {
+        const result = await window.electronAPI.saveChannelMapping({
+          id:            crypto.randomUUID(),
+          controllerId,
+          productCode,
+          options:       jobOptions,   // Array<{name,value}> — match this job's options
+          channelNumber,
+          skipAutoPrint,
+        });
+
+        if (result && result.success === false) {
+          throw new Error(result.error || 'Save failed');
+        }
+
+        // Re-resolve all routes (picks up the newly saved channel mapping) then re-render
+        modal.classList.add('hidden');
+        showToast('Channel mapping saved — job is ready to print', 'success');
+        await resolveRoutesForReceivedJobs(allJobs);
+        renderJobTable(getFilteredJobs());
+      } catch (err) {
+        showToast('Error saving channel mapping: ' + err.message, 'error', 8000);
+      } finally {
+        saveBtn.disabled    = false;
+        saveBtn.textContent = 'Save & Assign';
+      }
     }
   });
 })();
@@ -989,7 +1161,7 @@ function updateJobRowStatus(jobId, status, job) {
     const jobFolderPath = downloadDirectory && jobFolderName
       ? `${downloadDirectory}\\${jobFolderName}\\${sidecarJobId}`
       : '';
-    const reviewBtn = `<button class="btn-action btn-review" data-sidecar-job-id="${escapeHtml(sidecarJobId)}" data-job-path="${escapeHtml(jobFolderPath)}">Review</button>`;
+    const reviewBtn = `<button class="btn-action btn-review" data-sidecar-job-id="${escapeHtml(sidecarJobId)}" data-job-path="${escapeHtml(jobFolderPath)}" data-oh-job-id="${escapeHtml(String(job.id))}">Review</button>`;
     const dpofInnerHtml = getDpofOutputActionHtml(reviewBtn, jobId, status.prefix);
     if (currentFilter !== 'dismissed') {
       actionCell.innerHTML = `<div class="actions-cell-wrap">${dpofInnerHtml}<button class="btn-dismiss" data-job-id="${escapeHtml(jobId)}" title="Hide this job from the list">Dismiss</button></div>`;
@@ -1031,7 +1203,7 @@ function updateJobRowStatus(jobId, status, job) {
     const reviewBtnEl = actionCell.querySelector('.btn-review');
     if (reviewBtnEl) reviewBtnEl.addEventListener('click', () => {
       window.dispatchEvent(new CustomEvent('ohd:open-job-review', {
-        detail: { jobId: sidecarJobId, jobPath: jobFolderPath }
+        detail: { jobId: sidecarJobId, jobPath: jobFolderPath, ohJobId: String(job.id) }
       }));
     });
   }
@@ -1109,6 +1281,18 @@ function populateForm(config) {
   document.getElementById('filmScansAutoSyncMinutes').value = config.filmScansAutoSyncMinutes || 5;
   document.getElementById('filmScansWatchguardMinutes').value = config.filmScansWatchguardMinutes || 5;
 
+  // Film Scans — AI Rotation + Review Mode (M7-8 + M9)
+  const aiRotEl = document.getElementById('filmScanRotationEnabled');
+  if (aiRotEl) aiRotEl.checked = !!config.filmScanRotationEnabled;
+  // Review Mode is a tri-state radio group; default to 'never' if the loaded
+  // config is missing or malformed.
+  const reviewMode = (config.filmScanReviewMode === 'always' || config.filmScanReviewMode === 'smart')
+    ? config.filmScanReviewMode
+    : 'never';
+  const reviewRadio = document.getElementById('filmScanReviewMode_' + reviewMode);
+  if (reviewRadio) reviewRadio.checked = true;
+  updateFilmScanRotationEnableState();
+
   // File Uploads
   document.getElementById('fileUploadsEnabled').checked = config.fileUploadsEnabled || false;
   document.getElementById('fileUploadsWatchFolder').value = config.fileUploadsWatchFolder || '';
@@ -1171,6 +1355,18 @@ function getFormData() {
     filmScansStorageFolder: document.getElementById('filmScansStorageFolder').value.trim(),
     filmScansAutoSyncMinutes: parseInt(document.getElementById('filmScansAutoSyncMinutes').value, 10) || 5,
     filmScansWatchguardMinutes: parseInt(document.getElementById('filmScansWatchguardMinutes').value, 10) || 5,
+    // Film Scans — AI Rotation + Review Mode (M7-8 + M9). When AI is off we
+    // force review mode back to 'never' — Smart/Always are meaningless without
+    // AI metadata to review. The UI disables the radios in that state, but
+    // defensive code here keeps the IPC boundary clean.
+    filmScanRotationEnabled: document.getElementById('filmScanRotationEnabled').checked,
+    filmScanReviewMode: (() => {
+      const aiOn = document.getElementById('filmScanRotationEnabled').checked;
+      if (!aiOn) return 'never';
+      const checked = document.querySelector('input[name="filmScanReviewMode"]:checked');
+      const v = checked ? checked.value : 'never';
+      return (v === 'smart' || v === 'always') ? v : 'never';
+    })(),
     // File Uploads
     fileUploadsEnabled: document.getElementById('fileUploadsEnabled').checked,
     fileUploadsWatchFolder: document.getElementById('fileUploadsWatchFolder').value.trim(),
@@ -1437,6 +1633,15 @@ selectFileUploadsStorageBtn.addEventListener('click', async () => {
 });
 selectProcessFolderBtn.addEventListener('click', () => selectDirectoryFor('processFolderPath'));
 
+// M7-8: keep Manual Rotation Check coupled to Enable AI Rotation. Defensive
+// optional chaining — these elements only exist on builds that include the
+// Film Scans tab markup (they always do today, but render order during
+// reload could fire this before the DOM is ready).
+const aiRotationCheckbox = document.getElementById('filmScanRotationEnabled');
+if (aiRotationCheckbox) {
+  aiRotationCheckbox.addEventListener('change', updateFilmScanRotationEnableState);
+}
+
 /**
  * Enable/disable the Film Scans checkbox based on whether both folders are set.
  */
@@ -1449,6 +1654,26 @@ function updateFilmScansEnableState() {
   enableCheckbox.disabled = !bothSet;
   if (!bothSet) {
     enableCheckbox.checked = false;
+  }
+}
+
+/**
+ * M7-8 + M9: Review Mode is meaningless without AI Rotation, since there's
+ * nothing to review. When AI is off we disable all three radio options + grey
+ * the group, and force the selection back to 'never' so a save in the AI-off
+ * state can't persist Smart/Always.
+ */
+function updateFilmScanRotationEnableState() {
+  const aiEl  = document.getElementById('filmScanRotationEnabled');
+  const grp   = document.getElementById('filmScanReviewModeGroup');
+  if (!aiEl || !grp) return;
+  const aiOn = aiEl.checked;
+  const radios = grp.querySelectorAll('input[name="filmScanReviewMode"]');
+  radios.forEach((r) => { r.disabled = !aiOn; });
+  grp.style.opacity = aiOn ? '' : '0.5';
+  if (!aiOn) {
+    const neverEl = document.getElementById('filmScanReviewMode_never');
+    if (neverEl) neverEl.checked = true;
   }
 }
 
@@ -2711,6 +2936,7 @@ function getControllerTypeLabel(type) {
     case 'folder_copy': return 'Folder Copy';
     case 'pdf_copy':    return 'PDF Copy';
     case 'darkroompro': return 'Darkroom Pro';
+    case 'frontline':   return 'Frontline';
     default:            return (type || 'noritsu').toUpperCase();
   }
 }
@@ -2729,7 +2955,31 @@ function buildOrderControllerCard(ctrl) {
     </div>
     <div class="routing-card-body">
       <div><span class="routing-card-meta">Output:</span> ${escapeHtml(ctrl.outputPath || '(not set)')}</div>
+      ${ctrl.type === 'frontline' ? `<div><span class="routing-card-meta">Device:</span> ${escapeHtml(ctrl.device || 'Pixfizz')}</div>` : ''}
+      ${ctrl.type === 'frontline' && ctrl.backPrint1 ? `<div><span class="routing-card-meta">Back Print 1:</span> ${escapeHtml(ctrl.backPrint1)}</div>` : ''}
       ${ctrl.type === 'darkroompro' && ctrl.processedFolderName ? `<div><span class="routing-card-meta">Processed folder:</span> ${escapeHtml(ctrl.processedFolderName)}</div>` : ''}
+      ${ctrl.type === 'darkroompro' && ctrl.artworkRootPath ? `<div><span class="routing-card-meta">Artwork root:</span> ${escapeHtml(ctrl.artworkRootPath)}</div>` : ''}
+      ${ctrl.type === 'darkroompro' ? (() => {
+        const sizeCount  = Array.isArray(ctrl.sizeTranslations)  ? ctrl.sizeTranslations.length  : 0;
+        const mediaCount = Array.isArray(ctrl.mediaTranslations) ? ctrl.mediaTranslations.length : 0;
+        if (sizeCount === 0 && mediaCount === 0) return '';
+        const parts = [];
+        if (sizeCount > 0) {
+          const entries = ctrl.sizeTranslations.slice(0, 3)
+            .map(t => `${escapeHtml(t.productCodePrefix || '')} → ${escapeHtml(t.darkroomSize || '')}`)
+            .join(', ');
+          const more = sizeCount > 3 ? ` +${sizeCount - 3} more` : '';
+          parts.push(`<span class="routing-card-meta">Sizes:</span> ${entries}${more}`);
+        }
+        if (mediaCount > 0) {
+          const entries = ctrl.mediaTranslations.slice(0, 3)
+            .map(t => `${escapeHtml(t.from || '')} → ${escapeHtml(t.to || '')}`)
+            .join(', ');
+          const more = mediaCount > 3 ? ` +${mediaCount - 3} more` : '';
+          parts.push(`<span class="routing-card-meta">Media:</span> ${entries}${more}`);
+        }
+        return parts.map(p => `<div>${p}</div>`).join('');
+      })() : ''}
       <label class="routing-card-autoprint">
         <input type="checkbox" class="autoprint-toggle" ${ctrl.autoprint ? 'checked' : ''}>
         Auto Print
@@ -2765,12 +3015,88 @@ function buildOrderControllerCard(ctrl) {
   return card;
 }
 
+// ── Darkroom Pro translation table helpers ────────────────────────────────────
+
+function addSizeTranslationRow(container, prefix = '', size = '') {
+  const row = document.createElement('div');
+  row.className = 'mapping-row';
+  row.style.cssText = 'display:flex;align-items:center;gap:4px;margin-bottom:4px;';
+  row.innerHTML = `
+    <input type="text" class="dp-size-prefix" placeholder="Product Code (e.g. 0406-cut-print)" value="${escapeHtml(prefix)}" style="flex:1">
+    <span style="color:#666">→</span>
+    <input type="text" class="dp-size-value" placeholder="Size (e.g. 4x6)" value="${escapeHtml(size)}" style="flex:1">
+    <button type="button" style="background:none;border:none;color:#c0392b;cursor:pointer;font-size:18px;line-height:1;padding:0 4px">&times;</button>
+  `;
+  row.querySelector('button').addEventListener('click', () => row.remove());
+  container.appendChild(row);
+}
+
+function addMediaTranslationRow(container, from = '', to = '') {
+  const row = document.createElement('div');
+  row.className = 'mapping-row';
+  row.style.cssText = 'display:flex;align-items:center;gap:4px;margin-bottom:4px;';
+  row.innerHTML = `
+    <input type="text" class="dp-media-from" placeholder="Option value (e.g. lustre)" value="${escapeHtml(from)}" style="flex:1">
+    <span style="color:#666">→</span>
+    <input type="text" class="dp-media-to" placeholder="Darkroom value (e.g. Luster)" value="${escapeHtml(to)}" style="flex:1">
+    <button type="button" style="background:none;border:none;color:#c0392b;cursor:pointer;font-size:18px;line-height:1;padding:0 4px">&times;</button>
+  `;
+  row.querySelector('button').addEventListener('click', () => row.remove());
+  container.appendChild(row);
+}
+
+function renderSizeTranslations(translations) {
+  const container = document.getElementById('ocSizeTranslationsList');
+  container.innerHTML = '';
+  for (const t of (translations || [])) {
+    addSizeTranslationRow(container, t.productCodePrefix, t.darkroomSize);
+  }
+}
+
+function renderMediaTranslations(translations) {
+  const container = document.getElementById('ocMediaTranslationsList');
+  container.innerHTML = '';
+  for (const t of (translations || [])) {
+    addMediaTranslationRow(container, t.from, t.to);
+  }
+}
+
+function readSizeTranslations() {
+  const rows = document.querySelectorAll('#ocSizeTranslationsList .mapping-row');
+  const result = [];
+  rows.forEach(row => {
+    const prefix = row.querySelector('.dp-size-prefix').value.trim();
+    const size   = row.querySelector('.dp-size-value').value.trim();
+    if (prefix && size) result.push({ productCodePrefix: prefix, darkroomSize: size });
+  });
+  return result;
+}
+
+function readMediaTranslations() {
+  const rows = document.querySelectorAll('#ocMediaTranslationsList .mapping-row');
+  const result = [];
+  rows.forEach(row => {
+    const from = row.querySelector('.dp-media-from').value.trim();
+    const to   = row.querySelector('.dp-media-to').value.trim();
+    if (from && to) result.push({ from, to });
+  });
+  return result;
+}
+
 function updateOcTypeFields() {
   const type = document.getElementById('ocType').value;
-  document.getElementById('ocProcessedFolderGroup').style.display    = type === 'darkroompro'                                                              ? '' : 'none';
+  document.getElementById('ocProcessedFolderGroup').style.display    = type === 'darkroompro' ? '' : 'none';
+  document.getElementById('ocArtworkRootPathGroup').style.display     = type === 'darkroompro' ? '' : 'none';
+  document.getElementById('ocOrderLastNameFormatGroup').style.display  = type === 'darkroompro' ? '' : 'none';
+  document.getElementById('ocSizeTranslationsGroup').style.display     = type === 'darkroompro' ? '' : 'none';
+  document.getElementById('ocMediaTranslationsGroup').style.display    = type === 'darkroompro' ? '' : 'none';
   document.getElementById('ocBannerSheetGroup').style.display        = (type === 'noritsu' || type === 'epson' || type === 'dpof' || type === 'pdf_copy') ? '' : 'none';
-  document.getElementById('ocPipelineGroup').style.display           = type === 'pdf_copy'                                                                 ? '' : 'none';
+  document.getElementById('ocPipelineGroup').style.display           = type === 'pdf_copy'     ? '' : 'none';
   document.getElementById('ocCheckOrderStatusGroup').style.display   = (type === 'noritsu' || type === 'epson' || type === 'dpof' || type === 'darkroompro') ? '' : 'none';
+  // Frontline-specific fields
+  document.getElementById('ocDeviceGroup').style.display     = type === 'frontline' ? '' : 'none';
+  document.getElementById('ocBackPrint1Group').style.display = type === 'frontline' ? '' : 'none';
+  document.getElementById('ocBackPrint2Group').style.display = type === 'frontline' ? '' : 'none';
 }
 
 function openOrderControllerModal(ctrl = null) {
@@ -2779,7 +3105,16 @@ function openOrderControllerModal(ctrl = null) {
   document.getElementById('ocName').value       = ctrl ? ctrl.name       : '';
   document.getElementById('ocType').value       = ctrl ? ctrl.type       : 'noritsu';
   document.getElementById('ocOutputPath').value = ctrl ? (ctrl.outputPath || '') : '';
-  document.getElementById('ocProcessedFolderName').value = ctrl ? (ctrl.processedFolderName || '') : '';
+  document.getElementById('ocProcessedFolderName').value  = ctrl ? (ctrl.processedFolderName  || '') : '';
+  document.getElementById('ocArtworkRootPath').value      = ctrl ? (ctrl.artworkRootPath      || '') : '';
+  document.getElementById('ocOrderLastNameFormat').value  = ctrl ? (ctrl.orderLastNameFormat  || 'orderRef_lastName') : 'orderRef_lastName';
+  document.getElementById('ocMediaOptionKey').value       = ctrl ? (ctrl.mediaOptionKey        || '') : '';
+  renderSizeTranslations(ctrl ? ctrl.sizeTranslations  : []);
+  renderMediaTranslations(ctrl ? ctrl.mediaTranslations : []);
+  // Frontline fields
+  document.getElementById('ocDevice').value     = ctrl ? (ctrl.device     || 'Pixfizz')                   : 'Pixfizz';
+  document.getElementById('ocBackPrint1').value = ctrl ? (ctrl.backPrint1 || '{jobName}  {customerName}') : '{jobName}  {customerName}';
+  document.getElementById('ocBackPrint2').value = ctrl ? (ctrl.backPrint2 || '{jobId}  {filename}')       : '{jobId}  {filename}';
   document.getElementById('ocAutoPrint').checked        = ctrl ? !!ctrl.autoprint                      : false;
   document.getElementById('ocBannerSheet').checked      = ctrl ? !!ctrl.bannerSheet                    : false;
   document.getElementById('ocCheckOrderStatus').checked = ctrl ? (ctrl.checkOrderStatus === true)      : false;
@@ -3151,6 +3486,19 @@ document.getElementById('ocProcessedFolderBrowseBtn').addEventListener('click', 
   if (dir) document.getElementById('ocProcessedFolderName').value = dir;
 });
 
+document.getElementById('ocArtworkRootPathBrowseBtn').addEventListener('click', async () => {
+  const dir = await window.electronAPI.selectDirectory();
+  if (dir) document.getElementById('ocArtworkRootPath').value = dir;
+});
+
+document.getElementById('ocAddSizeTranslationBtn').addEventListener('click', () => {
+  addSizeTranslationRow(document.getElementById('ocSizeTranslationsList'));
+});
+
+document.getElementById('ocAddMediaTranslationBtn').addEventListener('click', () => {
+  addMediaTranslationRow(document.getElementById('ocMediaTranslationsList'));
+});
+
 document.getElementById('ocSaveBtn').addEventListener('click', async () => {
   const modal      = document.getElementById('orderControllerModal');
   const name       = document.getElementById('ocName').value.trim();
@@ -3178,7 +3526,17 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
     controller.pdfPipeline = { steps: JSON.parse(JSON.stringify(pipelineSteps)) };
   }
   if (type === 'darkroompro') {
-    controller.processedFolderName = document.getElementById('ocProcessedFolderName').value.trim();
+    controller.processedFolderName  = document.getElementById('ocProcessedFolderName').value.trim();
+    controller.artworkRootPath      = document.getElementById('ocArtworkRootPath').value.trim();
+    controller.orderLastNameFormat  = document.getElementById('ocOrderLastNameFormat').value;
+    controller.mediaOptionKey       = document.getElementById('ocMediaOptionKey').value.trim();
+    controller.sizeTranslations     = readSizeTranslations();
+    controller.mediaTranslations    = readMediaTranslations();
+  }
+  if (type === 'frontline') {
+    controller.device     = document.getElementById('ocDevice').value.trim()     || 'Pixfizz';
+    controller.backPrint1 = document.getElementById('ocBackPrint1').value.trim() || '{jobName}  {customerName}';
+    controller.backPrint2 = document.getElementById('ocBackPrint2').value.trim() || '{jobId}  {filename}';
   }
   try {
     await window.electronAPI.saveOrderController(controller);
@@ -3370,11 +3728,15 @@ function renderChannelMappings(mappings, controllers) {
 
       const infoDiv = document.createElement('div');
       infoDiv.className = 'channel-mapping-info';
+      const isFrontlineMapping = ctrl && ctrl.type === 'frontline';
       infoDiv.innerHTML =
         `<span class="channel-mapping-product">${escapeHtml(mapping.productCode)}</span>` +
         (optionStr ? `<span class="channel-mapping-options">${escapeHtml(optionStr)}</span>` : '') +
-        `<span class="channel-mapping-channel">→ Ch ${mapping.channelNumber}</span>` +
-        (mapping.printSizeCode ? `<span class="channel-mapping-options">${escapeHtml(mapping.printSizeCode)}</span>` : '') +
+        (isFrontlineMapping
+          ? `<span class="channel-mapping-channel">→ ${escapeHtml(mapping.batchCode || '(no batch code)')}</span>` +
+            (mapping.sortString ? `<span class="channel-mapping-options">${escapeHtml(mapping.sortString)}</span>` : '')
+          : `<span class="channel-mapping-channel">→ Ch ${mapping.channelNumber}</span>` +
+            (mapping.printSizeCode ? `<span class="channel-mapping-options">${escapeHtml(mapping.printSizeCode)}</span>` : '')) +
         (mapping.skipAutoPrint ? `<span class="channel-mapping-options" title="This channel is excluded from Auto Print">skip auto-print</span>` : '');
 
       const actionsDiv = document.createElement('div');
@@ -3419,7 +3781,6 @@ function openChannelMappingModal(mapping = null, controllers = null) {
 
   ctrlSel.innerHTML = '<option value="">Select controller...</option>';
   for (const c of ctrlList) {
-    if (c.type === 'darkroompro') continue; // Darkroom Pro uses its own mapping system
     const opt = document.createElement('option');
     opt.value = c.id;
     opt.textContent = c.name;
@@ -3431,6 +3792,9 @@ function openChannelMappingModal(mapping = null, controllers = null) {
   document.getElementById('cmChannelNumber').value    = mapping ? mapping.channelNumber        : '';
   document.getElementById('cmSkipAutoPrint').checked  = mapping ? Boolean(mapping.skipAutoPrint) : false;
   document.getElementById('cmPrintSizeCode').value    = mapping ? (mapping.printSizeCode || '') : '';
+  // Frontline fields
+  document.getElementById('cmBatchCode').value        = mapping ? (mapping.batchCode  || '') : '';
+  document.getElementById('cmSortString').value       = mapping ? (mapping.sortString || '') : '';
 
   const optsList = document.getElementById('cmOptionsList');
   optsList.innerHTML = '';
@@ -3439,7 +3803,23 @@ function openChannelMappingModal(mapping = null, controllers = null) {
   }
 
   modal.dataset.editingId = mapping ? mapping.id : '';
+
+  // Show/hide DPOF vs Frontline fields based on selected controller type
+  _updateCmFields(ctrlSel.value, ctrlList);
+
   modal.classList.remove('hidden');
+}
+
+function _updateCmFields(controllerId, ctrlList) {
+  const ctrl       = (ctrlList || cachedOrderControllers).find(c => c.id === controllerId);
+  const isFrontline = ctrl && ctrl.type === 'frontline';
+  const isDarkroomPro = ctrl && ctrl.type === 'darkroompro';
+
+  document.getElementById('cmChannelNumberGroup').style.display  = (!isFrontline && !isDarkroomPro) ? '' : 'none';
+  document.getElementById('cmSkipAutoPrintGroup').style.display  = !isFrontline ? '' : 'none';
+  document.getElementById('cmPrintSizeCodeGroup').style.display  = (!isFrontline && !isDarkroomPro) ? '' : 'none';
+  document.getElementById('cmBatchCodeGroup').style.display      = isFrontline ? '' : 'none';
+  document.getElementById('cmSortStringGroup').style.display     = isFrontline ? '' : 'none';
 }
 
 function addChannelMappingOptionRow(container, name = '', value = '') {
@@ -3457,6 +3837,9 @@ function addChannelMappingOptionRow(container, name = '', value = '') {
 }
 
 document.getElementById('addChannelMappingBtn').addEventListener('click', () => openChannelMappingModal(null));
+document.getElementById('cmControllerId').addEventListener('change', (e) => {
+  _updateCmFields(e.target.value, cachedOrderControllers);
+});
 document.getElementById('cmAddOptionBtn').addEventListener('click', () => {
   addChannelMappingOptionRow(document.getElementById('cmOptionsList'));
 });
@@ -3469,10 +3852,21 @@ document.getElementById('cmSaveBtn').addEventListener('click', async () => {
   const productCode    = document.getElementById('cmProductCode').value.trim();
   const channelNumber  = parseInt(document.getElementById('cmChannelNumber').value, 10);
   const printSizeCode  = document.getElementById('cmPrintSizeCode').value.trim();
+  const batchCode      = document.getElementById('cmBatchCode').value.trim();
+  const sortString     = document.getElementById('cmSortString').value.trim();
 
   if (!controllerId)                         { alert('Please select a controller.');                  return; }
   if (!productCode)                          { alert('Product code is required.');                    return; }
-  if (isNaN(channelNumber) || channelNumber < 1) { alert('Channel number must be a positive integer.'); return; }
+
+  const selectedController = cachedOrderControllers.find(c => c.id === controllerId);
+  const isFrontlineCtrl    = selectedController?.type === 'frontline';
+  const isDarkroomProCtrl  = selectedController?.type === 'darkroompro';
+
+  if (isFrontlineCtrl) {
+    if (!batchCode) { alert('Batch code is required for Frontline controllers.'); return; }
+  } else if (!isDarkroomProCtrl) {
+    if (isNaN(channelNumber) || channelNumber < 1) { alert('Channel number must be a positive integer.'); return; }
+  }
 
   const options = [];
   document.querySelectorAll('#cmOptionsList .mapping-row').forEach(r => {
@@ -3489,9 +3883,11 @@ document.getElementById('cmSaveBtn').addEventListener('click', async () => {
       controllerId,
       productCode,
       options,
-      channelNumber,
-      printSizeCode:  printSizeCode || '',
-      skipAutoPrint:  skipAutoPrint,
+      channelNumber:  isFrontlineCtrl ? null : channelNumber,
+      printSizeCode:  isFrontlineCtrl ? ''   : (printSizeCode || ''),
+      batchCode:      isFrontlineCtrl ? batchCode  : '',
+      sortString:     isFrontlineCtrl ? sortString : '',
+      skipAutoPrint:  isFrontlineCtrl ? false : skipAutoPrint,
     });
     modal.classList.add('hidden');
     await loadChannelMappings();

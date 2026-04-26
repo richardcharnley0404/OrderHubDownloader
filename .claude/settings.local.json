@@ -28,7 +28,11 @@
       "Bash(grep -r \"AUTPRINT\\\\|\\\\.mrk\\\\|\\\\.MRK\" /c/Dev/OrderHubDownloader --include=*.js)",
       "Bash(grep -r \"dpof\\\\|DPOF\" /c/Dev/OrderHubDownloader/src --include=*.js)",
       "Bash(grep -n \"generateMrk\\\\|writeMrk\\\\|_mrk\\\\|mrkContent\\\\|\\\\.MRK\\\\|\\\\.mrk\" /c/Dev/OrderHubDownloader/src/main/services/*.js)",
-      "Bash(findstr /i \"chokidar\" \"C:\\\\Dev\\\\OrderHubDownloader\\\\package.json\")"
+      "Bash(findstr /i \"chokidar\" \"C:\\\\Dev\\\\OrderHubDownloader\\\\package.json\")",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git stash:*)"
     ]
   }
 }

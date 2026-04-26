@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useJobReview } from './useJobReview.js';
 import { ThumbnailGrid } from './ThumbnailGrid.jsx';
 import { ControlSidebar } from './ControlPanel.jsx';
+import { CropEditor } from './CropEditor.jsx';
 
 /**
  * src/renderer/views/JobReview/index.jsx
@@ -350,7 +351,7 @@ function PreviewArea({ selected, jobPath }) {
 
 // ── JobReviewDrawer ───────────────────────────────────────────────────────────
 
-export function JobReviewDrawer({ jobId, jobPath, onClose }) {
+export function JobReviewDrawer({ jobId, jobPath, ohJobId, onClose }) {
   // Slide-in from the right: start off-screen, animate to position after mount.
   const [visible, setVisible] = useState(false);
   useEffect(() => {
@@ -367,7 +368,10 @@ export function JobReviewDrawer({ jobId, jobPath, onClose }) {
     selectImage, updateCorrection, updateQty,
     toggleReprint, toggleHold, resetImage, resetAll,
     saveJob, sendReprints, refreshSidecar,
-  } = useJobReview(jobId, jobPath);
+    // Crop-to-size
+    allSizeOptions, cropEditorOpen, cropSizeOption,
+    openCropEditor, closeCropEditor, cropImage,
+  } = useJobReview(jobId, jobPath, ohJobId);
 
   // Keyboard: Escape closes, arrow keys navigate.
   useEffect(() => {
@@ -496,8 +500,22 @@ export function JobReviewDrawer({ jobId, jobPath, onClose }) {
               onToggleHold={toggleHold}
               onResetImage={resetImage}
               onRefreshSidecar={refreshSidecar}
+              allSizeOptions={allSizeOptions}
+              cropSizeOption={cropSizeOption}
+              onOpenCropEditor={openCropEditor}
             />
           </div>
+        )}
+
+        {/* Crop editor overlay — full-screen portal over drawer content */}
+        {cropEditorOpen && selected && (
+          <CropEditor
+            image={selected}
+            jobPath={jobPath}
+            sizeOption={cropSizeOption}
+            onApply={async (rect) => await cropImage(selected.filename, cropSizeOption, rect)}
+            onCancel={closeCropEditor}
+          />
         )}
 
         {/* Bottom: reprint action bar */}

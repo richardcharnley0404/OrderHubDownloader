@@ -10,6 +10,10 @@ const routingService = require('./services/routing-service');
 const processFolderService = require('./services/process-folder-service');
 const { dpiValidator } = require('./services/dpi-validator');
 const logger = require('./services/logger');
+// Film Review panel (PW-007 Phase 1 — Milestone 4)
+const frameMetadataStore = require('./services/frame-metadata-store');
+const filmReviewPrefsStore = require('./services/film-review-prefs-store');
+const folderWatchService = require('./services/folder-watch-service');
 const fs = require('fs');
 const fsPromises = require('fs/promises');
 const path = require('path');
@@ -20,6 +24,61 @@ const Store = require('electron-store');
 // Persistent store for OHD-internal DPOF state (e.g. operator "Printed" flag).
 // Separate from config-service so no schema validation is required.
 const dpofStore = new Store({ name: 'dpof-state' });
+
+const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Retry-on-EPERM rename. Mirrors folder-watch-service's helper — keep them
+ * in sync. The manual rotate IPC hits the same Windows+SMB hot spot when
+ * sharp's writeFile leaves a brief handle on the destination, and JPGs
+ * specifically race with Synology's photo indexer + Windows Defender.
+ *
+ * Up to 10 retries with capped exponential backoff (~22s total patience),
+ * plus a final unlink+rename fallback in case the indexer holds a deny-write
+ * handle that tolerates explicit delete.
+ */
+/**
+ * Best-effort emit of `ohd:filmReview:roll-processed` so the renderer's
+ * RollList re-fetches. Mirrors folder-watch-service's helper — keep them in
+ * sync if either changes shape. Used by the approve-roll handler to push
+ * status updates while an upload is in flight (so an operator who hops back
+ * to the rolls list sees Uploading… → Uploaded without manual refresh).
+ */
+function emitFilmReviewRollUpdate(rollId) {
+  try {
+    const { BrowserWindow } = require('electron');
+    const wins = BrowserWindow.getAllWindows();
+    for (const w of wins) {
+      if (w && !w.isDestroyed()) {
+        w.webContents.send('ohd:filmReview:roll-processed', { rollId });
+      }
+    }
+  } catch (_) { /* best-effort */ }
+}
+
+async function renameWithRetry(src, dest, attempts = 10, baseDelay = 200, maxDelay = 4000) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      fs.renameSync(src, dest);
+      return;
+    } catch (err) {
+      lastErr = err;
+      const transient = ['EPERM', 'EBUSY', 'EACCES', 'ENOTEMPTY'].includes(err.code);
+      if (!transient) throw err;
+      if (i < attempts - 1) {
+        await _sleep(Math.min(baseDelay * Math.pow(2, i), maxDelay));
+      }
+    }
+  }
+  try {
+    fs.unlinkSync(dest);
+    fs.renameSync(src, dest);
+    return;
+  } catch (_) {
+    throw lastErr;
+  }
+}
 
 // Job Review Panel — main-process modules
 const { loadSidecar, saveSidecar }             = require('./jobs/sidecarManager');
@@ -913,6 +972,10 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
     return routingService.getChannelMappings();
   });
 
+  ipcMain.handle('ohd:routing:get-all-size-options', async () => {
+    return routingService.getAllSizeOptions();
+  });
+
   ipcMain.handle('ohd:routing:save-channel-mapping', async (event, mapping) => {
     try {
       routingService.saveChannelMapping(mapping);
@@ -921,6 +984,102 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
       return { success: true };
     } catch (error) {
       logger.logError('ohd:routing:save-channel-mapping error', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  // Darkroom Pro manual assignment — stores a per-job channel mapping override.
+  // Unlike DPOF (which creates a permanent channel mapping), Darkroom Pro assign
+  // stores the selected mapping ID directly on the job so the routing can resolve it.
+  ipcMain.handle('jobs:assignDarkroomChannel', async (event, { jobId, channelMappingId }) => {
+    try {
+      jobService.updateJobLocally(jobId, { _darkroomProChannelMappingId: channelMappingId });
+      logger.info('[DarkroomPro] Manual channel assignment stored', { jobId, channelMappingId });
+      // Notify renderer so the job row re-renders with updated route
+      if (windowManager) {
+        const mainWindow = windowManager.getWindow();
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('jobs:updated', jobService.getLocalJobs());
+        }
+      }
+      return { success: true };
+    } catch (error) {
+      logger.logError('jobs:assignDarkroomChannel error', error, { jobId });
+      return { success: false, error: error.message };
+    }
+  });
+
+  // Darkroom Pro manual size+media assignment — stores per-job overrides so the
+  // job can be dispatched without a matching translation table entry.
+  ipcMain.handle('jobs:assignDarkroomSizeMedia', async (event, { jobId, size, media }) => {
+    try {
+      jobService.updateJobLocally(jobId, { _darkroomProSize: size, _darkroomProMedia: media });
+      logger.info('[DarkroomPro] Manual size/media assignment stored', { jobId, size, media });
+      if (windowManager) {
+        const mainWindow = windowManager.getWindow();
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('jobs:updated', jobService.getLocalJobs());
+        }
+      }
+      return { success: true };
+    } catch (error) {
+      logger.logError('jobs:assignDarkroomSizeMedia error', error, { jobId });
+      return { success: false, error: error.message };
+    }
+  });
+
+  // Add size/media translation entries to a Darkroom Pro controller without
+  // going through the full Settings save flow.
+  ipcMain.handle('controllers:updateDarkroomTranslations', async (event, { controllerId, sizeTranslation, mediaTranslation }) => {
+    try {
+      const controllers = routingService.getControllers();
+      const controller  = controllers.find(c => c.id === controllerId);
+      if (!controller) {
+        logger.logWarning('[DarkroomPro] updateDarkroomTranslations: controller not found', { controllerId, knownIds: controllers.map(c => c.id) });
+        return { success: false, error: 'Controller not found' };
+      }
+
+      const sizeBefore  = (controller.sizeTranslations  || []).length;
+      const mediaBefore = (controller.mediaTranslations || []).length;
+
+      if (sizeTranslation && sizeTranslation.productCodePrefix) {
+        if (!Array.isArray(controller.sizeTranslations)) controller.sizeTranslations = [];
+        const alreadyExists = controller.sizeTranslations.some(
+          t => t.productCodePrefix &&
+               t.productCodePrefix.toLowerCase() === sizeTranslation.productCodePrefix.toLowerCase()
+        );
+        if (!alreadyExists) {
+          controller.sizeTranslations.push(sizeTranslation);
+        } else {
+          logger.info('[DarkroomPro] Size translation already exists — not duplicating', { productCodePrefix: sizeTranslation.productCodePrefix });
+        }
+      }
+
+      if (mediaTranslation && mediaTranslation.from) {
+        if (!Array.isArray(controller.mediaTranslations)) controller.mediaTranslations = [];
+        const alreadyExists = controller.mediaTranslations.some(
+          t => t.from && t.from.toLowerCase() === mediaTranslation.from.toLowerCase()
+        );
+        if (!alreadyExists) {
+          controller.mediaTranslations.push(mediaTranslation);
+        } else {
+          logger.info('[DarkroomPro] Media translation already exists — not duplicating', { from: mediaTranslation.from });
+        }
+      }
+
+      routingService.saveController(controller);
+      logger.info('[DarkroomPro] Translation tables updated via assign modal', {
+        controllerId,
+        sizeTranslation,
+        mediaTranslation,
+        sizeCountBefore:  sizeBefore,
+        sizeCountAfter:   (controller.sizeTranslations  || []).length,
+        mediaCountBefore: mediaBefore,
+        mediaCountAfter:  (controller.mediaTranslations || []).length,
+      });
+      return { success: true, controller };
+    } catch (error) {
+      logger.logError('controllers:updateDarkroomTranslations error', error);
       return { success: false, error: error.message };
     }
   });
@@ -1120,6 +1279,106 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
       return { success: true, sidecar: updated };
     } catch (error) {
       logger.logError('ohd:job:reset-all error', error, { jobId: sidecar && sidecar.jobId });
+      return { success: false, error: error.message };
+    }
+  });
+
+  /**
+   * ohd:job:crop-image
+   * Payload:  { jobPath, sidecar, filename, cropRect, channelMappingId, ohJobId }
+   *   cropRect: { x, y, w, h } — image-space pixels (passed directly to Sharp)
+   *   ohJobId: numeric OrderHub job ID (string) — used to store the channel override
+   * Returns:  { success: true, sidecar }
+   *
+   * 1. Sources the image from /working/ (or /originals/ if working copy absent).
+   * 2. Applies the crop rectangle using Sharp and writes back to /working/filename.
+   * 3. Updates the sidecar entry: cropApplied, croppedPath, cropRect, channelMappingId.
+   * 4. Stores _channelMappingOverride on the job-service cache so that when the
+   *    job is next sent to print the overridden channel is used automatically.
+   */
+  ipcMain.handle('ohd:job:crop-image', async (event, { jobPath, sidecar, filename, cropRect, channelMappingId, darkroomSize, ohJobId }) => {
+    try {
+      let sharp;
+      try {
+        sharp = require('sharp');
+      } catch (e) {
+        return { success: false, error: 'sharp is not installed — cannot crop. Run: npm install sharp' };
+      }
+
+      // Prefer the working copy; fall back to originals if working/ was never written.
+      const workingDir  = path.join(jobPath, 'working');
+      const workingPath = path.join(workingDir, filename);
+      const originalsPath = path.join(jobPath, 'originals', filename);
+
+      let sourcePath;
+      if (fs.existsSync(workingPath)) {
+        sourcePath = workingPath;
+      } else if (fs.existsSync(originalsPath)) {
+        sourcePath = originalsPath;
+      } else {
+        return { success: false, error: `Source image not found: ${filename}` };
+      }
+
+      // Ensure /working/ exists
+      await fsPromises.mkdir(workingDir, { recursive: true });
+
+      // Crop via Sharp — write to a temp file then rename so we never leave a
+      // half-written file at the destination path.
+      const tempPath = workingPath + '.crop_tmp';
+      await sharp(sourcePath)
+        .extract({
+          left:   Math.max(0, cropRect.x),
+          top:    Math.max(0, cropRect.y),
+          width:  Math.max(1, cropRect.w),
+          height: Math.max(1, cropRect.h),
+        })
+        .jpeg({ quality: 95 })
+        .toFile(tempPath);
+
+      // Atomic rename: replace working copy with the cropped version
+      await fsPromises.rename(tempPath, workingPath);
+
+      logger.info('Crop applied', {
+        filename, cropRect,
+        channelMappingId,
+        ohJobId,
+        croppedPath: workingPath,
+      });
+
+      // Update the sidecar image entry
+      const updatedSidecar = {
+        ...sidecar,
+        images: sidecar.images.map(img => {
+          if (img.filename !== filename) return img;
+          return {
+            ...img,
+            cropApplied:      true,
+            croppedPath:      workingPath,
+            cropRect:         { x: cropRect.x, y: cropRect.y, w: cropRect.w, h: cropRect.h },
+            channelMappingId,
+          };
+        }),
+      };
+
+      const saved = await saveSidecar(updatedSidecar, jobPath);
+
+      // Store routing overrides on the in-memory job cache.
+      // DPOF controllers: _channelMappingOverride → routes to the specific channel.
+      // Darkroom Pro:     _darkroomProSize        → overrides the size sent to Darkroom.
+      // Plain-size crops (no source mapping) leave routing unchanged.
+      if (ohJobId && (channelMappingId || darkroomSize)) {
+        const numericId = Number(ohJobId);
+        if (!isNaN(numericId)) {
+          const updates = {};
+          if (channelMappingId) updates._channelMappingOverride = channelMappingId;
+          if (darkroomSize)     updates._darkroomProSize        = darkroomSize;
+          jobService.updateJobLocally(numericId, updates);
+        }
+      }
+
+      return { success: true, sidecar: saved };
+    } catch (error) {
+      logger.logError('ohd:job:crop-image error', error, { filename, cropRect });
       return { success: false, error: error.message };
     }
   });
@@ -1714,6 +1973,364 @@ ipcMain.handle('store:getJobDateRange', () => {
 ipcMain.handle('store:setJobDateRange', (event, days) => {
   configService.set('jobDateRange', Number(days));
   return Number(days);
+});
+
+// ── Film Review panel (PW-007 Phase 1 — Milestone 4) ──
+//
+// IPC contract lives under the `ohd:filmReview:*` namespace. Queries are
+// read-only summaries for the renderer; commands mutate the metadata store
+// and return the updated record so the renderer can optimistically patch
+// its local state. Tweaks persist to a dedicated electron-store, so a
+// density/theme change never races with config.json writes.
+//
+// Paired event: `ohd:filmReview:roll-processed` is emitted by
+// folder-watch-service when Mode 2 finishes a roll — NOT from here.
+
+// Queries
+ipcMain.handle('ohd:filmReview:list-rolls', () => {
+  try {
+    return frameMetadataStore.listRollsWithSummary();
+  } catch (err) {
+    logger.logError('[filmReview] list-rolls failed', err);
+    return [];
+  }
+});
+
+ipcMain.handle('ohd:filmReview:get-roll', (event, rollId) => {
+  try {
+    return frameMetadataStore.getRollWithFrames(rollId);
+  } catch (err) {
+    logger.logError('[filmReview] get-roll failed', err);
+    return null;
+  }
+});
+
+ipcMain.handle('ohd:filmReview:get-frame', (event, frameId) => {
+  try {
+    return frameMetadataStore.get(frameId);
+  } catch (err) {
+    logger.logError('[filmReview] get-frame failed', err);
+    return null;
+  }
+});
+
+// Renderer cannot load arbitrary absolute paths via <img src="file://...">
+// under the default Electron security config. This handler returns a
+// file:// URL that the renderer's <img> tag will resolve via the
+// app's custom protocol / fs allowances. If the frame has no thumbnail
+// (very old records from before Milestone 4, or a thumbnail that failed
+// to generate), we return null so the UI can show a placeholder.
+ipcMain.handle('ohd:filmReview:get-thumbnail', (event, frameId) => {
+  try {
+    const rec = frameMetadataStore.get(frameId);
+    if (!rec || !rec.thumbnailPath) return null;
+    // Normalise Windows backslashes for file:// URLs.
+    const urlPath = rec.thumbnailPath.replace(/\\/g, '/');
+    return `file:///${urlPath.replace(/^\/+/, '')}`;
+  } catch (err) {
+    logger.logError('[filmReview] get-thumbnail failed', err);
+    return null;
+  }
+});
+
+// Commands
+ipcMain.handle('ohd:filmReview:flag-frame', (event, payload) => {
+  try {
+    const { frameId, flag } = payload || {};
+    return frameMetadataStore.appendFlag(frameId, flag);
+  } catch (err) {
+    logger.logError('[filmReview] flag-frame failed', err);
+    return null;
+  }
+});
+
+ipcMain.handle('ohd:filmReview:unflag-frame', (event, payload) => {
+  try {
+    const { frameId, flagIndex } = payload || {};
+    return frameMetadataStore.removeFlag(frameId, flagIndex);
+  } catch (err) {
+    logger.logError('[filmReview] unflag-frame failed', err);
+    return null;
+  }
+});
+
+ipcMain.handle('ohd:filmReview:mark-roll-reviewed', (event, rollId) => {
+  try {
+    return frameMetadataStore.markRollReviewed(rollId);
+  } catch (err) {
+    logger.logError('[filmReview] mark-roll-reviewed failed', err);
+    return 0;
+  }
+});
+
+// Open the roll's source folder in the OS file browser. We derive the
+// folder path from the first frame's originalPath rather than storing it
+// on the roll record — Mode 2 pipelines can move files around, so the
+// record is the source of truth.
+ipcMain.handle('ohd:filmReview:open-folder', (event, rollId) => {
+  try {
+    const frames = frameMetadataStore.listByRoll(rollId);
+    if (!frames.length || !frames[0].originalPath) return false;
+    const folderPath = path.dirname(frames[0].originalPath);
+    // shell.openPath returns a Promise<string>; empty string on success.
+    return shell.openPath(folderPath).then((errMsg) => !errMsg);
+  } catch (err) {
+    logger.logError('[filmReview] open-folder failed', err);
+    return false;
+  }
+});
+
+// Tweaks (persistent UI preferences — density, theme, kbd-hint visibility)
+ipcMain.handle('ohd:filmReview:get-tweaks', () => {
+  try {
+    return filmReviewPrefsStore.getAll();
+  } catch (err) {
+    logger.logError('[filmReview] get-tweaks failed', err);
+    return null;
+  }
+});
+
+ipcMain.handle('ohd:filmReview:set-tweak', (event, payload) => {
+  try {
+    const { key, value } = payload || {};
+    return filmReviewPrefsStore.set(key, value);
+  } catch (err) {
+    logger.logError('[filmReview] set-tweak failed', err);
+    return false;
+  }
+});
+
+/**
+ * Manual rotation (Milestone 4e): apply a 90° increment to the TIFF on disk,
+ * regenerate the 512px thumbnail, and persist the cumulative operator rotation
+ * on the frame record. Auto-creates (or updates in place) a rotation-type flag
+ * so the rotate buttons double as training-data capture — every manual rotate
+ * is a labelled "the correct orientation is X°" example.
+ *
+ * Mirrors folder-watch-service Step 2a.5 for file IO: sharp → .rot.tmp →
+ * renameSync → regenerate thumb. Valid deltas: 90, -90, 180.
+ *
+ * Training-data semantics:
+ *   rotation.predictedAngle    — what the model said for the ORIGINAL scan
+ *   rotation.applied           — true if the model rotated the file on disk
+ *   rotation.operatorRotation  — cumulative operator rotation on TOP of that
+ *   operatorFlags[*].correctRotation — same as operatorRotation (convenience copy)
+ *
+ *   Ground-truth-from-original (for retraining) =
+ *     rotation.applied
+ *       ? (predictedAngle + operatorRotation) mod 360
+ *       :  operatorRotation
+ */
+ipcMain.handle('ohd:filmReview:rotate-frame', async (event, payload) => {
+  try {
+    const { frameId, delta } = payload || {};
+    if (!frameId) return null;
+    const VALID_DELTAS = [90, -90, 180];
+    if (!VALID_DELTAS.includes(delta)) return null;
+
+    const rec = frameMetadataStore.get(frameId);
+    if (!rec || !rec.originalPath) return null;
+
+    const imagePath = rec.originalPath;
+    if (!fs.existsSync(imagePath)) {
+      logger.logError(`[filmReview] rotate-frame: source image missing at ${imagePath}`);
+      return null;
+    }
+
+    const sharp = require('sharp');
+    const ext = path.extname(imagePath).toLowerCase();
+    const isTiff = ext === '.tif' || ext === '.tiff';
+    const tmpPath = imagePath + '.rot.tmp';
+
+    // Step 1: rotate the original in place. TIF: lossless LZW + horizontal
+    // predictor (matches folder-watch). JPG: q90 re-encode (lossy but acceptable
+    // — operators rarely rotate the same JPG more than once or twice).
+    try {
+      const pipeline = sharp(imagePath, { limitInputPixels: false, failOn: 'none' }).rotate(delta);
+      if (isTiff) {
+        await pipeline.tiff({ compression: 'lzw', predictor: 'horizontal' }).toFile(tmpPath);
+      } else {
+        await pipeline.jpeg({ quality: 90 }).toFile(tmpPath);
+      }
+      // Retry rename — same EPERM race as folder-watch's auto rotation.
+      // Sharp/AV/explorer can hold a brief handle on the destination on
+      // Windows + SMB shares; backoff handles it.
+      await renameWithRetry(tmpPath, imagePath);
+    } catch (rotErr) {
+      try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch (_) { /* ignored */ }
+      logger.logError('[filmReview] rotate-frame: sharp rotation failed', rotErr);
+      return null;
+    }
+
+    // Step 1b (TIF only): keep the sibling JPG in sync. The folder-watch
+    // pipeline writes a `<basename>.jpg` next to every TIF (Step 2b) and
+    // S3 upload takes both. If we don't re-encode the JPG here, the TIF
+    // would be uploaded rotated but the JPG would still be stale — and
+    // the customer-facing gallery uses the JPG. Best-effort: failure is
+    // logged but the rotation still counts.
+    if (isTiff) {
+      const siblingJpg = path.join(
+        path.dirname(imagePath),
+        path.basename(imagePath, path.extname(imagePath)) + '.jpg'
+      );
+      try {
+        await sharp(imagePath, { limitInputPixels: false, failOn: 'none' })
+          .jpeg({ quality: 90 })
+          .toFile(siblingJpg);
+      } catch (jpgErr) {
+        logger.logError(`[filmReview] rotate-frame: sibling JPG re-encode failed for ${siblingJpg}`, jpgErr);
+      }
+    }
+
+    // Step 2: regenerate the 512px thumbnail so the grid + FocusedFrame reflect
+    // the new orientation immediately. Non-fatal if it fails — the UI can
+    // still show the (now-stale) previous thumbnail and a manual refresh fixes.
+    if (rec.thumbnailPath) {
+      try {
+        await sharp(imagePath, { limitInputPixels: false, failOn: 'none' })
+          .resize(512, null, { withoutEnlargement: true, fit: 'inside' })
+          .jpeg({ quality: 85 })
+          .toFile(rec.thumbnailPath);
+      } catch (thumbErr) {
+        logger.logError('[filmReview] rotate-frame: thumbnail regen failed', thumbErr);
+      }
+    }
+
+    // Step 3: update cumulative operator rotation, mod 360. JavaScript % can
+    // return negatives; double-mod normalises.
+    const prevOp = (rec.rotation && typeof rec.rotation.operatorRotation === 'number')
+      ? rec.rotation.operatorRotation
+      : 0;
+    const nextOp = (((prevOp + delta) % 360) + 360) % 360;
+
+    const nextRotation = {
+      ...(rec.rotation || {}),
+      operatorRotation: nextOp,
+      operatorRotationAt: new Date().toISOString(),
+    };
+
+    // Step 4: upsert the auto-generated rotation flag. Marker `__auto: true`
+    // lets us find-and-update rather than spamming a new flag on every tap.
+    // Manual flags (type 'rotation' without __auto) are left alone.
+    const flags = Array.isArray(rec.operatorFlags) ? [...rec.operatorFlags] : [];
+    const autoIdx = flags.findIndex((f) => f && f.type === 'rotation' && f.__auto === true);
+    const stamp = new Date().toISOString();
+    const autoFlag = {
+      type: 'rotation',
+      note: null,
+      correctRotation: nextOp,
+      flaggedAt: stamp,
+      __auto: true,
+    };
+    if (autoIdx >= 0) flags[autoIdx] = autoFlag;
+    else              flags.push(autoFlag);
+
+    const updated = frameMetadataStore.update(frameId, {
+      rotation: nextRotation,
+      operatorFlags: flags,
+    });
+
+    logger.info(`[filmReview] rotate-frame: ${frameId} delta=${delta} cumulative=${nextOp}`);
+    return updated;
+  } catch (err) {
+    logger.logError('[filmReview] rotate-frame failed', err);
+    return null;
+  }
+});
+
+/**
+ * Approve a roll for S3 upload (PW-007 M7 — Manual Review mode).
+ *
+ * Called from RollReview's "Approve & Upload" button when the roll is in the
+ * 'pending' uploadStatus — set by folder-watch when filmScanReviewMode is
+ * 'always' or when 'smart' triggered on a low-conf / rotation-error frame.
+ * Looks up the deferred storage context the folder-watch step stashed on the
+ * roll record, runs s3Service.uploadFolder, and stamps the result back onto
+ * the roll record so the panel can hide / retry / show error.
+ *
+ * Returns:
+ *   { ok: true,  uploaded, total }                — success
+ *   { ok: false, error: string, uploaded?, total? } — failure (operator can retry)
+ *
+ * Errors mid-IPC (missing roll record, bad config) return ok:false with a
+ * descriptive error rather than throwing — keeps the renderer's error path
+ * uniform.
+ */
+ipcMain.handle('ohd:filmReview:approve-roll', async (event, rollIdRaw) => {
+  // Accept both `rollId` string and `{ rollId }` object — preload calls it
+  // with a bare string; future callers may want to pass options.
+  const rollId = typeof rollIdRaw === 'string' ? rollIdRaw : (rollIdRaw && rollIdRaw.rollId);
+  if (!rollId) return { ok: false, error: 'rollId is required' };
+
+  try {
+    const roll = frameMetadataStore.getRoll(rollId);
+    if (!roll) {
+      return { ok: false, error: `No roll record found for ${rollId} (was it processed in Manual mode?)` };
+    }
+    if (!roll.storagePath || !fs.existsSync(roll.storagePath)) {
+      return { ok: false, error: `Storage folder missing on disk: ${roll.storagePath}` };
+    }
+
+    const config = configService.getAll();
+    const s3Config = folderWatchService._buildS3Config(config, roll.locationId);
+    if (!s3Config) {
+      return { ok: false, error: 'S3 is not configured (check Connection settings)' };
+    }
+
+    // Mark uploading so concurrent panel reads can show a spinner / disable
+    // the button. The renderer also disables locally on click but the store
+    // value matters if the user reopens the panel mid-upload.
+    frameMetadataStore.updateRoll(rollId, { uploadStatus: 'uploading', uploadError: null });
+    emitFilmReviewRollUpdate(rollId);
+
+    let result;
+    try {
+      result = await s3Service.uploadFolder(roll.storagePath, roll.s3Prefix, s3Config, (progress) => {
+        logger.info(`[filmReview] approve-roll ${rollId}: ${progress.message}`);
+      });
+    } catch (uploadErr) {
+      const msg = uploadErr && uploadErr.message ? uploadErr.message : String(uploadErr);
+      logger.logError(`[filmReview] approve-roll: uploadFolder threw for ${rollId}`, uploadErr);
+      frameMetadataStore.updateRoll(rollId, { uploadStatus: 'failed', uploadError: msg });
+      emitFilmReviewRollUpdate(rollId);
+      return { ok: false, error: msg };
+    }
+
+    if (result.failed > 0) {
+      const msg = `Upload incomplete: ${result.uploaded}/${result.total} files uploaded, ${result.failed} failed`;
+      logger.logWarning(`[filmReview] approve-roll ${rollId}: ${msg}`, result);
+      frameMetadataStore.updateRoll(rollId, { uploadStatus: 'failed', uploadError: msg });
+      emitFilmReviewRollUpdate(rollId);
+      return { ok: false, error: msg, uploaded: result.uploaded, total: result.total };
+    }
+
+    frameMetadataStore.updateRoll(rollId, {
+      uploadStatus: 'uploaded',
+      uploadError: null,
+      uploadedAt: new Date().toISOString(),
+    });
+    // Manual-mode rolls only enter the panel because the operator has to
+    // sign off before upload. Once that sign-off succeeds the roll has, by
+    // definition, been reviewed — so flip every frame to reviewed too.
+    // This mirrors the Auto/Off "Mark reviewed" button and lets the existing
+    // status filter naturally hide approved rolls from "Ready to review".
+    try {
+      frameMetadataStore.markRollReviewed(rollId);
+    } catch (markErr) {
+      // Non-fatal: the upload succeeded, the cosmetic status flip can be
+      // retried by the operator from the panel.
+      logger.logWarning(`[filmReview] approve-roll ${rollId}: markRollReviewed failed (non-fatal)`, markErr);
+    }
+    logger.info(`[filmReview] approve-roll ${rollId}: upload complete (${result.uploaded}/${result.total})`);
+    emitFilmReviewRollUpdate(rollId);
+    return { ok: true, uploaded: result.uploaded, total: result.total };
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    logger.logError('[filmReview] approve-roll failed', err);
+    try { frameMetadataStore.updateRoll(rollId, { uploadStatus: 'failed', uploadError: msg }); } catch (_) { /* ignored */ }
+    emitFilmReviewRollUpdate(rollId);
+    return { ok: false, error: msg };
+  }
 });
 
 module.exports = { setupIpcHandlers };

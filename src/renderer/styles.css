@@ -895,6 +895,38 @@ body {
   color: #3b4a5a;
 }
 
+/* M9: Radio rows for the Film Scan Review Mode picker. Mirrors checkbox-group
+   spacing so the Film Scans tab feels consistent. */
+.form-group__label {
+  display: block;
+  font-weight: 600;
+  font-size: 13px;
+  color: #3b4a5a;
+  margin-bottom: 6px;
+}
+.radio-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+  font-weight: normal;
+  margin-bottom: 6px;
+}
+.radio-row input[type="radio"] {
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  flex-shrink: 0;
+  cursor: pointer;
+  accent-color: #1e7b8f;
+}
+.radio-row span {
+  font-size: 13px;
+  font-weight: normal;
+  color: #3b4a5a;
+  line-height: 1.4;
+}
+
 /* ── Buttons ── */
 button {
   font-family: inherit;

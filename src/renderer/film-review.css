@@ -1,0 +1,1121 @@
+/**
+ * film-review.css
+ *
+ * Styles for the Film Review Panel (PW-007 Phase 1, Milestone 4).
+ *
+ * All selectors are scoped under .film-review-root / .film-review-panel so
+ * they cannot bleed into the existing renderer.js UI. Design tokens (colors,
+ * spacing, typography) are defined as CSS variables on .film-review-root so
+ * the dark-theme variant can override them with a single class swap.
+ *
+ * Palette source: docs/design/film-review-design-brief.md
+ *   ink          #232429   (text on light)
+ *   steel-grey   #E8EBED   (surface)
+ *   pixfizz blue #32C5FF   (primary accent, ONLY for status chips/buttons)
+ *   amber        #F5A623   (low-confidence)
+ *   red          #E3452F   (rotation errors)
+ *
+ * Dark theme swaps surfaces for dim lab lighting; accent colors are kept
+ * the same so operators don't have to relearn what amber / red mean.
+ */
+
+/* ─── Root container ─────────────────────────────────────────────────── */
+
+.film-review-root {
+  /* Fills the tab-panel. tab-panel's `display:none` when inactive keeps
+     this from stealing layout; no need for our own visibility logic. */
+  width: 100%;
+  height: 100%;
+  min-height: 0;          /* allow children to use 100% without overflow */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ─── Design tokens (light theme) ────────────────────────────────────── */
+
+.film-review-panel {
+  /* Colors */
+  --fr-ink:          #232429;
+  --fr-ink-dim:      #5a5f66;
+  --fr-ink-faint:    #8a8f96;
+  --fr-surface:      #E8EBED;
+  --fr-surface-raised: #ffffff;
+  --fr-surface-sunk: #dcdfe2;
+  --fr-border:       #c5c9cd;
+  --fr-border-subtle:#e1e4e7;
+  --fr-accent:       #32C5FF;    /* Pixfizz blue */
+  --fr-accent-ink:   #003d54;
+  --fr-amber:        #F5A623;
+  --fr-amber-weak:   #fdf1dc;
+  --fr-red:          #E3452F;
+  --fr-red-weak:     #fbe3df;
+  --fr-green:        #27ae60;
+  --fr-green-weak:   #dff3e6;
+
+  /* Spacing */
+  --fr-s1: 4px;
+  --fr-s2: 8px;
+  --fr-s3: 12px;
+  --fr-s4: 16px;
+  --fr-s5: 24px;
+  --fr-s6: 32px;
+
+  /* Typography */
+  --fr-mono: 'JetBrains Mono', 'Consolas', 'Menlo', monospace;
+  --fr-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --fr-radius: 6px;
+  --fr-radius-lg: 10px;
+
+  /* Layout */
+  --fr-chrome-h: 48px;       /* header bar height */
+
+  /* Apply */
+  background: var(--fr-surface);
+  color: var(--fr-ink);
+  font-family: var(--fr-font);
+  font-size: 14px;
+  line-height: 1.4;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.film-review-panel.film-review-theme-dark {
+  --fr-ink:          #e7e9ec;
+  --fr-ink-dim:      #a9aeb5;
+  --fr-ink-faint:    #6b7079;
+  --fr-surface:      #1b1d21;
+  --fr-surface-raised: #23262b;
+  --fr-surface-sunk: #15171a;
+  --fr-border:       #34383e;
+  --fr-border-subtle:#2a2d32;
+  --fr-amber-weak:   #3a2e18;
+  --fr-red-weak:     #3a1f1c;
+  --fr-green-weak:   #1c3526;
+}
+
+/* ─── Chrome / header ────────────────────────────────────────────────── */
+
+.fr-chrome {
+  flex: 0 0 auto;
+  height: var(--fr-chrome-h);
+  padding: 0 var(--fr-s4);
+  display: flex;
+  align-items: center;
+  gap: var(--fr-s3);
+  background: var(--fr-surface-raised);
+  border-bottom: 1px solid var(--fr-border-subtle);
+}
+
+.fr-chrome__title {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--fr-ink);
+  margin-right: var(--fr-s2);
+}
+
+.fr-chrome__crumb {
+  font-family: var(--fr-mono);
+  color: var(--fr-ink-dim);
+}
+
+.fr-chrome__spacer { flex: 1 1 auto; }
+
+.fr-chrome__btn {
+  appearance: none;
+  background: transparent;
+  color: var(--fr-ink-dim);
+  border: 1px solid transparent;
+  padding: 4px 10px;
+  border-radius: var(--fr-radius);
+  font: inherit;
+  cursor: pointer;
+  transition: background 80ms ease, color 80ms ease;
+}
+.fr-chrome__btn:hover {
+  background: var(--fr-surface-sunk);
+  color: var(--fr-ink);
+}
+.fr-chrome__btn--primary {
+  color: var(--fr-accent-ink);
+  background: var(--fr-accent);
+  border-color: var(--fr-accent);
+}
+.fr-chrome__btn--primary:hover {
+  filter: brightness(0.95);
+  color: var(--fr-accent-ink);
+  background: var(--fr-accent);
+}
+
+/* ─── Body / scroll container ─────────────────────────────────────────── */
+
+.fr-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--fr-s4) var(--fr-s5);
+}
+
+/* ─── Empty state (no rolls yet) ─────────────────────────────────────── */
+
+.fr-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: var(--fr-s6) var(--fr-s5);
+  color: var(--fr-ink-faint);
+  text-align: center;
+  gap: var(--fr-s2);
+}
+.fr-empty__title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--fr-ink-dim);
+}
+.fr-empty__hint {
+  font-size: 13px;
+  max-width: 46ch;
+}
+
+/* ─── Roll list toolbar ──────────────────────────────────────────────── */
+
+.fr-rolls-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--fr-s3);
+  margin-bottom: var(--fr-s4);
+  flex-wrap: wrap;
+}
+
+.fr-filter-group {
+  display: inline-flex;
+  background: var(--fr-surface-raised);
+  border: 1px solid var(--fr-border-subtle);
+  border-radius: var(--fr-radius);
+  overflow: hidden;
+}
+.fr-filter-group__btn {
+  appearance: none;
+  background: transparent;
+  color: var(--fr-ink-dim);
+  border: 0;
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 80ms ease, color 80ms ease;
+}
+.fr-filter-group__btn + .fr-filter-group__btn {
+  border-left: 1px solid var(--fr-border-subtle);
+}
+.fr-filter-group__btn:hover {
+  background: var(--fr-surface-sunk);
+  color: var(--fr-ink);
+}
+.fr-filter-group__btn.is-active {
+  background: var(--fr-accent);
+  color: var(--fr-accent-ink);
+}
+
+.fr-search {
+  flex: 0 1 280px;
+  padding: 6px 10px;
+  border: 1px solid var(--fr-border);
+  border-radius: var(--fr-radius);
+  background: var(--fr-surface-raised);
+  color: var(--fr-ink);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 80ms ease, box-shadow 80ms ease;
+}
+.fr-search:focus {
+  border-color: var(--fr-accent);
+  box-shadow: 0 0 0 2px rgba(50, 197, 255, 0.18);
+}
+
+.fr-rolls-toolbar__count {
+  margin-left: auto;
+  color: var(--fr-ink-faint);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ─── Roll list grid ─────────────────────────────────────────────────── */
+
+.fr-roll-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--fr-s3);
+}
+
+.fr-roll-card {
+  background: var(--fr-surface-raised);
+  border: 1px solid var(--fr-border-subtle);
+  border-radius: var(--fr-radius-lg);
+  padding: var(--fr-s4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--fr-s2);
+  cursor: pointer;
+  transition: border-color 80ms ease, transform 80ms ease, box-shadow 80ms ease;
+}
+.fr-roll-card:hover {
+  border-color: var(--fr-accent);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+  transform: translateY(-1px);
+}
+.fr-roll-card:focus-visible {
+  outline: 2px solid var(--fr-accent);
+  outline-offset: 2px;
+}
+
+.fr-roll-card__header {
+  display: flex;
+  align-items: baseline;
+  gap: var(--fr-s3);
+}
+.fr-roll-card__id {
+  font-family: var(--fr-mono);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fr-ink);
+  letter-spacing: 0.01em;
+}
+.fr-roll-card__time {
+  color: var(--fr-ink-faint);
+  font-size: 12px;
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.fr-roll-card__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.fr-roll-card__status--ready {
+  background: var(--fr-accent);
+  color: var(--fr-accent-ink);
+}
+.fr-roll-card__status--reviewed {
+  background: var(--fr-green-weak);
+  color: var(--fr-green);
+}
+
+/* M8-3: provisional roll states. "Watching" = scan detected but the
+   watchguard timer hasn't elapsed yet. "Processing" = AI rotation /
+   thumbnail pass is running. Both are read-only states — the card is
+   inert until the real roll record lands. */
+.fr-roll-card__status--watching {
+  background: var(--fr-surface-sunk);
+  color: var(--fr-ink-dim);
+  border: 1px solid var(--fr-border);
+}
+.fr-roll-card__status--processing {
+  background: rgba(50, 197, 255, 0.12);
+  color: var(--fr-accent-ink);
+  border: 1px solid var(--fr-accent);
+}
+.film-review-theme-dark .fr-roll-card__status--processing {
+  color: var(--fr-accent);
+}
+
+.fr-roll-card--inert {
+  cursor: default;
+  opacity: 0.85;
+}
+.fr-roll-card--inert:hover {
+  border-color: var(--fr-border-subtle);
+  box-shadow: none;
+  transform: none;
+}
+.fr-roll-card--inert:focus-visible { outline: none; }
+
+.fr-roll-card__hint {
+  font-size: 12px;
+  color: var(--fr-ink-faint);
+  font-style: italic;
+  margin-top: var(--fr-s1);
+}
+
+/* M7-7: status row holds both the review-state pill and (when present) the
+   Manual-mode upload-state pill side by side. */
+.fr-roll-card__status-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.fr-roll-card__upload {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.fr-roll-card__upload--pending {
+  background: var(--fr-amber-weak, rgba(255, 176, 32, 0.15));
+  color: var(--fr-amber, #b07a00);
+}
+.fr-roll-card__upload--uploading {
+  background: rgba(50, 197, 255, 0.18);
+  color: var(--fr-accent);
+  animation: fr-upload-pulse 1.4s ease-in-out infinite;
+}
+@keyframes fr-upload-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}
+.fr-roll-card__upload--failed {
+  background: var(--fr-red-weak, rgba(208, 72, 72, 0.15));
+  color: var(--fr-red, #d04848);
+}
+.fr-roll-card__upload--uploaded {
+  background: var(--fr-green-weak);
+  color: var(--fr-green);
+}
+
+.fr-roll-card__stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--fr-s3);
+  margin-top: var(--fr-s1);
+}
+.fr-roll-card__stat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--fr-ink-dim);
+}
+.fr-roll-card__stat-value {
+  font-family: var(--fr-mono);
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--fr-ink);
+  font-variant-numeric: tabular-nums;
+}
+.fr-roll-card__stat--amber .fr-roll-card__stat-value { color: var(--fr-amber); }
+.fr-roll-card__stat--red   .fr-roll-card__stat-value { color: var(--fr-red); }
+.fr-roll-card__stat--muted .fr-roll-card__stat-value { color: var(--fr-ink-faint); }
+
+/* ─── Roll Review — stats header & filter chips ──────────────────────── */
+
+.fr-roll-stats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--fr-s5);
+  padding: var(--fr-s3) 0 var(--fr-s4);
+  border-bottom: 1px solid var(--fr-border-subtle);
+  margin-bottom: var(--fr-s4);
+}
+.fr-roll-stats__label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fr-ink-faint);
+  margin-bottom: 2px;
+}
+.fr-roll-stats__item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.fr-roll-stats__value {
+  font-family: var(--fr-mono);
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--fr-ink);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.fr-roll-stats__item--amber .fr-roll-stats__value { color: var(--fr-amber); }
+.fr-roll-stats__item--red   .fr-roll-stats__value { color: var(--fr-red); }
+.fr-roll-stats__item--muted .fr-roll-stats__value { color: var(--fr-ink-faint); }
+
+.fr-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--fr-s2);
+  margin-bottom: var(--fr-s4);
+  align-items: center;
+}
+.fr-chip {
+  appearance: none;
+  background: var(--fr-surface-raised);
+  color: var(--fr-ink-dim);
+  border: 1px solid var(--fr-border-subtle);
+  padding: 4px 12px;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: background 80ms ease, color 80ms ease, border-color 80ms ease;
+}
+.fr-chip:hover {
+  background: var(--fr-surface-sunk);
+  color: var(--fr-ink);
+}
+.fr-chip.is-active {
+  background: var(--fr-accent);
+  color: var(--fr-accent-ink);
+  border-color: var(--fr-accent);
+}
+.fr-chip__count {
+  font-family: var(--fr-mono);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+}
+.fr-chip--amber:not(.is-active) { color: var(--fr-amber); border-color: var(--fr-amber); }
+.fr-chip--red:not(.is-active)   { color: var(--fr-red);   border-color: var(--fr-red);   }
+
+.fr-kbd-hint {
+  margin-left: auto;
+  color: var(--fr-ink-faint);
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.fr-kbd-hint code {
+  font-family: var(--fr-mono);
+  background: var(--fr-surface-sunk);
+  color: var(--fr-ink-dim);
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--fr-border-subtle);
+  font-size: 10px;
+}
+
+/* ─── Frame grid & densities ─────────────────────────────────────────── */
+
+.fr-frame-grid {
+  display: grid;
+  gap: 10px;
+  width: 100%;
+}
+.fr-frame-grid--tight   { grid-template-columns: repeat(9, 1fr); gap: 6px; }
+.fr-frame-grid--regular { grid-template-columns: repeat(6, 1fr); gap: 10px; }
+.fr-frame-grid--comfy   { grid-template-columns: repeat(4, 1fr); gap: 14px; }
+
+/* ─── Frame cell ─────────────────────────────────────────────────────── */
+
+.fr-frame-cell {
+  position: relative;
+  background: var(--fr-surface-raised);
+  border: 2px solid transparent;  /* reserve space so border-state changes don't reflow */
+  border-radius: var(--fr-radius);
+  overflow: hidden;
+  cursor: pointer;
+  transition: transform 80ms ease, box-shadow 80ms ease, border-color 80ms ease;
+  display: flex;
+  flex-direction: column;
+}
+.fr-frame-cell:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.08);
+}
+.fr-frame-cell:focus-visible {
+  outline: 2px solid var(--fr-accent);
+  outline-offset: 2px;
+}
+.fr-frame-cell--low-conf { border-color: var(--fr-amber); }
+.fr-frame-cell--error    { border-color: var(--fr-red); }
+
+.fr-frame-cell__thumb-wrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 3 / 2;
+  background: var(--fr-surface-sunk);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.fr-frame-cell__thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.fr-frame-cell__thumb--placeholder {
+  color: var(--fr-ink-faint);
+  font-family: var(--fr-mono);
+  font-size: 11px;
+  text-align: center;
+  padding: 8px;
+}
+
+/* Corner dot — always visible */
+.fr-conf-dot {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--fr-surface-raised);  /* halo so dot reads on any thumbnail */
+}
+.fr-conf-dot--hi    { background: var(--fr-green); }
+.fr-conf-dot--mid   { background: var(--fr-ink-faint); }
+.fr-conf-dot--low   { background: var(--fr-amber); }
+.fr-conf-dot--error { background: var(--fr-red); }
+
+/* Rotation-error ribbon — appears in top-left of frame */
+.fr-rot-err-ribbon {
+  position: absolute;
+  top: 0;
+  left: 0;
+  background: var(--fr-red);
+  color: white;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-bottom-right-radius: var(--fr-radius);
+  pointer-events: none;
+}
+
+/* Flag badge — frames that have operator_flags get a small indicator */
+.fr-flag-badge {
+  position: absolute;
+  bottom: 6px;
+  left: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: var(--fr-accent);
+  color: var(--fr-accent-ink);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 999px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+/* Hover overlay with flag icon button */
+.fr-frame-cell__hover-actions {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  padding: 6px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 80ms ease;
+  /* gradient fade so the flag icon always reads */
+  background: linear-gradient(to bottom, rgba(0, 0, 0, 0.35), transparent 50%);
+}
+.fr-frame-cell:hover .fr-frame-cell__hover-actions { opacity: 1; pointer-events: auto; }
+
+.fr-flag-icon-btn {
+  appearance: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 0;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--fr-ink);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  /* nudge the dot out of the way */
+  margin-right: 22px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  transition: background 80ms ease;
+}
+.fr-flag-icon-btn:hover { background: #fff; }
+
+/* Footer row — numeric % + frame index. Hidden at tight density. */
+.fr-frame-cell__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--fr-ink-dim);
+  font-variant-numeric: tabular-nums;
+  background: var(--fr-surface-raised);
+  border-top: 1px solid var(--fr-border-subtle);
+}
+.fr-frame-grid--tight .fr-frame-cell__footer { display: none; }
+
+.fr-frame-cell__idx {
+  font-family: var(--fr-mono);
+  color: var(--fr-ink-faint);
+}
+.fr-frame-cell__conf {
+  font-family: var(--fr-mono);
+  font-weight: 600;
+}
+.fr-frame-cell__conf--amber { color: var(--fr-amber); }
+.fr-frame-cell__conf--red   { color: var(--fr-red); }
+
+/* ─── Flag menu popover ──────────────────────────────────────────────── */
+
+.fr-flag-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: transparent;  /* just captures outside clicks */
+}
+.fr-flag-menu {
+  position: fixed;
+  z-index: 91;
+  min-width: 260px;
+  background: var(--fr-surface-raised);
+  color: var(--fr-ink);
+  border: 1px solid var(--fr-border);
+  border-radius: var(--fr-radius-lg);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  padding: var(--fr-s3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--fr-s2);
+}
+.fr-flag-menu__title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fr-ink-faint);
+}
+.fr-flag-menu__types {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.fr-flag-menu__type {
+  appearance: none;
+  background: var(--fr-surface-sunk);
+  color: var(--fr-ink);
+  border: 1px solid var(--fr-border-subtle);
+  border-radius: var(--fr-radius);
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: background 80ms ease, border-color 80ms ease;
+}
+.fr-flag-menu__type:hover { background: var(--fr-border-subtle); }
+.fr-flag-menu__type.is-selected {
+  background: var(--fr-accent);
+  color: var(--fr-accent-ink);
+  border-color: var(--fr-accent);
+}
+.fr-flag-menu__type-key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  background: var(--fr-surface-raised);
+  color: var(--fr-ink-dim);
+  font-family: var(--fr-mono);
+  font-size: 11px;
+  font-weight: 700;
+  border: 1px solid var(--fr-border-subtle);
+}
+.fr-flag-menu__type.is-selected .fr-flag-menu__type-key {
+  background: var(--fr-accent-ink);
+  color: var(--fr-accent);
+  border-color: transparent;
+}
+/* --- Correct-orientation picker (training-signal, rotation flags only) --- */
+.fr-flag-menu__rot {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 2px;
+}
+.fr-flag-menu__rot-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fr-ink-dim);
+  letter-spacing: 0.02em;
+}
+.fr-flag-menu__rot-hint {
+  font-weight: 400;
+  color: var(--fr-ink-faint);
+}
+.fr-flag-menu__rot-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+}
+.fr-flag-menu__rot-btn {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--fr-ink);
+  background: var(--fr-surface-raised);
+  border: 1px solid var(--fr-border);
+  border-radius: var(--fr-radius);
+  cursor: pointer;
+  text-align: left;
+}
+.fr-flag-menu__rot-btn:hover {
+  border-color: var(--fr-ink-faint);
+}
+.fr-flag-menu__rot-btn.is-selected {
+  border-color: var(--fr-accent);
+  background: rgba(50, 197, 255, 0.10);
+  color: var(--fr-ink);
+}
+.fr-flag-menu__rot-glyph {
+  font-size: 16px;
+  line-height: 1;
+  width: 16px;
+  text-align: center;
+  color: var(--fr-ink-dim);
+}
+.fr-flag-menu__rot-btn.is-selected .fr-flag-menu__rot-glyph {
+  color: var(--fr-accent);
+}
+.fr-flag-menu__rot-text {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fr-flag-menu__note {
+  width: 100%;
+  min-height: 54px;
+  resize: vertical;
+  border: 1px solid var(--fr-border);
+  border-radius: var(--fr-radius);
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--fr-ink);
+  background: var(--fr-surface-raised);
+  outline: none;
+}
+.fr-flag-menu__note:focus {
+  border-color: var(--fr-accent);
+  box-shadow: 0 0 0 2px rgba(50, 197, 255, 0.18);
+}
+.fr-flag-menu__footer {
+  display: flex;
+  align-items: center;
+  gap: var(--fr-s2);
+  font-size: 11px;
+  color: var(--fr-ink-faint);
+}
+.fr-flag-menu__footer-spacer { flex: 1 1 auto; }
+.fr-flag-menu__btn {
+  appearance: none;
+  background: transparent;
+  color: var(--fr-ink-dim);
+  border: 1px solid transparent;
+  padding: 4px 10px;
+  border-radius: var(--fr-radius);
+  font: inherit;
+  cursor: pointer;
+}
+.fr-flag-menu__btn:hover { background: var(--fr-surface-sunk); color: var(--fr-ink); }
+.fr-flag-menu__btn--primary {
+  background: var(--fr-accent);
+  color: var(--fr-accent-ink);
+  border-color: var(--fr-accent);
+}
+.fr-flag-menu__btn--primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.fr-flag-menu__btn--primary:hover:not(:disabled) { filter: brightness(0.95); }
+
+/* ─── Flash feedback for quick-flag (F key) ──────────────────────────── */
+
+@keyframes fr-flag-flash {
+  0%   { box-shadow: 0 0 0 0 rgba(50, 197, 255, 0.0); }
+  40%  { box-shadow: 0 0 0 6px rgba(50, 197, 255, 0.45); }
+  100% { box-shadow: 0 0 0 0 rgba(50, 197, 255, 0.0); }
+}
+.fr-frame-cell--flash { animation: fr-flag-flash 420ms ease-out; }
+
+/* ─── FocusedFrame overlay (M4d) ─────────────────────────────────────── */
+
+.fr-focus-overlay {
+  position: fixed;
+  inset: 0;
+  /* Below the flag-menu backdrop (90) and menu (91) so the shared FlagMenu
+     popover layers above us correctly when opened from the Flag button in
+     our header chrome. Above the panel's own chrome/grid (z-index: auto). */
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  background: transparent;
+  /* The panel itself is the portal; tokens cascade from .film-review-panel
+     through body→html so we re-read them here explicitly for safety. */
+  color: var(--fr-ink);
+}
+.fr-focus-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(20, 22, 26, 0.72);
+  backdrop-filter: blur(4px);
+}
+.film-review-theme-dark .fr-focus-backdrop {
+  background: rgba(0, 0, 0, 0.82);
+}
+
+.fr-focus-chrome {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--fr-s2);
+  padding: var(--fr-s2) var(--fr-s3);
+  background: var(--fr-surface-raised);
+  border-bottom: 1px solid var(--fr-border);
+  box-shadow: 0 1px 6px rgba(0,0,0,0.18);
+}
+.fr-focus-chrome__title {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--fr-ink);
+}
+.fr-focus-chrome__counter {
+  color: var(--fr-ink-faint);
+  font-weight: 400;
+  margin-left: 4px;
+}
+.fr-focus-chrome__meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: var(--fr-s2);
+}
+.fr-focus-chrome__spacer { flex: 1 1 auto; }
+
+/*
+ * Rotate button group in the FocusedFrame chrome. The two buttons sit flush
+ * so they read as a single control, and the optional badge behind them
+ * surfaces the cumulative operator rotation — useful as a "you've rotated
+ * this 180° total" reminder while the operator is mid-review.
+ */
+.fr-focus-rotate-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.fr-focus-rotate-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: rgba(50, 197, 255, 0.10);
+  color: var(--fr-accent-ink);
+  border: 1px solid var(--fr-accent);
+  margin-left: 2px;
+}
+.film-review-theme-dark .fr-focus-rotate-badge {
+  color: var(--fr-accent);
+}
+
+.fr-focus-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: var(--fr-surface-sunk);
+  color: var(--fr-ink-dim);
+  border: 1px solid var(--fr-border-subtle);
+}
+.fr-focus-pill--amber {
+  background: var(--fr-amber-weak);
+  color: #8a5e00;
+  border-color: var(--fr-amber);
+}
+.fr-focus-pill--red {
+  background: var(--fr-red-weak);
+  color: #8d2617;
+  border-color: var(--fr-red);
+}
+.fr-focus-pill--muted {
+  background: transparent;
+  color: var(--fr-ink-faint);
+  border-color: var(--fr-border-subtle);
+  font-weight: 500;
+}
+.fr-focus-pill--accent {
+  background: rgba(50, 197, 255, 0.12);
+  color: var(--fr-accent-ink);
+  border-color: var(--fr-accent);
+}
+.film-review-theme-dark .fr-focus-pill--accent {
+  color: var(--fr-accent);
+}
+
+.fr-focus-stage {
+  position: relative;
+  z-index: 1;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--fr-s3);
+  gap: var(--fr-s2);
+}
+.fr-focus-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  /* 512px thumb scaled up is blurry — sharpen perceived edge with a subtle
+     outline so the image doesn't float on the dark backdrop. */
+  box-shadow: 0 6px 28px rgba(0,0,0,0.45), 0 0 0 1px rgba(255,255,255,0.08);
+  background: #000;
+  /* Crisp pixel scaling is LESS useful than default bilinear for photos, so
+     stick with default image-rendering. */
+}
+.fr-focus-img-placeholder {
+  width: 480px;
+  max-width: 100%;
+  height: 320px;
+  max-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fr-ink-faint);
+  background: var(--fr-surface-sunk);
+  border: 1px dashed var(--fr-border);
+  border-radius: var(--fr-radius);
+  font-size: 13px;
+}
+
+.fr-focus-nav-edge {
+  appearance: none;
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 1px solid rgba(255,255,255,0.18);
+  background: rgba(30, 32, 36, 0.55);
+  color: #fff;
+  font-size: 28px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 120ms ease;
+}
+.fr-focus-nav-edge:hover:not(:disabled) {
+  background: rgba(50, 197, 255, 0.35);
+  border-color: var(--fr-accent);
+}
+.fr-focus-nav-edge:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.fr-focus-footer {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--fr-s3);
+  padding: var(--fr-s2) var(--fr-s3);
+  background: var(--fr-surface-raised);
+  border-top: 1px solid var(--fr-border);
+  font-size: 12px;
+  color: var(--fr-ink-dim);
+  min-height: 36px;
+}
+.fr-focus-footer__flags {
+  flex: 1 1 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.fr-focus-footer__flags-empty {
+  color: var(--fr-ink-faint);
+  font-style: italic;
+}
+.fr-focus-footer__hint {
+  flex: 0 0 auto;
+  color: var(--fr-ink-faint);
+}
+.fr-focus-footer__hint code {
+  background: var(--fr-surface-sunk);
+  border: 1px solid var(--fr-border-subtle);
+  border-radius: 3px;
+  padding: 0 4px;
+  font-size: 11px;
+  color: var(--fr-ink-dim);
+}
+
+.fr-focus-flag-pill {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
+  padding: 2px 8px;
+  background: rgba(50, 197, 255, 0.10);
+  border: 1px solid var(--fr-accent);
+  border-radius: 999px;
+  color: var(--fr-ink);
+  font-size: 11px;
+}
+.fr-focus-flag-pill strong {
+  font-weight: 600;
+  color: var(--fr-accent-ink);
+}
+.film-review-theme-dark .fr-focus-flag-pill strong {
+  color: var(--fr-accent);
+}
+.fr-focus-flag-pill__rot {
+  color: var(--fr-ink-dim);
+}
+.fr-focus-flag-pill__note {
+  color: var(--fr-ink-faint);
+  font-style: italic;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

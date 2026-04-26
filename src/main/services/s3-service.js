@@ -95,14 +95,14 @@ class S3Service {
         }
 
         try {
-          await this._uploadFileViaPresignedUrl(filePath, presignEntry.upload_url);
+          await this._uploadWithRetry(filePath, presignEntry.upload_url, presignEntry.s3_key || name);
           uploaded++;
           if (progressCallback) {
             progressCallback({ message: `Uploaded ${uploaded}/${files.length}: ${relPath}`, status: 'uploading' });
           }
         } catch (error) {
           failed++;
-          logger.logError(`Failed to upload ${presignEntry.s3_key || name}`, error);
+          logger.logError(`Failed to upload ${presignEntry.s3_key || name} after retries`, error);
         }
       }
     } catch (outerError) {
@@ -203,6 +203,41 @@ class S3Service {
       req.write(buffer);
       req.end();
     });
+  }
+
+  /**
+   * Wrap _uploadFileViaPresignedUrl with a tight retry on transient network
+   * failures ("socket hang up", ECONNRESET, ETIMEDOUT, EPIPE, EAI_AGAIN,
+   * Upload request timed out). Avoids wasting the roll-level retry — which
+   * re-uploads the entire batch — on a single-file blip.
+   *
+   * Three attempts with 2s → 5s backoff. HTTP 4xx/5xx errors are NOT
+   * retried at this layer (a 403 from a bad presigned URL won't get better
+   * with more attempts); the caller's roll-level retry will pick those up
+   * if needed.
+   */
+  async _uploadWithRetry(filePath, presignedUrl, label) {
+    const MAX_ATTEMPTS = 3;
+    const BACKOFFS_MS = [2_000, 5_000];
+    const TRANSIENT = /(socket hang up|ECONNRESET|ETIMEDOUT|EPIPE|EAI_AGAIN|timed out)/i;
+    let lastErr;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        await this._uploadFileViaPresignedUrl(filePath, presignedUrl);
+        if (attempt > 1) {
+          logger.info(`s3: ${label} succeeded on attempt ${attempt}/${MAX_ATTEMPTS}`);
+        }
+        return;
+      } catch (err) {
+        lastErr = err;
+        const transient = TRANSIENT.test(err && err.message ? err.message : '');
+        if (!transient || attempt === MAX_ATTEMPTS) throw err;
+        const wait = BACKOFFS_MS[attempt - 1];
+        logger.logWarning(`s3: ${label} attempt ${attempt}/${MAX_ATTEMPTS} failed transiently (${err.message}), retrying in ${wait / 1000}s`);
+        await new Promise(r => setTimeout(r, wait));
+      }
+    }
+    throw lastErr;
   }
 
   /**
