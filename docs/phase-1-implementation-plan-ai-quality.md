@@ -1,6 +1,6 @@
 # Phase 1 Implementation Plan — AI Quality Gate
 
-**Scope:** Local-only quality scoring of every image in every job (Mode 1 FTP polling pipeline), with a job-level hold when any image scores below an operator-configurable threshold. Held jobs surface in the existing Jobs grid via the Flags column with a count badge (e.g. `3/400`). Operator opens the held job into the existing Job Review screen, sees only the failed images by default, runs a manual or batch fixup using a chosen AI model, and approves the job to release for routing. No auto-enhancement. No model lazy-download from S3 (models bundled with the installer). No changes to Mode 2/Mode 3 pipelines or print controllers.
+**Scope:** Local-only quality scoring of every image in every job (Mode 1 FTP polling pipeline), with a job-level hold when any image scores below an operator-configurable threshold. Held jobs surface in the existing Jobs grid via the Flags column with a count badge (e.g. `3/400`). Operator opens the held job into a new dedicated **Quality Review** tab — a sibling of the existing Film Review tab, built in the same two-stage list → focused-image style — sees only the failed images by default, runs a manual or batch fixup using a chosen AI model, and approves the job to release for routing. The existing Job Review drawer is unchanged. No auto-enhancement. No model lazy-download from S3 (models bundled with the installer). No changes to Mode 2/Mode 3 pipelines or print controllers.
 
 **Source of truth for this plan:** `ARCHITECTURE.md` at the repo root, plus the PW-007 Phase 1 plan (`phase-1-implementation-plan.md`) which establishes the conventions for ONNX integration in OHD. This plan extends those conventions; it does not invent parallel patterns. The implementer should verify line-level specifics against the live source tree, especially `enhancementManager.js` (provider system the new local provider slots into) and the existing Activity Log entry format.
 
@@ -54,8 +54,17 @@ All paths relative to repo root.
 | `src/main/services/ai-fixup-service.js` | Domain service for fixup. `applyFixup(imagePath, modelId, opts) → { outputPath, beforeScore, afterScore, kept, error? }`. Pre/post MUSIQ scoring built in. Writes through `originalsManager.js`. |
 | `src/main/services/ai-job-quality-orchestrator.js` | Plugs into the Mode 1 download pipeline. As each image lands, queue it for scoring. When all images for a job are scored, derive job state (`route` or `hold`). |
 | `src/main/services/ai-quality-store.js` | Thin wrapper over `sidecarManager.js` for reading/writing the AI quality block of each image's sidecar. Keeps the AI shape isolated from the broader sidecar. |
-| `src/renderer/views/job-review/QualityPanel.jsx` | New React section in the existing Job Review screen. Shows MUSIQ score, threshold, fixup model dropdown, fix/revert/approve-as-is actions. |
-| `src/renderer/views/jobs-grid/QualityFlag.jsx` | Renderer-side flag badge for the Flags column (`3/400` red triangle). |
+| `src/renderer/views/QualityReview/index.jsx` | Top-level component for the Quality Review tab. Owns the two pieces of state that survive view transitions: `tweaks` (density, theme, showKbdHint — same shape as Film Review) and `openJobId` (null = show JobList, set = show JobReview → FocusedImage). Mirrors `src/renderer/views/FilmReview/index.jsx`. |
+| `src/renderer/views/QualityReview/mount.jsx` | React entry point. Mounts a React root into `<div id="quality-review-root">` inside the Quality tab. Mirrors `src/renderer/views/FilmReview/mount.jsx`. |
+| `src/renderer/views/QualityReview/JobList.jsx` | Held-jobs list (the parallel of `RollList`). Each row shows job code, customer, total/failed counts, oldest hold time, and a status indicator. Click → opens the JobReview view. Re-fetches when an `aiQuality.onJobHeld` event fires. |
+| `src/renderer/views/QualityReview/JobReview.jsx` | Per-job thumbnail grid (the parallel of `RollReview`). Default filter: "Show failed only". Failed images get a red corner indicator on the thumbnail. Batch action above the grid: `[Apply [Auto ▼] to all 3 failed images]`. Header `[Approve & Route]` button enabled only when no failed-without-decision image remains. |
+| `src/renderer/views/QualityReview/FocusedImage.jsx` | Single-image view (the parallel of `FocusedFrame`). Large preview, score overlay, fixup dropdown (Clean compression / Sharpen / Upscale / Auto), Apply Fixup, Approve as-is, Revert, fixup history. Keyboard shortcuts mirror `FocusedFrame` where they apply (←/→ to move between failed images, etc). |
+| `src/renderer/views/QualityReview/ImageCell.jsx` | Single thumbnail cell with score badge and red-corner-indicator. Parallel of `FrameCell`. |
+| `src/renderer/views/QualityReview/FixupMenu.jsx` | Reusable fixup-model dropdown component (used by both `JobReview` batch action and `FocusedImage` per-image action). Parallel of `FlagMenu`. |
+| `src/renderer/quality-review.bundle.js` | esbuild entry — same convention as `film-review.bundle.js`. |
+| `src/renderer/quality-review.css` | Tab-scoped styles. Same convention as `film-review.css`. Inherits the design tokens used by Film Review for visual consistency. |
+| `src/renderer/views/jobs-grid/QualityFlag.jsx` | Renderer-side flag badge for the existing Flags column on the Jobs grid (`3/400` red triangle). Click navigates to the Quality tab and opens the job. |
+| `src/main/services/quality-review-prefs-store.js` | electron-store-backed prefs (density / theme / showKbdHint), parallel of `film-review-prefs-store.js`. |
 | `docs/AI-QUALITY.md` | User-facing doc: what it does, how the threshold works, the MUSIQ guidance text shown in settings, what each fixup model does, troubleshooting. |
 
 ---
@@ -72,9 +81,9 @@ All paths relative to repo root.
 | `src/main/jobs/originalsManager.js` | Confirm fixup writes preserve original. Likely no code change — the existing pattern already handles this — but verify and add a test. |
 | `src/main/ipc-handlers.js` | Register IPC handlers for: get-quality-state-for-job, run-fixup, approve-as-is, revert-fixup, list-models. |
 | `src/preload/preload.js` | Expose those handlers via contextBridge under `window.electronAPI.aiQuality.*`. |
-| `src/renderer/index.html` | Add Quality flag column to Jobs grid (or extend the existing Flags column to render the new badge type). |
-| `src/renderer/renderer.js` | Wire up flag rendering, click-to-open-held-job behaviour. |
-| `src/renderer/views/job-review/` (existing React tree) | Mount `QualityPanel` when the job has any failed image. Add a "Show only failed images" toggle to the image strip, defaulting ON when arriving from a held-job click. |
+| `src/renderer/index.html` | Add new "Quality" tab next to "Film". Add `<div id="quality-review-root">` inside its tab panel. Add Quality flag column to Jobs grid (or extend the existing Flags column to render the new badge type). |
+| `src/renderer/renderer.js` | Wire up the new Quality tab in the existing vanilla tab-switcher (same pattern used for Film). Wire up Quality flag rendering on the Jobs grid; click handler switches to the Quality tab and dispatches a `quality-review:open-job` event the React tree listens for. |
+| `scripts/build-renderer.js` | Add `quality-review.bundle.js` to the esbuild entry list (same pattern as `film-review.bundle.js`). |
 | `ARCHITECTURE.md` | Add an "AI Quality Gate" section under the AI Image Enhancement service map. Add a new pending-work row marking Phase 2 (verification calibration). |
 | About screen | Extend the third-party licences link to cover the new models. |
 
@@ -167,9 +176,15 @@ All exposed via contextBridge under `window.electronAPI.aiQuality.*`. Naming fol
 
 **Queries:**
 
-- `aiQuality.getJobQuality(jobId) → { jobId, held, images: [{ imageId, score, passed, fixupHistory, operatorDecision }] }`
+- `aiQuality.listHeldJobs() → [{ jobId, jobCode, customer, totalImages, failedImages, oldestHoldAt }]` — drives the JobList stage of the Quality Review tab.
+- `aiQuality.getJobQuality(jobId) → { jobId, held, images: [{ imageId, score, passed, fixupHistory, operatorDecision, thumbnailPath }] }`
 - `aiQuality.listFixupModels() → [{ modelId: 'fbcnn', label: 'Clean compression', description: '...', estimatedMs: 800 }, ...]`
 - `aiQuality.getActivityLog({ jobId? }) → ActivityLogEntry[]` — passthrough/filter on the existing Activity Log if its API supports it; otherwise rely on the global Activity Log tab and just emit entries.
+
+**Quality Review tab prefs** (mirror Film Review's `filmReview:get-tweaks` / `filmReview:set-tweak`):
+
+- `qualityReview.getTweaks() → { density, theme, showKbdHint }`
+- `qualityReview.setTweak({ key, value }) → { ok }`
 
 **Commands:**
 
@@ -246,51 +261,135 @@ The guidance text is verbatim — Richard explicitly asked for it shown to opera
 
 ---
 
-## 9. Held-job review UI (extends existing Job Review screen)
+## 9. Held-job review UI — new dedicated Quality Review tab
 
-Per Richard's option (1) — the held-job review reuses the existing Job Review screen rather than introducing a parallel surface. Two additions:
+The held-job review is a **new tab**, sibling of the existing Film Review tab, built in the same two-stage list → focused-image style. It is the primary surface for resolving Quality holds. The existing Job Review drawer is **not** modified by this work — operators can still open Job Review from the Jobs grid for everything else (Quantity, Colour Correction, Crop To Size, AI Enhancement: Standard V2 / Face enhancement).
 
-**Image strip filter.** A toggle at the top of the image thumbnail strip: `[Show only failed (3) | Show all (400)]`. Default to "failed only" when arriving via a Quality flag click. Failed images get a red corner indicator on their thumbnail (matches the Film Review confidence-corner-dot pattern).
+This decision (versus extending Job Review) was made because:
+- Held-job review has different ergonomics: operators want to triage many failed images across many jobs in one sitting, not pop in and out of one job at a time.
+- The Film Review pattern already encodes the right interaction shape (folder/job list → grid → focused single-image with keyboard nav and quick action menu) and a consistent visual language.
+- A separate surface keeps the existing Job Review drawer focused on its current job, and lets the Quality Review tab be styled and optimised for a triage workflow.
 
-**New `QualityPanel` section in the right-hand panel.** Shown only when the currently-selected image has `aiQuality.passed === false` or has fixup history. Mounted alongside the existing Colour Correction / Reprint / Crop To Size / AI Enhancement sections.
+### Architectural mirror of Film Review
+
+| Film Review | Quality Review |
+|---|---|
+| Tab: **Film** | Tab: **Quality** |
+| Mount point: `<div id="film-review-root">` | Mount point: `<div id="quality-review-root">` |
+| Bundle: `film-review.bundle.js` | Bundle: `quality-review.bundle.js` |
+| Top-level: `views/FilmReview/index.jsx` (`tweaks`, `openRollId`) | Top-level: `views/QualityReview/index.jsx` (`tweaks`, `openJobId`) |
+| Stage 1: `RollList.jsx` — list of processed rolls | Stage 1: `JobList.jsx` — list of held jobs |
+| Stage 2: `RollReview.jsx` — thumbnail grid of frames | Stage 2: `JobReview.jsx` — thumbnail grid of images |
+| Stage 3: `FocusedFrame.jsx` — single frame, manual rotate | Stage 3: `FocusedImage.jsx` — single image, fixup actions |
+| Cell: `FrameCell.jsx` | Cell: `ImageCell.jsx` |
+| Action menu: `FlagMenu.jsx` | Action menu: `FixupMenu.jsx` |
+| Prefs store: `film-review-prefs-store.js` | Prefs store: `quality-review-prefs-store.js` |
+| Trigger event: `onFilmReviewRollProcessed` → bumps `refreshKey` | Trigger event: `aiQuality.onJobHeld` → bumps `refreshKey` |
+
+Visual language reuses the design tokens established by Film Review (see `docs/design/film-review-design-brief.md`): same density tweaks (tight / regular / comfy), same theme toggle (light / dark), same keyboard-hint chip pattern. The result should feel like a sister surface, not a new app.
+
+### Stage 1 — Job list (`JobList.jsx`)
+
+A list of all currently held jobs. Each row shows:
 
 ```
-┌─ AI QUALITY ────────────────────────┐
-│ Score: 64 / 75 threshold  [FAILED]  │
-│                                      │
-│ Suggested fix: [Clean compression ▼] │
-│   • Clean compression (FBCNN)        │
-│   • Sharpen / deblur                 │
-│   • Upscale 2x (Real-ESRGAN)         │
-│   • Auto (try chain + verify)        │
-│                                      │
-│ [ Apply Fixup ]                      │
-│                                      │
-│ ── Or ──                             │
-│ [ Approve as-is, override gate ]     │
-│                                      │
-│ History:                             │
-│   No fixups yet.                     │
-└──────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│ ●  Job 18241  Smith, Jane           3/400   45 min ago   →  │
+│ ●  Job 18247  Patel, R.             1/12     3 min ago   →  │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-After a fixup runs, the same panel updates:
+- Status dot (red = held, amber = scoring in progress, green = resolved).
+- Failed/total count badge — same visual as the Jobs-grid Flag badge.
+- Time since hold — relative ("45 min ago"), absolute on hover.
+- Sort: oldest hold first by default.
+- Click row → opens Stage 2 with that job's failed-only filter active.
+
+Re-fetches when `aiQuality.onJobHeld` or `aiQuality.onFixupComplete` fires (refreshKey bump pattern, mirrors Film Review). Newly-resolved jobs animate out.
+
+Empty state: cheerful "No held jobs — quality looks good ✓".
+
+### Stage 2 — Job review grid (`JobReview.jsx`)
+
+Thumbnail grid of the job's images. Filter pill at the top: `[ Failed only (3) ] [ All (400) ]`. Defaults to **Failed only** when arriving from the Job List or a Jobs-grid flag click.
 
 ```
-│ Score: 64 → 78 ✓  (kept)             │
-│                                      │
-│ History:                             │
-│   FBCNN: 64 → 78  [keep] [revert]   │
-│                                      │
-│ [ Run another fixup ]                │
-│ [ Revert to original ]               │
+┌─ Job 18241 — Smith, Jane ──────── [Failed only (3) ▼] [All (400)] ──┐
+│                                                                       │
+│  [img]  [img]  [img]                                                  │
+│   ●      ●      ●                                                     │
+│                                                                       │
+│  Batch: [Apply [Auto ▼] to all 3 failed]   [ Approve & Route ]        │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Batch actions** above the image strip when in "failed only" view: `[Apply [Auto ▼] to all 3 failed images]`. Wires to `aiQuality.runFixupBatch`.
+- Failed thumbnails get a red corner indicator (mirrors the Film Review confidence-corner-dot).
+- Score badge in the corner of every thumbnail when in "All" view.
+- Batch action above the grid: `[Apply [Auto ▼] to all 3 failed]` — wires to `aiQuality.runFixupBatch`.
+- Header `[Approve & Route]` — enabled only when every failed image has a decision (`fixed | approved_as_is`). Wires to `aiQuality.releaseJob`.
+- Click a thumbnail → opens Stage 3 (FocusedImage).
+- Keyboard: `Esc` returns to Job List; `←/→` cycles through job tabs at the top if multiple jobs are pinned (Phase 2 — pinning deferred).
 
-**Release control.** A new "Approve & Route" button in the job header, enabled only when no image is in failed-without-decision state. Wires to `aiQuality.releaseJob`.
+### Stage 3 — Focused image (`FocusedImage.jsx`)
 
-The existing Job Review controls (Quantity, Colour Correction, Crop To Size, AI Enhancement: Standard V2 / Face enhancement) remain untouched. Operators can still apply colour correction on a fixed-up image, etc.
+Single-image triage view. Preview pane on the left, action panel on the right.
+
+```
+┌─────────────────────────────────────────────────────────┬──────────────────────┐
+│                                                         │  AI QUALITY          │
+│                                                         │  ────────────────────│
+│             [ large image preview ]                     │  Score: 64 / 75      │
+│                                                         │  [FAILED]            │
+│                                                         │                      │
+│                                                         │  Fix: [Clean ▼]      │
+│                                                         │   • Clean compression│
+│                                                         │   • Sharpen / deblur │
+│                                                         │   • Upscale 2x       │
+│                                                         │   • Auto             │
+│                                                         │                      │
+│                                                         │  [ Apply Fixup ]     │
+│                                                         │                      │
+│                                                         │  ── Or ──            │
+│                                                         │  [ Approve as-is ]   │
+│                                                         │                      │
+│                                                         │  History:            │
+│                                                         │   No fixups yet.     │
+│  ◄ prev          image 2 of 3 failed         next ►     │                      │
+└─────────────────────────────────────────────────────────┴──────────────────────┘
+```
+
+After a fixup runs, the right panel updates:
+
+```
+│  Score: 64 → 78 ✓  (kept)         │
+│                                    │
+│  History:                          │
+│   FBCNN  64 → 78  [keep] [revert] │
+│                                    │
+│  [ Run another fixup ]             │
+│  [ Revert to original ]            │
+```
+
+Keyboard shortcuts (mirroring `FocusedFrame` where applicable):
+
+- `←/→` — previous / next failed image in this job
+- `F` — focus the fixup dropdown
+- `Enter` — Apply Fixup
+- `A` — Approve as-is (with confirmation)
+- `R` — Revert to original (only when fixupHistory is non-empty)
+- `Esc` — back to JobReview grid
+
+### Triggers — how operators reach the tab
+
+1. **Jobs grid Flag column** — clicking a `3/400` flag badge switches to the Quality tab, opens that job (Stage 2) with Failed-only active.
+2. **`aiQuality.onJobHeld` notification** — toast notification with a "Review now" button that switches to the Quality tab and opens the held job.
+3. **Direct tab click** — operator opens the Quality tab manually; sees JobList with all currently held jobs.
+
+### Out of scope for this section (deferred)
+
+- Pinning multiple jobs side-by-side or in tabs within the Quality Review screen.
+- Cross-job batch fixup ("apply Auto to all failed images across all held jobs").
+- Showing non-Quality flags on the Job List (e.g. routing errors). The Quality tab stays Quality-focused; routing/dispatch issues continue to surface in their existing surfaces.
 
 ---
 
@@ -474,19 +573,25 @@ Activity Log entries are write-only from the main process; the renderer only rea
 - Add Quality flag to the Flags column in the Jobs grid (`3/400` red triangle).
 - Smoke-test with real lab jobs end-to-end up to "job is held."
 
-**Milestone 3 — Held-job review UI.**
-- Mount `QualityPanel` in the existing Job Review screen.
-- "Show only failed" toggle in the image strip.
-- "Approve & Route" job-header button.
-- "Approve as-is" override path.
-- No fixups yet — operator can only approve as-is or reject for now.
+**Milestone 3 — Quality Review tab (no fixups yet).**
+- Add new "Quality" tab to `index.html` next to "Film". Add `<div id="quality-review-root">`. Wire up vanilla tab switching in `renderer.js`.
+- Add `quality-review.bundle.js` to `scripts/build-renderer.js`.
+- Build the React tree mirroring Film Review:
+  - `views/QualityReview/mount.jsx`, `index.jsx`
+  - `JobList.jsx` (Stage 1) — wired to `aiQuality.listHeldJobs` + `onJobHeld` event.
+  - `JobReview.jsx` (Stage 2) — thumbnail grid, Failed-only filter default, batch fixup placeholder (disabled until M4).
+  - `FocusedImage.jsx` (Stage 3) — preview + Approve as-is + Approve & Route paths only (no fixup wiring yet).
+  - `ImageCell.jsx`, `FixupMenu.jsx`.
+- Add `quality-review-prefs-store.js` and IPC handlers (`qualityReview.getTweaks` / `setTweak`).
+- Wire Jobs-grid Quality flag click → switch to Quality tab → open job (Stage 2).
+- Operator can: open held jobs, see failed images, approve as-is, release the job. No fixups yet.
 
 **Milestone 4 — Fixup models + history.**
 - Add FBCNN and Real-ESRGAN model files.
 - Implement `ai-fixup-service.js` with single-model and Auto-chain paths.
 - Pre/post MUSIQ verification (always-keep policy in Phase 1, data captured).
-- Wire fixup actions and history display in `QualityPanel`.
-- Wire batch fixup action in the image strip.
+- Wire fixup actions and history display in `FocusedImage.jsx`.
+- Wire batch fixup action in `JobReview.jsx`.
 - Originals preservation via `originalsManager.js` — verified by test.
 
 **Milestone 5 — Activity Log, docs, polish.**
@@ -512,7 +617,8 @@ Activity Log entries are write-only from the main process; the renderer only rea
 - **SCUNet (denoise) and NAFNet (deblur).** Not in Phase 1. Defer until pilot data shows they're justified by frequency of those failure modes.
 - **Per-product-type threshold overrides.** Schema reserved (Section 8), UI not built. Add in Phase 2 if labs ask.
 - **Backpressure on FTP polling when queue is deep.** Measured in Phase 1, implemented in Phase 2 if needed.
-- **Unified Job Review layout matching Film Review grid pattern.** Bigger UI refactor — out of scope for this plan. Tracked separately.
+- **Pinning multiple held jobs side-by-side or in tabs within the Quality Review screen.** Not in Phase 1.
+- **Cross-job batch fixup ("apply Auto to all failed across all held jobs").** Not in Phase 1 — pilot data may not justify it.
 - **Tile-based processing for Real-ESRGAN on huge images.** Not in Phase 1. Add when first OOM is reported.
 - **GPU detection for non-DirectML hardware** (CUDA on Nvidia Topaz machines). Possible Phase 2 EP option.
 
@@ -524,7 +630,7 @@ Activity Log entries are write-only from the main process; the renderer only rea
 - No model lazy-download from S3 (models bundled).
 - No changes to Mode 2 (Film Scans), Mode 3 (File Uploads), or print controller pipelines.
 - No changes to the Film Review Panel.
-- No changes to the existing Job Review controls (Quantity, Colour Correction, Crop To Size, AI Enhancement: Standard V2 / Face enhancement) — additive only.
+- No changes to the existing Job Review drawer — Quality Review is a separate new tab. The Job Review drawer keeps its current controls (Quantity, Colour Correction, Crop To Size, AI Enhancement: Standard V2 / Face enhancement) untouched.
 - No intelligent cropping (deferred to a Feature B Phase 1 plan that builds on the same infrastructure).
 - No face detection or face-weighted scoring.
 - No cloud calls for scoring or fixup — local ONNX only.
