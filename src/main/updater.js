@@ -89,6 +89,25 @@ function _configureAutoUpdater() {
 
 async function _checkIn() {
   try {
+    // Only register this install with OrderHub when it is actively
+    // downloading artwork (i.e. polling is enabled). Upload-only
+    // deployments — a PC running solely to push Film Scans or File
+    // Uploads to S3 — don't need to appear as an online OHD in the
+    // OrderHub admin console because they aren't doing artwork work
+    // and the operator wouldn't expect them to.
+    //
+    // Multi-PC site context: a common deployment splits work across
+    // boxes (PC #1 polls + dispatches; PC #2 watches a film-scan
+    // folder and uploads). Without this gate both PCs would check in
+    // with separate `instance_id`s and `machine_name`s every 4 hours,
+    // making the admin console list confusing and giving the appearance
+    // of "two OHDs running" when in practice only one is doing OH-side
+    // work. See docs/orderhub/bugfixes.md 2026-04-30 for the full
+    // rationale.
+    if (!configService.get('pollingEnabled')) {
+      return;
+    }
+
     const { baseUrl, key: apiKey, organizationId, locationId } = configService.getApiSettings();
 
     if (!apiKey || !organizationId) {

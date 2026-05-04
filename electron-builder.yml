@@ -6,12 +6,25 @@ directories:
   output: dist
   buildResources: assets
 
-# Ship the ONNX orientation model alongside the app.
-# asarUnpack is mandatory: onnxruntime-node loads the model by filesystem
-# path and cannot read from inside an asar archive.
+# Exclude dev-only directories from the packaged app. The big offenders are
+# tools/onnx-export/.venv and tools/onnx-export/.venv-jax (~5.5 GB of
+# Python ML stack used during MUSIQ-SPAQ conversion — not needed at
+# runtime). docs/ and .claude/ are also excluded for cleanliness.
+files:
+  - "**/*"
+  - "!tools/**/*"
+  - "!docs/**/*"
+  - "!.claude/**/*"
+  - "!**/*.test.js"
+
+# Ship the ONNX models + Apache 2.0 license attribution alongside the app.
+# asarUnpack is mandatory for the models: onnxruntime-node loads them by
+# filesystem path and cannot read from inside an asar archive.
 extraResources:
   - from: resources/models
     to: models
+  - from: THIRD_PARTY_LICENSES.md
+    to: THIRD_PARTY_LICENSES.md
 asarUnpack:
   - resources/models/**
 

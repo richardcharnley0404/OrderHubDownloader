@@ -132,6 +132,31 @@ class AIInferenceClient {
     return this._request('inference', { modelId, input }, opts);
   }
 
+  /**
+   * Send a tile-shaped inference request. Distinct from `run()` because the
+   * input is a raw HWC uint8 tile buffer with explicit dimensions, and the
+   * response carries back the model's raw float32 CHW output for the
+   * caller to stitch. Used by the local-enhancement pipeline; the existing
+   * `run()` shape stays unchanged for MUSIQ and orientation.
+   *
+   * @param {string} modelId
+   * @param {Uint8Array|Buffer} tileBuffer  HWC, length tileW * tileH * 3
+   * @param {number} tileW
+   * @param {number} tileH
+   * @param {object} [opts] { timeoutMs }
+   * @returns {Promise<{chwData: Float32Array, scaledW: number, scaledH: number, inferenceMs: number}>}
+   */
+  async runTile(modelId, tileBuffer, tileW, tileH, opts) {
+    return this._request(
+      'inference:tile',
+      { modelId, tileBuffer, tileW, tileH },
+      // Per-tile inference is bounded by model compute (~500 ms on CPU at
+      // 256² tiles per the spike), but allow a generous tile-level budget
+      // since other models may share the EP transiently.
+      { timeoutMs: (opts && opts.timeoutMs) || 60000 },
+    );
+  }
+
   async shutdown() {
     if (!this._child) return;
 

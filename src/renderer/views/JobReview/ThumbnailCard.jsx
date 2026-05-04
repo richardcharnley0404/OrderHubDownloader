@@ -19,27 +19,23 @@ import { useRef, useEffect } from 'react';
  *   - MOD      (green) — when qty or corrections differ from original
  *   - ×{qty}   (grey)  — when qtyCurrent !== qtyOriginal
  *
+ * Selection border is drawn by CSS (.jr-card.is-selected) — earlier
+ * implementation drew it on the canvas as well, which was redundant.
+ *
  * Props:
- *   image       ImageEntry  Full sidecar image entry
- *   imagePath   string      Absolute path to the image file in /working/
- *   isSelected  boolean
- *   onClick     () => void
- *   cardSize    number      Width of the card in px (default 140)
+ *   image                ImageEntry  Full sidecar image entry
+ *   imagePath            string      Absolute path to the image file in /working/
+ *   isSelected           boolean
+ *   onClick              () => void
+ *   cardSize             number      Width of the card in px (default 140)
+ *   aiQualityThreshold   number      Threshold below which the score badge turns red
  */
-
-const BRAND_GREEN = '#72B622';
-const PURPLE_AI   = '#9b59b6';
-
-const BG_CARD    = '#374d5c';
-const BG_HOVER   = '#3d5464';
-const BORDER_DIM = '#3a4e5e';
-const TEXT_MUTED = '#5d7a8a';
 
 const CANVAS_ASPECT = 0.75;   // height = width × 0.75
 
 // ── Canvas rendering ──────────────────────────────────────────────────────────
 
-function useImageCanvas(canvasRef, imagePath, corrections, reprint, isSelected, size) {
+function useImageCanvas(canvasRef, imagePath, corrections, reprint, size) {
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -88,13 +84,6 @@ function useImageCanvas(canvasRef, imagePath, corrections, reprint, isSelected, 
         ctx.fillStyle = 'rgba(220, 50, 50, 0.18)';
         ctx.fillRect(0, 0, w, h);
       }
-
-      // Selected border.
-      if (isSelected) {
-        ctx.strokeStyle = BRAND_GREEN;
-        ctx.lineWidth = 3;
-        ctx.strokeRect(1.5, 1.5, w - 3, h - 3);
-      }
     }
 
     // Attempt to load the actual image from disk.
@@ -131,11 +120,13 @@ function useImageCanvas(canvasRef, imagePath, corrections, reprint, isSelected, 
       applyOverlays();
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [imagePath, corrections.cyan, corrections.magenta, corrections.yellow, reprint, isSelected, size]);
+  }, [imagePath, corrections.cyan, corrections.magenta, corrections.yellow, reprint, size]);
 }
 
 function drawPlaceholder(ctx, w, h) {
   // Grey gradient placeholder when image path is unknown.
+  // Colours are intentionally hardcoded — the placeholder reads against
+  // both light and dark card surfaces.
   const grad = ctx.createLinearGradient(0, 0, w, h);
   grad.addColorStop(0, '#3a5060');
   grad.addColorStop(1, '#243040');
@@ -152,31 +143,59 @@ function drawPlaceholder(ctx, w, h) {
   ctx.stroke();
 }
 
-// ── Badge components ──────────────────────────────────────────────────────────
+// ── Sub-components ────────────────────────────────────────────────────────────
 
-function Badge({ text, bg, textColor = '#fff' }) {
+/**
+ * Per-image AI Quality score pill, bottom-right corner of the thumbnail.
+ *
+ *   - unscored (no aiQuality block, or scored:false)  → render nothing
+ *   - errored  (aiQuality.error populated)            → "n/a" + tooltip with error
+ *   - scored, above threshold                         → white text on dark pill
+ *   - scored, below threshold                         → red text + red border
+ *
+ * Tooltip carries the calibration context: scored timestamp, model version,
+ * mode at score time, threshold at score time.
+ */
+function ScoreBadge({ aiQuality, threshold }) {
+  if (!aiQuality || !aiQuality.scored) return null;
+
+  const hasError = !!aiQuality.error;
+  const score = typeof aiQuality.score === 'number' ? aiQuality.score : null;
+  const subThreshold = !hasError && score !== null && score < threshold;
+  const display = hasError || score === null ? 'n/a' : score.toFixed(1);
+
+  // Tooltip — newline-separated lines via the title attribute (browsers
+  // render \n as line breaks in native tooltips).
+  const tipLines = [];
+  if (hasError) tipLines.push(`Error: ${aiQuality.error}`);
+  if (aiQuality.scoredAt) {
+    try {
+      tipLines.push(`Scored: ${new Date(aiQuality.scoredAt).toLocaleString()}`);
+    } catch { /* ignore parse failure */ }
+  }
+  if (aiQuality.modelVersion) tipLines.push(`Model: ${aiQuality.modelVersion}`);
+  if (aiQuality.modeAtScoreTime) tipLines.push(`Mode: ${aiQuality.modeAtScoreTime}`);
+  if (aiQuality.thresholdAtScoreTime != null) {
+    tipLines.push(`Threshold at scoring: ${aiQuality.thresholdAtScoreTime}`);
+  }
+  const tooltip = tipLines.join('\n');
+
   return (
-    <div style={{
-      background: bg,
-      borderRadius: 2,
-      padding: '1px 5px',
-      fontSize: 9,
-      fontFamily: "'DM Mono', monospace",
-      color: textColor,
-      letterSpacing: '0.05em',
-      lineHeight: 1.6,
-    }}>
-      {text}
+    <div
+      title={tooltip}
+      className={'jr-score' + (subThreshold ? ' jr-score--sub' : '')}
+    >
+      {display}
     </div>
   );
 }
 
 // ── ThumbnailCard ─────────────────────────────────────────────────────────────
 
-export function ThumbnailCard({ image, imagePath, isSelected, onClick, cardSize = 140 }) {
+export function ThumbnailCard({ image, imagePath, isSelected, onClick, cardSize = 140, aiQualityThreshold = 50 }) {
   const canvasRef = useRef(null);
 
-  const { corrections, reprint, qtyCurrent, qtyOriginal, filename, enhanced } = image;
+  const { corrections, reprint, qtyCurrent, qtyOriginal, filename, enhanced, aiQuality } = image;
 
   const isModified = qtyCurrent !== qtyOriginal
     || corrections.cyan    !== 0
@@ -186,13 +205,11 @@ export function ThumbnailCard({ image, imagePath, isSelected, onClick, cardSize 
   const canvasW = cardSize - 12;           // 6 px padding each side
   const canvasH = Math.round(canvasW * CANVAS_ASPECT);
 
-  useImageCanvas(canvasRef, imagePath, corrections, reprint, isSelected, canvasW);
+  useImageCanvas(canvasRef, imagePath, corrections, reprint, canvasW);
 
-  const borderColor = isSelected
-    ? BRAND_GREEN
-    : reprint
-      ? '#cc3333'
-      : BORDER_DIM;
+  const className = 'jr-card'
+    + (isSelected ? ' is-selected' : '')
+    + (reprint    ? ' is-reprint'  : '');
 
   return (
     <div
@@ -202,42 +219,32 @@ export function ThumbnailCard({ image, imagePath, isSelected, onClick, cardSize 
       onKeyDown={e => e.key === 'Enter' && onClick()}
       aria-pressed={isSelected}
       aria-label={`Select ${filename}`}
-      style={{
-        background:    isSelected ? BG_HOVER : BG_CARD,
-        border:        `1px solid ${borderColor}`,
-        borderRadius:  5,
-        padding:       6,
-        cursor:        'pointer',
-        position:      'relative',
-        transition:    'background 0.15s, border-color 0.15s',
-        boxShadow:     isSelected ? `0 0 0 1px ${BRAND_GREEN}22` : 'none',
-        userSelect:    'none',
-      }}
+      className={className}
     >
       {/* Canvas */}
       <canvas
         ref={canvasRef}
         width={canvasW}
         height={canvasH}
-        style={{ display: 'block', borderRadius: 3 }}
+        className="jr-card__canvas"
       />
 
       {/* Top-left badges */}
-      <div style={{
-        position: 'absolute', top: 8, left: 8,
-        display: 'flex', gap: 3,
-      }}>
-        {reprint && <Badge text="REPRINT" bg="#cc3333" />}
-        {isModified && !reprint && <Badge text="MOD" bg={BRAND_GREEN} />}
-        {enhanced && <Badge text="AI" bg={PURPLE_AI} />}
+      <div className="jr-badges-tl">
+        {reprint && <span className="jr-badge jr-badge--reprint">REPRINT</span>}
+        {isModified && !reprint && <span className="jr-badge jr-badge--mod">MOD</span>}
+        {enhanced && <span className="jr-badge jr-badge--ai">AI</span>}
       </div>
 
       {/* Top-right QTY badge */}
       {qtyCurrent !== qtyOriginal && (
-        <div style={{ position: 'absolute', top: 8, right: 8 }}>
-          <Badge text={`×${qtyCurrent}`} bg="#415564" />
+        <div className="jr-badge-tr">
+          <span className="jr-badge jr-badge--qty">×{qtyCurrent}</span>
         </div>
       )}
+
+      {/* Bottom-right AI Quality score pill */}
+      <ScoreBadge aiQuality={aiQuality} threshold={aiQualityThreshold} />
 
     </div>
   );

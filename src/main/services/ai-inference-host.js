@@ -25,6 +25,18 @@
 
 const path = require('path');
 
+// Disable libvips' operation cache in the utility process. The main process
+// already does this in src/main/index.js, but this is a SEPARATE OS process
+// with its own libvips state. Without this, the orientation/musiq loaders'
+// `sharp(imagePath, …)` reads retain the source-file descriptor in libvips'
+// op cache, which races with the main process's rotate-write-rename cycle
+// in folder-watch-service.js and surfaces as EPERM on SMB shares (Synology).
+// JPGs hit this much harder than TIFFs because of libvips loader differences.
+// Symptom this prevents: every "ROTATION FAILED" frame in the Film Review
+// panel for rolls on a network share. Must run BEFORE any loader does
+// `require('sharp')`. See OHD memory `sharp + libvips EPERM on SMB`.
+require('sharp').cache(false);
+
 // utilityProcess does NOT have process.send — it uses parentPort.
 // If parentPort is missing, this script was launched outside utilityProcess
 // (e.g. directly via `node ai-inference-host.js`) — bail loudly so we don't
@@ -102,6 +114,16 @@ parentPort.on('message', (event) => {
       });
       break;
 
+    case 'inference:tile':
+      handleInferenceTile(id, msg).catch((err) => {
+        log('error', `inference:tile handler threw: ${err && err.message}`, { stack: err && err.stack });
+        reply(id, false, {
+          message: err && err.message ? err.message : 'inference:tile handler threw',
+          code: 'INFERENCE_FAILED',
+        });
+      });
+      break;
+
     case 'shutdown':
       log('info', 'shutdown requested — exiting');
       // Give the parent a moment to flush the log forward.
@@ -149,8 +171,11 @@ async function loadAllModels(modelOverrides) {
     return;
   }
 
-  // Register each known model loader. New models (fbcnn, realesrgan)
-  // get added here in their respective milestones.
+  // Register each known model loader. M1 of the local-enhancement plan
+  // adds `realesrgan` (Real-ESRGAN x4, super-resolution + implicit
+  // denoise/deblock). FBCNN remains a future addition if specific JPEG-
+  // artefact failure modes warrant it; Real-ESRGAN-general handles the
+  // common cases as a side effect of its training distribution.
   let orientationLoader;
   try {
     orientationLoader = require('./ai-inference-models/orientation-loader');
@@ -165,6 +190,14 @@ async function loadAllModels(modelOverrides) {
     loaders.set(musiqLoader.modelId, musiqLoader);
   } catch (err) {
     log('error', `failed to require musiq-loader: ${err && err.message}`, { stack: err && err.stack });
+  }
+
+  let realesrganLoader;
+  try {
+    realesrganLoader = require('./ai-inference-models/realesrgan-loader');
+    loaders.set(realesrganLoader.modelId, realesrganLoader);
+  } catch (err) {
+    log('error', `failed to require realesrgan-loader: ${err && err.message}`, { stack: err && err.stack });
   }
 
   // Attempt to create a session for each registered model.
@@ -288,6 +321,127 @@ async function handleInference(id, msg) {
 
   result.inferenceMs = Date.now() - startedAt;
   return reply(id, true, result);
+}
+
+// ---------------------------------------------------------------------------
+// Tile-shaped inference (per-tile dispatch for Real-ESRGAN)
+// ---------------------------------------------------------------------------
+//
+// Distinct from handleInference() above: callers pass a raw HWC uint8 tile
+// buffer (not an image path), the loader's prepareTensor receives it
+// directly, and the response carries back the raw float32 CHW output for
+// the main-side stitcher to blend. Postprocessing (clamp + uint8 round) is
+// done by the stitcher in finalise(), not per-tile, so that overlapping
+// tile contributions blend in float space without intermediate quantisation.
+//
+// Request payload (the host receives these fields on the message):
+//   {
+//     id,
+//     kind: 'inference:tile',
+//     modelId:    string                 // 'realesrgan'
+//     tileBuffer: Uint8Array | Buffer    // HWC, length = tileW * tileH * 3
+//     tileW:      number
+//     tileH:      number
+//   }
+//
+// Reply (success):
+//   {
+//     id, ok: true, result: {
+//       chwData:   Float32Array   // length = scaledW * scaledH * 3
+//       scaledW:   number          // tileW * loader.scale
+//       scaledH:   number          // tileH * loader.scale
+//       inferenceMs: number
+//     }
+//   }
+async function handleInferenceTile(id, msg) {
+  const startedAt = Date.now();
+  const { modelId, tileBuffer, tileW, tileH } = msg;
+
+  if (!modelId || typeof modelId !== 'string') {
+    return reply(id, false, { message: 'inference:tile: missing modelId', code: 'BAD_INPUT' });
+  }
+  if (!tileBuffer || typeof tileBuffer.length !== 'number') {
+    return reply(id, false, { message: 'inference:tile: missing tileBuffer', code: 'BAD_INPUT' });
+  }
+  if (!Number.isInteger(tileW) || !Number.isInteger(tileH) || tileW <= 0 || tileH <= 0) {
+    return reply(id, false, {
+      message: `inference:tile: invalid tile dims ${tileW}x${tileH}`,
+      code: 'BAD_INPUT',
+    });
+  }
+  if (tileBuffer.length !== tileW * tileH * 3) {
+    return reply(id, false, {
+      message: `inference:tile: tileBuffer length ${tileBuffer.length} != ${tileW}*${tileH}*3`,
+      code: 'BAD_INPUT',
+    });
+  }
+
+  const loader = loaders.get(modelId);
+  const session = sessions.get(modelId);
+  if (!loader || !session) {
+    return reply(id, false, {
+      message: `model '${modelId}' not loaded`,
+      code: 'MODEL_NOT_LOADED',
+    });
+  }
+  if (typeof loader.prepareTensor !== 'function' || typeof loader.scale !== 'number') {
+    return reply(id, false, {
+      message: `model '${modelId}' does not support tile inference (missing prepareTensor or scale)`,
+      code: 'BAD_INPUT',
+    });
+  }
+
+  let tensor;
+  try {
+    tensor = loader.prepareTensor(tileBuffer, tileW, tileH, ort);
+  } catch (err) {
+    return reply(id, false, {
+      message: `prepareTensor failed: ${err && err.message}`,
+      code: 'INFERENCE_FAILED',
+    });
+  }
+
+  let output;
+  try {
+    output = await session.run({ [loader.inputName]: tensor });
+  } catch (err) {
+    return reply(id, false, {
+      message: `session.run failed: ${err && err.message}`,
+      code: 'INFERENCE_FAILED',
+    });
+  }
+
+  const tensorOut = output[loader.outputName];
+  if (!tensorOut || !tensorOut.data) {
+    return reply(id, false, {
+      message: `output tensor '${loader.outputName}' missing or empty`,
+      code: 'INFERENCE_FAILED',
+    });
+  }
+
+  const scale = loader.scale;
+  const scaledW = tileW * scale;
+  const scaledH = tileH * scale;
+  const expected = scaledW * scaledH * 3;
+
+  // tensorOut.data is a Float32Array view into ORT's tensor backing store. We
+  // pass it back across postMessage; structured clone copies the typed array,
+  // which is correct here — the ORT tensor is not safe to retain past this
+  // call (the runtime may reuse the backing buffer for the next inference).
+  const chwData = tensorOut.data;
+  if (chwData.length !== expected) {
+    return reply(id, false, {
+      message: `output length ${chwData.length} != expected ${expected} (${scaledW}x${scaledH}x3 CHW)`,
+      code: 'INFERENCE_FAILED',
+    });
+  }
+
+  return reply(id, true, {
+    chwData,
+    scaledW,
+    scaledH,
+    inferenceMs: Date.now() - startedAt,
+  });
 }
 
 // ---------------------------------------------------------------------------

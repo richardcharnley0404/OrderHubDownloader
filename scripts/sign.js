@@ -53,7 +53,7 @@ exports.default = async function sign(configuration) {
       'trusted-signing-cli sign',
       `--file-list "${filePath}"`,
       `--publisher-name "Pixfizz"`,
-      `--description "OrderHub Downloader"`,
+      `--description "OrderHub Desktop"`,
       `--description-url "https://orderhub.app"`,
       `--azure-key-vault-tenant-id "${AZURE_TENANT_ID}"`,
       `--azure-key-vault-client-id "${AZURE_CLIENT_ID}"`,

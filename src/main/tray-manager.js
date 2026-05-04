@@ -24,7 +24,7 @@ class TrayManager {
       const icon = nativeImage.createFromPath(iconPath);
 
       this.tray = new Tray(icon.resize({ width: 16, height: 16 }));
-      this.tray.setToolTip('OrderHub Downloader');
+      this.tray.setToolTip('OrderHub Desktop');
 
       // Handle tray icon click
       this.tray.on('click', () => {
@@ -108,7 +108,7 @@ class TrayManager {
 
     // ── Actions ──
     menuItems.push({
-      label: 'Open OrderHub Downloader',
+      label: 'Open OrderHub Desktop',
       click: () => {
         windowManager.showWindow();
       }
@@ -207,7 +207,7 @@ class TrayManager {
     const parts = [`Service: ${serviceLabel}`, jobsLabel];
     if (timeLabel) parts.push(timeLabel);
 
-    this.tray.setToolTip(`OrderHub Downloader\n${parts.join(' | ')}`);
+    this.tray.setToolTip(`OrderHub Desktop\n${parts.join(' | ')}`);
   }
 
   /**

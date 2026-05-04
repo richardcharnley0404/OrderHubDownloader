@@ -17,22 +17,15 @@ import { CropEditor } from './CropEditor.jsx';
  *   - On close: if isDirty, auto-saves before calling onClose().
  *   - On open:  calls ohd:job:load IPC to fetch sidecar + image list.
  *
+ * Styling: classes are defined in src/renderer/job-review.css; the panel
+ * inherits the app-wide --app-* design tokens, so dark/light themes track
+ * the body.app-theme-dark switch driven from the app header.
+ *
  * Props:
  *   jobId    string          Job identifier, e.g. "JOB-00452"
  *   jobPath  string          Absolute path to the job root folder
  *   onClose  () => void      Called after save (if dirty) is complete
  */
-
-// ── Palette ───────────────────────────────────────────────────────────────────
-const BRAND_GREEN = '#72B622';
-const BG_DEEP     = '#2a3a45';
-const BG_BASE     = '#324452';
-const BG_PANEL    = '#2e3e4c';
-const BG_INPUT    = '#2a3a45';
-const BG_CARD     = '#374d5c';
-const BORDER_DIM  = '#3a4e5e';
-const TEXT_DIM    = '#8aa8be';
-const TEXT_MUTED  = '#5d7a8a';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -73,65 +66,40 @@ function DrawerTopBar({
   const reprintJobId = reprintCount > 0 ? `${jobId}-r${reprintCount}` : null;
 
   return (
-    <div style={{
-      background: BG_DEEP,
-      borderBottom: '1px solid #1e2c35',
-      padding: '10px 16px',
-      display: 'flex', alignItems: 'center', gap: 12,
-      flexShrink: 0,
-    }}>
+    <div className="jr-topbar">
       {/* Breadcrumb */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <div style={{
-          width: 8, height: 8, borderRadius: '50%',
-          background: BRAND_GREEN, boxShadow: `0 0 8px ${BRAND_GREEN}`,
-        }} />
-        <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, color: BRAND_GREEN, letterSpacing: '0.05em' }}>
-          OHD
-        </span>
-        <span style={{ color: '#4a6070', fontSize: 13 }}>›</span>
-        <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: TEXT_DIM }}>
-          Job Review
-        </span>
+      <div className="jr-crumb">
+        <div className="jr-crumb__dot" />
+        <span className="jr-crumb__app">OHD</span>
+        <span className="jr-crumb__sep">›</span>
+        <span className="jr-crumb__panel">Job Review</span>
         {selectedFilename && (
           <>
-            <span style={{ color: '#4a6070', fontSize: 13 }}>›</span>
-            <span style={{
-              fontFamily: "'DM Mono', monospace", fontSize: 11,
-              color: TEXT_MUTED, letterSpacing: '0.03em',
-            }}>
-              {midEllipsis(selectedFilename)}
-            </span>
+            <span className="jr-crumb__sep">›</span>
+            <span className="jr-crumb__file">{midEllipsis(selectedFilename)}</span>
           </>
         )}
       </div>
 
-      <div style={{ flex: 1 }} />
+      <div className="jr-topbar__spacer" />
 
       {/* Job meta */}
-      <div style={{ textAlign: 'right' }}>
-        <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, color: '#c8d8e0', fontWeight: 500 }}>
-          {jobId}
-        </div>
-        <div style={{ fontSize: 10, color: TEXT_MUTED, letterSpacing: '0.06em' }}>
+      <div className="jr-topbar__meta">
+        <div className="jr-topbar__meta-jobid">{jobId}</div>
+        <div className="jr-topbar__meta-count">
           {images.length} IMAGE{images.length !== 1 ? 'S' : ''}
         </div>
       </div>
 
       {/* Last reprint badge */}
       {reprintJobId && (
-        <div style={{
-          background: '#1e0a0a', border: '1px solid #cc3333',
-          borderRadius: 4, padding: '4px 10px',
-        }}>
-          <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: '#ff6666' }}>
-            {reprintJobId} sent ✓
-          </span>
+        <div className="jr-reprint-pill">
+          <span className="jr-reprint-pill__text">{reprintJobId} sent ✓</span>
         </div>
       )}
 
       {/* Stats */}
-      <div style={{ display: 'flex', gap: 8 }}>
+      <div className="jr-stats">
         <StatBox label="TOTAL PRINTS" value={totalPrints} />
         <StatBox
           label="MODIFIED"
@@ -150,12 +118,7 @@ function DrawerTopBar({
         <button
           onClick={onSave}
           disabled={isSaving}
-          style={{
-            background: BRAND_GREEN, border: 'none', borderRadius: 4,
-            color: '#fff', fontSize: 11, fontFamily: "'DM Mono', monospace",
-            padding: '5px 14px', cursor: isSaving ? 'wait' : 'pointer',
-            opacity: isSaving ? 0.6 : 1, letterSpacing: '0.05em',
-          }}
+          className="jr-btn-save"
         >
           {isSaving ? 'SAVING…' : 'SAVE'}
         </button>
@@ -165,34 +128,20 @@ function DrawerTopBar({
       <button
         onClick={onClose}
         aria-label="Close Job Review"
-        style={{
-          background: 'none', border: '1px solid #3a4e5e',
-          borderRadius: 4, color: TEXT_DIM,
-          padding: '5px 10px', cursor: 'pointer', fontSize: 14,
-          lineHeight: 1,
-        }}
+        className="jr-btn-close"
       >✕</button>
     </div>
   );
 }
 
 function StatBox({ label, value, highlight = false, danger = false }) {
+  const cls = 'jr-stat'
+    + (highlight ? ' jr-stat--highlight' : '')
+    + (danger    ? ' jr-stat--danger'    : '');
   return (
-    <div style={{
-      background: danger ? '#1e0a0a' : BG_INPUT,
-      border: `1px solid ${danger ? '#cc3333' : '#2a3a45'}`,
-      borderRadius: 4, padding: '4px 12px', textAlign: 'center',
-    }}>
-      <div style={{
-        fontSize: 16, fontWeight: 600,
-        color: danger ? '#ff6666' : highlight ? BRAND_GREEN : TEXT_MUTED,
-        fontFamily: "'DM Mono', monospace",
-      }}>
-        {value}
-      </div>
-      <div style={{ fontSize: 9, color: TEXT_MUTED, letterSpacing: '0.08em' }}>
-        {label}
-      </div>
+    <div className={cls}>
+      <div className="jr-stat__value">{value}</div>
+      <div className="jr-stat__label">{label}</div>
     </div>
   );
 }
@@ -216,31 +165,19 @@ function ActionBar({ reprintImages, reprintCount, jobId, isSaving, onSendReprint
   }
 
   return (
-    <div style={{
-      background: '#1a0808', borderTop: '1px solid #cc333344',
-      padding: '10px 20px', display: 'flex', alignItems: 'center', gap: 12,
-      flexShrink: 0,
-    }}>
+    <div className="jr-actionbar">
       {lastSent ? (
-        <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: '#ff6666' }}>
-          {lastSent} sent ✓
-        </span>
+        <span className="jr-actionbar__sent">{lastSent} sent ✓</span>
       ) : (
         <>
-          <span style={{ fontSize: 12, color: '#ff8888' }}>
+          <span className="jr-actionbar__count">
             ↺ {reprintImages.length} image{reprintImages.length !== 1 ? 's' : ''} flagged
           </span>
-          <div style={{ flex: 1 }} />
+          <div className="jr-actionbar__spacer" />
           <button
             onClick={handleSend}
             disabled={sending || isSaving}
-            style={{
-              background: '#cc3333', border: 'none', borderRadius: 4,
-              color: '#fff', fontSize: 12, fontFamily: "'DM Mono', monospace",
-              padding: '7px 20px', cursor: 'pointer',
-              opacity: (sending || isSaving) ? 0.6 : 1,
-              letterSpacing: '0.04em',
-            }}
+            className="jr-btn-send"
           >
             {sending ? 'SENDING…' : `Send ${reprintImages.length} Reprints → ${jobId}-r${reprintCount + 1}`}
           </button>
@@ -287,63 +224,33 @@ function PreviewArea({ selected, jobPath }) {
   }
 
   return (
-    <div style={{
-      flex: 1, position: 'relative',
-      background: BG_PANEL, overflow: 'hidden',
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-    }}>
+    <div className="jr-preview">
       {imagePath ? (
         <img
           src={imagePath}
           alt={selected.filename}
-          style={{
-            width: '100%', height: '100%',
-            objectFit: 'contain',
-            display: 'block',
-          }}
+          className="jr-preview__img"
         />
       ) : (
-        <div style={{ color: TEXT_MUTED, fontSize: 13, fontFamily: "'DM Mono', monospace" }}>
-          No image
-        </div>
+        <div className="jr-preview__empty">No image</div>
       )}
 
       {/* CMY colour-correction tint overlay */}
       {overlayColor && (
-        <div style={{
-          position: 'absolute', inset: 0,
-          background: overlayColor,
-          pointerEvents: 'none',
-        }} />
+        <div className="jr-preview__overlay" style={{ background: overlayColor }} />
       )}
 
       {/* Reprint tint overlay */}
       {reprint && (
-        <div style={{
-          position: 'absolute', inset: 0,
-          background: 'rgba(220,50,50,0.18)',
-          pointerEvents: 'none',
-        }} />
+        <div className="jr-preview__overlay jr-preview__overlay--reprint" />
       )}
 
       {/* Status badges — bottom corners */}
       {hasCorrections && (
-        <div style={{
-          position: 'absolute', bottom: 12, left: 12,
-          background: 'rgba(114,182,34,0.9)', borderRadius: 3,
-          padding: '2px 8px', fontSize: 10,
-          fontFamily: "'DM Mono', monospace", color: '#fff',
-          pointerEvents: 'none',
-        }}>CORRECTED</div>
+        <div className="jr-preview__chip jr-preview__chip--corrected">CORRECTED</div>
       )}
       {reprint && (
-        <div style={{
-          position: 'absolute', bottom: 12, right: 12,
-          background: 'rgba(204,51,51,0.9)', borderRadius: 3,
-          padding: '2px 8px', fontSize: 10,
-          fontFamily: "'DM Mono', monospace", color: '#fff',
-          pointerEvents: 'none',
-        }}>FLAGGED FOR REPRINT</div>
+        <div className="jr-preview__chip jr-preview__chip--reprint">FLAGGED FOR REPRINT</div>
       )}
     </div>
   );
@@ -371,6 +278,8 @@ export function JobReviewDrawer({ jobId, jobPath, ohJobId, onClose }) {
     // Crop-to-size
     allSizeOptions, cropEditorOpen, cropSizeOption,
     openCropEditor, closeCropEditor, cropImage,
+    // AI Quality
+    aiQualityThreshold,
   } = useJobReview(jobId, jobPath, ohJobId);
 
   // Keyboard: Escape closes, arrow keys navigate.
@@ -402,133 +311,87 @@ export function JobReviewDrawer({ jobId, jobPath, ohJobId, onClose }) {
   // ── Render ──────────────────────────────────────────────────────────────────
 
   return (
-    <>
-      {/* Scoped slider thumb CSS */}
-      <style>{`
-        .ohd-job-review input[type=range]::-webkit-slider-thumb {
-          -webkit-appearance: none;
-          width: 14px; height: 14px;
-          border-radius: 50%;
-          background: #c8d8e0;
-          border: 2px solid #415564;
-          cursor: pointer;
-          box-shadow: 0 0 0 3px rgba(114,182,34,0.15);
-        }
-        .ohd-job-review input[type=range]::-webkit-slider-thumb:hover {
-          background: #72B622;
-          border-color: #72B622;
-        }
-        .ohd-job-review ::-webkit-scrollbar { width: 6px; height: 6px; }
-        .ohd-job-review ::-webkit-scrollbar-track { background: #1e2c35; }
-        .ohd-job-review ::-webkit-scrollbar-thumb { background: #4a6070; border-radius: 3px; }
-        .ohd-job-review ::-webkit-scrollbar-thumb:hover { background: #5d7a8a; }
-      `}</style>
+    <div className={'jr-root' + (visible ? ' is-visible' : '')}>
+      {/* Top bar */}
+      <DrawerTopBar
+        jobId={jobId}
+        selectedFilename={selected?.filename ?? null}
+        images={images}
+        reprintImages={reprintImages}
+        reprintCount={reprintCount}
+        isSaving={isSaving}
+        isDirty={isDirty}
+        onSave={saveJob}
+        onClose={handleClose}
+      />
 
-      <div
-        className="ohd-job-review"
-        style={{
-          position:   'fixed',
-          inset:      0,
-          zIndex:     100,
-          display:    'flex',
-          flexDirection: 'column',
-          background: BG_BASE,
-          fontFamily: "'DM Sans', system-ui, sans-serif",
-          color:      '#c8d8e0',
-          transform:  visible ? 'translateX(0)' : 'translateX(100%)',
-          transition: 'transform 0.25s ease',
-        }}
-      >
-        {/* Top bar */}
-        <DrawerTopBar
-          jobId={jobId}
-          selectedFilename={selected?.filename ?? null}
-          images={images}
-          reprintImages={reprintImages}
-          reprintCount={reprintCount}
-          isSaving={isSaving}
-          isDirty={isDirty}
-          onSave={saveJob}
-          onClose={handleClose}
-        />
+      {/* Body */}
+      {isLoading ? (
+        <div className="jr-state">Loading {jobId}…</div>
+      ) : loadError ? (
+        <div className="jr-state jr-state--error">Error: {loadError}</div>
+      ) : (
+        <div className="jr-body">
 
-        {/* Body */}
-        {isLoading ? (
-          <div style={{
-            flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontFamily: "'DM Mono', monospace", fontSize: 13, color: TEXT_MUTED,
-          }}>
-            Loading {jobId}…
-          </div>
-        ) : loadError ? (
-          <div style={{
-            flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontFamily: "'DM Mono', monospace", fontSize: 13, color: '#cc4444',
-          }}>
-            Error: {loadError}
-          </div>
-        ) : (
-          <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-
-            {/* Left: thumbnail grid */}
-            <ThumbnailGrid
-              images={images}
-              selectedId={selectedId}
-              jobPath={jobPath}
-              onSelect={selectImage}
-            />
-
-            {/* Centre: large preview */}
-            <PreviewArea
-              selected={selected}
-              jobPath={jobPath}
-            />
-
-            {/* Right: controls */}
-            <ControlSidebar
-              selected={selected}
-              images={images}
-              selectedId={selectedId}
-              jobPath={jobPath}
-              holdCorrection={holdCorrection}
-              reprintCount={reprintCount}
-              jobId={jobId}
-              onSelectImage={selectImage}
-              onUpdateCorrection={updateCorrection}
-              onUpdateQty={updateQty}
-              onToggleReprint={toggleReprint}
-              onToggleHold={toggleHold}
-              onResetImage={resetImage}
-              onRefreshSidecar={refreshSidecar}
-              allSizeOptions={allSizeOptions}
-              cropSizeOption={cropSizeOption}
-              onOpenCropEditor={openCropEditor}
-            />
-          </div>
-        )}
-
-        {/* Crop editor overlay — full-screen portal over drawer content */}
-        {cropEditorOpen && selected && (
-          <CropEditor
-            image={selected}
+          {/* Left: thumbnail grid */}
+          <ThumbnailGrid
+            images={images}
+            selectedId={selectedId}
             jobPath={jobPath}
-            sizeOption={cropSizeOption}
-            onApply={async (rect) => await cropImage(selected.filename, cropSizeOption, rect)}
-            onCancel={closeCropEditor}
+            onSelect={selectImage}
+            aiQualityThreshold={aiQualityThreshold}
           />
-        )}
 
-        {/* Bottom: reprint action bar */}
-        {!isLoading && !loadError && (
-          <ActionBar
-            reprintImages={reprintImages}
+          {/* Centre: large preview */}
+          <PreviewArea
+            selected={selected}
+            jobPath={jobPath}
+          />
+
+          {/* Right: controls */}
+          <ControlSidebar
+            selected={selected}
+            images={images}
+            selectedId={selectedId}
+            jobPath={jobPath}
+            holdCorrection={holdCorrection}
             reprintCount={reprintCount}
             jobId={jobId}
-            isSaving={isSaving}
-            onSendReprints={sendReprints}
+            onSelectImage={selectImage}
+            onUpdateCorrection={updateCorrection}
+            onUpdateQty={updateQty}
+            onToggleReprint={toggleReprint}
+            onToggleHold={toggleHold}
+            onResetImage={resetImage}
+            onRefreshSidecar={refreshSidecar}
+            allSizeOptions={allSizeOptions}
+            cropSizeOption={cropSizeOption}
+            onOpenCropEditor={openCropEditor}
           />
-        )}
-      </div>
-    </>
+        </div>
+      )}
+
+      {/* Crop editor overlay — full-screen portal over drawer content */}
+      {cropEditorOpen && selected && (
+        <CropEditor
+          image={selected}
+          jobPath={jobPath}
+          sizeOption={cropSizeOption}
+          onApply={async (rect) => await cropImage(selected.filename, cropSizeOption, rect)}
+          onCancel={closeCropEditor}
+        />
+      )}
+
+      {/* Bottom: reprint action bar */}
+      {!isLoading && !loadError && (
+        <ActionBar
+          reprintImages={reprintImages}
+          reprintCount={reprintCount}
+          jobId={jobId}
+          isSaving={isSaving}
+          onSendReprints={sendReprints}
+        />
+      )}
+    </div>
   );
 }

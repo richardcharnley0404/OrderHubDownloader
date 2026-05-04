@@ -98,9 +98,18 @@ class PrintService {
     }
 
     // Phase 3: Load enhanced-image substitution map.
-    // If an image was enhanced via Replicate/Topaz, use the cached enhanced
-    // version instead of the original working file.
-    const enhancedMap = await this._getEnhancedPathMap(String(job.id), jobFolderPath);
+    // If an image was enhanced via the AI Enhancement pipeline (Pixfizz AI
+    // local or Topaz), use the cached enhanced version instead of the
+    // original working file.
+    //
+    // Pre-existing bug fixed alongside Phase C+ jobId convention work: every
+    // other _getEnhancedPathMap call site in this file keys the sidecar by
+    // `${order_number}_${id}` (the composite form the React drawer also uses),
+    // but this Darkroom direct path used to pass `String(job.id)` (numeric).
+    // That meant the lookup hit the wrong/missing sidecar and silently
+    // returned empty — Darkroom prints would never substitute enhanced files.
+    // Aligning with the rest of print-service for consistency.
+    const enhancedMap = await this._getEnhancedPathMap(`${job.order_number}_${job.id}`, jobFolderPath);
 
     // Build line items — each image gets an absolute filepath
     const lineItems = [];
@@ -395,8 +404,9 @@ class PrintService {
     }
 
     // Phase 3: Load enhanced-image substitution map.
-    // If an image was enhanced via Replicate/Topaz, use the cached enhanced
-    // version instead of the original working file.
+    // If an image was enhanced via the AI Enhancement pipeline (Pixfizz AI
+    // local or Topaz), use the cached enhanced version instead of the
+    // original working file.
     // NOTE: The sidecar file is named after jobFolderName (e.g. "PXDEMO-R9F091_38348645.json"),
     // not job.id alone, so we pass jobFolderName as the sidecar ID.
     const enhancedMap = await this._getEnhancedPathMap(jobFolderName, jobFolderPath);
@@ -796,7 +806,17 @@ class PrintService {
     }
 
     const dpJob = {
+      // Job id is exposed so the {jobId} token resolves in configurable photo
+      // lines. Templates that don't reference {jobId} are unaffected.
+      id:            job.id,
       orderRef:      job.order_number || '',
+      // Filename stem for the Darkroom Pro .txt output. Multi-job orders
+      // share order_number, so using order_number alone collides — the
+      // second job's file overwrites the first. Prefer job_name (matches
+      // the JOB NO column in the Jobs grid, e.g. "PXDEMO-9V0L91-1") so
+      // operators can correlate filenames to grid rows. Fall back to a
+      // stable composite when job_name isn't set.
+      outputFilenameStem: job.job_name || `${job.order_number || ''}_${job.id}`,
       productCode:   job.product_code || '',
       customer:      { firstName, lastName, email: job.customer_email || '' },
       labCode:       job.website || '',
@@ -819,6 +839,10 @@ class PrintService {
       sizeTranslations:    fullController?.sizeTranslations  || [],
       mediaOptionKey:      fullController?.mediaOptionKey    || '',
       mediaTranslations:   fullController?.mediaTranslations || [],
+      // Configurable photo lines — operator-defined key/value pairs inserted
+      // between Orderid= and Filepath= in every per-image block. Empty/missing
+      // entries are filtered out inside the emitter; passing [] is harmless.
+      photoLines:          fullController?.photoLines        || [],
     };
 
     const destPath = await generateDarkroomProFile(dpJob, controller);
@@ -1248,7 +1272,8 @@ class PrintService {
 
   /**
    * Build a Map of { imageBasename → enhancedAbsolutePath } for any images
-   * that have been successfully enhanced via the Replicate pipeline.
+   * that have been successfully enhanced via the AI Enhancement pipeline
+   * (Pixfizz AI local or Topaz).
    *
    * Returns an empty Map if the sidecar cannot be loaded, or if no images
    * have been enhanced.  Callers treat an empty Map as "no substitution".

@@ -6,16 +6,17 @@ import { ThumbnailCard } from './ThumbnailCard.jsx';
  *
  * Scrollable 3-column grid of ThumbnailCard components.
  *
+ * Styling: classes defined in src/renderer/job-review.css.
+ *
  * Props (passed down from useJobReview via index.jsx):
- *   images       ImageEntry[]
- *   selectedId   string        Currently selected filename
- *   jobPath      string        Absolute path to job root (for image file:// URLs)
- *   onSelect     (filename) => void
+ *   images               ImageEntry[]
+ *   selectedId           string        Currently selected filename
+ *   jobPath              string        Absolute path to job root (for image file:// URLs)
+ *   onSelect             (filename) => void
+ *   aiQualityThreshold   number        Threshold below which the per-card score badge turns red
  */
 
-const BG_PANEL = '#2e3e4c';
-
-export function ThumbnailGrid({ images, selectedId, jobPath, onSelect }) {
+export function ThumbnailGrid({ images, selectedId, jobPath, onSelect, aiQualityThreshold }) {
   const scrollRef = useRef(null);
 
   // Auto-scroll the selected card into view whenever selectedId changes
@@ -29,32 +30,8 @@ export function ThumbnailGrid({ images, selectedId, jobPath, onSelect }) {
   }, [selectedId]);
 
   return (
-    // Outer wrapper: takes full height from parent flex-row stretch,
-    // clips content so the inner div can scroll independently.
-    <div
-      style={{
-        width: 460,
-        flexShrink: 0,
-        display: 'flex',
-        flexDirection: 'column',
-        background: BG_PANEL,
-        borderRight: '1px solid #1e2c35',
-        overflow: 'hidden',
-      }}
-    >
-      {/* Inner grid: fills remaining height and scrolls vertically */}
-      <div
-        ref={scrollRef}
-        style={{
-          flex: 1,
-          overflowY: 'auto',
-          padding: 12,
-          display: 'grid',
-          gridTemplateColumns: 'repeat(3, 1fr)',
-          gap: 8,
-          alignContent: 'start',
-        }}
-      >
+    <div className="jr-grid-col">
+      <div ref={scrollRef} className="jr-grid-scroll">
         {images.map(img => {
           // Construct the absolute path to the image file in /working/.
           // We join client-side because jobPath is already an absolute Windows path.
@@ -69,21 +46,13 @@ export function ThumbnailGrid({ images, selectedId, jobPath, onSelect }) {
               imagePath={imagePath}
               isSelected={img.filename === selectedId}
               onClick={() => onSelect(img.filename)}
+              aiQualityThreshold={aiQualityThreshold}
             />
           );
         })}
 
         {images.length === 0 && (
-          <div style={{
-            gridColumn: '1 / -1',
-            padding: 32,
-            textAlign: 'center',
-            fontSize: 12,
-            fontFamily: "'DM Mono', monospace",
-            color: '#5d7a8a',
-          }}>
-            No images found in /working/
-          </div>
+          <div className="jr-grid-empty">No images found in /working/</div>
         )}
       </div>
     </div>

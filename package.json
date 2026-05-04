@@ -1,6 +1,6 @@
 {
   "name": "orderhub-downloader",
-  "version": "1.2.0",
+  "version": "1.5.0",
   "description": "Automatic FTP file downloader for OrderHub jobs",
   "main": "src/main/index.js",
   "scripts": {
@@ -10,7 +10,8 @@
     "build:dir": "electron-builder --dir",
     "generate-icons": "node scripts/generate-icons.js",
     "build:renderer": "node scripts/build-renderer.js",
-    "watch:renderer": "node scripts/build-renderer.js --watch"
+    "watch:renderer": "node scripts/build-renderer.js --watch",
+    "test": "node --test --test-force-exit \"src/main/services/__tests__/*.test.js\" \"src/main/services/ai-inference-models/__tests__/*.test.js\" \"src/main/enhancement/__tests__/*.test.js\""
   },
   "keywords": [
     "electron",

@@ -1,41 +1,54 @@
 /**
  * src/main/services/ai-inference-models/musiq-loader.js
  *
- * Host-side loader for the MUSIQ image-quality model
- * (AI Quality Gate, M2). Mirrors the structure of orientation-loader.js.
+ * Host-side loader for the AI Quality Gate scoring model. Mirrors the
+ * structure of orientation-loader.js — exports a `prepareTensor` and a
+ * `postprocess` plus the model-file metadata that ai-inference-host
+ * uses to load and invoke the ONNX session.
  *
- * NOTE — model file NOT YET BUNDLED.
- * The .onnx file is expected at resources/models/musiq/model.onnx but is
- * not in the repo as of v1.2.0-rc1. When the file is missing, the host's
- * load attempt fails gracefully, the model is absent from `loadedModels`,
- * and ai-quality-service falls back to its "always pass / forced score"
- * behaviour.
+ * Bundled model:
+ *   Google MUSIQ-SPAQ, **3-scale variant** (native + 224 + 384 resolution
+ *   scales, ResNet-50 backbone + multi-scale Transformer). Source weights:
+ *   gs://gresearch/musiq/spaq_ckpt.npz (Apache 2.0). The .onnx file is
+ *   the result of a JAX -> TF SavedModel -> ONNX conversion pipeline
+ *   documented in docs/ai-quality-gate/conversion-audit.md.
  *
- * Tensor contract — the values below are PLACEHOLDERS until verified
- * against the real .onnx file metadata. When the model is bundled, run
- * `node -e "require('onnxruntime-node').InferenceSession.create('path/to/model.onnx').then(s=>console.log(s.inputNames, s.outputNames))"`
- * and update INPUT_NAME / OUTPUT_NAME / IMG_SIZE here. The MUSIQ-SPAQ
- * variant typically uses 384x384 RGB input and outputs a single scalar
- * 0–100 quality score.
+ * Production preprocessing diverges from MUSIQ's training-time pipeline
+ * in one specific way: the JS preprocessor uses sharp's Lanczos3 kernel
+ * for the 224 and 384 short-scale resamples, where the trained MUSIQ
+ * pipeline uses tf.image.resize(method=GAUSSIAN). This substitution was
+ * empirically validated as score-equivalent within ~0.7 points across
+ * a 5-image test set (canonical Gaussian reference vs the Lanczos
+ * production pipeline). See conversion-audit.md § "Resize Pivot" for
+ * the reasoning.
+ *
+ * Bundled artefact: musiq-spaq-3scale-cap1024-v1.onnx (131 MB, opset 18).
+ *   - cap = 1024 native patches (sequence length total = 1217)
+ *   - input  shape: [1, 1217, 3075]  (patch tensor — see preprocessor)
+ *   - output shape: [1, 1]           (MOS score directly in [0, 100])
+ *
+ * The "v1" suffix in the filename anchors the modelVersion string written
+ * to each image's sidecar (ai-inference-host derives it via
+ * path.basename(loader.modelFile, '.onnx')). When a future revision is
+ * bundled (e.g. recalibrated, re-trained, or re-exported with a different
+ * cap), bump to -v2 so historical operator-decision data stays attributed
+ * to the model that actually scored each image.
  */
 
 'use strict';
 
 const path = require('path');
 const fs = require('fs');
-const sharp = require('sharp');
+const preprocessor = require('./musiq-preprocessor');
 
-const MODEL_FILE = 'model.onnx';
+const MODEL_FILE = 'musiq-spaq-3scale-cap1024-v1.onnx';
 
-// PLACEHOLDERS — verify against the actual .onnx file when bundled.
+// Verified against the bundled ONNX — see conversion script at
+// tools/onnx-export/_musiq_src/convert_3scale_capped.py and the sidecar
+// metadata at tools/onnx-export/musiq-spaq-3scale-cap1024.model.json.
 const INPUT_NAME  = 'input';
 const OUTPUT_NAME = 'output';
-const IMG_SIZE    = 384;
-
-// MUSIQ-SPAQ uses standard ImageNet normalisation. If the actual model
-// requires different stats, update here.
-const IMAGENET_MEAN = [0.485, 0.456, 0.406];
-const IMAGENET_STD  = [0.229, 0.224, 0.225];
+const INPUT_SHAPE = [1, preprocessor.TOTAL_MAX_PATCHES, preprocessor.PATCH_ROW_DIM];
 
 function resolveModelPath(override) {
   if (override && typeof override === 'string' && override.trim()) {
@@ -47,53 +60,39 @@ function resolveModelPath(override) {
   return path.join(__dirname, '..', '..', '..', '..', 'resources', 'models', 'musiq', MODEL_FILE);
 }
 
+/**
+ * Run the JS preprocessor on the image and return an ort.Tensor ready for
+ * the bundled MUSIQ-SPAQ ONNX. The preprocessor handles aspect-preserving
+ * Lanczos3 resizes for the 224 and 384 short scales, native-resolution
+ * patch extraction for the third scale, hashed-spatial-pos-embedding
+ * indexes, scale-id tagging, and mask-aware row-major truncation/padding
+ * up to the 1217-row cap.
+ *
+ * Image inputs whose dimensions are not multiples of 32 are handled
+ * correctly via the SAME-padding semantics implemented in
+ * musiq-preprocessor.extract_32x32_patches (verified byte-exact against
+ * tf.image.extract_patches; see conversion-audit.md § "SAME-Padding Bug
+ * Discovery" for why this matters).
+ */
 async function prepareTensor(imagePath, ort) {
-  const { data } = await sharp(imagePath, { limitInputPixels: false, failOn: 'none' })
-    .removeAlpha()
-    .flatten({ background: '#ffffff' })
-    .resize(IMG_SIZE, IMG_SIZE, { fit: 'fill' })
-    .raw()
-    .toBuffer({ resolveWithObject: true });
-
-  const plane = IMG_SIZE * IMG_SIZE;
-  const out = new Float32Array(3 * plane);
-
-  for (let i = 0; i < plane; i++) {
-    const src = i * 3;
-    out[i]             = (data[src]     / 255 - IMAGENET_MEAN[0]) / IMAGENET_STD[0];
-    out[i + plane]     = (data[src + 1] / 255 - IMAGENET_MEAN[1]) / IMAGENET_STD[1];
-    out[i + 2 * plane] = (data[src + 2] / 255 - IMAGENET_MEAN[2]) / IMAGENET_STD[2];
-  }
-
-  return new ort.Tensor('float32', out, [1, 3, IMG_SIZE, IMG_SIZE]);
+  const buf = await preprocessor.preprocess(imagePath);
+  return new ort.Tensor('float32', buf, INPUT_SHAPE);
 }
 
 /**
  * Convert raw model output into the caller-facing shape:
  *   { score: number (0-100) }
  *
- * MUSIQ output is typically a single scalar in some range — could be
- * 0–1 (needs *100), 0–10 (needs *10), or already 0–100 depending on the
- * exported variant. Verify against the actual model when bundled and
- * adjust the scaling here.
+ * MUSIQ-SPAQ's head outputs a Mean Opinion Score directly in [0, 100];
+ * no scaling is needed. The TOPIQ-era `*100` heuristic that was here
+ * before is removed — for MUSIQ-SPAQ a clamp is the only required step.
  */
 function postprocess(rawOutput) {
   if (!rawOutput || rawOutput.length < 1) {
     throw new Error('musiq postprocess: empty output');
   }
-  let raw = rawOutput[0];
-  // PLACEHOLDER scaling — verify when the real model lands.
-  // If the model already outputs 0–100, this is a no-op.
-  // If the model outputs 0–1, multiply by 100.
-  // If the model outputs 0–10, multiply by 10.
-  let score = raw;
-  if (raw <= 1.0) {
-    score = raw * 100;
-  } else if (raw <= 10.0) {
-    score = raw * 10;
-  }
-  // Clamp to [0, 100] just in case.
-  score = Math.max(0, Math.min(100, score));
+  const raw = rawOutput[0];
+  const score = Math.max(0, Math.min(100, raw));
   return { score };
 }
 
@@ -102,7 +101,10 @@ module.exports = {
   modelFile: MODEL_FILE,
   inputName: INPUT_NAME,
   outputName: OUTPUT_NAME,
-  imageSize: IMG_SIZE,
+  // imageSize is no longer meaningful for MUSIQ (input is a patch tensor,
+  // not a fixed-shape image), but ai-inference-host's warmup helper reads
+  // this field to allocate a zero tensor for warmup. Skip warmup by not
+  // exposing imageSize — host code already handles the fallback.
   resolveModelPath,
   prepareTensor,
   postprocess,

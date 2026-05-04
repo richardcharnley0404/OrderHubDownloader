@@ -14,6 +14,30 @@
  *     enhancedAt, enhancementModel) are written by enhancementManager.js
  *     and intentionally preserved on reset — a reset restores the source
  *     image and corrections, but does not remove an existing enhancement
+ *
+ * Optional enhancement fields (Phase 1 local-enhancement plan, M2+):
+ *   The enhancement block is extended at write time with extra fields when
+ *   the enhancement runs. Older sidecars never had them; consumers must
+ *   tolerate field absence. createImageEntry() does NOT pre-populate these
+ *   so that legacy sidecars stay byte-equivalent on round-trip.
+ *
+ *     provider              'local' | 'topaz' | (legacy 'replicate')
+ *     modelVersion          model file stem, e.g. 'realesr-general-x4v3'
+ *     scoreBefore           MUSIQ score of the working file pre-enhance, 0-100
+ *     scoreAfter            MUSIQ score of the cache file post-enhance, 0-100
+ *     scoreModel            MUSIQ model version that produced the scores
+ *     enhancementTriggeredBy 'operator' | 'quality-gate'
+ *
+ *   Local-provider only (Real-ESRGAN tile-and-stitch):
+ *     inferenceMs           wall-clock for the tile loop, ms
+ *     tileCount             total tiles processed
+ *     tileSize              tile edge in source pixels (default 256)
+ *     tileOverlap           feather overlap in source pixels (default 16)
+ *     executionProvider     'cpu' (DirectML deferred to Phase 1.1)
+ *     sourceWidth           source pixel dims
+ *     sourceHeight
+ *     outputWidth           4× source dims (after upscale)
+ *     outputHeight
  */
 
 'use strict';
@@ -52,12 +76,33 @@ function createImageEntry(filename, qty = 1) {
     reprintJobId:      null,
 
     // AI Enhancement (Phase 3) — written by enhancementManager.js after a
-    // successful Replicate upscale.  All null/false until enhanced.
+    // successful enhancement run. All null/false until enhanced. The
+    // additional optional fields (provider, scoreBefore/After, tileCount,
+    // executionProvider, etc — see header comment) are added flat at
+    // write time, not pre-allocated here, so legacy sidecars round-trip
+    // unchanged.
     enhanced:          false,
-    enhancementSource: null,   // e.g. 'Replicate/Topaz'
+    enhancementSource: null,   // 'local' | 'topaz-direct' | (legacy 'Replicate/Topaz')
     enhancedPath:      null,   // absolute path to /cache/{baseName}_enhanced.jpg
     enhancedAt:        null,   // ISO 8601 timestamp of enhancement
-    enhancementModel:  null,   // e.g. 'Standard V2'
+    enhancementModel:  null,   // e.g. 'realesr-general-x4v3' (local) or 'Standard V2' (topaz)
+
+    // Integrity-suspect flag (v1.3.2 pivot) — written by ftp-service.js when
+    // a downloaded file fails the magic-byte check. The file keeps its
+    // original extension and flows through the print pipeline normally; this
+    // field is the forensic record of why the operator might want to give it
+    // a closer look. `null` means the file passed the check (or was never
+    // checked — non-image extensions bypass entirely).
+    //
+    // Shape when set:
+    //   {
+    //     detected:      true,
+    //     detectedAt:    ISO 8601 timestamp,
+    //     firstBytesHex: hex of leading bytes seen, or null on read-error,
+    //     expectedMagic: human-readable description of what was expected,
+    //     ftpRemotePath: source path for upstream investigation,
+    //   }
+    integritySuspect: null,
 
     // AI Quality Gate (v1.2.0) — written by ai-job-quality-orchestrator.js
     // after each scoring pass. `scored: false` means scoring hasn't been

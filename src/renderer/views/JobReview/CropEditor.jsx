@@ -365,13 +365,7 @@ export function CropEditor({ image, jobPath, sizeOption, onApply, onCancel }) {
       role="dialog"
       aria-modal="true"
       aria-label="Crop image"
-      style={{
-        position: 'fixed', inset: 0, zIndex: 200,
-        background: 'rgba(10,18,24,0.95)',
-        display: 'flex', flexDirection: 'column',
-        alignItems: 'center', justifyContent: 'center',
-        fontFamily: "'DM Sans', system-ui, sans-serif",
-      }}
+      className="jr-crop-overlay"
     >
       {/* Hidden img element used as canvas source */}
       <img
@@ -387,11 +381,7 @@ export function CropEditor({ image, jobPath, sizeOption, onApply, onCancel }) {
       />
 
       {/* Header label */}
-      <div style={{
-        fontSize: 11, fontFamily: "'DM Mono', monospace",
-        color: '#6a8899', letterSpacing: '0.08em',
-        marginBottom: 10, textTransform: 'uppercase',
-      }}>
+      <div className="jr-crop-header">
         {sizeOption
           ? `Crop to ${sizeOption.label} — drag corners to resize`
           : 'Crop image — drag corners to resize'}
@@ -400,13 +390,7 @@ export function CropEditor({ image, jobPath, sizeOption, onApply, onCancel }) {
       {/* Canvas */}
       <canvas
         ref={canvasRef}
-        style={{
-          width: 'min(880px, 88vw)',
-          height: 'min(580px, 70vh)',
-          borderRadius: 4,
-          display: 'block',
-          touchAction: 'none',
-        }}
+        className="jr-crop-canvas"
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
@@ -414,27 +398,15 @@ export function CropEditor({ image, jobPath, sizeOption, onApply, onCancel }) {
       />
 
       {!imgLoaded && (
-        <div style={{
-          position: 'absolute',
-          fontFamily: "'DM Mono', monospace", fontSize: 13, color: '#5d7a8a',
-        }}>
-          Loading image…
-        </div>
+        <div className="jr-crop-loading">Loading image…</div>
       )}
 
       {/* Buttons */}
-      <div style={{ display: 'flex', gap: 12, marginTop: 16 }}>
+      <div className="jr-crop-buttons">
         <button
           onClick={onCancel}
           disabled={applying}
-          style={{
-            background: 'none', border: '1px solid #3a4e5e',
-            color: '#8aa8be', borderRadius: 4,
-            padding: '8px 24px', fontSize: 12,
-            fontFamily: "'DM Mono', monospace",
-            cursor: 'pointer', letterSpacing: '0.04em',
-            opacity: applying ? 0.5 : 1,
-          }}
+          className="jr-crop-btn jr-crop-btn--cancel"
         >
           Cancel
         </button>
@@ -442,15 +414,7 @@ export function CropEditor({ image, jobPath, sizeOption, onApply, onCancel }) {
         <button
           onClick={handleApply}
           disabled={!cropRect || !imgLoaded || applying}
-          style={{
-            background: '#72B622', border: 'none',
-            color: '#fff', borderRadius: 4,
-            padding: '8px 28px', fontSize: 12,
-            fontFamily: "'DM Mono', monospace",
-            cursor: (!cropRect || !imgLoaded || applying) ? 'not-allowed' : 'pointer',
-            letterSpacing: '0.04em',
-            opacity: (!cropRect || !imgLoaded || applying) ? 0.5 : 1,
-          }}
+          className="jr-crop-btn jr-crop-btn--apply"
         >
           {applying ? 'Applying…' : 'Apply Crop'}
         </button>
@@ -458,10 +422,7 @@ export function CropEditor({ image, jobPath, sizeOption, onApply, onCancel }) {
 
       {/* Crop dimensions readout */}
       {cropRect && imgLoaded && (
-        <div style={{
-          marginTop: 10, fontSize: 10,
-          fontFamily: "'DM Mono', monospace", color: '#4a6070',
-        }}>
+        <div className="jr-crop-readout">
           {cropRect.w} × {cropRect.h} px  |  source: {naturalSize.w} × {naturalSize.h} px
         </div>
       )}

@@ -3,7 +3,7 @@
 /**
  * src/main/enhancement/topazClient.js
  *
- * Topaz Image API client for direct (non-Replicate) AI image enhancement.
+ * Topaz Image API client for cloud AI image enhancement.
  * API base: https://api.topazlabs.com/image/v1
  *
  * Async enhancement flow:

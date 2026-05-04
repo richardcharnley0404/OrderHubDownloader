@@ -8,11 +8,14 @@ const { runTest: runPrintControllerTest } = require('./services/test-print-contr
 const { printControllerStore } = require('./services/print-controller-store');
 const routingService = require('./services/routing-service');
 const processFolderService = require('./services/process-folder-service');
-const { dpiValidator } = require('./services/dpi-validator');
 const logger = require('./services/logger');
 // Film Review panel (PW-007 Phase 1 — Milestone 4)
 const frameMetadataStore = require('./services/frame-metadata-store');
 const filmReviewPrefsStore = require('./services/film-review-prefs-store');
+// App-wide UI prefs (theme) — lifted out of film-review-prefs during the
+// 2026-04-29 theming consistency pass so a single header toggle can drive
+// every panel.
+const appPrefsStore = require('./services/app-prefs-store');
 const folderWatchService = require('./services/folder-watch-service');
 // AI Quality Gate (v1.2.0)
 const jobDownloadService = require('./services/job-download-service');
@@ -92,6 +95,7 @@ const { getJobOutputStatus }                   = require('./jobs/outputStatusMan
 
 // Phase 3 — AI Enhancement
 const enhancementManager = require('./enhancement/enhancementManager');
+const localEnhancementClient = require('./enhancement/localClient');
 
 /**
  * Setup all IPC handlers
@@ -100,6 +104,13 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
   // One-time migration: copy DPOF controllers from the old print-controller-store
   // into the new routing-service data structures on first startup.
   routingService.migrateFromPrintControllerStore();
+
+  // One-time cleanup: remove the now-deprecated routing keys from config.json
+  // (orderControllers, processControllerMappings, channelMappings, ...).
+  // Routing data lives exclusively in routing.json since the store split, but
+  // the leftover stale duplicates in config.json have repeatedly misled
+  // anyone debugging routing issues. Gated by its own flag so it runs once.
+  routingService.stripDeprecatedConfigJsonKeys();
 
   // Configuration handlers
   ipcMain.handle('config:get', async () => {
@@ -357,10 +368,11 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
   });
 
   // Refresh jobs from API
-  // Sync in_production jobs against OH and push jobs:updated if any were auto-completed
+  // Sync active jobs (pending / received / in_production) against OH and push
+  // jobs:updated if any were auto-completed or auto-cancelled out-of-band.
   async function syncAndNotify() {
     try {
-      const count = await jobService.syncInProductionFromOH();
+      const count = await jobService.syncJobStatusFromOH();
       if (count > 0 && windowManager) {
         const win = windowManager.getWindow();
         if (win && !win.isDestroyed()) {
@@ -380,77 +392,6 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
     } catch (error) {
       logger.logError('Error refreshing jobs', error);
       return { jobs: [], lastFetchTime: null, error: error.message };
-    }
-  });
-
-  // Validate job image DPI before sending to print
-  ipcMain.handle('jobs:validateDpi', async (event, jobId) => {
-    try {
-      const settings = dpiValidator.getSettings();
-      if (!settings.enabled) {
-        return { success: true, disabled: true, canAutoSubmit: true, requiresManualApproval: false, images: [] };
-      }
-
-      const { jobs } = jobService.getLocalJobs();
-      const job = jobs.find(j => String(j.id) === String(jobId));
-      if (!job) {
-        return { success: false, error: 'Job not found' };
-      }
-
-      const downloadDirectory = configService.get('downloadDirectory');
-      if (!downloadDirectory) {
-        return { success: false, error: 'Download directory not configured' };
-      }
-
-      const orderFolderPath = path.join(downloadDirectory, `${job.order_number}_${job.order_id}`);
-      const manifestPath = path.join(orderFolderPath, `${job.order_number}.json`);
-
-      if (!fs.existsSync(manifestPath)) {
-        return { success: false, error: 'Order manifest not found — has the job been downloaded?' };
-      }
-
-      let manifest;
-      try {
-        manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
-      } catch (e) {
-        return { success: false, error: `Cannot read order manifest: ${e.message}` };
-      }
-
-      // Find this specific job's entry in the manifest
-      const jobManifest = (manifest.jobs || []).find(j =>
-        String(j.jobId) === String(job.id) ||
-        (job.internal_job_id && String(j.jobId) === String(job.internal_job_id))
-      );
-
-      if (!jobManifest) {
-        return { success: false, error: 'Job not found in order manifest' };
-      }
-
-      const result = await dpiValidator.validateJob(orderFolderPath, jobManifest);
-      logger.info('DPI validation result', { jobId, overallStatus: result.overallStatus, canAutoSubmit: result.canAutoSubmit });
-      return { success: true, ...result };
-
-    } catch (error) {
-      logger.logError('DPI validation error', error, { jobId });
-      return { success: false, error: error.message };
-    }
-  });
-
-  // Manually approve a job that failed DPI auto-submit
-  ipcMain.handle('jobs:approveDpi', async (event, jobId) => {
-    try {
-      const { jobs } = jobService.getLocalJobs();
-      const job = jobs.find(j => String(j.id) === String(jobId));
-      if (!job) {
-        return { success: false, error: 'Job not found' };
-      }
-      // Mark job as manually DPI-approved in local cache
-      jobService.updateJobLocally(jobId, { _dpiApproved: true, _dpiApprovedAt: new Date().toISOString() });
-      logger.info('Job manually approved for DPI override', { jobId });
-      return { success: true };
-    } catch (error) {
-      logger.logError('Error approving job DPI', error, { jobId });
-      return { success: false, error: error.message };
     }
   });
 
@@ -476,7 +417,12 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
         const local = jobDownloadService.checkLocalFiles(job);
         if (local.found) {
           try {
-            const scoring = await aiJobQualityOrchestrator.scoreJob(job.id, local.localPath);
+            // Sidecars are keyed by composite jobId (`${order_number}_${id}`)
+            // — see _resolveSidecarJobId. Every orchestrator + ai-quality-store
+            // entry point on the IPC boundary translates here so the storage
+            // layer doesn't see the OrderHub numeric `job.id`.
+            const sidecarJobId = _resolveSidecarJobId(job);
+            const scoring = await aiJobQualityOrchestrator.scoreJob(sidecarJobId, local.localPath);
             if (scoring.held) {
               logger.info('[ai-quality] manual dispatch blocked — job held', { jobId: job.id, summary: scoring.summary });
               if (windowManager) {
@@ -490,7 +436,7 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
               }
               return {
                 success: false,
-                error: `Job held by AI Quality Gate — ${scoring.summary.failed}/${scoring.summary.total} images below threshold ${scoring.summary.threshold}. Release via the Quality flag in the Jobs grid.`,
+                error: `Job held by AI Quality — use the RELEASE button in the FLAGS column`,
                 held: true,
                 summary: scoring.summary,
               };
@@ -920,6 +866,33 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
 
   ipcMain.handle('ohd:routing:save-controller', async (event, controller) => {
     try {
+      // Defence-in-depth mirror of the renderer-side guard in
+      // src/renderer/renderer.js (ocSaveBtn handler). A Darkroom Pro
+      // controller with mediaTranslations defined but mediaOptionKey empty
+      // is misconfigured by construction — resolveMedia short-circuits on
+      // empty mediaOptionKey before it ever reads the translations array,
+      // so dispatched .txt files end up with `Media=` blank and customers
+      // get whatever Darkroom Pro defaults to. Reject the save so a
+      // malformed IPC payload (or a future renderer bug) can't slip past.
+      if (
+        controller &&
+        controller.type === 'darkroompro' &&
+        Array.isArray(controller.mediaTranslations) &&
+        controller.mediaTranslations.length > 0 &&
+        !(controller.mediaOptionKey && controller.mediaOptionKey.trim())
+      ) {
+        const msg =
+          'Paper Type Option Key is required when Media Translations are defined. ' +
+          'Either set the option key on the controller or clear the translations.';
+        logger.logWarning('[routing] save-controller rejected — translations without option key', {
+          controllerId:        controller.id,
+          name:                controller.name,
+          mediaTranslations:   controller.mediaTranslations.length,
+          mediaOptionKey:      controller.mediaOptionKey || '(empty)',
+        });
+        return { success: false, error: msg };
+      }
+
       routingService.saveController(controller);
 
       // Darkroom Pro controllers are dual-written to the legacy printControllerStore
@@ -1057,6 +1030,14 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
           mainWindow.webContents.send('jobs:updated', jobService.getLocalJobs());
         }
       }
+      // Now that this job has its size/media overrides set, it may be eligible
+      // for auto-print. Mirror the DPOF saveChannelMapping pattern: fire-and-
+      // forget runAutoPrint so the auto-print loop's gate (ipc-handlers.js
+      // ~1771: `if (!ctrl || !ctrl.autoprint) continue`) is the single source
+      // of truth for whether dispatch happens. Renderer no longer calls
+      // sendToPrint directly — that bypassed the autoprint flag (see
+      // docs/orderhub/bugfixes.md, 2026-04-28 entry on assign-and-save).
+      runAutoPrint().catch(err => logger.logError('[auto-print] post-darkroom-assign check failed', err));
       return { success: true };
     } catch (error) {
       logger.logError('jobs:assignDarkroomSizeMedia error', error, { jobId });
@@ -1518,17 +1499,34 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
   /**
    * ohd:enhancement:test
    * Payload:  { apiKey, provider? }
-   * Returns:  { valid: true } | { valid: false, error: string }
+   * Returns:  { valid: true, durationMs?, executionProvider?, meta? }
+   *           | { valid: false, error: string }
    *
-   * Validates the supplied API key for the given provider without running any
-   * inference.  The key is passed directly from the Settings form so the
-   * operator can test it before saving.  Never written to the activity log.
+   * For provider === 'topaz': validates the supplied API key with a pure
+   * network check (no file I/O, no sidecar). The apiKey is passed directly
+   * from the Settings form so the operator can test it before saving.
    *
-   * provider: 'replicate' | 'topaz' — defaults to the configured provider.
+   * For provider === 'local' (Pixfizz AI Enhancement): runs a real one-tile
+   * inference on a synthesised 64×64 fixture via localClient.selfTest().
+   * Returns timing + execution-provider metadata so the UI can display
+   * "Model loaded successfully in Xms (CPU)".
+   *
+   * The apiKey field is never logged.
    */
   ipcMain.handle('ohd:enhancement:test', async (event, { apiKey, provider }) => {
     try {
-      // validateApiKey is a pure network check — no file I/O, no sidecar.
+      if (provider === 'local') {
+        const r = await localEnhancementClient.selfTest();
+        if (r.ok) {
+          return {
+            valid: true,
+            durationMs: r.durationMs,
+            executionProvider: r.meta && r.meta.executionProvider,
+            meta: r.meta,
+          };
+        }
+        return { valid: false, error: r.error || 'self-test failed' };
+      }
       return await enhancementManager.validateApiKey(apiKey, provider);
     } catch (error) {
       // Do NOT log apiKey — keep it out of the activity log.
@@ -1538,12 +1536,35 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
   });
 
   /**
+   * ohd:config:clear-replicate-migration-toast
+   * Payload:  none
+   * Returns:  { success: true }
+   *
+   * Called by the renderer once the post-upgrade Replicate-removal toast has
+   * been displayed. Flips the one-shot `_migratedFromReplicate` flag back to
+   * false so the toast doesn't re-show on subsequent launches. The migration
+   * itself remains stamped via `_replicateProviderMigratedAt`.
+   */
+  ipcMain.handle('ohd:config:clear-replicate-migration-toast', async () => {
+    try {
+      const configService = require('./services/config-service');
+      configService.clearReplicateMigrationToast();
+      return { success: true };
+    } catch (error) {
+      logger.logError('ohd:config:clear-replicate-migration-toast error', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  /**
    * ohd:enhancement:run
    * Payload:  { jobId, jobPath, filename, model, options }
    * Returns:  { success: true, status: 'started', predictionId }
    *
-   * Starts a Replicate prediction and returns immediately with the prediction
-   * ID.  The renderer polls ohd:enhancement:status until the job completes.
+   * Starts an enhancement job and returns immediately with a synthetic job
+   * ID (`local_*` for Pixfizz AI, `topaz_*` for the Topaz Image API). The
+   * renderer polls ohd:enhancement:status until the job completes. The
+   * IPC field name `predictionId` is preserved for renderer compatibility.
    *
    * `model` is hoisted out of `options` for convenience so the renderer
    * component can pass it as a top-level field from the model dropdown.
@@ -1588,9 +1609,11 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
    * Payload:  { predictionId }
    * Returns:  { success: true, cancelled: true } | { success: false, error }
    *
-   * Cancels an in-progress prediction and removes it from the in-memory
-   * registry.  Safe to call on a prediction that has already completed —
-   * Replicate ignores cancel requests on finished predictions.
+   * Cancels an in-progress enhancement job and removes it from the
+   * in-memory registry. Safe to call on a job that has already completed.
+   * For Pixfizz AI Enhancement (`local_*` IDs), cancellation is
+   * cooperative — the tile loop terminates after the current ~500 ms tile
+   * finishes inferring.
    */
   ipcMain.handle('ohd:enhancement:cancel', async (event, { predictionId }) => {
     try {
@@ -1776,7 +1799,9 @@ async function runAutoPrint() {
           continue;
         }
         try {
-          const scoring = await aiJobQualityOrchestrator.scoreJob(job.id, local.localPath);
+          // See _resolveSidecarJobId — sidecars are composite-keyed.
+          const sidecarJobId = _resolveSidecarJobId(job);
+          const scoring = await aiJobQualityOrchestrator.scoreJob(sidecarJobId, local.localPath);
           if (scoring.held) {
             logger.info('[auto-print] job held by AI Quality Gate', {
               jobId: job.id,
@@ -1813,6 +1838,10 @@ async function runAutoPrint() {
           });
         } catch (err) {
           logger.logError('[auto-print] Folder copy failed for job ' + job.id, err, { jobId: job.id });
+          jobService.updateJobLocally(job.id, {
+            _status: 'error',
+            _errorMessage: err.message || 'Folder copy failed',
+          });
           continue;
         }
         if (result.success) {
@@ -1825,6 +1854,10 @@ async function runAutoPrint() {
           }
         } else {
           logger.logError('[auto-print] Folder copy returned failure for job ' + job.id, null, { jobId: job.id, error: result.error });
+          jobService.updateJobLocally(job.id, {
+            _status: 'error',
+            _errorMessage: result.error || 'Folder copy returned failure',
+          });
         }
         continue;
       }
@@ -1835,9 +1868,21 @@ async function runAutoPrint() {
       const ctrl = controllers.find(c => c.id === route.controllerId);
       if (!ctrl || !ctrl.autoprint) continue;
 
-      // DPOF controllers require a channel mapping; folder_copy does not
-      const isDpof = (ctrl.type || 'dpof') !== 'folder_copy';
-      if (isDpof && !route.channelNumber) continue;
+      // Channel number is only required for DPOF controllers (noritsu, epson,
+      // or legacy untyped controllers). Other controller types (folder_copy,
+      // pdf_copy, darkroompro, frontline) don't have channel mappings and
+      // route via their own dispatch paths.
+      //
+      // Latent regression note (v1.3.2): the previous gate
+      // `(ctrl.type || 'dpof') !== 'folder_copy'` misclassified every
+      // non-folder_copy controller as DPOF, silently skipping
+      // darkroompro/pdf_copy/frontline jobs whose channelNumber is null.
+      // Surfaced when yesterday's autoprint pivot routed darkroompro through
+      // this loop for the first time (previously bypassed via direct
+      // sendToPrint at renderer).
+      const DPOF_TYPES = new Set(['noritsu', 'epson', 'dpof']);
+      const isDpofCtrl = DPOF_TYPES.has(ctrl.type) || !ctrl.type;
+      if (isDpofCtrl && !route.channelNumber) continue;
 
       // Channel-level opt-out — skip without logging an error
       if (route.skipAutoPrint) {
@@ -1851,12 +1896,17 @@ async function runAutoPrint() {
       try {
         result = await printService.sendViaDPOFRouted(job, route);
       } catch (err) {
-        if (err.message && err.message.includes('Order manifest not found')) {
-          logger.logError('[auto-print] Manifest not found, marking job as error', err, { jobId: job.id });
-          jobService.updateJobLocally(job.id, { _status: 'error', _errorMessage: 'Manifest not found' });
-        } else {
-          logger.logError('[auto-print] Dispatch failed', err, { jobId: job.id });
-        }
+        // Generalized in v1.3.2 — the previous manifest-only special case
+        // was added to break a retry loop on that specific error, but every
+        // other dispatch error class still retry-looped. The eligibility
+        // filter at line 1704 excludes jobs in _status: 'error' from future
+        // cycles, so propagating the error message AND setting status to
+        // 'error' breaks the retry loop for ALL error classes consistently.
+        logger.logError('[auto-print] Dispatch failed', err, { jobId: job.id });
+        jobService.updateJobLocally(job.id, {
+          _status: 'error',
+          _errorMessage: err.message || 'Dispatch failed',
+        });
         continue;
       }
 
@@ -1864,6 +1914,10 @@ async function runAutoPrint() {
         logger.logError('[auto-print] Dispatch returned failure', null, {
           jobId: job.id,
           error: result.error,
+        });
+        jobService.updateJobLocally(job.id, {
+          _status: 'error',
+          _errorMessage: result.error || 'Dispatch returned failure',
         });
         continue;
       }
@@ -2173,6 +2227,27 @@ ipcMain.handle('ohd:filmReview:set-tweak', (event, payload) => {
   }
 });
 
+// App-wide theme (light | dark). Drives the body.app-theme-dark class swap
+// in the renderer; both Job Review and Film Review pick up the resulting
+// --app-* token overrides automatically.
+ipcMain.handle('ohd:app:get-theme', () => {
+  try {
+    return appPrefsStore.get('theme');
+  } catch (err) {
+    logger.logError('[app] get-theme failed', err);
+    return 'light';
+  }
+});
+
+ipcMain.handle('ohd:app:set-theme', (event, value) => {
+  try {
+    return appPrefsStore.set('theme', value);
+  } catch (err) {
+    logger.logError('[app] set-theme failed', err);
+    return false;
+  }
+});
+
 /**
  * Manual rotation (Milestone 4e): apply a 90° increment to the TIFF on disk,
  * regenerate the 512px thumbnail, and persist the cumulative operator rotation
@@ -2406,6 +2481,129 @@ ipcMain.handle('ohd:filmReview:approve-roll', async (event, rollIdRaw) => {
   }
 });
 
+/**
+ * Delete a Film Review roll.
+ *
+ * Cleans up all local state for a roll the operator has decided is junk
+ * (mis-scan, wrong slot, test scan that shouldn't ship to S3). Steps:
+ *
+ *   1. Refuse if uploadStatus === 'uploaded' — the roll is already on S3
+ *      and a local-only delete would leave the operator with the wrong
+ *      mental model. They can re-trigger from the bucket if needed.
+ *   2. Resolve the storage folder. Prefer the roll record's storagePath
+ *      (always set by folder-watch in M7+); fall back to the dirname of
+ *      any frame's originalPath for legacy rolls without a roll record.
+ *   3. Rename the storage folder to `<basename>__DELETED__<ISO>`. This is
+ *      a soft delete — the JPGs survive on disk so an accidental click
+ *      is recoverable. Operator (or a future cleanup job) can purge the
+ *      __DELETED__ folders later. Uses renameWithRetry for SMB safety
+ *      (same EPERM race that bites the rotation pipeline).
+ *   4. Delete the userData thumbnails directory for this roll. Cheap to
+ *      regenerate, no point retaining once the roll is gone from the panel.
+ *   5. Delete the frame records and the roll record from frame-metadata.
+ *      This is what actually guarantees "won't go to S3" — approve-roll
+ *      reads getRoll(rollId) and refuses if it's missing.
+ *   6. Emit roll-processed so RollList re-fetches and the card disappears.
+ *
+ * Returns:
+ *   { ok: true,  framesRemoved, deletedFolderPath }    — success
+ *   { ok: false, error: string }                       — refused / failed
+ *
+ * Folder-rename failures are NOT fatal: the metadata is still scrubbed so
+ * the panel and upload path forget the roll. We surface the rename error
+ * so the operator knows to clean up the folder manually if it survives.
+ */
+ipcMain.handle('ohd:filmReview:delete-roll', async (event, rollIdRaw) => {
+  const rollId = typeof rollIdRaw === 'string' ? rollIdRaw : (rollIdRaw && rollIdRaw.rollId);
+  if (!rollId) return { ok: false, error: 'rollId is required' };
+
+  try {
+    const roll = frameMetadataStore.getRoll(rollId);
+
+    // Refuse uploaded rolls — they're already on S3 and a local-only
+    // delete would mislead the operator.
+    if (roll && roll.uploadStatus === 'uploaded') {
+      return {
+        ok: false,
+        error: 'This roll has already been uploaded to S3. Delete it from the bucket if needed; the local copy will be cleaned up automatically.',
+      };
+    }
+
+    // Resolve storage folder. Prefer the roll record; fall back to the
+    // dirname of any frame's originalPath (legacy rolls / Off-mode rolls
+    // that pre-date the M7 roll record).
+    let storagePath = roll && roll.storagePath ? roll.storagePath : null;
+    if (!storagePath) {
+      const frames = frameMetadataStore.listByRoll(rollId);
+      if (frames.length && frames[0].originalPath) {
+        storagePath = path.dirname(frames[0].originalPath);
+      }
+    }
+
+    // Rename the folder to the __DELETED__ form. Best-effort: if the
+    // folder is already gone (operator deleted it manually) or the rename
+    // fails for some reason, we still proceed with the metadata scrub so
+    // the panel + upload path forget about it.
+    let renameError = null;
+    let deletedFolderPath = null;
+    if (storagePath && fs.existsSync(storagePath)) {
+      try {
+        const parent  = path.dirname(storagePath);
+        const baseDir = path.basename(storagePath);
+        const stamp   = new Date().toISOString().replace(/[:.]/g, '-');
+        deletedFolderPath = path.join(parent, `${baseDir}__DELETED__${stamp}`);
+        await renameWithRetry(storagePath, deletedFolderPath);
+        logger.info(`[filmReview] delete-roll ${rollId}: folder renamed → ${deletedFolderPath}`);
+      } catch (err) {
+        renameError = err && err.message ? err.message : String(err);
+        logger.logError(`[filmReview] delete-roll: folder rename failed for ${rollId} (continuing with metadata scrub)`, err);
+        deletedFolderPath = null;
+      }
+    } else if (storagePath) {
+      logger.info(`[filmReview] delete-roll ${rollId}: storage folder already absent (${storagePath})`);
+    } else {
+      logger.info(`[filmReview] delete-roll ${rollId}: no storage path resolvable, scrubbing metadata only`);
+    }
+
+    // Best-effort thumbnail dir cleanup. Thumbnails are regenerable cache.
+    try {
+      const { app } = require('electron');
+      const thumbDir = path.join(app.getPath('userData'), 'thumbnails', rollId);
+      if (fs.existsSync(thumbDir)) {
+        fs.rmSync(thumbDir, { recursive: true, force: true });
+        logger.info(`[filmReview] delete-roll ${rollId}: thumbnails directory removed`);
+      }
+    } catch (err) {
+      // Non-fatal — thumbnails will just be orphaned cache.
+      logger.logWarning(`[filmReview] delete-roll ${rollId}: thumbnail cleanup failed (non-fatal)`, err);
+    }
+
+    // Scrub metadata. This is the bit that guarantees "won't ever upload".
+    const framesRemoved = frameMetadataStore.deleteFramesByRoll(rollId);
+    frameMetadataStore.deleteRoll(rollId);
+
+    emitFilmReviewRollUpdate(rollId);
+
+    logger.info(`[filmReview] delete-roll ${rollId}: ${framesRemoved} frame records removed`);
+
+    if (renameError) {
+      // Metadata scrub succeeded but the folder is still on disk under its
+      // original name — the operator should know.
+      return {
+        ok: true,
+        framesRemoved,
+        deletedFolderPath: null,
+        warning: `Local files were not renamed (${renameError}). The roll has been removed from the panel but the folder is still on disk under its original name.`,
+      };
+    }
+    return { ok: true, framesRemoved, deletedFolderPath };
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    logger.logError('[filmReview] delete-roll failed', err);
+    return { ok: false, error: msg };
+  }
+});
+
 // ──────────────────────────────────────────────────────────────────────────────
 // AI Quality Gate (v1.2.0) — held-job IPC
 // ──────────────────────────────────────────────────────────────────────────────
@@ -2416,6 +2614,24 @@ ipcMain.handle('ohd:filmReview:approve-roll', async (event, rollIdRaw) => {
  * path even when the folder doesn't yet exist (so callers can decide
  * how to handle missing-folder errors themselves).
  */
+/**
+ * Resolve the composite sidecar jobId for a job — `${order_number}_${id}`.
+ *
+ * This is the convention used by the React Job Review drawer and matches the
+ * inner-job folder name on disk. The orchestrator and ai-quality-store key
+ * sidecars by this composite form, so any IPC handler invoking those layers
+ * MUST translate from the OrderHub numeric `job.id` (which the renderer and
+ * jobService cache use as the canonical identifier) into the composite form
+ * before calling in.
+ *
+ * Returns null if the job is missing the inputs needed to build a composite.
+ * Callers should treat null as "can't address the sidecar" and bail out.
+ */
+function _resolveSidecarJobId(job) {
+  if (!job || !job.order_number || job.id == null) return null;
+  return `${job.order_number}_${job.id}`;
+}
+
 function _resolveJobPath(job) {
   const downloadDirectory = configService.get('downloadDirectory');
   if (!downloadDirectory) return null;
@@ -2431,40 +2647,93 @@ function _resolveJobPath(job) {
 }
 
 /**
- * Return the held-jobs list for the Quality Review tab (M3) and the
- * Jobs grid badge (M2). Each entry includes enough info for the badge
- * to render without further IPC.
+ * Return per-job AI Quality status for every received/pending job.
+ *
+ * Two related concerns served by one IPC iteration:
+ *   - Held-state badge UI (originally the only consumer; jobs with
+ *     unfixed sub-threshold images surface here with `failedImages > 0`).
+ *   - Scoring-progress for the Jobs-grid action-button gating (Bug 2 of
+ *     the 2026-04-28 maintenance fixes — buttons disable while
+ *     `phase === 'scoring'`, re-enable on `phase === 'scored'`).
+ *
+ * Each entry shape:
+ *   {
+ *     jobId,                  // numeric OrderHub id (matches grid's job.id key)
+ *     jobCode, customer,
+ *     totalImages,            // sidecar image count
+ *     scoredCount,            // images with aiQuality.scored === true
+ *     phase,                  // 'scoring' (partial/none) | 'scored' (all done)
+ *     failedImages,           // unfixed sub-threshold images (held signal)
+ *     oldestHoldAt,           // job.created_at, for held-state ordering
+ *   }
+ *
+ * Renderer derives:
+ *   - aiQualityHeldByJobId map: entries where failedImages > 0
+ *   - aiQualityScoringStatusByJobId map: every entry, keyed by `phase`
+ *
+ * Jobs absent from the response (no sidecar yet, files not local, etc.)
+ * are treated by the renderer as "pending AI Quality" when the feature
+ * flag is on.
  */
 ipcMain.handle('aiQuality:listHeldJobs', async () => {
   try {
     const { jobs } = jobService.getLocalJobs();
     const out = [];
     for (const job of jobs) {
-      // Only surface held state for jobs the autoprint loop is still
-      // considering. A held flag on a job that's already been Printed
-      // (or marked error) is stale noise and would clutter the badge UI.
-      if (job._status !== 'received' && job._status !== 'pending') continue;
+      // Surface AI Quality scoring data for every job that has it, not
+      // just the ones still in the autoprint pool. Earlier this skipped
+      // anything whose status wasn't 'received' or 'pending', which made
+      // the FLAGS column empty for processed jobs and lost the historical
+      // record of "this job had X failed images at process time". The
+      // renderer differentiates by status: pending/received → live held
+      // badge with Release button; processed/printed/dismissed → muted
+      // historical badge, count only.
       const jobPath = _resolveJobPath(job);
       if (!jobPath || !fs.existsSync(jobPath)) continue;
+      const sidecarJobId = _resolveSidecarJobId(job);
+      if (!sidecarJobId) continue;
       let rows;
       try {
-        rows = await aiQualityStore.getJobQuality(job.id, jobPath);
+        rows = await aiQualityStore.getJobQuality(sidecarJobId, jobPath);
       } catch (_) {
         continue;
       }
-      const total = rows.length;
+      // `total` is **disk truth** (count of image-extension files in the
+      // job folder), not `rows.length` (sidecar-entry count).
+      //
+      // Why: the orchestrator's setImageQuality upserts a sidecar entry
+      // per image as it scores. For a fresh Mode-1 job whose sidecar
+      // started empty (no Job-Review-touched /working/ folder to seed
+      // entries from), `rows.length` equals "images so far scored",
+      // making `scored === rows.length` a tautology mid-loop. The IPC
+      // would report `phase: 'scored'` from the very first image and
+      // the renderer's button gate would re-enable buttons before
+      // scoring actually finished. See bugfixes.md 2026-04-28 entry on
+      // Bug A for the full diagnostic.
+      //
+      // Disk-truth `_scanJobImages(jobPath).length` correctly reflects
+      // the orchestrator's iteration target — phase='scoring' until the
+      // sidecar's scored count catches up to the disk count, then
+      // phase='scored'. Quarantined files (.quarantine extension) are
+      // excluded from this count by IMAGE_EXTENSIONS — they're out of
+      // scope for scoring; their visibility is handled separately
+      // (Bug B / quarantinedCount field below).
+      const total = aiJobQualityOrchestrator._scanJobImages(jobPath).length;
+      if (total === 0) continue;
+      const scored = rows.filter((r) => r.aiQuality && r.aiQuality.scored).length;
       const failed = rows.filter((r) => {
         const aq = r.aiQuality || {};
         if (!aq.scored || aq.passed) return false;
         const decision = (aq.operatorDecision && aq.operatorDecision.kind) || 'none';
         return decision !== 'fixed' && decision !== 'approved_as_is';
       }).length;
-      if (failed === 0) continue;
       out.push({
         jobId: job.id,
         jobCode: job.order_number || '',
         customer: job.customer_name || '',
         totalImages: total,
+        scoredCount: scored,
+        phase: scored >= total ? 'scored' : 'scoring',
         failedImages: failed,
         oldestHoldAt: job.created_at || null,
       });
@@ -2489,7 +2758,12 @@ ipcMain.handle('aiQuality:getJobQuality', async (event, jobId) => {
     if (!jobPath || !fs.existsSync(jobPath)) {
       return { jobId, held: false, images: [] };
     }
-    const rows = await aiQualityStore.getJobQuality(jobId, jobPath);
+    // Renderer addresses jobs by numeric `job.id`; storage layer is keyed by
+    // composite. Translate at this IPC boundary; preserve the renderer's
+    // numeric jobId in the response shape.
+    const sidecarJobId = _resolveSidecarJobId(job);
+    if (!sidecarJobId) return { jobId, held: false, images: [] };
+    const rows = await aiQualityStore.getJobQuality(sidecarJobId, jobPath);
     return {
       jobId,
       held: aiQualityStore.deriveHeld(rows),
@@ -2515,7 +2789,10 @@ ipcMain.handle('aiQuality:releaseJob', async (event, payload) => {
     if (!job) return { ok: false, error: 'job not found' };
     const jobPath = _resolveJobPath(job);
     if (!jobPath) return { ok: false, error: 'job path unresolvable' };
-    return await aiJobQualityOrchestrator.releaseJob(jobId, jobPath, note);
+    // Translate numeric → composite at the IPC boundary (see _resolveSidecarJobId).
+    const sidecarJobId = _resolveSidecarJobId(job);
+    if (!sidecarJobId) return { ok: false, error: 'sidecar jobId unresolvable' };
+    return await aiJobQualityOrchestrator.releaseJob(sidecarJobId, jobPath, note);
   } catch (err) {
     logger.logError('[aiQuality] releaseJob failed', err);
     return { ok: false, error: err.message };
@@ -2537,11 +2814,20 @@ ipcMain.handle('aiQuality:approveImage', async (event, payload) => {
     if (!job) return { ok: false, error: 'job not found' };
     const jobPath = _resolveJobPath(job);
     if (!jobPath) return { ok: false, error: 'job path unresolvable' };
-    return await aiJobQualityOrchestrator.approveImage(jobId, jobPath, filename, note);
+    // Translate numeric → composite at the IPC boundary (see _resolveSidecarJobId).
+    const sidecarJobId = _resolveSidecarJobId(job);
+    if (!sidecarJobId) return { ok: false, error: 'sidecar jobId unresolvable' };
+    return await aiJobQualityOrchestrator.approveImage(sidecarJobId, jobPath, filename, note);
   } catch (err) {
     logger.logError('[aiQuality] approveImage failed', err);
     return { ok: false, error: err.message };
   }
 });
 
-module.exports = { setupIpcHandlers };
+module.exports = {
+  setupIpcHandlers,
+  // Exposed for unit tests of the v1.3.2 generalized catch handler — see
+  // src/main/services/__tests__/ipc-handlers-auto-print.test.js. Production
+  // callers go through the IPC + polling-service callback wiring.
+  _runAutoPrint: runAutoPrint,
+};

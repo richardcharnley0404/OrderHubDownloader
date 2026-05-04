@@ -37,6 +37,12 @@ export function useJobReview(jobId, jobPath, ohJobId = null) {
   const [cropEditorOpen, setCropEditorOpen] = useState(false);
   const [cropSizeOption, setCropSizeOption] = useState(null);
 
+  // -- AI Quality threshold (read once on mount; falls back to 50) --------------
+  // Used by ThumbnailCard to colour the per-image score badge red when the
+  // image is sub-threshold. Read at mount because it's a calibration value
+  // that rarely changes during a Review session.
+  const [aiQualityThreshold, setAiQualityThreshold] = useState(50);
+
   // Stable refs so async callbacks always see the latest values.
   const jobIdRef   = useRef(jobId);
   const jobPathRef = useRef(jobPath);
@@ -53,6 +59,17 @@ export function useJobReview(jobId, jobPath, ohJobId = null) {
     window.electronAPI.getAllSizeOptions()
       .then(opts => setAllSizeOptions(opts || []))
       .catch(() => setAllSizeOptions([]));
+  }, []);
+
+  // -- Load AI Quality threshold once on mount ----------------------------------
+
+  useEffect(() => {
+    window.electronAPI.getConfig()
+      .then(cfg => {
+        const t = parseInt(cfg && cfg.aiQualityThreshold, 10);
+        if (!Number.isNaN(t) && t > 0) setAiQualityThreshold(t);
+      })
+      .catch(() => { /* default 50 */ });
   }, []);
 
   // -- Load ---------------------------------------------------------------------
@@ -279,5 +296,8 @@ export function useJobReview(jobId, jobPath, ohJobId = null) {
     openCropEditor,
     closeCropEditor,
     cropImage,
+
+    // AI Quality
+    aiQualityThreshold,
   };
 }

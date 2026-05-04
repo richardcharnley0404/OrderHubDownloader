@@ -85,7 +85,7 @@ function resolveModelPath(override) {
  * Decode an image file and prepare it as an [1, 3, 384, 384] float32 tensor
  * in ImageNet-normalised NCHW order.
  *
- * sharp options (replicated 1:1 from orientation-service for parity):
+ * sharp options (duplicated 1:1 from orientation-service for parity):
  *   - limitInputPixels: false — high-res scanner JPGs/TIFFs routinely exceed
  *     sharp's default 268MP cap.
  *   - failOn: 'none' — tolerate truncated trailers / non-fatal libvips

@@ -3,18 +3,21 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>OrderHub Downloader</title>
+  <title>OrderHub Desktop</title>
   <link rel="stylesheet" href="styles.css">
   <!-- Film Review Panel — scoped under .film-review-panel so no leak into legacy UI -->
   <link rel="stylesheet" href="film-review.css">
+  <!-- Job Review Panel — scoped under .jr-root so no leak into legacy UI -->
+  <link rel="stylesheet" href="job-review.css">
 </head>
 <body>
   <div class="app-frame">
     <header class="app-header">
       <img src="../../assets/favicon%20hub.svg" alt="OrderHub" class="header-logo">
       <span class="header-divider"></span>
-      <span class="header-title">OrderHub Downloader</span>
+      <span class="header-title">OrderHub Desktop</span>
       <span id="appVersion" class="app-version"></span>
+      <button type="button" class="theme-toggle-btn" id="themeToggleBtn" title="Toggle dark theme" aria-label="Toggle theme"></button>
       <div class="window-controls">
         <button type="button" class="window-control-btn" id="minimiseBtn" title="Minimise">&#8722;</button>
         <button type="button" class="window-control-btn" id="maximiseBtn" title="Maximise"></button>
@@ -81,7 +84,6 @@
                 <th>Preview</th>
                 <th class="sortable" data-sort="process">Process</th>
                 <th class="sortable" data-sort="category">Category</th>
-                <th>DPI</th>
                 <th>Flags</th>
                 <th class="sortable" data-sort="job_no">Job No</th>
                 <th class="sortable" data-sort="product">Product</th>
@@ -293,67 +295,60 @@
             </fieldset>
 
             <fieldset class="panel-section">
-              <legend>DPI Validation</legend>
-              <p class="section-desc">Validate image resolution before sending jobs to a print controller. Jobs below threshold can be blocked or require manual approval.</p>
+              <legend>AI Quality Gate</legend>
+              <p class="section-desc">
+                Score every image in every job before it dispatches to a printer.
+                Jobs with any image scoring below the threshold are held for
+                operator review and surface as a flag on the Jobs grid. No
+                images are altered automatically — operators approve, fix, or
+                reject from the held-job view.
+              </p>
 
               <div class="form-group checkbox-group">
                 <label>
-                  <input type="checkbox" id="dpiValidationEnabled" name="dpiValidationEnabled">
-                  <span>Enable DPI validation</span>
+                  <input type="checkbox" id="aiQualityEnabled" name="aiQualityEnabled">
+                  <span>Enable AI Quality Gate</span>
                 </label>
               </div>
 
-              <div id="dpiValidationFields">
-                <div class="form-group">
-                  <label for="dpiExcellentThreshold">Excellent Quality Threshold (DPI)</label>
-                  <input type="number" id="dpiExcellentThreshold" name="dpiExcellentThreshold"
-                    value="300" min="72" max="1200" style="width:90px;">
-                  <small class="field-hint">Images at or above this DPI are considered perfect quality.</small>
-                </div>
+              <div class="form-group">
+                <label class="form-group__label" for="aiQualityThreshold">Quality threshold</label>
+                <input type="number" id="aiQualityThreshold" name="aiQualityThreshold"
+                       min="1" max="100" step="1" style="width: 6em;">
+                <small class="field-hint">
+                  Images scoring below this number are flagged for review.
+                  Default 50. Adjust based on your lab's print quality bar.
+                </small>
+                <small class="field-hint" style="margin-top: 0.5em;">
+                  <strong>Guidance:</strong><br>
+                  &bull; Below 50 — significant quality issues likely<br>
+                  &bull; 50–70 — borderline; some labs accept, some don't<br>
+                  &bull; 70–85 — typical phone uploads, usually fine for print<br>
+                  &bull; Above 85 — high-quality images
+                </small>
+              </div>
 
-                <div class="dpi-threshold-group">
-                  <div class="dpi-threshold-label">── Warning Threshold ──</div>
+              <div class="form-group checkbox-group">
+                <label>
+                  <input type="checkbox" id="aiQualityHoldAutoPrint" name="aiQualityHoldAutoPrint">
+                  <span>Hold auto-print on quality failure</span>
+                </label>
+                <small class="field-hint">
+                  When ON, jobs containing any image scoring below the
+                  threshold are held back from auto-print until an operator
+                  reviews them. When OFF, jobs auto-print regardless of
+                  scores (failed images are still flagged in Job Review).
+                </small>
+              </div>
 
-                  <div class="form-group">
-                    <label for="dpiWarningThreshold">Warning DPI</label>
-                    <input type="number" id="dpiWarningThreshold" name="dpiWarningThreshold"
-                      value="275" min="72" max="1200" style="width:90px;">
-                    <small class="field-hint">Images between Warning DPI and Excellent DPI trigger a warning.</small>
-                  </div>
-
-                  <div class="form-group checkbox-group">
-                    <label>
-                      <input type="checkbox" id="dpiWarningAllowAutoSubmit" name="dpiWarningAllowAutoSubmit">
-                      <span>Allow auto-submit to print controller</span>
-                    </label>
-                    <small class="field-hint">If checked, jobs with warning-level DPI print automatically without confirmation.</small>
-                  </div>
-                </div>
-
-                <div class="dpi-threshold-group">
-                  <div class="dpi-threshold-label">── Poor Quality Threshold ──</div>
-
-                  <div class="form-group">
-                    <label for="dpiPoorThreshold">Poor DPI</label>
-                    <input type="number" id="dpiPoorThreshold" name="dpiPoorThreshold"
-                      value="200" min="72" max="1200" style="width:90px;">
-                    <small class="field-hint">Images between Poor DPI and Warning DPI are flagged as poor quality.</small>
-                  </div>
-
-                  <div class="form-group checkbox-group">
-                    <label>
-                      <input type="checkbox" id="dpiPoorAllowAutoSubmit" name="dpiPoorAllowAutoSubmit">
-                      <span>Allow auto-submit to print controller</span>
-                    </label>
-                    <small class="field-hint">If unchecked, poor-quality jobs require manual approval before printing.</small>
-                  </div>
-                </div>
-
-                <p class="field-hint" style="margin-top:8px;">
-                  Jobs below the Poor DPI threshold are always blocked and require manual review.
-                </p>
+              <div class="form-group checkbox-group">
+                <label>
+                  <input type="checkbox" id="aiQualityDebugLog" name="aiQualityDebugLog">
+                  <span>Verbose logging (per-image scoring detail to log)</span>
+                </label>
               </div>
             </fieldset>
+
           </div>
 
           <!-- Sub-tab: Film Scans -->
@@ -451,47 +446,6 @@
               </div>
             </fieldset>
 
-            <fieldset class="panel-section">
-              <legend>AI Quality Gate</legend>
-              <p class="section-desc">
-                Score every image in every job before it dispatches to a printer.
-                Jobs with any image scoring below the threshold are held for
-                operator review and surface as a flag on the Jobs grid. No
-                images are altered automatically — operators approve, fix, or
-                reject from the held-job view.
-              </p>
-
-              <div class="form-group checkbox-group">
-                <label>
-                  <input type="checkbox" id="aiQualityEnabled" name="aiQualityEnabled">
-                  <span>Enable AI Quality Gate</span>
-                </label>
-              </div>
-
-              <div class="form-group">
-                <label class="form-group__label" for="aiQualityThreshold">Quality threshold</label>
-                <input type="number" id="aiQualityThreshold" name="aiQualityThreshold"
-                       min="1" max="100" step="1" style="width: 6em;">
-                <small class="field-hint">
-                  Images scoring below this number are flagged for review.
-                  Default 75. Adjust based on your lab's print quality bar.
-                </small>
-                <small class="field-hint" style="margin-top: 0.5em;">
-                  <strong>Guidance:</strong><br>
-                  &bull; Below 50 — significant quality issues likely<br>
-                  &bull; 50–70 — borderline; some labs accept, some don't<br>
-                  &bull; 70–85 — typical phone uploads, usually fine for print<br>
-                  &bull; Above 85 — high-quality images
-                </small>
-              </div>
-
-              <div class="form-group checkbox-group">
-                <label>
-                  <input type="checkbox" id="aiQualityDebugLog" name="aiQualityDebugLog">
-                  <span>Verbose logging (per-image scoring detail to log)</span>
-                </label>
-              </div>
-            </fieldset>
           </div>
 
           <!-- Sub-tab: File Uploads -->
@@ -656,44 +610,43 @@
           <div class="settings-subtab-panel" id="subtab-aienhancement">
             <fieldset class="panel-section">
               <legend>AI Enhancement</legend>
-              <p class="section-desc">Use AI to upscale and enhance print images. Choose your enhancement provider below.</p>
+              <p class="section-desc">Use AI to upscale and enhance print images. Pixfizz AI Enhancement runs on this computer and needs no setup. Topaz is an optional premium cloud upscaler.</p>
 
-              <!-- Provider selection -->
+              <!-- Provider selection. Topaz <option> is hidden via JS when topazApiKey is empty. -->
               <div class="form-group">
                 <label for="enhancementProvider">Enhancement Provider</label>
                 <select id="enhancementProvider" name="enhancementProvider">
-                  <option value="replicate">Replicate (Topaz via Replicate)</option>
-                  <option value="topaz">Topaz Direct</option>
+                  <option value="local"
+                    title="Runs on this computer. No API key needed. Free per image. Slower than Topaz but works out of the box.">Pixfizz AI Enhancement</option>
+                  <option value="topaz"
+                    title="Cloud-based premium upscaler. Requires a Topaz API key. Faster and higher quality on hard cases.">Topaz</option>
                 </select>
               </div>
 
-              <!-- ── Replicate section ── -->
-              <div id="replicateSection">
-                <p class="section-desc" style="margin-top:8px;">Requires a Replicate API key — get one free at <span class="link-hint">replicate.com</span>.</p>
-
-                <div class="form-group">
-                  <label for="replicateApiKey">Replicate API Key</label>
-                  <div class="input-with-button">
-                    <input type="password" id="replicateApiKey" name="replicateApiKey"
-                      placeholder="r8_..." autocomplete="new-password">
-                    <button type="button" id="replicateApiKeyToggle" class="btn-browse">Show</button>
-                  </div>
-                </div>
+              <!-- ── Pixfizz AI Enhancement section ── -->
+              <div id="localSection">
+                <p class="section-desc" style="margin-top:8px;">Real-ESRGAN, runs locally. No internet connection required. Performance scales with the image size — typical 6 MP customer photo takes ~50 s on this machine.</p>
 
                 <div class="test-row">
-                  <button type="button" id="testReplicateBtn" class="btn-secondary">Test API Key</button>
-                  <span id="replicateTestStatus" class="test-status"></span>
+                  <button type="button" id="testLocalBtn" class="btn-secondary">Test</button>
+                  <span id="localTestStatus" class="test-status"></span>
                 </div>
 
-                <div class="form-group" style="margin-top: 16px;">
-                  <label for="enhancementDefaultModel">Default Model</label>
-                  <select id="enhancementDefaultModel" name="enhancementDefaultModel">
-                    <option value="Standard V2">Standard V2 (recommended — best for most photos)</option>
-                    <option value="High Fidelity V2">High Fidelity V2 (preserves fine detail)</option>
-                    <option value="Low Resolution V2">Low Resolution V2 (for very small inputs)</option>
-                    <option value="Recovery V2">Recovery V2 (for heavily compressed images)</option>
-                  </select>
-                </div>
+                <details class="advanced-disclosure" style="margin-top: 16px;">
+                  <summary>Advanced — Pixfizz AI Settings</summary>
+                  <div class="form-group" style="margin-top: 12px;">
+                    <label for="enhancementLocalTileSize">Tile size (pixels)</label>
+                    <input type="number" id="enhancementLocalTileSize" name="enhancementLocalTileSize"
+                      min="64" max="1024" step="32" value="256">
+                    <small class="field-hint">Default 256. Larger tiles use more memory but reduce overall tile count.</small>
+                  </div>
+                  <div class="form-group">
+                    <label for="enhancementLocalTileOverlap">Tile overlap (pixels)</label>
+                    <input type="number" id="enhancementLocalTileOverlap" name="enhancementLocalTileOverlap"
+                      min="0" max="64" step="4" value="16">
+                    <small class="field-hint">Default 16. Pixels of overlap between adjacent tiles, blended to hide seams.</small>
+                  </div>
+                </details>
               </div>
 
               <!-- ── Topaz Direct section ── -->
@@ -732,9 +685,9 @@
               <div class="form-group checkbox-group" style="margin-top: 16px;">
                 <label>
                   <input type="checkbox" id="enhancementFaceEnhancement" name="enhancementFaceEnhancement">
-                  <span>Enable face enhancement</span>
+                  <span>Enable face enhancement (Topaz only)</span>
                 </label>
-                <small class="field-hint">Applies Topaz face recovery. Recommended for portrait prints.</small>
+                <small class="field-hint">Applies Topaz face recovery. Recommended for portrait prints. No-op when Pixfizz AI Enhancement is selected.</small>
               </div>
 
               <div class="form-group checkbox-group">
@@ -742,7 +695,7 @@
                   <input type="checkbox" id="enhancementAutoEnhance" name="enhancementAutoEnhance">
                   <span>Auto-enhance when a job is opened in Job Review</span>
                 </label>
-                <small class="field-hint">Automatically starts enhancement for each image when the Job Review panel is opened. Requires a valid API key.</small>
+                <small class="field-hint">Automatically starts enhancement for each image when the Job Review panel is opened.</small>
               </div>
             </fieldset>
           </div>
@@ -825,42 +778,11 @@
     </div>
   </div>
 
-  <!-- ═══ DPI Validation Modal ═══ -->
-  <div id="dpiModal" class="dpi-modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="dpiModalTitle">
-    <div class="dpi-modal">
-      <div class="dpi-modal-header">
-        <span id="dpiModalIcon" class="dpi-modal-icon">⚠️</span>
-        <h2 id="dpiModalTitle" class="dpi-modal-title">DPI Validation Warning</h2>
-      </div>
-
-      <p id="dpiModalSummary" class="dpi-modal-summary"></p>
-
-      <div class="dpi-table-wrap">
-        <table class="dpi-table">
-          <thead>
-            <tr>
-              <th>Image</th>
-              <th>Pixels</th>
-              <th>Print Size</th>
-              <th>DPI</th>
-              <th>Status</th>
-              <th>Recommendation</th>
-            </tr>
-          </thead>
-          <tbody id="dpiModalTableBody"></tbody>
-        </table>
-      </div>
-
-      <div class="dpi-modal-footer">
-        <button type="button" id="dpiModalCancel" class="btn-secondary">Cancel</button>
-        <button type="button" id="dpiModalSendAnyway" class="btn-warning">Send Anyway</button>
-      </div>
-    </div>
-  </div>
-
   <!-- ═══ Order Controller Modal ═══ -->
   <div id="orderControllerModal" class="pm-modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="ocModalTitle">
     <div class="pm-modal">
+      <!-- × close — wired by wirePmModalDismiss() in renderer.js -->
+      <button type="button" class="pm-modal-close" aria-label="Close">×</button>
       <h3 id="ocModalTitle">Add Controller</h3>
 
       <div class="form-group">
@@ -934,6 +856,21 @@
         </select>
       </div>
 
+      <div class="form-group" id="ocPhotoLinesGroup" style="display:none">
+        <label style="font-weight:600;margin-bottom:4px;display:block">Photo Lines</label>
+        <small style="color:var(--text-muted,#888);display:block;margin-bottom:8px">
+          Optional key/value lines inserted between <code>Orderid=</code> and <code>Filepath=</code> for every image — typically used for back-print details on the reverse of the photo.
+          The left field is the Darkroom field name (free text — must match what your Darkroom Pro setup expects, e.g. <code>Photo.First Name</code>).
+          The right field is an OHD template; tokens below are resolved per image. Maximum 2 lines.
+        </small>
+        <div id="ocPhotoLinesList"></div>
+        <button type="button" id="ocAddPhotoLineBtn" class="btn-secondary btn-sm" style="margin-top:6px">+ Add Photo Line</button>
+        <div style="margin-top:10px;padding:8px 10px;background:var(--surface-muted,#f5f5f5);border-radius:4px">
+          <small style="color:var(--text-muted,#666);display:block;margin-bottom:6px">Available tokens — click to copy:</small>
+          <div id="ocPhotoLineTokens" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+        </div>
+      </div>
+
       <div class="form-group" id="ocSizeTranslationsGroup" style="display:none">
         <label style="font-weight:600;margin-bottom:4px;display:block">Size Translations</label>
         <small style="color:var(--text-muted,#888);display:block;margin-bottom:8px">Map an exact product code to the size string Darkroom Pro expects.</small>
@@ -1001,6 +938,8 @@
   <!-- ═══ Channel Mapping Modal ═══ -->
   <div id="channelMappingModal" class="pm-modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="cmModalTitle">
     <div class="pm-modal">
+      <!-- × close — wired by wirePmModalDismiss() in renderer.js -->
+      <button type="button" class="pm-modal-close" aria-label="Close">×</button>
       <h3 id="cmModalTitle">Add Channel Mapping</h3>
 
       <div class="form-group">
@@ -1127,6 +1066,8 @@
   <!-- Assign Channel Modal (Steps 9 & 10) -->
   <div id="assignChannelModal" class="pm-modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="assignChannelModalTitle">
     <div class="pm-modal">
+      <!-- × close — wired by wirePmModalDismiss() in renderer.js -->
+      <button type="button" class="pm-modal-close" aria-label="Close">×</button>
       <h3 id="assignChannelModalTitle">Assign Channel</h3>
       <p class="section-desc" style="margin-top:0;margin-bottom:14px;">Save a channel mapping for this job so it can be sent to the printer.</p>
 

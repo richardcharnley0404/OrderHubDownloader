@@ -19,8 +19,10 @@
  *   - Scoring is post-download, pre-routing (NOT pipelined with download).
  *     A 400-image job pays scoring time on top of download time. Acceptable
  *     for v1.2.0; revisit in Phase 2 if pilot data shows real lag.
- *   - Score is computed once per image. Re-scoring (e.g. after a fixup)
- *     happens in M4 via ai-fixup-service, not here.
+ *   - Score is computed once per image. Re-scoring after a fixup happens
+ *     in ai-fixup-service.js (the M4 milestone delivered alongside the
+ *     local-enhancement plan), not here. This orchestrator triggers fixup
+ *     when aiQualityMode === 'block' AND enhancementAutoEnhance === true.
  *   - When the feature flag is OFF, scoreJob() is a no-op; the autoprint
  *     loop's canRoute() check always returns true.
  */
@@ -33,6 +35,7 @@ const configService = require('./config-service');
 const logger = require('./logger');
 const aiQualityService = require('./ai-quality-service');
 const aiQualityStore = require('./ai-quality-store');
+const aiFixupService = require('./ai-fixup-service');
 
 // Image file extensions we score. Mirrors sidecarManager's IMAGE_EXTENSIONS
 // but operates on the job-root directly because most jobs land their images
@@ -118,7 +121,11 @@ class AIJobQualityOrchestrator {
         return { ok: true, held: false, summary: { skipped: true, reason: 'service-not-ready' } };
       }
 
-      const threshold = parseInt(configService.get('aiQualityThreshold'), 10) || 75;
+      const threshold = parseInt(configService.get('aiQualityThreshold'), 10) || 50;
+      // Mode is read once up-front so it can be stamped into each per-image
+      // sidecar entry as `modeAtScoreTime`. The job-level held gating below
+      // re-uses the same value.
+      const mode = configService.get('aiQualityMode') || 'warn';
       // Debug knob: when aiQualityForceScore > 0, always re-score so the
       // forced value takes effect against any pre-existing sidecar entries.
       // Without this, a sidecar written before the operator set forceScore
@@ -146,16 +153,60 @@ class AIJobQualityOrchestrator {
       const errors = [];
 
       for (const filename of imageFilenames) {
+        const imagePath = path.join(jobPath, filename);
         const existing = existingByName.get(filename);
+
+        // Skip-vs-rescore decision for an already-scored image.
+        //
+        //   - clean previous score (no error)              → skip
+        //   - errored previous score, file unchanged       → skip
+        //         (no point re-running on the same broken file every poll)
+        //   - errored previous score, mtime/size changed   → fall through
+        //         (file was replaced — likely after the Phase-2 quarantine
+        //         flow surfaced corruption and the operator dropped a fresh
+        //         copy in place)
+        //   - forceRescore debug knob set                  → fall through
         if (existing && existing.scored && !forceRescore) {
-          // Already scored — count it and move on.
-          if (existing.passed) passedCount++; else failedCount++;
+          if (!existing.error) {
+            if (existing.passed) passedCount++; else failedCount++;
+            continue;
+          }
+          // Errored — only re-run if the file fingerprint changed.
+          let fileChanged = false;
+          try {
+            const st = fs.statSync(imagePath);
+            const prevSize = existing.fileSizeAtScoreTime;
+            const prevMtime = existing.fileMtimeAtScoreTime;
+            if (prevSize != null && prevMtime != null) {
+              fileChanged = (st.size !== prevSize) || (st.mtimeMs !== prevMtime);
+            }
+            // If the previous entry lacked the fingerprint fields (legacy
+            // sidecar from before Phase 3), we can't tell — leave it alone.
+          } catch (_) {
+            // Stat failed → can't tell → skip.
+          }
+          if (!fileChanged) {
+            if (existing.passed) passedCount++; else failedCount++;
+            continue;
+          }
+          logger.info(
+            `[ai-quality] re-scoring ${filename} (file changed since previous error: ` +
+            `${existing.error})`
+          );
+        }
+
+        if (!fs.existsSync(imagePath)) {
+          errors.push({ filename, error: 'image not found' });
           continue;
         }
 
-        const imagePath = path.join(jobPath, filename);
-        if (!fs.existsSync(imagePath)) {
-          errors.push({ filename, error: 'image not found' });
+        // Capture file fingerprint at score time so a future poll can decide
+        // whether to re-score (see skip-vs-rescore comment above).
+        let stat;
+        try {
+          stat = fs.statSync(imagePath);
+        } catch (statErr) {
+          errors.push({ filename, error: `stat failed: ${statErr.message}` });
           continue;
         }
 
@@ -166,10 +217,13 @@ class AIJobQualityOrchestrator {
           scored: true,
           score: result.score,
           thresholdAtScoreTime: threshold,
+          modeAtScoreTime: mode,
           passed,
           modelVersion: result.modelVersion,
           inferenceMs: result.inferenceMs,
           scoredAt: new Date().toISOString(),
+          fileSizeAtScoreTime: stat.size,
+          fileMtimeAtScoreTime: stat.mtimeMs,
           error: result.error,
         });
 
@@ -178,15 +232,116 @@ class AIJobQualityOrchestrator {
       }
 
       // Re-read post-write to derive held state from the latest sidecar.
-      const finalRows = await aiQualityStore.getJobQuality(jobId, jobPath);
-      const held = aiQualityStore.deriveHeld(finalRows);
+      let finalRows = await aiQualityStore.getJobQuality(jobId, jobPath);
+      let qualityHeld = aiQualityStore.deriveHeld(finalRows);
+
+      // ── Auto-enhance fixup (Phase 1 plan §8.2) ───────────────────────────
+      // When the gate is in block-mode AND the operator opted into
+      // enhancementAutoEnhance, apply the configured provider to every
+      // held image BEFORE deciding whether the job stays held. The fixup
+      // service rescores after enhancement and updates aiQuality.score /
+      // aiQuality.passed in the sidecar, so the post-fixup deriveHeld()
+      // call below naturally reflects the new state.
+      //
+      // Fixup is skipped — even in block-mode — when:
+      //   - enhancementAutoEnhance is unset (operator hasn't opted in)
+      //   - qualityHeld is false (nothing to fix)
+      //   - mode === 'warn' (never blocks routing, so fixup is moot)
+      //
+      // Per-image failures DO NOT abort the loop. Each fixup is
+      // independently graceful — see ai-fixup-service.js for the failure
+      // contract. An image whose fixup throws or doesn't cross threshold
+      // simply remains held; deriveHeld() handles both cases identically.
+      let fixupAttempts = 0;
+      let fixupSucceeded = 0;
+      let fixupFailed = 0;
+      const autoEnhance = configService.get('enhancementAutoEnhance') === true;
+      if (mode === 'block' && qualityHeld && autoEnhance) {
+        const provider = configService.get('enhancementProvider') || 'local';
+        const heldRows = finalRows.filter((r) => {
+          const aq = r.aiQuality || {};
+          if (!aq.scored || aq.passed) return false;
+          const decision = (aq.operatorDecision && aq.operatorDecision.kind) || 'none';
+          return decision === 'none';
+        });
+
+        logger.info(
+          `[ai-quality] auto-enhance ON, provider=${provider}, ` +
+          `applying fixup to ${heldRows.length} held image(s) in job ${jobId}`
+        );
+
+        for (const row of heldRows) {
+          fixupAttempts++;
+          try {
+            const result = await aiFixupService.applyFixup(jobId, jobPath, row.filename, { provider });
+            if (result.error) {
+              fixupFailed++;
+              logger.logWarning(
+                `[ai-quality] fixup error for ${row.filename}: ${result.error} ` +
+                `(scoreBefore=${result.beforeScore}, scoreAfter=${result.afterScore ?? 'n/a'})`
+              );
+            } else if (result.crossedThreshold) {
+              fixupSucceeded++;
+            } else {
+              fixupFailed++;
+              logger.info(
+                `[ai-quality] fixup did not clear threshold for ${row.filename} ` +
+                `(${result.beforeScore?.toFixed?.(1) ?? '?'} → ${result.afterScore?.toFixed?.(1) ?? '?'} ` +
+                `< ${threshold}) — image remains held`
+              );
+            }
+          } catch (err) {
+            // applyFixup is contract-bound to never throw, but defence-in-
+            // depth: a thrown exception leaves the image in its pre-fixup
+            // held state — which is exactly the right fallback behaviour.
+            fixupFailed++;
+            logger.logError(
+              `[ai-quality] fixup threw for ${row.filename} — image remains held`,
+              err,
+            );
+          }
+        }
+
+        // Re-read after the fixup pass so the held decision reflects the
+        // post-fixup sidecar.
+        finalRows = await aiQualityStore.getJobQuality(jobId, jobPath);
+        qualityHeld = aiQualityStore.deriveHeld(finalRows);
+      }
+
+      // Mode gates whether qualityHeld becomes the returned `held`:
+      //   - 'warn'  → never block routing on quality grounds. Sub-threshold
+      //               images are still written to sidecars (passed: false) and
+      //               surface in the Quality Review tab, but auto-print and
+      //               manual print proceed normally. This is the v1.2.0 default;
+      //               we want field data from production scoring before
+      //               flipping the gate to actually block.
+      //   - 'block' → preserve the original M1+M2 gating: any unfixed
+      //               sub-threshold image holds the job until operator action.
+      // (mode was read once at the top of this function and stamped into each
+      //  per-image entry as modeAtScoreTime; same value used here.)
+      const held = (mode === 'block') && qualityHeld;
+
+      const subThresholdCount = finalRows.filter((r) => {
+        const aq = r.aiQuality || {};
+        return aq.scored && !aq.passed;
+      }).length;
 
       const elapsed = Date.now() - startedAt;
       logger.info(
         `[ai-quality] job ${jobId} scored: ${scoredCount} new, ` +
         `${passedCount}/${imageFilenames.length} passing, ` +
-        `${failedCount} failing, held=${held}, ${elapsed}ms`
+        `${failedCount} failing, mode=${mode}, qualityHeld=${qualityHeld}, held=${held}, ${elapsed}ms`
       );
+
+      // Warn-mode visibility: when the gate would have held the job in
+      // block-mode, surface the same information at info level so the
+      // operator can spot it in logs without needing to open the UI.
+      if (mode === 'warn' && subThresholdCount > 0) {
+        logger.info(
+          `[ai-quality] warn-mode: jobId=${jobId}, total=${imageFilenames.length}, ` +
+          `sub-threshold=${subThresholdCount}, routing proceeds`
+        );
+      }
 
       return {
         ok: true,
@@ -197,6 +352,13 @@ class AIJobQualityOrchestrator {
           failed: failedCount,
           total: imageFilenames.length,
           threshold,
+          mode,
+          qualityHeld,
+          subThreshold: subThresholdCount,
+          // Fixup counts populated when auto-enhance ran; all zero otherwise.
+          fixupAttempts,
+          fixupSucceeded,
+          fixupFailed,
           elapsedMs: elapsed,
           errors,
         },
@@ -219,6 +381,9 @@ class AIJobQualityOrchestrator {
    */
   async canRoute(jobId, jobPath) {
     if (!configService.get('aiQualityEnabled')) return true;
+    // Warn-mode never blocks routing — match scoreJob's held=false return.
+    const mode = configService.get('aiQualityMode') || 'warn';
+    if (mode !== 'block') return true;
     try {
       const rows = await aiQualityStore.getJobQuality(jobId, jobPath);
       return !aiQualityStore.deriveHeld(rows);
@@ -263,4 +428,12 @@ class AIJobQualityOrchestrator {
   }
 }
 
-module.exports = new AIJobQualityOrchestrator();
+const orchestrator = new AIJobQualityOrchestrator();
+// Exposed for the aiQuality:listHeldJobs IPC handler in ipc-handlers.js —
+// it needs the same disk-truth image enumeration the orchestrator uses
+// internally so the scoring-progress `total` field reflects what's
+// actually on disk, not what the sidecar happens to have entries for.
+// (See bugfixes.md 2026-04-28 entry on the Bug A regression for context.)
+orchestrator._scanJobImages = _scanJobImages;
+
+module.exports = orchestrator;

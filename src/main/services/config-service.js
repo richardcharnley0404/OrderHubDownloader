@@ -155,9 +155,31 @@ const schema = {
     type: 'boolean',
     default: false
   },
+  // Held-state semantics for sub-threshold images:
+  //   'warn'  — score every image, write per-image sidecars (passed: false for
+  //             sub-threshold), but do NOT hold the job. Auto-print and manual
+  //             print proceed normally. Operators see scores in the UI but
+  //             nothing blocks routing. This is the v1.2.0 default — we want
+  //             the field data from production scoring before flipping the
+  //             gate to 'block'.
+  //   'block' — sub-threshold images set held=true on the job. Auto-print is
+  //             blocked and the job appears in Quality Review until the
+  //             operator approves-as-is or fixes the offending images.
+  // Shipped installs default to 'warn'. Operators can flip to 'block' once
+  // they've reviewed enough scoring data to trust the threshold.
+  aiQualityMode: {
+    type: 'string',
+    enum: ['warn', 'block'],
+    default: 'warn'
+  },
+  // Default lowered from 75 to 50 based on empirical data from
+  // PXDEMO-721XH7 / PXDEMO-PT7HM2 — score distribution clusters 60-75
+  // for typical phone uploads with bad-quality tail at 36-45;
+  // threshold 50 cleanly separates the tail without rejecting the
+  // typical bulk.
   aiQualityThreshold: {
     type: 'number',
-    default: 75,
+    default: 50,
     minimum: 1,
     maximum: 100
   },
@@ -228,46 +250,10 @@ const schema = {
     type: 'object',
     default: {}
   },
-  // DPI Validation
-  dpiValidationEnabled: {
-    type: 'boolean',
-    default: true
-  },
-  dpiExcellentThreshold: {
-    type: 'number',
-    default: 300,
-    minimum: 72,
-    maximum: 1200
-  },
-  dpiWarningThreshold: {
-    type: 'number',
-    default: 275,
-    minimum: 72,
-    maximum: 1200
-  },
-  dpiWarningAllowAutoSubmit: {
-    type: 'boolean',
-    default: true
-  },
-  dpiPoorThreshold: {
-    type: 'number',
-    default: 200,
-    minimum: 72,
-    maximum: 1200
-  },
-  dpiPoorAllowAutoSubmit: {
-    type: 'boolean',
-    default: false
-  },
-  // AI Enhancement (Phase 3)
+  // AI Enhancement (Phase 3+)
   enhancementProvider: {
     type: 'string',
-    default: 'replicate'
-  },
-  // Replicate provider
-  replicateApiKey: {
-    type: 'string',
-    default: ''
+    default: 'local'
   },
   enhancementDefaultModel: {
     type: 'string',
@@ -290,6 +276,28 @@ const schema = {
     type: 'string',
     default: 'Standard V2'
   },
+  // Pixfizz AI Enhancement (local Real-ESRGAN). Tile-size and overlap are
+  // exposed for field-engineer tuning but normally untouched. Defaults
+  // are settled per Phase 1 plan §0.10 (256² with 16 px overlap).
+  enhancementLocalTileSize: {
+    type: 'number',
+    default: 256,
+    minimum: 64,
+    maximum: 1024
+  },
+  enhancementLocalTileOverlap: {
+    type: 'number',
+    default: 16,
+    minimum: 0,
+    maximum: 255
+  },
+  // Run a MUSIQ rescore before and after every enhancement (any provider)
+  // and write scoreBefore/scoreAfter into the per-image sidecar entry.
+  // Default true on fresh installs and at upgrade-time per plan §0.6.
+  enhancementRescoreAfter: {
+    type: 'boolean',
+    default: true
+  },
   dismissedJobs: {
     type: 'array',
     default: []
@@ -297,13 +305,58 @@ const schema = {
   jobDateRange: {
     type: 'number',
     default: 30
+  },
+  // One-shot migration marker for the v1.3.2 integrity-quarantine pivot.
+  // Set to an ISO 8601 timestamp on first successful run of
+  // runIntegrityQuarantineMigration(). Once set, the migration is skipped
+  // on every subsequent launch. NEVER cleared by code — clearing is a
+  // manual operator action (delete the key from config.json) if a re-run
+  // is ever needed. See src/main/services/integrity-quarantine-migration.js.
+  _integrityQuarantineMigratedAt: {
+    type: ['string', 'null'],
+    default: null
+  },
+  // One-shot migration marker for the Phase 1 local-enhancement release —
+  // removes the legacy Replicate provider. Set to an ISO 8601 timestamp on
+  // first launch with a Replicate-era config; cleared NEVER (same convention
+  // as _integrityQuarantineMigratedAt above). Acts as the idempotency guard
+  // for _migrateReplicateProvider().
+  _replicateProviderMigratedAt: {
+    type: ['string', 'null'],
+    default: null
+  },
+  // One-shot toast trigger: set to true by _migrateReplicateProvider() when
+  // an actual replicate→local rewrite happened (i.e. the operator was using
+  // Replicate before the upgrade). Renderer reads it on launch, shows a
+  // dismissable toast once, and calls ohd:config:clear-migration-toast to
+  // flip it back to false. Default false so fresh installs and Topaz-only
+  // installs never see the toast.
+  _migratedFromReplicate: {
+    type: 'boolean',
+    default: false
   }
 };
 
 class ConfigService {
   constructor() {
-    this.store = new Store({ schema });
+    this.store = new Store({
+      schema,
+      // Strip leading UTF-8 BOM if present. PowerShell, Notepad, and various
+      // Windows editors default to writing UTF-8 with BOM; electron-store's
+      // conf library doesn't strip BOMs and crashes on JSON.parse. This
+      // bricked the app during v1.3.2 development when a config flag was
+      // edited via PowerShell `Set-Content -Encoding UTF8`. Defensive read
+      // prevents the failure mode that bit during dev from biting customers
+      // in production.
+      deserialize: (raw) => {
+        if (raw.charCodeAt(0) === 0xFEFF) {
+          raw = raw.slice(1);
+        }
+        return JSON.parse(raw);
+      },
+    });
     this._migrateReviewMode();
+    this._migrateReplicateProvider();
   }
 
   /**
@@ -320,6 +373,58 @@ class ConfigService {
       this.store.set('filmScanReviewMode', 'always');
     }
     this.store.set('_filmScanReviewModeMigrated', true);
+  }
+
+  /**
+   * One-shot migration: remove the legacy Replicate provider from config.
+   *
+   *   - If `enhancementProvider === 'replicate'`, rewrite to 'local' and set
+   *     the `_migratedFromReplicate` flag so the renderer shows the
+   *     post-upgrade toast exactly once.
+   *   - Always strip the `replicateApiKey` key from disk (orphan key on
+   *     installs that switched to Topaz before the upgrade — no functional
+   *     impact, but keeps the on-disk config tidy).
+   *   - Stamp `_replicateProviderMigratedAt` so we never run again.
+   *
+   * The defensive remap in enhancementManager.getProvider() stays in place
+   * as a defence-in-depth no-op for any rare config that bypasses this path
+   * (e.g. a config file hand-edited back to 'replicate' between launches).
+   */
+  _migrateReplicateProvider() {
+    if (this.store.get('_replicateProviderMigratedAt')) return;
+
+    const provider = this.store.get('enhancementProvider');
+    const wasReplicate = provider === 'replicate';
+
+    if (wasReplicate) {
+      this.store.set('enhancementProvider', 'local');
+      this.store.set('_migratedFromReplicate', true);
+    }
+
+    // electron-store .delete() is a no-op for keys that don't exist on disk,
+    // so this is safe regardless of whether the key was ever populated.
+    try {
+      this.store.delete('replicateApiKey');
+    } catch (_) { /* ignore */ }
+
+    this.store.set('_replicateProviderMigratedAt', new Date().toISOString());
+
+    // Single line of telemetry — a future support investigation may need
+    // to know which installs traversed the Replicate→local boundary.
+    // eslint-disable-next-line no-console
+    console.log(
+      `[config-migration] replicate-provider migration done ` +
+      `(wasReplicate=${wasReplicate}, replicateApiKeyDeleted=true)`
+    );
+  }
+
+  /**
+   * Called by the renderer once it has rendered (and dismissed, or simply
+   * displayed) the post-upgrade Replicate-removal toast. Flips the
+   * one-shot flag so the toast doesn't re-show on subsequent launches.
+   */
+  clearReplicateMigrationToast() {
+    this.store.set('_migratedFromReplicate', false);
   }
 
   /**
@@ -358,6 +463,7 @@ class ConfigService {
       filmScanReviewMode: this.store.get('filmScanReviewMode'),
       // AI Quality Gate
       aiQualityEnabled: this.store.get('aiQualityEnabled'),
+      aiQualityMode: this.store.get('aiQualityMode'),
       aiQualityThreshold: this.store.get('aiQualityThreshold'),
       aiQualityModelPath: this.store.get('aiQualityModelPath'),
       aiQualityDebugLog: this.store.get('aiQualityDebugLog'),
@@ -374,21 +480,19 @@ class ConfigService {
       // Process folder
       processFolderPath: this.store.get('processFolderPath'),
       processFolderMappings: this.store.get('processFolderMappings'),
-      // DPI Validation
-      dpiValidationEnabled: this.store.get('dpiValidationEnabled'),
-      dpiExcellentThreshold: this.store.get('dpiExcellentThreshold'),
-      dpiWarningThreshold: this.store.get('dpiWarningThreshold'),
-      dpiWarningAllowAutoSubmit: this.store.get('dpiWarningAllowAutoSubmit'),
-      dpiPoorThreshold: this.store.get('dpiPoorThreshold'),
-      dpiPoorAllowAutoSubmit: this.store.get('dpiPoorAllowAutoSubmit'),
       // AI Enhancement
       enhancementProvider: this.store.get('enhancementProvider'),
-      replicateApiKey: this.store.get('replicateApiKey'),
       enhancementDefaultModel: this.store.get('enhancementDefaultModel'),
       enhancementFaceEnhancement: this.store.get('enhancementFaceEnhancement'),
       enhancementAutoEnhance: this.store.get('enhancementAutoEnhance'),
       topazApiKey: this.store.get('topazApiKey'),
       topazDefaultModel: this.store.get('topazDefaultModel'),
+      enhancementLocalTileSize: this.store.get('enhancementLocalTileSize'),
+      enhancementLocalTileOverlap: this.store.get('enhancementLocalTileOverlap'),
+      enhancementRescoreAfter: this.store.get('enhancementRescoreAfter'),
+      // One-shot toast trigger consumed by the renderer; cleared via
+      // clearReplicateMigrationToast() once the toast has been shown.
+      _migratedFromReplicate: this.store.get('_migratedFromReplicate'),
     };
   }
 
@@ -520,6 +624,12 @@ class ConfigService {
     if (Object.prototype.hasOwnProperty.call(config, 'aiQualityEnabled')) {
       this.store.set('aiQualityEnabled', Boolean(config.aiQualityEnabled));
     }
+    if (Object.prototype.hasOwnProperty.call(config, 'aiQualityMode')) {
+      const mode = String(config.aiQualityMode);
+      if (mode === 'warn' || mode === 'block') {
+        this.store.set('aiQualityMode', mode);
+      }
+    }
     if (Object.prototype.hasOwnProperty.call(config, 'aiQualityThreshold')) {
       const t = parseInt(config.aiQualityThreshold, 10);
       if (!isNaN(t) && t >= 1 && t <= 100) {
@@ -569,25 +679,6 @@ class ConfigService {
     // Save process folder (default)
     this.store.set('processFolderPath', (config.processFolderPath || '').trim());
 
-    // Save DPI Validation settings
-    this.store.set('dpiValidationEnabled', Boolean(config.dpiValidationEnabled));
-
-    const dpiExcellent = parseInt(config.dpiExcellentThreshold, 10);
-    if (!isNaN(dpiExcellent) && dpiExcellent >= 72 && dpiExcellent <= 1200) {
-      this.store.set('dpiExcellentThreshold', dpiExcellent);
-    }
-
-    const dpiWarning = parseInt(config.dpiWarningThreshold, 10);
-    if (!isNaN(dpiWarning) && dpiWarning >= 72 && dpiWarning <= 1200) {
-      this.store.set('dpiWarningThreshold', dpiWarning);
-    }
-    this.store.set('dpiWarningAllowAutoSubmit', Boolean(config.dpiWarningAllowAutoSubmit));
-
-    const dpiPoor = parseInt(config.dpiPoorThreshold, 10);
-    if (!isNaN(dpiPoor) && dpiPoor >= 72 && dpiPoor <= 1200) {
-      this.store.set('dpiPoorThreshold', dpiPoor);
-    }
-    this.store.set('dpiPoorAllowAutoSubmit', Boolean(config.dpiPoorAllowAutoSubmit));
 
     // Save process folder mappings
     // Supports both legacy string values and new object values { folderPath, controllerId? }
@@ -617,13 +708,21 @@ class ConfigService {
     this.store.set('processFolderMappings', cleanMappings);
 
     // Save AI Enhancement settings
-    this.store.set('enhancementProvider', config.enhancementProvider || 'replicate');
-    this.store.set('replicateApiKey', config.replicateApiKey || '');
+    this.store.set('enhancementProvider', config.enhancementProvider || 'local');
     this.store.set('enhancementDefaultModel', config.enhancementDefaultModel || 'Standard V2');
     this.store.set('enhancementFaceEnhancement', Boolean(config.enhancementFaceEnhancement));
     this.store.set('enhancementAutoEnhance', Boolean(config.enhancementAutoEnhance));
     this.store.set('topazApiKey', config.topazApiKey || '');
     this.store.set('topazDefaultModel', config.topazDefaultModel || 'Standard V2');
+    if (Number.isInteger(config.enhancementLocalTileSize)) {
+      this.store.set('enhancementLocalTileSize', config.enhancementLocalTileSize);
+    }
+    if (Number.isInteger(config.enhancementLocalTileOverlap)) {
+      this.store.set('enhancementLocalTileOverlap', config.enhancementLocalTileOverlap);
+    }
+    if (typeof config.enhancementRescoreAfter === 'boolean') {
+      this.store.set('enhancementRescoreAfter', config.enhancementRescoreAfter);
+    }
 
     return this.getAll();
   }

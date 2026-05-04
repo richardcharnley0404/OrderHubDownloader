@@ -32,42 +32,51 @@
   overflow: hidden;
 }
 
-/* ─── Design tokens (light theme) ────────────────────────────────────── */
+/* ─── Design tokens (aliased from app-wide --app-* in styles.css) ──────
+ *
+ * As of 2026-04-29 (queued "Theming consistency pass"), Film Review's
+ * token set was promoted to app-wide --app-* tokens defined on `body`
+ * in `styles.css`. The Film Review panel previously owned its own
+ * theme toggle — that was lifted into the app header. The fr-* names
+ * remain here as aliases so all existing .fr-* CSS rules below keep
+ * working unchanged; light/dark switching now follows the single
+ * `body.app-theme-dark` class.
+ * ──────────────────────────────────────────────────────────────────── */
 
 .film-review-panel {
-  /* Colors */
-  --fr-ink:          #232429;
-  --fr-ink-dim:      #5a5f66;
-  --fr-ink-faint:    #8a8f96;
-  --fr-surface:      #E8EBED;
-  --fr-surface-raised: #ffffff;
-  --fr-surface-sunk: #dcdfe2;
-  --fr-border:       #c5c9cd;
-  --fr-border-subtle:#e1e4e7;
-  --fr-accent:       #32C5FF;    /* Pixfizz blue */
-  --fr-accent-ink:   #003d54;
-  --fr-amber:        #F5A623;
-  --fr-amber-weak:   #fdf1dc;
-  --fr-red:          #E3452F;
-  --fr-red-weak:     #fbe3df;
-  --fr-green:        #27ae60;
-  --fr-green-weak:   #dff3e6;
+  /* Colour aliases */
+  --fr-ink:           var(--app-ink);
+  --fr-ink-dim:       var(--app-ink-dim);
+  --fr-ink-faint:     var(--app-ink-faint);
+  --fr-surface:       var(--app-surface-sunk);   /* FR's "surface" was a slightly-sunk fill */
+  --fr-surface-raised: var(--app-surface-raised);
+  --fr-surface-sunk:  var(--app-surface-deep);
+  --fr-border:        var(--app-border);
+  --fr-border-subtle: var(--app-border-subtle);
+  --fr-accent:        var(--app-accent);
+  --fr-accent-ink:    var(--app-accent-ink);
+  --fr-amber:         var(--app-amber);
+  --fr-amber-weak:    var(--app-amber-weak);
+  --fr-red:           var(--app-red);
+  --fr-red-weak:      var(--app-red-weak);
+  --fr-green:         var(--app-green);
+  --fr-green-weak:    var(--app-green-weak);
 
-  /* Spacing */
-  --fr-s1: 4px;
-  --fr-s2: 8px;
-  --fr-s3: 12px;
-  --fr-s4: 16px;
-  --fr-s5: 24px;
-  --fr-s6: 32px;
+  /* Spacing aliases */
+  --fr-s1: var(--app-s1);
+  --fr-s2: var(--app-s2);
+  --fr-s3: var(--app-s3);
+  --fr-s4: var(--app-s4);
+  --fr-s5: var(--app-s5);
+  --fr-s6: var(--app-s6);
 
-  /* Typography */
-  --fr-mono: 'JetBrains Mono', 'Consolas', 'Menlo', monospace;
-  --fr-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  --fr-radius: 6px;
-  --fr-radius-lg: 10px;
+  /* Typography aliases */
+  --fr-mono:   var(--app-mono);
+  --fr-font:   var(--app-font);
+  --fr-radius: var(--app-radius);
+  --fr-radius-lg: var(--app-radius-lg);
 
-  /* Layout */
+  /* Layout — panel-local */
   --fr-chrome-h: 48px;       /* header bar height */
 
   /* Apply */
@@ -84,18 +93,14 @@
   overflow: hidden;
 }
 
-.film-review-panel.film-review-theme-dark {
-  --fr-ink:          #e7e9ec;
-  --fr-ink-dim:      #a9aeb5;
-  --fr-ink-faint:    #6b7079;
-  --fr-surface:      #1b1d21;
-  --fr-surface-raised: #23262b;
-  --fr-surface-sunk: #15171a;
-  --fr-border:       #34383e;
-  --fr-border-subtle:#2a2d32;
-  --fr-amber-weak:   #3a2e18;
-  --fr-red-weak:     #3a1f1c;
-  --fr-green-weak:   #1c3526;
+/* The `.film-review-theme-dark` class is no longer set by FilmReview's own
+ * toggle (which was removed when the theme moved app-wide). It's still
+ * referenced by a handful of dark-only tweaks below (e.g. focus-overlay
+ * backdrop). To keep those working under the app-wide toggle, we mirror
+ * any `body.app-theme-dark` selector onto the panel. */
+body.app-theme-dark .film-review-panel {
+  /* All --fr-* aliases above already pick up the app-theme-dark overrides
+     of --app-* automatically — no per-token redefinition needed here. */
 }
 
 /* ─── Chrome / header ────────────────────────────────────────────────── */
@@ -329,7 +334,7 @@
   color: var(--fr-accent-ink);
   border: 1px solid var(--fr-accent);
 }
-.film-review-theme-dark .fr-roll-card__status--processing {
+body.app-theme-dark .fr-roll-card__status--processing {
   color: var(--fr-accent);
 }
 
@@ -389,6 +394,79 @@
 .fr-roll-card__upload--uploaded {
   background: var(--fr-green-weak);
   color: var(--fr-green);
+}
+
+/* Delete affordance on each roll card. Sits at the right of the status row
+   (margin-left: auto pushes it). Subtle by default — the destructive red is
+   only revealed on hover so a casual hover over the card doesn't scream
+   danger, but the operator's intent is clear once they reach for the button. */
+/* Actions cluster — Approve & Upload (when applicable) plus Delete, pinned
+   to the right edge of the status row. The wrapper's margin-left:auto
+   absorbs free space so the buttons travel as a pair regardless of which
+   pills appear before them. */
+.fr-roll-card__actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Approve & Upload — primary action on Manual/Smart pending rolls. Lets
+   the operator skip the grid view when they trust the roll on sight. */
+.fr-roll-card__approve {
+  appearance: none;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--fr-accent);
+  color: var(--fr-accent-ink);
+  border: 1px solid var(--fr-accent);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: filter 80ms ease;
+}
+.fr-roll-card__approve:hover:not(:disabled) {
+  filter: brightness(0.93);
+}
+.fr-roll-card__approve:focus-visible {
+  outline: 2px solid var(--fr-accent);
+  outline-offset: 2px;
+}
+.fr-roll-card__approve:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.fr-roll-card__delete {
+  /* margin-left: auto removed — the actions wrapper handles right-alignment */
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--fr-border);
+  background: transparent;
+  color: var(--fr-ink-faint);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color 80ms ease, border-color 80ms ease, background 80ms ease;
+}
+.fr-roll-card__delete:hover:not(:disabled) {
+  color: var(--fr-red, #d04848);
+  border-color: var(--fr-red, #d04848);
+  background: var(--fr-red-weak, rgba(208, 72, 72, 0.08));
+}
+.fr-roll-card__delete:focus-visible {
+  outline: 2px solid var(--fr-red, #d04848);
+  outline-offset: 2px;
+}
+.fr-roll-card__delete:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .fr-roll-card__stats {
@@ -892,7 +970,7 @@
   background: rgba(20, 22, 26, 0.72);
   backdrop-filter: blur(4px);
 }
-.film-review-theme-dark .fr-focus-backdrop {
+body.app-theme-dark .fr-focus-backdrop {
   background: rgba(0, 0, 0, 0.82);
 }
 
@@ -949,7 +1027,7 @@
   border: 1px solid var(--fr-accent);
   margin-left: 2px;
 }
-.film-review-theme-dark .fr-focus-rotate-badge {
+body.app-theme-dark .fr-focus-rotate-badge {
   color: var(--fr-accent);
 }
 
@@ -986,7 +1064,7 @@
   color: var(--fr-accent-ink);
   border-color: var(--fr-accent);
 }
-.film-review-theme-dark .fr-focus-pill--accent {
+body.app-theme-dark .fr-focus-pill--accent {
   color: var(--fr-accent);
 }
 
@@ -1105,7 +1183,7 @@
   font-weight: 600;
   color: var(--fr-accent-ink);
 }
-.film-review-theme-dark .fr-focus-flag-pill strong {
+body.app-theme-dark .fr-focus-flag-pill strong {
   color: var(--fr-accent);
 }
 .fr-focus-flag-pill__rot {

@@ -1,5 +1,3 @@
-const fs = require('fs');
-const path = require('path');
 const configService = require('./config-service');
 const ftpService = require('./ftp-service');
 const folderWatchService = require('./folder-watch-service');
@@ -149,13 +147,31 @@ class PollingService {
   /**
    * Poll OrderHub API for pending jobs and check if files exist locally.
    * If files found → mark job as received via API.
+   *
+   * Also sync local pending/received/in_production jobs against OH's
+   * authoritative status — picks up out-of-band completion (job marked
+   * complete or cancelled in OH UI / by another OHD instance / by an
+   * integration) and clears the row from Awaiting Processing without
+   * requiring a manual refresh.
    */
   async pollJobs() {
     try {
       logger.info('Polling: fetching jobs from API');
 
       const jobs = await jobService.fetchJobs();
-      const pendingJobs = jobs.filter(j => j._status === 'pending');
+
+      // Out-of-band completion sync. Runs after fetchJobs so any newly-
+      // returned jobs are eligible, and before the file-presence loop so
+      // a job that OH already considers terminal isn't re-marked received
+      // on the same cycle. syncJobStatusFromOH is internally chunked and
+      // tolerant of per-job failures, so it can't take down the cycle.
+      try {
+        await jobService.syncJobStatusFromOH();
+      } catch (syncErr) {
+        logger.logWarning('Polling: syncJobStatusFromOH error', { error: syncErr.message });
+      }
+
+      const pendingJobs = jobService.getLocalJobs().jobs.filter(j => j._status === 'pending');
 
       logger.info('Polling: job poll complete', {
         totalJobs: jobs.length,
@@ -174,39 +190,13 @@ class PollingService {
         const result = jobDownloadService.checkLocalFiles(job);
 
         if (result.found) {
-          // Check manifest for images with missing size fields before marking received.
-          // A missing size means the product is misconfigured in Pixfizz Core and the
-          // job cannot be printed — flag it as a warning rather than receiving it.
-          let hasMissingSize = false;
-          const orderFolderPath = path.dirname(result.localPath);
-          const manifestPath = path.join(orderFolderPath, `${job.order_number}.json`);
-          try {
-            const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
-            const jobEntry = (manifest.jobs || []).find(j => String(j.jobId) === String(job.id));
-            if (jobEntry && Array.isArray(jobEntry.images) && jobEntry.images.some(img => !img.size)) {
-              hasMissingSize = true;
-            }
-          } catch (manifestErr) {
-            // Manifest not yet present or unreadable — proceed and let markReceived handle it
-            logger.logWarning('Polling: could not read manifest for size check', {
-              jobId: job.id,
-              error: manifestErr.message
-            });
-          }
-
-          if (hasMissingSize) {
-            jobService.updateJobLocally(job.id, {
-              _status: 'warning',
-              _warningMessage: 'One or more images are missing a size — check product configuration in Pixfizz Core'
-            });
-            logger.logWarning('Polling: job has missing image sizes, marking as warning', {
-              jobId: job.id,
-              orderNumber: job.order_number
-            });
-            this.lastJobPollSummary.failedCount++;
-            continue;
-          }
-
+          // Receive-time missing-size validation removed in v1.3.2.
+          // The check was over-broad — it fired for all controller types,
+          // but missing image-level size only matters for DPOF dispatch.
+          // The canonical missing-size validation lives at
+          // print-service.js:236 (DPOF-scoped) and now propagates a clear
+          // operator message via the generalized auto-print catch handlers
+          // (see ipc-handlers.js:~1796).
           try {
             await jobService.markReceived(job.id, {
               timestamp: new Date().toISOString(),

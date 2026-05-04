@@ -41,8 +41,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   sendToPrint: (jobId) => ipcRenderer.invoke('jobs:sendToPrint', jobId),
   markCompleted: (jobId) => ipcRenderer.invoke('jobs:markCompleted', jobId),
   onJobsUpdated: (callback) => ipcRenderer.on('jobs:updated', (event, data) => callback(data)),
-  validateJobDpi: (jobId) => ipcRenderer.invoke('jobs:validateDpi', jobId),
-  approveDpiJob: (jobId) => ipcRenderer.invoke('jobs:approveDpi', jobId),
 
   // Activity log
   readLogs: (options) => ipcRenderer.invoke('logs:read', options),
@@ -101,11 +99,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   jobCropImage:   (payload) => ipcRenderer.invoke('ohd:job:crop-image',  payload),
   reprintCreate:  (payload) => ipcRenderer.invoke('ohd:reprint:create',  payload),
 
-  // AI Enhancement (Phase 3)
+  // AI Enhancement (Phase 3+)
   enhancementTest:   (payload) => ipcRenderer.invoke('ohd:enhancement:test',   payload),
   enhancementRun:    (payload) => ipcRenderer.invoke('ohd:enhancement:run',    payload),
   enhancementStatus: (payload) => ipcRenderer.invoke('ohd:enhancement:status', payload),
   enhancementCancel: (payload) => ipcRenderer.invoke('ohd:enhancement:cancel', payload),
+
+  // Phase 1 local-enhancement: ack the post-upgrade migration toast so it
+  // doesn't re-show on the next launch.
+  clearReplicateMigrationToast: () => ipcRenderer.invoke('ohd:config:clear-replicate-migration-toast'),
 
   // DPOF output status
   getJobOutputStatus: (jobId) => ipcRenderer.invoke('ohd:job:get-output-status', { jobId }),
@@ -137,10 +139,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   filmReviewOpenFolder:       (rollId)                 => ipcRenderer.invoke('ohd:filmReview:open-folder', rollId),
   filmReviewRotateFrame:      (frameId, delta)         => ipcRenderer.invoke('ohd:filmReview:rotate-frame', { frameId, delta }),
   filmReviewApproveRoll:      (rollId)                 => ipcRenderer.invoke('ohd:filmReview:approve-roll', rollId),
+  filmReviewDeleteRoll:       (rollId)                 => ipcRenderer.invoke('ohd:filmReview:delete-roll',  rollId),
   filmReviewGetTweaks:        ()                       => ipcRenderer.invoke('ohd:filmReview:get-tweaks'),
   filmReviewSetTweak:         (key, value)             => ipcRenderer.invoke('ohd:filmReview:set-tweak',  { key, value }),
   onFilmReviewRollProcessed:  (callback) =>
     ipcRenderer.on('ohd:filmReview:roll-processed', (event, data) => callback(data)),
+
+  // App-wide theme (light | dark). Drives body.app-theme-dark — see
+  // job-review.css / film-review.css / styles.css token definitions.
+  appGetTheme:                ()                       => ipcRenderer.invoke('ohd:app:get-theme'),
+  appSetTheme:                (value)                  => ipcRenderer.invoke('ohd:app:set-theme', value),
 
   // AI Quality Gate (v1.2.0)
   aiQualityListHeldJobs:    ()                                => ipcRenderer.invoke('aiQuality:listHeldJobs'),

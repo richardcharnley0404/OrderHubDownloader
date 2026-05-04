@@ -1,5 +1,7 @@
 'use strict';
 
+const { resolveTemplate } = require('./template-tokens');
+
 /**
  * FrontlineGenerator
  *
@@ -69,8 +71,8 @@ class FrontlineGenerator {
       const qty      = image.quantity      != null ? image.quantity      : 1;
       const rotation = image.rotationAngle != null ? image.rotationAngle : 0;
       const filename = image.filename      || '';
-      const bp1      = this._resolveTemplate(bp1Template, job, filename);
-      const bp2      = this._resolveTemplate(bp2Template, job, filename);
+      const bp1      = resolveTemplate(bp1Template, job, { filename });
+      const bp2      = resolveTemplate(bp2Template, job, { filename });
 
       lines.push('      <image quantity="' + qty + '" rotationAngle="' + rotation + '">');
       lines.push('        <path><![CDATA[' + filename + ']]></path>');
@@ -85,23 +87,6 @@ class FrontlineGenerator {
 
     // CRLF required — Frontline runs on Windows
     return lines.join('\r\n') + '\r\n';
-  }
-
-  /**
-   * Resolve template tokens in a backPrint string.
-   * @param {string} template
-   * @param {object} job
-   * @param {string} filename - current image filename (basename, with extension)
-   * @returns {string}
-   */
-  _resolveTemplate(template, job, filename) {
-    if (!template) return '';
-    return template
-      .replace(/\{customerName\}/g, job.customer_name  || '')
-      .replace(/\{jobId\}/g,        String(job.id || ''))
-      .replace(/\{orderNumber\}/g,  job.order_number   || '')
-      .replace(/\{jobName\}/g,      job.job_name       || job.order_number || '')
-      .replace(/\{filename\}/g,     filename           || '');
   }
 
   /** Escape a string for use in an XML attribute value (double-quoted). */

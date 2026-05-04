@@ -115,23 +115,8 @@ class S3Service {
     // ── Manifest ─────────────────────────────────────────────────────────────
     // Always written, regardless of upload errors, so OH always knows the folder exists.
     try {
-      const { app } = require('electron');
-      const tiffExts  = new Set(['.tif', '.tiff']);
-      const jpegExts  = new Set(['.jpg', '.jpeg']);
-      const tiffCount = files.filter(f => tiffExts.has(path.extname(f).toLowerCase())).length;
-      const jpgCount  = files.filter(f => jpegExts.has(path.extname(f).toLowerCase())).length;
-
-      const manifestName = `${folderName}.json`;
-      const manifestBody = JSON.stringify({
-        folder:       folderName,
-        total_files:  files.length,
-        tiff_count:   tiffCount,
-        jpg_count:    jpgCount,
-        errors:       failed,
-        completed_at: new Date().toISOString(),
-        ohd_version:  app.getVersion()
-      });
-      const manifestBuffer = Buffer.from(manifestBody, 'utf8');
+      const { name: manifestName, buffer: manifestBuffer } =
+        this._buildManifestPayload(folderName, files, failed);
 
       const manifestDescriptor = {
         name:     manifestName,
@@ -324,34 +309,65 @@ class S3Service {
     let failed = 0;
 
     try {
-      for (const filePath of files) {
-        const relativePath = path.relative(localFolderPath, filePath).replace(/\\/g, '/');
-        const s3Key = `${s3Prefix}${folderName}/${relativePath}`;
+      try {
+        for (const filePath of files) {
+          const relativePath = path.relative(localFolderPath, filePath).replace(/\\/g, '/');
+          const s3Key = `${s3Prefix}${folderName}/${relativePath}`;
 
-        try {
-          const fileStat = fs.statSync(filePath);
-          const contentType = this._getContentType(filePath);
+          try {
+            const fileStat = fs.statSync(filePath);
+            const contentType = this._getContentType(filePath);
 
-          if (fileStat.size > MULTIPART_THRESHOLD) {
-            await this._uploadFileMultipartAmazon(client, credentials.bucketName, s3Key, filePath, contentType);
-          } else {
-            const fileContent = fs.readFileSync(filePath);
-            await client.send(new PutObjectCommand({
-              Bucket: credentials.bucketName,
-              Key: s3Key,
-              Body: fileContent,
-              ContentType: contentType
-            }));
+            if (fileStat.size > MULTIPART_THRESHOLD) {
+              await this._uploadFileMultipartAmazon(client, credentials.bucketName, s3Key, filePath, contentType);
+            } else {
+              const fileContent = fs.readFileSync(filePath);
+              await client.send(new PutObjectCommand({
+                Bucket: credentials.bucketName,
+                Key: s3Key,
+                Body: fileContent,
+                ContentType: contentType
+              }));
+            }
+
+            uploaded++;
+            if (progressCallback) {
+              progressCallback({ message: `Uploaded ${uploaded}/${files.length}: ${relativePath}`, status: 'uploading' });
+            }
+          } catch (error) {
+            failed++;
+            logger.logError(`Failed to upload ${s3Key}`, error);
           }
-
-          uploaded++;
-          if (progressCallback) {
-            progressCallback({ message: `Uploaded ${uploaded}/${files.length}: ${relativePath}`, status: 'uploading' });
-          }
-        } catch (error) {
-          failed++;
-          logger.logError(`Failed to upload ${s3Key}`, error);
         }
+      } catch (outerError) {
+        // Mirror Pixfizz semantics: even an unexpected error mid-loop must not
+        // skip the manifest write — OH relies on it to know the folder is done.
+        failed = files.length - uploaded;
+        logger.logError(`amazon: unexpected error during upload loop for ${folderName} — falling through to manifest`, outerError);
+      }
+
+      // ── Manifest ──────────────────────────────────────────────────────────
+      // Mandatory for OH ingest. Always written, regardless of upload errors.
+      // Errors here are swallowed so they never affect the reported result.
+      try {
+        const { name: manifestName, buffer: manifestBuffer } =
+          this._buildManifestPayload(folderName, files, failed);
+        const manifestKey = `${s3Prefix}${folderName}/${manifestName}`;
+
+        await client.send(new PutObjectCommand({
+          Bucket:      credentials.bucketName,
+          Key:         manifestKey,
+          Body:        manifestBuffer,
+          ContentType: 'application/json'
+        }));
+
+        if (failed > 0) {
+          logger.logWarning(`amazon: manifest written with ${failed} error(s) for folder ${folderName} — lab must re-upload after deleting in OH`);
+        } else {
+          logger.info(`amazon: manifest uploaded — ${manifestName}`);
+        }
+      } catch (manifestError) {
+        logger.logError('amazon: failed to upload manifest', manifestError);
       }
 
       return { uploaded, failed, total: files.length };
@@ -424,6 +440,42 @@ class S3Service {
   }
 
   // ── Shared helpers ───────────────────────────────────────────────────────────
+
+  /**
+   * Build the per-folder JSON manifest that signals to OrderHub that an upload
+   * session has finished. Provider-agnostic — both the Pixfizz and Amazon paths
+   * call this and then upload the buffer with whatever transport they use.
+   *
+   * The manifest is mandatory for OH ingest of Film Scans and File Uploads:
+   * without it, OH never sees the folder as "done".
+   *
+   * @param {string}   folderName
+   * @param {string[]} files     - all files included in the upload (pre-filter)
+   * @param {number}   failed    - count of file-level failures
+   * @returns {{ name: string, buffer: Buffer }}
+   */
+  _buildManifestPayload(folderName, files, failed) {
+    const { app } = require('electron');
+    const tiffExts = new Set(['.tif', '.tiff']);
+    const jpegExts = new Set(['.jpg', '.jpeg']);
+    const tiffCount = files.filter(f => tiffExts.has(path.extname(f).toLowerCase())).length;
+    const jpgCount  = files.filter(f => jpegExts.has(path.extname(f).toLowerCase())).length;
+
+    const body = JSON.stringify({
+      folder:       folderName,
+      total_files:  files.length,
+      tiff_count:   tiffCount,
+      jpg_count:    jpgCount,
+      errors:       failed,
+      completed_at: new Date().toISOString(),
+      ohd_version:  app.getVersion()
+    });
+
+    return {
+      name:   `${folderName}.json`,
+      buffer: Buffer.from(body, 'utf8')
+    };
+  }
 
   _getAllFiles(dirPath) {
     const files = [];

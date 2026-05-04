@@ -7,8 +7,8 @@ const testApiBtn = document.getElementById('testApiBtn');
 const testFtpBtn = document.getElementById('testFtpBtn');
 const selectDirBtn = document.getElementById('selectDirBtn');
 const testS3Btn = document.getElementById('testS3Btn');
-const testReplicateBtn = document.getElementById('testReplicateBtn');
-const testTopazBtn     = document.getElementById('testTopazBtn');
+const testLocalBtn = document.getElementById('testLocalBtn');
+const testTopazBtn = document.getElementById('testTopazBtn');
 const selectFilmScansWatchBtn = document.getElementById('selectFilmScansWatchBtn');
 const selectFilmScansStorageBtn = document.getElementById('selectFilmScansStorageBtn');
 const selectFileUploadsWatchBtn = document.getElementById('selectFileUploadsWatchBtn');
@@ -37,28 +37,125 @@ let currentDateRange = 30; // days back to show; 0 = all time
 let cachedControllers = []; // For process mapping controller dropdowns
 let downloadDirectory = ''; // Kept in sync with saved config — used to compute jobPath for Job Review
 
-// AI Quality Gate (v1.2.0) — populated by refreshAiQualityHeldJobs().
-// Map<jobIdString, { failedImages, totalImages }>. Empty when feature is OFF.
+// AI Quality Gate (v1.2.0) — populated by refreshAiQualityJobState().
+// Two views over the same IPC response:
+//   - aiQualityHeldByJobId: jobs with unfixed sub-threshold images
+//     (`failedImages > 0`). Drives the red flag-quality badge in the
+//     Jobs grid and the click-to-release flow.
+//   - aiQualityScoringStatusByJobId: phase per job ('scoring' | 'scored').
+//     Drives the action-button gating (Process/Assign/Dismiss disabled
+//     while AI Quality is still scoring; re-enabled when phase='scored').
+// Both maps are empty when the feature is OFF or the IPC isn't available.
 let aiQualityHeldByJobId = new Map();
+let aiQualityScoringStatusByJobId = new Map();
+// Cached at refresh time so isPendingAIQuality can short-circuit cheaply
+// without an IPC roundtrip per row.
+let aiQualityEnabledCached = false;
+// Mode cached at refresh time. 'warn' = scoring runs and the badge is
+// informational only; jobs dispatch even with failed images. 'block' =
+// failed images actually hold the job, so the Release button is meaningful.
+// Drives the Release-button gate in the FLAGS column — in 'warn' mode there
+// is nothing to release and showing the button confuses operators.
+let aiQualityModeCached = 'warn';
 
-async function refreshAiQualityHeldJobs() {
+async function refreshAiQualityJobState() {
   try {
     if (!window.electronAPI || !window.electronAPI.aiQualityListHeldJobs) {
       aiQualityHeldByJobId = new Map();
+      aiQualityScoringStatusByJobId = new Map();
+      aiQualityEnabledCached = false;
       return;
     }
+    // Read the feature flag and mode at refresh time — operators can flip
+    // them via the Settings panel without a restart, and we want both the
+    // pending-scoring gate AND the Release-button gate to respond to that
+    // without a stale-cache window.
+    try {
+      const cfg = await window.electronAPI.getConfig();
+      aiQualityEnabledCached = !!(cfg && cfg.aiQualityEnabled);
+      aiQualityModeCached    = (cfg && cfg.aiQualityMode === 'block') ? 'block' : 'warn';
+    } catch (_) {
+      aiQualityEnabledCached = false;
+      aiQualityModeCached    = 'warn';
+    }
+
     const list = await window.electronAPI.aiQualityListHeldJobs();
-    const next = new Map();
+    const heldNext = new Map();
+    const statusNext = new Map();
     (list || []).forEach((row) => {
-      next.set(String(row.jobId), {
-        failedImages: row.failedImages,
+      const key = String(row.jobId);
+      statusNext.set(key, {
+        phase: row.phase,
+        scoredCount: row.scoredCount,
         totalImages: row.totalImages,
+        failedCount: row.failedImages,
       });
+      if (row.failedImages > 0) {
+        heldNext.set(key, {
+          failedImages: row.failedImages,
+          totalImages: row.totalImages,
+        });
+      }
     });
-    aiQualityHeldByJobId = next;
+    aiQualityHeldByJobId = heldNext;
+    aiQualityScoringStatusByJobId = statusNext;
   } catch (err) {
-    console.error('[ai-quality] refresh held-jobs failed', err);
+    console.error('[ai-quality] refresh job state failed', err);
   }
+}
+
+// Backwards-compatible alias — older call sites referenced the held-only
+// refresh by name. The new implementation populates both maps in one
+// IPC roundtrip.
+const refreshAiQualityHeldJobs = refreshAiQualityJobState;
+
+/**
+ * Returns true when AI Quality is enabled AND the given job is in a
+ * status where scoring is still in scope AND scoring hasn't completed.
+ * Used to gate Process/Assign/Dismiss buttons in the Jobs grid.
+ *
+ *   - Feature flag OFF → always false (preserves current behaviour)
+ *   - Status not received/pending → false (scoring already happened or
+ *     job is past the gate's scope)
+ *   - No scoring entry yet (files not local, sidecar not built) → true
+ *   - Entry says phase='scoring' → true (partial / no images scored yet)
+ *   - Entry says phase='scored' → false (all images have a verdict;
+ *     held-state may still be true via a separate map but the gate is done)
+ */
+function isPendingAIQuality(job) {
+  if (!aiQualityEnabledCached) return false;
+  if (job._status !== 'received' && job._status !== 'pending') return false;
+  const status = aiQualityScoringStatusByJobId.get(String(job.id));
+  if (!status) return true;
+  return status.phase === 'scoring';
+}
+
+/**
+ * Stricter sibling of isPendingAIQuality used to gate the Dismiss button.
+ *
+ * Returns true ONLY when scoring is actively in flight — i.e. a sidecar
+ * entry exists and its phase is still 'scoring'. The "no entry yet"
+ * branch (files not local, sidecar not built) returns false here, unlike
+ * the conservative isPendingAIQuality.
+ *
+ * Why split the two:
+ *   - Process / Assign downstream-act on a job and must wait for scoring
+ *     to confirm a verdict — they stay on isPendingAIQuality.
+ *   - Dismiss is config-only (store:dismissJob just appends the jobId to
+ *     a list — no file or sidecar mutation). The original gate comment
+ *     said "dismissing mid-scoring would orphan a sidecar mid-update";
+ *     that risk only applies when there IS a sidecar mid-update. POS
+ *     orders that arrive in 'pending' status with no artwork never
+ *     produce a sidecar at all, so there is nothing to orphan and the
+ *     operator must be able to remove the row when the artwork is never
+ *     going to come (walk-in customer abandoned the order, etc.).
+ */
+function isAiQualityScoringInProgress(job) {
+  if (!aiQualityEnabledCached) return false;
+  if (job._status !== 'received' && job._status !== 'pending') return false;
+  const status = aiQualityScoringStatusByJobId.get(String(job.id));
+  if (!status) return false;
+  return status.phase === 'scoring';
 }
 
 // DPOF output-status cache: jobId (string) → { prefix, folderName, folderPath }
@@ -89,6 +186,45 @@ async function resolveRoutesForReceivedJobs(jobs) {
 }
 
 // ══════════════════════════════════════
+// Tab visibility (mode-driven)
+// ══════════════════════════════════════
+//
+// Jobs and Film Review are only relevant when their underlying mode is
+// enabled in Settings. A site-PC running purely as a film-scan uploader
+// (pollingEnabled: false, filmScansEnabled: true) shouldn't see a Jobs
+// tab at all — and conversely an order-handling PC with filmScansEnabled
+// off shouldn't see Film Review. Settings and Activity Log are always
+// visible (Settings because the operator needs it to enable the modes
+// in the first place, Activity Log because it's a passive read-only view).
+//
+// Triggered on:
+//   - App startup, immediately after getConfig() resolves
+//   - Settings save (saveConfig handler), so toggles take effect without restart
+//
+// If the active tab gets hidden by a config change, focus is moved to
+// the first visible tab so the user isn't left staring at nothing.
+function updateTabVisibility(config) {
+  const showJobs = !!(config && config.pollingEnabled);
+  const showFilm = !!(config && config.filmScansEnabled);
+
+  const jobsTab = document.querySelector('.tab-bar .tab[data-tab="jobs"]');
+  const filmTab = document.querySelector('.tab-bar .tab[data-tab="film"]');
+  if (jobsTab) jobsTab.style.display = showJobs ? '' : 'none';
+  if (filmTab) filmTab.style.display = showFilm ? '' : 'none';
+
+  // If the currently-active tab is now hidden, switch to the first
+  // visible tab. Programmatic .click() reuses the existing tab handler,
+  // which keeps panel-switching, settings-load side-effects, etc. all in
+  // one place — no need to duplicate that logic here.
+  const activeTab = document.querySelector('.tab-bar .tab.active');
+  if (activeTab && activeTab.style.display === 'none') {
+    const firstVisible = Array.from(document.querySelectorAll('.tab-bar .tab'))
+      .find(t => t.style.display !== 'none');
+    if (firstVisible) firstVisible.click();
+  }
+}
+
+// ══════════════════════════════════════
 // Tab switching (main tabs)
 // ══════════════════════════════════════
 document.querySelectorAll('.tab-bar .tab').forEach(tab => {
@@ -116,9 +252,45 @@ document.querySelectorAll('.settings-subtab').forEach(tab => {
 });
 
 // ══════════════════════════════════════
+// Modal dismiss wiring (.pm-modal-overlay)
+// ══════════════════════════════════════
+// Wires up backdrop-click, × button, and Escape-key dismiss for every
+// modal that uses the .pm-modal-overlay / .pm-modal pattern. The existing
+// Cancel/Save button click handlers (e.g. ocCancelBtn, ocSaveBtn) are
+// untouched — those add explicit `.hidden` themselves and continue to
+// work alongside this helper.
+function wirePmModalDismiss() {
+  document.querySelectorAll('.pm-modal-overlay').forEach((overlay) => {
+    // Backdrop click — only when the overlay itself was the target, not a
+    // descendant inside .pm-modal. event.target check is the standard guard.
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) overlay.classList.add('hidden');
+    });
+
+    // × close button (added in HTML alongside each <h3>).
+    const closeBtn = overlay.querySelector('.pm-modal-close');
+    if (closeBtn) {
+      closeBtn.addEventListener('click', () => {
+        overlay.classList.add('hidden');
+      });
+    }
+  });
+
+  // Escape key — close any currently-visible pm-modal.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    document
+      .querySelectorAll('.pm-modal-overlay:not(.hidden)')
+      .forEach((m) => m.classList.add('hidden'));
+  });
+}
+
+// ══════════════════════════════════════
 // Startup
 // ══════════════════════════════════════
 window.addEventListener('DOMContentLoaded', async () => {
+  wirePmModalDismiss();
+
   // ── App version display ──
   try {
     const { version, updateReady } = await window.electronAPI.getAppVersion();
@@ -146,6 +318,27 @@ window.addEventListener('DOMContentLoaded', async () => {
   try {
     const config = await window.electronAPI.getConfig();
     populateForm(config);
+    // Set tab visibility based on which modes are enabled — runs after
+    // the config is in hand so the first paint already reflects the
+    // operator's deployment shape (Jobs vs Film Review vs both).
+    updateTabVisibility(config);
+    // One-time toast on first launch after the Replicate→local migration.
+    // The flag is set by config-service._migrateReplicateProvider() and
+    // cleared via clearReplicateMigrationToast on the main side once we
+    // acknowledge here, so subsequent launches stay quiet.
+    if (config && config._migratedFromReplicate) {
+      showToast(
+        "Replicate has been removed in this release. You're now using Pixfizz AI Enhancement (local). " +
+        "Topaz remains available if your Topaz API key is configured.",
+        'info',
+        12000,
+      );
+      try {
+        if (typeof window.electronAPI.clearReplicateMigrationToast === 'function') {
+          await window.electronAPI.clearReplicateMigrationToast();
+        }
+      } catch (e) { /* non-fatal — worst case the toast shows once more */ }
+    }
   } catch (error) {
     showStatus('Error loading configuration: ' + error.message, 'error');
   }
@@ -168,6 +361,45 @@ window.addEventListener('DOMContentLoaded', async () => {
 // ── Window controls ──
 document.getElementById('minimiseBtn').addEventListener('click', () => window.electronAPI.minimiseWindow());
 document.getElementById('closeBtn').addEventListener('click', () => window.electronAPI.closeWindow());
+
+// ── Theme toggle ──
+// Single source of truth for light/dark across the app. The class lives on
+// <body> so every panel — Job Review (.jr-root), Film Review (.film-review-panel),
+// and the legacy renderer.js UI — picks up the same --app-* token overrides
+// from styles.css.
+//
+// Persistence:
+//   read once on startup via electronAPI.appGetTheme(), then write through
+//   electronAPI.appSetTheme(value) on each click. Failures fall back silently
+//   to whatever the body class currently is.
+(async () => {
+  const themeBtn = document.getElementById('themeToggleBtn');
+  if (!themeBtn) return;
+
+  function applyTheme(theme) {
+    if (theme === 'dark') document.body.classList.add('app-theme-dark');
+    else                  document.body.classList.remove('app-theme-dark');
+  }
+
+  // Initial paint — read persisted value before first frame (preload guarantees
+  // electronAPI is available synchronously, so we just await the IPC).
+  try {
+    const saved = await window.electronAPI.appGetTheme();
+    applyTheme(saved === 'dark' ? 'dark' : 'light');
+  } catch (err) {
+    console.warn('[theme] failed to load saved theme — defaulting to light', err);
+  }
+
+  themeBtn.addEventListener('click', async () => {
+    const isDark = document.body.classList.contains('app-theme-dark');
+    const next   = isDark ? 'light' : 'dark';
+    applyTheme(next);
+    try { await window.electronAPI.appSetTheme(next); }
+    catch (err) {
+      console.warn('[theme] persist failed — local class still applied', err);
+    }
+  });
+})();
 
 // Maximise / restore — SVG icons drawn inline so they scale cleanly with currentColor.
 const _SVG_MAXIMISE = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10"><rect x="0.75" y="0.75" width="8.5" height="8.5" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>';
@@ -509,46 +741,88 @@ function renderJobTable(jobs) {
     const jobFolderPath = downloadDirectory && jobFolderName
       ? `${downloadDirectory}\\${jobFolderName}\\${sidecarJobId}`
       : '';
+    // AI Quality Gate (v1.2.0) — when scoring is still pending for this job,
+    // dispatch-related buttons (Process / Assign / Dismiss / DPOF status
+    // actions) are rendered disabled with a tooltip. Review stays enabled
+    // throughout (operator can inspect the job, see "no images" or
+    // partially-scored state, while scoring continues). The feature-flag
+    // off case bypasses this entirely — see isPendingAIQuality.
+    const pendingAIQ = isPendingAIQuality(job);
+    const pendingAttrs = pendingAIQ
+      ? ' disabled class="btn-action pending" title="Pending AI Quality check"'
+      : '';
+    // Helper: take a button HTML snippet that uses the standard pattern
+    // class="btn-action btn-foo" data-job-id="..." and inject the disabled
+    // state without duplicating the class attribute.
+    function maybeDisable(btnHtml, extraClass = '') {
+      if (!pendingAIQ) return btnHtml;
+      // Replace the class="btn-action ..." with class="btn-action ... pending" + disabled.
+      const withClass = btnHtml.replace(
+        /class="btn-action ([^"]*)"/,
+        `class="btn-action $1 pending"`,
+      );
+      return withClass.replace(
+        /<button /,
+        '<button disabled title="Pending AI Quality check" ',
+      );
+    }
+
     // Review button shown alongside any downloaded job (received / in_production / completed).
+    // Review is NOT gated on AI Quality — operators can inspect a job whose
+    // scoring is still in progress.
     const reviewBtn = `<button class="btn-action btn-review" data-sidecar-job-id="${escapeHtml(sidecarJobId)}" data-job-path="${escapeHtml(jobFolderPath)}" data-oh-job-id="${escapeHtml(String(job.id))}">Review</button>`;
 
     let actionHtml = '';
     if (currentFilter === 'dismissed') {
+      // Restore is out of scope of the AI Quality gate (already-dismissed
+      // jobs are by definition past scoring).
       actionHtml = `<div class="actions-cell-wrap"><button class="btn-action btn-restore" data-job-id="${escapeHtml(String(job.id))}">Restore</button></div>`;
     } else if (outputStatus) {
-      // DPOF prefix-driven action buttons
-      actionHtml = getDpofOutputActionHtml(reviewBtn, String(job.id), outputStatus.prefix);
+      // DPOF prefix-driven action buttons. These are post-dispatch actions
+      // (resend, retry, mark-printed) — gate on pending AI Quality so an
+      // operator can't trigger a re-dispatch on a job that's mid-scoring.
+      const dpofHtml = getDpofOutputActionHtml(reviewBtn, String(job.id), outputStatus.prefix);
+      actionHtml = pendingAIQ
+        ? dpofHtml.replace(/<button /g, '<button disabled title="Pending AI Quality check" ')
+                  .replace(/class="btn-action ([^"]*)"/g, 'class="btn-action $1 pending"')
+        : dpofHtml;
     } else if (job._status === 'completed') {
+      // Already-completed jobs are past scoring — no gate needed.
       actionHtml = `${reviewBtn}<button class="btn-action btn-printed" disabled>Processed</button>`;
     } else if (job._status === 'in_production') {
+      // Job already dispatched — review-only, no gate.
       actionHtml = reviewBtn;
     } else if (job._status === 'received') {
       const route = jobRouteCache.get(String(job.id));
       if (route && route.type === 'unrouted') {
         if (route.reason === 'no-channel') {
           // Controller is assigned but no channel mapping yet — show Assign button
-          actionHtml = `${reviewBtn}<button class="btn-action btn-assign-channel" data-job-id="${escapeHtml(String(job.id))}">Assign</button>`;
+          const assignBtn = `<button class="btn-action btn-assign-channel" data-job-id="${escapeHtml(String(job.id))}">Assign</button>`;
+          actionHtml = `${reviewBtn}${maybeDisable(assignBtn)}`;
         } else {
           // No controller AND no default folder configured
           actionHtml = `${reviewBtn}<span class="route-unassigned-msg">No default folder — configure in Settings → Process Folders</span>`;
         }
       } else {
         // Routed (controller / default-folder / process-folder) or not yet resolved — normal Send to Print
-        actionHtml = `${reviewBtn}<button class="btn-action btn-send-print" data-job-id="${escapeHtml(String(job.id))}">Process</button>`;
+        const processBtn = `<button class="btn-action btn-send-print" data-job-id="${escapeHtml(String(job.id))}">Process</button>`;
+        actionHtml = `${reviewBtn}${maybeDisable(processBtn)}`;
       }
     } else if (job._status === 'pending') {
       const route = jobRouteCache.get(String(job.id));
       if (route && route.type === 'unrouted') {
         if (route.reason === 'no-channel') {
           // Controller assigned but no channel mapping yet — show Assign
-          actionHtml = `${reviewBtn}<button class="btn-action btn-assign-channel" data-job-id="${escapeHtml(String(job.id))}">Assign</button>`;
+          const assignBtn = `<button class="btn-action btn-assign-channel" data-job-id="${escapeHtml(String(job.id))}">Assign</button>`;
+          actionHtml = `${reviewBtn}${maybeDisable(assignBtn)}`;
         } else {
           // No controller AND no default folder configured
           actionHtml = `${reviewBtn}<span class="route-unassigned-msg">No default folder — configure in Settings → Process Folders</span>`;
         }
       } else if (route && route.type !== 'unrouted') {
         // Valid route — show Review + Send to Print (same as received)
-        actionHtml = `${reviewBtn}<button class="btn-action btn-send-print" data-job-id="${escapeHtml(String(job.id))}">Process</button>`;
+        const processBtn = `<button class="btn-action btn-send-print" data-job-id="${escapeHtml(String(job.id))}">Process</button>`;
+        actionHtml = `${reviewBtn}${maybeDisable(processBtn)}`;
       } else {
         actionHtml = '<span style="color:#a0aec0;font-size:11px">--</span>';
       }
@@ -559,9 +833,30 @@ function renderJobTable(jobs) {
       actionHtml = '<span style="color:#a0aec0;font-size:11px">--</span>';
     }
 
-    // Wrap with dismiss button for non-dismissed tabs
+    // Wrap with dismiss button for non-dismissed tabs. Dismiss is gated
+    // ONLY on actively-in-progress scoring (isAiQualityScoringInProgress),
+    // not on the broader isPendingAIQuality. The narrower gate keeps the
+    // original "don't orphan a sidecar mid-update" safety while letting
+    // operators remove jobs that will never have a sidecar — most
+    // commonly POS / walk-in orders that come in as 'pending' and never
+    // receive artwork. With the broader gate those rows were stuck in
+    // the grid permanently.
     if (currentFilter !== 'dismissed') {
-      actionHtml = `<div class="actions-cell-wrap">${actionHtml}<button class="btn-dismiss" data-job-id="${escapeHtml(String(job.id))}" title="Hide this job from the list">Dismiss</button></div>`;
+      const scoringInFlight = isAiQualityScoringInProgress(job);
+      const dismissBtnAttrs = scoringInFlight
+        ? ' disabled class="btn-dismiss pending" title="Pending AI Quality check"'
+        : ' class="btn-dismiss" title="Hide this job from the list"';
+      actionHtml = `<div class="actions-cell-wrap">${actionHtml}<button${dismissBtnAttrs} data-job-id="${escapeHtml(String(job.id))}">Dismiss</button></div>`;
+    }
+
+    // Surface the AI-Quality-scoring state explicitly. The buttons above
+    // already get .pending styling from the same flag, but a greyed-out
+    // button doesn't tell the operator *why* it's inactive — this caption
+    // makes the wait visible. Stacked outside .actions-cell-wrap so it
+    // sits beneath the buttons via normal block flow + the TD's
+    // vertical-align: middle.
+    if (pendingAIQ) {
+      actionHtml += `<div class="ai-q-indicator" title="AI Quality scoring in progress">AI scoring…</div>`;
     }
 
     const jobNo = formatJobNo(job);
@@ -576,23 +871,43 @@ function renderJobTable(jobs) {
     }
     const heldQuality = aiQualityHeldByJobId.get(String(job.id));
     if (heldQuality) {
-      const tip = `AI Quality: ${heldQuality.failedImages}/${heldQuality.totalImages} images failed — click to release`;
-      flagsHtml += `<span class="flag-icon flag-quality" title="${escapeHtml(tip)}" data-quality-job="${escapeHtml(String(job.id))}" style="cursor:pointer;color:#dc2626;font-weight:600;">&#9888; ${heldQuality.failedImages}/${heldQuality.totalImages}</span>`;
-    }
-
-    // DPI indicator cell
-    let dpiHtml = '<span class="dpi-badge dpi-unknown" title="DPI not checked">–</span>';
-    if (job._dpiStatus) {
-      const dpiLabels = { excellent: '✅', good: '✅', warning: '⚠️', poor: '❌' };
-      const dpiTitles = {
-        excellent: `Excellent DPI (${job._dpiMin || ''}+)`,
-        good: `Good DPI`,
-        warning: `Warning: low DPI`,
-        poor: `Poor DPI — manual approval required`
-      };
-      const icon = dpiLabels[job._dpiStatus] || '–';
-      const title = dpiTitles[job._dpiStatus] || job._dpiStatus;
-      dpiHtml = `<span class="dpi-badge dpi-${escapeHtml(job._dpiStatus)}" title="${escapeHtml(title)}">${icon}</span>`;
+      // Two-part badge: a non-interactive count on top, an explicit Release
+      // button below. Earlier UX was an icon-only badge with a "click to
+      // release" tooltip — operators new to the AI Quality Gate were
+      // missing that affordance and getting stuck on the toast that says
+      // "release via the Quality flag in the Jobs grid". The button keeps
+      // the existing click handler (still binds to `.flag-quality
+      // [data-quality-job]`) but makes the action discoverable at a
+      // glance.
+      //
+      // For jobs no longer in the autoprint pool (printed, dismissed, etc.)
+      // the badge is rendered in a muted style and the Release button is
+      // suppressed — the action doesn't apply once the job is through, but
+      // the count stays visible as historical record of "X images failed
+      // AI Quality at processing time".
+      const isLive = job._status === 'received' || job._status === 'pending';
+      // Release is only meaningful in block mode. In warn mode the
+      // orchestrator returns held=false even with failed images, so the
+      // job dispatches normally — there is nothing held and nothing to
+      // release. Showing the button there leaves operators clicking it,
+      // hitting the confirm dialog, and ending up in the same state they
+      // could already reach by just clicking Process. Suppress in warn.
+      const isHoldingMode = aiQualityModeCached === 'block';
+      const liveTip = isHoldingMode
+        ? `${heldQuality.failedImages}/${heldQuality.totalImages} images failed AI Quality scoring — job held, click Release to dispatch`
+        : `${heldQuality.failedImages}/${heldQuality.totalImages} images flagged by AI Quality (warn mode — job will dispatch normally)`;
+      const histTip = `${heldQuality.failedImages}/${heldQuality.totalImages} images flagged by AI Quality at processing time`;
+      const tip = isLive ? liveTip : histTip;
+      const stackClass = isLive ? 'flag-quality-stack' : 'flag-quality-stack flag-quality-stack--muted';
+      const countClass = isLive ? 'flag-quality-count' : 'flag-quality-count flag-quality-count--muted';
+      const releaseBtn = (isLive && isHoldingMode)
+        ? `<button type="button" class="flag-quality flag-quality-release" data-quality-job="${escapeHtml(String(job.id))}" title="Release the AI Quality hold and allow this job to print as-is">Release</button>`
+        : '';
+      flagsHtml +=
+        `<span class="${stackClass}">` +
+          `<span class="${countClass}" title="${escapeHtml(tip)}">&#9888; ${heldQuality.failedImages}/${heldQuality.totalImages}</span>` +
+          releaseBtn +
+        `</span>`;
     }
 
     tr.innerHTML = `
@@ -600,7 +915,6 @@ function renderJobTable(jobs) {
       <td>${previewHtml}</td>
       <td>${escapeHtml(job.process || '--')}</td>
       <td>${escapeHtml(job.category || '--')}</td>
-      <td class="flags-cell dpi-cell">${dpiHtml}</td>
       <td class="flags-cell">${flagsHtml || ''}</td>
       <td><span class="job-no" data-copy="${escapeHtml(jobNo)}" title="Click to copy">${escapeHtml(jobNo)}</span>${job.customer_name ? `<br><span class="customer-name">${escapeHtml(job.customer_name)}</span>` : ''}${job.created_at ? `<br><span class="ordered-date">${formatDueDate(job.created_at, job.date_format)}</span>` : ''}</td>
       <td>${escapeHtml(job.product || '--')}</td>
@@ -648,40 +962,13 @@ function renderJobTable(jobs) {
     });
   });
 
-  // Attach Send to Print handlers (with DPI validation intercept)
+  // Attach Send to Print handlers
   document.querySelectorAll('.btn-send-print[data-job-id]').forEach(btn => {
     btn.addEventListener('click', async () => {
       const jobId = btn.dataset.jobId;
       btn.disabled = true;
 
       try {
-        // Step 1: DPI validation
-        btn.textContent = 'Checking DPI...';
-        const dpiResult = await window.electronAPI.validateJobDpi(jobId);
-
-        if (dpiResult.success && !dpiResult.disabled) {
-          // Update the DPI badge in the row immediately
-          const dpiCell = btn.closest('tr') && btn.closest('tr').querySelector('.dpi-cell');
-          if (dpiCell && dpiResult.overallStatus) {
-            const icons = { excellent: '✅', good: '✅', warning: '⚠️', poor: '❌' };
-            dpiCell.innerHTML = `<span class="dpi-badge dpi-${escapeHtml(dpiResult.overallStatus)}" title="${escapeHtml(dpiResult.overallStatus)}">${icons[dpiResult.overallStatus] || '–'}</span>`;
-          }
-
-          if (!dpiResult.canAutoSubmit) {
-            // Show the DPI warning modal — user must confirm
-            btn.textContent = 'Process';
-            const proceed = await showDpiModal(dpiResult);
-            if (!proceed) {
-              btn.disabled = false;
-              return;
-            }
-            // User approved — mark as manually approved
-            await window.electronAPI.approveDpiJob(jobId);
-            btn.disabled = true;
-          }
-        }
-
-        // Step 2: Actually send to print
         btn.textContent = 'Sending...';
         const result = await window.electronAPI.sendToPrint(jobId);
 
@@ -1111,20 +1398,20 @@ function openAssignModal(job, route) {
           }
         }
 
-        // 2. Store per-job size/media overrides in the job record
+        // 2. Store per-job size/media overrides in the job record. The
+        //    `assignDarkroomSizeMedia` IPC handler fires runAutoPrint() at
+        //    its tail (mirrors saveChannelMapping for DPOF) so dispatch
+        //    happens through the auto-print loop's `ctrl.autoprint` gate
+        //    rather than via a direct sendToPrint call here. With autoprint
+        //    OFF the job is left in routable-but-pending state for manual
+        //    Process action — see docs/orderhub/bugfixes.md.
         const assignResult = await window.electronAPI.assignDarkroomSizeMedia(jobId, sizeValue, mediaValue);
         if (assignResult && assignResult.success === false) {
           throw new Error(assignResult.error || 'Failed to store assignment');
         }
 
-        // 3. Dispatch the job immediately
-        const printResult = await window.electronAPI.sendToPrint(jobId);
-        if (printResult && printResult.success === false) {
-          throw new Error(printResult.error || 'Dispatch failed');
-        }
-
         modal.classList.add('hidden');
-        showToast('Darkroom Pro job sent to output folder', 'success');
+        showToast('Darkroom Pro assignment saved', 'success');
         await resolveRoutesForReceivedJobs(allJobs);
         renderJobTable(getFilteredJobs());
       } catch (err) {
@@ -1361,9 +1648,12 @@ function populateForm(config) {
   const aiQEnabled = document.getElementById('aiQualityEnabled');
   const aiQThreshold = document.getElementById('aiQualityThreshold');
   const aiQDebug = document.getElementById('aiQualityDebugLog');
+  const aiQHoldAutoPrint = document.getElementById('aiQualityHoldAutoPrint');
   if (aiQEnabled)   aiQEnabled.checked   = !!config.aiQualityEnabled;
-  if (aiQThreshold) aiQThreshold.value   = config.aiQualityThreshold || 75;
+  if (aiQThreshold) aiQThreshold.value   = config.aiQualityThreshold || 50;
   if (aiQDebug)     aiQDebug.checked     = !!config.aiQualityDebugLog;
+  if (aiQHoldAutoPrint) aiQHoldAutoPrint.checked = config.aiQualityMode === 'block';
+  updateAiQualityEnableState();
 
   // File Uploads
   document.getElementById('fileUploadsEnabled').checked = config.fileUploadsEnabled || false;
@@ -1378,23 +1668,18 @@ function populateForm(config) {
   // Process folder
   document.getElementById('processFolderPath').value = config.processFolderPath || '';
 
-  // DPI Validation
-  document.getElementById('dpiValidationEnabled').checked = config.dpiValidationEnabled !== false;
-  document.getElementById('dpiExcellentThreshold').value = config.dpiExcellentThreshold || 300;
-  document.getElementById('dpiWarningThreshold').value = config.dpiWarningThreshold || 275;
-  document.getElementById('dpiWarningAllowAutoSubmit').checked = config.dpiWarningAllowAutoSubmit !== false;
-  document.getElementById('dpiPoorThreshold').value = config.dpiPoorThreshold || 200;
-  document.getElementById('dpiPoorAllowAutoSubmit').checked = config.dpiPoorAllowAutoSubmit || false;
-  toggleDpiValidationFields();
 
   // AI Enhancement
-  document.getElementById('enhancementProvider').value = config.enhancementProvider || 'replicate';
-  document.getElementById('replicateApiKey').value = config.replicateApiKey || '';
-  document.getElementById('enhancementDefaultModel').value = config.enhancementDefaultModel || 'Standard V2';
+  document.getElementById('enhancementProvider').value = config.enhancementProvider || 'local';
   document.getElementById('topazApiKey').value = config.topazApiKey || '';
   document.getElementById('topazDefaultModel').value = config.topazDefaultModel || 'Standard V2';
   document.getElementById('enhancementFaceEnhancement').checked = config.enhancementFaceEnhancement || false;
   document.getElementById('enhancementAutoEnhance').checked = config.enhancementAutoEnhance || false;
+  // Pixfizz AI Enhancement advanced fields — defaults match plan §0.10.
+  document.getElementById('enhancementLocalTileSize').value =
+    Number.isFinite(config.enhancementLocalTileSize) ? config.enhancementLocalTileSize : 256;
+  document.getElementById('enhancementLocalTileOverlap').value =
+    Number.isFinite(config.enhancementLocalTileOverlap) ? config.enhancementLocalTileOverlap : 16;
   updateEnhancementProviderSections();
 
   // Update enable states based on folders
@@ -1441,8 +1726,9 @@ function getFormData() {
     })(),
     // AI Quality Gate (v1.2.0)
     aiQualityEnabled:    document.getElementById('aiQualityEnabled')?.checked || false,
-    aiQualityThreshold:  parseInt(document.getElementById('aiQualityThreshold')?.value, 10) || 75,
+    aiQualityThreshold:  parseInt(document.getElementById('aiQualityThreshold')?.value, 10) || 50,
     aiQualityDebugLog:   document.getElementById('aiQualityDebugLog')?.checked || false,
+    aiQualityMode:       document.getElementById('aiQualityHoldAutoPrint')?.checked ? 'block' : 'warn',
     // File Uploads
     fileUploadsEnabled: document.getElementById('fileUploadsEnabled').checked,
     fileUploadsWatchFolder: document.getElementById('fileUploadsWatchFolder').value.trim(),
@@ -1453,21 +1739,14 @@ function getFormData() {
     pollingInterval: parseInt(document.getElementById('pollingInterval').value, 10) || 60,
     // Process folder
     processFolderPath: document.getElementById('processFolderPath').value.trim(),
-    // DPI Validation
-    dpiValidationEnabled: document.getElementById('dpiValidationEnabled').checked,
-    dpiExcellentThreshold: parseInt(document.getElementById('dpiExcellentThreshold').value, 10) || 300,
-    dpiWarningThreshold: parseInt(document.getElementById('dpiWarningThreshold').value, 10) || 275,
-    dpiWarningAllowAutoSubmit: document.getElementById('dpiWarningAllowAutoSubmit').checked,
-    dpiPoorThreshold: parseInt(document.getElementById('dpiPoorThreshold').value, 10) || 200,
-    dpiPoorAllowAutoSubmit: document.getElementById('dpiPoorAllowAutoSubmit').checked,
     // AI Enhancement
     enhancementProvider: document.getElementById('enhancementProvider').value,
-    replicateApiKey: document.getElementById('replicateApiKey').value,
-    enhancementDefaultModel: document.getElementById('enhancementDefaultModel').value,
     topazApiKey: document.getElementById('topazApiKey').value,
     topazDefaultModel: document.getElementById('topazDefaultModel').value,
     enhancementFaceEnhancement: document.getElementById('enhancementFaceEnhancement').checked,
     enhancementAutoEnhance: document.getElementById('enhancementAutoEnhance').checked,
+    enhancementLocalTileSize: parseInt(document.getElementById('enhancementLocalTileSize').value, 10) || 256,
+    enhancementLocalTileOverlap: parseInt(document.getElementById('enhancementLocalTileOverlap').value, 10) || 16,
   };
 }
 
@@ -1494,76 +1773,6 @@ function showToast(message, type = 'info', duration = 6000) {
     toastNotification.className = 'toast-notification hidden';
     toastTimer = null;
   }, duration);
-}
-
-// ══════════════════════════════════════
-// DPI VALIDATION MODAL
-// ══════════════════════════════════════
-
-/**
- * Show the DPI warning modal.
- * Returns a Promise<boolean> — true = "Send Anyway", false = "Cancel".
- */
-function showDpiModal(dpiResult) {
-  return new Promise((resolve) => {
-    const modal = document.getElementById('dpiModal');
-    const title = document.getElementById('dpiModalTitle');
-    const summary = document.getElementById('dpiModalSummary');
-    const tbody = document.getElementById('dpiModalTableBody');
-    const cancelBtn = document.getElementById('dpiModalCancel');
-    const sendBtn = document.getElementById('dpiModalSendAnyway');
-    const icon = document.getElementById('dpiModalIcon');
-
-    // Set title and summary based on overall status
-    const isPoor = dpiResult.overallStatus === 'poor';
-    icon.textContent = isPoor ? '❌' : '⚠️';
-    title.textContent = isPoor ? 'Poor Image Quality Detected' : 'Low DPI Warning';
-    summary.textContent = isPoor
-      ? 'One or more images have poor resolution and may print with visible pixelation. Manual approval is required to proceed.'
-      : 'One or more images are below the recommended DPI. You can still send this job, but print quality may be reduced.';
-
-    sendBtn.textContent = isPoor ? 'Approve & Send' : 'Send Anyway';
-    sendBtn.className = isPoor ? 'btn-danger' : 'btn-warning';
-
-    // Build table
-    tbody.innerHTML = '';
-    const images = dpiResult.images || [];
-    for (const img of images) {
-      const statusEmoji = { excellent: '✅', good: '✅', warning: '⚠️', poor: '❌' };
-      const tr = document.createElement('tr');
-      tr.className = `dpi-row-${img.status || 'unknown'}`;
-      tr.innerHTML = `
-        <td class="dpi-filename">${escapeHtml(img.filename ? img.filename.split(/[\\/]/).pop() : '--')}</td>
-        <td>${img.imageWidth && img.imageHeight ? `${img.imageWidth}×${img.imageHeight}` : '--'}</td>
-        <td>${escapeHtml(img.printSize || '--')}</td>
-        <td class="dpi-value">${img.actualDPI !== null && img.actualDPI !== undefined ? img.actualDPI : '--'}</td>
-        <td>${statusEmoji[img.status] || '–'} ${escapeHtml(img.status || '--')}</td>
-        <td class="dpi-recommendation">${escapeHtml(img.recommendation || '')}</td>
-      `;
-      tbody.appendChild(tr);
-    }
-
-    // Show modal
-    modal.classList.remove('hidden');
-
-    // Wire buttons (one-time handlers to avoid stacking)
-    function cleanup() {
-      modal.classList.add('hidden');
-      cancelBtn.removeEventListener('click', onCancel);
-      sendBtn.removeEventListener('click', onSend);
-      modal.removeEventListener('click', onOverlayClick);
-    }
-
-    function onCancel() { cleanup(); resolve(false); }
-    function onSend()   { cleanup(); resolve(true);  }
-    function onOverlayClick(e) {
-      if (e.target === modal) { cleanup(); resolve(false); }
-    }
-
-    cancelBtn.addEventListener('click', onCancel);
-    sendBtn.addEventListener('click', onSend);
-    modal.addEventListener('click', onOverlayClick);
-  });
 }
 
 // Save configuration
@@ -1643,6 +1852,10 @@ form.addEventListener('submit', async (e) => {
     downloadDirectory = config.downloadDirectory || '';
     // Default folder change may unblock previously-warning jobs — re-evaluate immediately
     resolveRoutesForReceivedJobs(allJobs).then(() => renderJobTable(getFilteredJobs()));
+    // Re-evaluate tab visibility — toggling pollingEnabled or filmScansEnabled
+    // in Settings should immediately add/remove the corresponding tab without
+    // requiring an app restart.
+    updateTabVisibility(config);
     showStatus('Settings saved successfully!', 'success');
   } catch (error) {
     showStatus('Error saving settings: ' + error.message, 'error');
@@ -1651,19 +1864,6 @@ form.addEventListener('submit', async (e) => {
     saveBtn.textContent = 'Save Settings';
   }
 });
-
-// ══════════════════════════════════════
-// SETTINGS: DPI Validation toggle
-// ══════════════════════════════════════
-
-function toggleDpiValidationFields() {
-  const enabled = document.getElementById('dpiValidationEnabled').checked;
-  const fields = document.getElementById('dpiValidationFields');
-  if (fields) fields.style.display = enabled ? '' : 'none';
-}
-
-document.getElementById('dpiValidationEnabled').addEventListener('change', toggleDpiValidationFields);
-
 
 // ══════════════════════════════════════
 // SETTINGS: Directory pickers
@@ -1718,6 +1918,11 @@ if (aiRotationCheckbox) {
   aiRotationCheckbox.addEventListener('change', updateFilmScanRotationEnableState);
 }
 
+const aiQualityEnabledCheckbox = document.getElementById('aiQualityEnabled');
+if (aiQualityEnabledCheckbox) {
+  aiQualityEnabledCheckbox.addEventListener('change', updateAiQualityEnableState);
+}
+
 /**
  * Enable/disable the Film Scans checkbox based on whether both folders are set.
  */
@@ -1751,6 +1956,13 @@ function updateFilmScanRotationEnableState() {
     const neverEl = document.getElementById('filmScanReviewMode_never');
     if (neverEl) neverEl.checked = true;
   }
+}
+
+function updateAiQualityEnableState() {
+  const enabledEl = document.getElementById('aiQualityEnabled');
+  const holdEl = document.getElementById('aiQualityHoldAutoPrint');
+  if (!enabledEl || !holdEl) return;
+  holdEl.disabled = !enabledEl.checked;
 }
 
 /**
@@ -1874,48 +2086,61 @@ testFtpBtn.addEventListener('click', async () => {
 
 // ── AI Enhancement — provider section toggle ──────────────────────────────────
 
+/**
+ * Show/hide provider-specific Settings sections based on the dropdown
+ * selection. Also hides the Topaz <option> entirely (not just disables it)
+ * when no Topaz API key is configured — Pixfizz AI Enhancement is the only
+ * choice on installs without a Topaz subscription.
+ */
 function updateEnhancementProviderSections() {
-  const provider = document.getElementById('enhancementProvider').value;
-  document.getElementById('replicateSection').style.display = (provider === 'replicate') ? '' : 'none';
-  document.getElementById('topazSection').style.display     = (provider === 'topaz')     ? '' : 'none';
+  const select = document.getElementById('enhancementProvider');
+  const topazOption = select.querySelector('option[value="topaz"]');
+  const topazKey = (document.getElementById('topazApiKey').value || '').trim();
+
+  if (topazOption) {
+    if (topazKey) {
+      topazOption.hidden = false;
+    } else {
+      topazOption.hidden = true;
+      // If Topaz is currently selected but no key is set, fall back to local
+      // so the user isn't stuck on a hidden option.
+      if (select.value === 'topaz') select.value = 'local';
+    }
+  }
+
+  const provider = select.value;
+  document.getElementById('localSection').style.display = (provider === 'local') ? '' : 'none';
+  document.getElementById('topazSection').style.display = (provider === 'topaz') ? '' : 'none';
 }
 
 document.getElementById('enhancementProvider').addEventListener('change', updateEnhancementProviderSections);
+// Re-run the visibility logic when the Topaz key field changes — if the
+// user pastes a key, the Topaz option should appear without a save.
+document.getElementById('topazApiKey').addEventListener('input', updateEnhancementProviderSections);
 
-// ── Replicate API key — show/hide toggle and test ─────────────────────────────
+// ── Pixfizz AI Enhancement — Test button ─────────────────────────────────────
+// Calls localClient.selfTest() via the existing enhancement:test IPC route.
+// The main-side handler special-cases provider === 'local' to dispatch to
+// selfTest (a real one-tile inference) instead of the API-key validator.
 
-document.getElementById('replicateApiKeyToggle').addEventListener('click', () => {
-  const input = document.getElementById('replicateApiKey');
-  const btn   = document.getElementById('replicateApiKeyToggle');
-  if (input.type === 'password') {
-    input.type      = 'text';
-    btn.textContent = 'Hide';
-  } else {
-    input.type      = 'password';
-    btn.textContent = 'Show';
-  }
-});
-
-testReplicateBtn.addEventListener('click', async () => {
-  const apiKey = document.getElementById('replicateApiKey').value.trim();
-  if (!apiKey) {
-    showTestStatus('replicateTestStatus', 'Please enter an API key first', 'error');
-    return;
-  }
+testLocalBtn.addEventListener('click', async () => {
   try {
-    testReplicateBtn.disabled    = true;
-    testReplicateBtn.textContent = 'Testing...';
-    const result = await window.electronAPI.enhancementTest({ apiKey, provider: 'replicate' });
+    testLocalBtn.disabled    = true;
+    testLocalBtn.textContent = 'Testing...';
+    showTestStatus('localTestStatus', 'Running model on a small test image…', 'info');
+    const result = await window.electronAPI.enhancementTest({ apiKey: '', provider: 'local' });
     if (result.valid) {
-      showTestStatus('replicateTestStatus', '✓ API key is valid', 'success');
+      const dur = result.durationMs ? ` in ${result.durationMs} ms` : '';
+      const ep  = result.executionProvider ? ` (${result.executionProvider.toUpperCase()})` : '';
+      showTestStatus('localTestStatus', `✓ Model loaded successfully${dur}${ep}`, 'success');
     } else {
-      showTestStatus('replicateTestStatus', 'Invalid: ' + (result.error || 'Unknown error'), 'error');
+      showTestStatus('localTestStatus', 'Failed: ' + (result.error || 'Unknown error'), 'error');
     }
   } catch (error) {
-    showTestStatus('replicateTestStatus', 'Error: ' + error.message, 'error');
+    showTestStatus('localTestStatus', 'Error: ' + error.message, 'error');
   } finally {
-    testReplicateBtn.disabled    = false;
-    testReplicateBtn.textContent = 'Test API Key';
+    testLocalBtn.disabled    = false;
+    testLocalBtn.textContent = 'Test';
   }
 });
 
@@ -3121,10 +3346,132 @@ function addMediaTranslationRow(container, from = '', to = '') {
   container.appendChild(row);
 }
 
+// ── Darkroom Pro: configurable Photo Lines ─────────────────────────────────
+// Photo lines are operator-defined key/value pairs inserted between Orderid=
+// and Filepath= in every per-image block of the Darkroom Pro .txt file. The
+// left input is the literal Darkroom field name (free text — vendor-specific,
+// e.g. "Photo.First Name"); the right input is an OHD template string with
+// {token} placeholders resolved per image. Hard-capped at 2 rows.
+
+const PHOTO_LINE_MAX_ROWS = 2;
+
+// Token list mirrors SUPPORTED_TOKENS in src/main/services/template-tokens.js.
+// Kept in sync manually because the renderer can't require Node modules.
+const PHOTO_LINE_TOKENS = [
+  '{customerName}',
+  '{firstName}',
+  '{lastName}',
+  '{jobId}',
+  '{orderNumber}',
+  '{jobName}',
+  '{filename}',
+];
+
+function _refreshPhotoLineAddBtnState() {
+  const btn = document.getElementById('ocAddPhotoLineBtn');
+  if (!btn) return;
+  const count = document.querySelectorAll('#ocPhotoLinesList .mapping-row').length;
+  btn.disabled = count >= PHOTO_LINE_MAX_ROWS;
+  btn.style.opacity = btn.disabled ? '0.5' : '';
+  btn.style.cursor  = btn.disabled ? 'not-allowed' : '';
+}
+
+function addPhotoLineRow(container, darkroomField = '', ohdTemplate = '') {
+  // Defensive: never exceed the cap even if a stored controller somehow has
+  // more entries (shouldn't happen via the UI, but keep parity with the save
+  // path which trims to the cap on read).
+  if (container.querySelectorAll('.mapping-row').length >= PHOTO_LINE_MAX_ROWS) return;
+
+  const row = document.createElement('div');
+  row.className = 'mapping-row';
+  row.style.cssText = 'display:flex;align-items:center;gap:4px;margin-bottom:4px;';
+  row.innerHTML = `
+    <input type="text" class="dp-photo-field" placeholder="Darkroom field (e.g. Photo.First Name)" value="${escapeHtml(darkroomField)}" style="flex:1">
+    <span style="color:#666">=</span>
+    <input type="text" class="dp-photo-template" placeholder="OHD template (e.g. {filename} or {lastName}-{filename})" value="${escapeHtml(ohdTemplate)}" style="flex:1">
+    <button type="button" style="background:none;border:none;color:#c0392b;cursor:pointer;font-size:18px;line-height:1;padding:0 4px">&times;</button>
+  `;
+  row.querySelector('button').addEventListener('click', () => {
+    row.remove();
+    _refreshPhotoLineAddBtnState();
+  });
+  container.appendChild(row);
+  _refreshPhotoLineAddBtnState();
+}
+
+function renderPhotoLines(photoLines) {
+  const container = document.getElementById('ocPhotoLinesList');
+  container.innerHTML = '';
+  // Trim to the cap silently rather than rendering rows the user can't add
+  // back via +Add. Persistence stays in insertion order.
+  const safeArr = (photoLines || []).slice(0, PHOTO_LINE_MAX_ROWS);
+  for (const pl of safeArr) {
+    addPhotoLineRow(container, pl.darkroomField || '', pl.ohdTemplate || '');
+  }
+  _refreshPhotoLineAddBtnState();
+}
+
+function readPhotoLines() {
+  const rows = document.querySelectorAll('#ocPhotoLinesList .mapping-row');
+  const result = [];
+  rows.forEach(row => {
+    const darkroomField = row.querySelector('.dp-photo-field').value.trim();
+    const ohdTemplate   = row.querySelector('.dp-photo-template').value;
+    // Drop entries with no field name — the value template is allowed to be
+    // empty (resolves to an empty string after the `=`, which is valid).
+    if (darkroomField) result.push({ darkroomField, ohdTemplate });
+  });
+  return result.slice(0, PHOTO_LINE_MAX_ROWS);
+}
+
+function renderPhotoLineTokens() {
+  const container = document.getElementById('ocPhotoLineTokens');
+  if (!container) return;
+  // Idempotent — safe to call repeatedly. Only re-render if empty so we
+  // don't churn the DOM every modal open.
+  if (container.children.length > 0) return;
+  for (const token of PHOTO_LINE_TOKENS) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.textContent = token;
+    chip.title = `Click to copy ${token}`;
+    chip.style.cssText = [
+      'font-family:ui-monospace,Menlo,Consolas,monospace',
+      'font-size:12px',
+      'padding:3px 8px',
+      'background:var(--surface,#fff)',
+      'border:1px solid var(--border,#ddd)',
+      'border-radius:3px',
+      'cursor:pointer',
+      'color:var(--text,#333)',
+    ].join(';');
+    chip.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(token);
+        showToast(`Copied ${token}`, 'success', 1500);
+      } catch (err) {
+        showToast('Could not copy — select and copy manually', 'error', 3000);
+      }
+    });
+    container.appendChild(chip);
+  }
+}
+
 function renderSizeTranslations(translations) {
   const container = document.getElementById('ocSizeTranslationsList');
   container.innerHTML = '';
-  for (const t of (translations || [])) {
+  // Display-only alphanumeric sort. Persistence stays in insertion order
+  // (no writes on render). The `numeric: true` flag is load-bearing —
+  // without it "0406" sorts after "10" lexicographically; with it,
+  // 0406 < 0808 < 1212 as operators expect.
+  const sorted = [...(translations || [])].sort((a, b) =>
+    (a.productCodePrefix || '').localeCompare(
+      b.productCodePrefix || '',
+      undefined,
+      { numeric: true, sensitivity: 'base' },
+    ),
+  );
+  for (const t of sorted) {
     addSizeTranslationRow(container, t.productCodePrefix, t.darkroomSize);
   }
 }
@@ -3132,7 +3479,17 @@ function renderSizeTranslations(translations) {
 function renderMediaTranslations(translations) {
   const container = document.getElementById('ocMediaTranslationsList');
   container.innerHTML = '';
-  for (const t of (translations || [])) {
+  // Display-only alphanumeric sort, same shape as renderSizeTranslations.
+  // numeric:true matters less here (media values are usually pure alpha)
+  // but kept for consistency in case operators ever use codes like "lustre-1".
+  const sorted = [...(translations || [])].sort((a, b) =>
+    (a.from || '').localeCompare(
+      b.from || '',
+      undefined,
+      { numeric: true, sensitivity: 'base' },
+    ),
+  );
+  for (const t of sorted) {
     addMediaTranslationRow(container, t.from, t.to);
   }
 }
@@ -3164,6 +3521,7 @@ function updateOcTypeFields() {
   document.getElementById('ocProcessedFolderGroup').style.display    = type === 'darkroompro' ? '' : 'none';
   document.getElementById('ocArtworkRootPathGroup').style.display     = type === 'darkroompro' ? '' : 'none';
   document.getElementById('ocOrderLastNameFormatGroup').style.display  = type === 'darkroompro' ? '' : 'none';
+  document.getElementById('ocPhotoLinesGroup').style.display           = type === 'darkroompro' ? '' : 'none';
   document.getElementById('ocSizeTranslationsGroup').style.display     = type === 'darkroompro' ? '' : 'none';
   document.getElementById('ocMediaTranslationsGroup').style.display    = type === 'darkroompro' ? '' : 'none';
   document.getElementById('ocBannerSheetGroup').style.display        = (type === 'noritsu' || type === 'epson' || type === 'dpof' || type === 'pdf_copy') ? '' : 'none';
@@ -3187,6 +3545,20 @@ function openOrderControllerModal(ctrl = null) {
   document.getElementById('ocMediaOptionKey').value       = ctrl ? (ctrl.mediaOptionKey        || '') : '';
   renderSizeTranslations(ctrl ? ctrl.sizeTranslations  : []);
   renderMediaTranslations(ctrl ? ctrl.mediaTranslations : []);
+  // Photo Lines — for an existing controller, render whatever was saved
+  // (including the empty array, which means the operator deliberately
+  // unchecked them). For a new controller, seed the two defaults that match
+  // the legacy hard-coded format we removed, so existing Darkroom Pro setups
+  // keep working out of the box without any reconfiguration.
+  if (ctrl) {
+    renderPhotoLines(ctrl.photoLines || []);
+  } else {
+    renderPhotoLines([
+      { darkroomField: 'Photo.First Name', ohdTemplate: '{filename}' },
+      { darkroomField: 'Photo.Last Name',  ohdTemplate: '{lastName}' },
+    ]);
+  }
+  renderPhotoLineTokens();
   // Frontline fields
   document.getElementById('ocDevice').value     = ctrl ? (ctrl.device     || 'Pixfizz')                   : 'Pixfizz';
   document.getElementById('ocBackPrint1').value = ctrl ? (ctrl.backPrint1 || '{jobName}  {customerName}') : '{jobName}  {customerName}';
@@ -3575,6 +3947,10 @@ document.getElementById('ocAddMediaTranslationBtn').addEventListener('click', ()
   addMediaTranslationRow(document.getElementById('ocMediaTranslationsList'));
 });
 
+document.getElementById('ocAddPhotoLineBtn').addEventListener('click', () => {
+  addPhotoLineRow(document.getElementById('ocPhotoLinesList'));
+});
+
 document.getElementById('ocSaveBtn').addEventListener('click', async () => {
   const modal      = document.getElementById('orderControllerModal');
   const name       = document.getElementById('ocName').value.trim();
@@ -3608,6 +3984,26 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
     controller.mediaOptionKey       = document.getElementById('ocMediaOptionKey').value.trim();
     controller.sizeTranslations     = readSizeTranslations();
     controller.mediaTranslations    = readMediaTranslations();
+    controller.photoLines           = readPhotoLines();
+
+    // Misconfiguration guard: defining translations without a Paper Type
+    // Option Key is meaningless — resolveMedia short-circuits at line 129
+    // (`if (!mediaOptionKey ...) return ''`) before it ever consults the
+    // translations array. The customer-visible failure mode is a silently
+    // dispatched .txt file with `Media=` blank. Surface the misconfig at
+    // save time so the operator can't accidentally leave a controller in
+    // that state. See bug investigation 2026-04-30.
+    if (controller.mediaTranslations.length > 0 && !controller.mediaOptionKey) {
+      const optionKeyInput = document.getElementById('ocMediaOptionKey');
+      optionKeyInput.setCustomValidity(
+        'Paper Type Option Key is required when Media Translations are defined. ' +
+        'Either fill in the option key (e.g. "finish-options") or delete the translation rows.'
+      );
+      optionKeyInput.reportValidity();
+      optionKeyInput.focus();
+      return;
+    }
+    document.getElementById('ocMediaOptionKey').setCustomValidity('');
   }
   if (type === 'frontline') {
     controller.device     = document.getElementById('ocDevice').value.trim()     || 'Pixfizz';
@@ -3615,9 +4011,26 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
     controller.backPrint2 = document.getElementById('ocBackPrint2').value.trim() || '{jobId}  {filename}';
   }
   try {
-    await window.electronAPI.saveOrderController(controller);
+    const result = await window.electronAPI.saveOrderController(controller);
+    // The IPC handler returns {success:false, error} on validation failures
+    // (e.g. the server-side mirror of the translations-without-key guard
+    // in ipc-handlers.js `ohd:routing:save-controller`). Surface those
+    // without hiding the modal so the operator can fix the inputs in place.
+    if (result && result.success === false) {
+      showToast('Error saving controller: ' + (result.error || 'Save failed'), 'error', 8000);
+      return;
+    }
     modal.classList.add('hidden');
     await loadRoutingSection();
+    // Editing a controller's translations (or the Paper Type Option Key)
+    // can change how existing Received jobs resolve their route. Re-evaluate
+    // every received job and re-render the Jobs table so jobs that were
+    // pending Assign flip to Process when a matching translation has just
+    // been added — without making the operator click Refresh manually.
+    if (Array.isArray(allJobs) && allJobs.length > 0) {
+      await resolveRoutesForReceivedJobs(allJobs);
+      renderJobTable(getFilteredJobs());
+    }
   } catch (err) {
     showToast('Error saving controller: ' + err.message, 'error');
   }

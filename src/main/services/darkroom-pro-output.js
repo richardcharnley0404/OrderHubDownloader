@@ -3,6 +3,7 @@
 const fs     = require('fs');
 const path   = require('path');
 const logger = require('./logger');
+const { resolveTemplate } = require('./template-tokens');
 
 /**
  * Darkroom Pro Output Generator
@@ -13,23 +14,34 @@ const logger = require('./logger');
  *   OrderFirstName=...
  *   OrderLastName=...
  *   OrderEmail=...
- *   ExtOrderNum=...
+ *   ExtOrderNum=...           ← per-job filename stem (e.g. PXDEMO-D4LNF6-1)
  *   [blank line]
- *   Qty=...
- *   Size=...
- *   Media=...
- *   Date= MMMM DD, YYYY
- *   Orderid=...
- *   Photo.First Name=...
- *   Photo.Last Name=...
- *   Filepath=...    ← one per image
- *   [blank line between line item blocks; no trailing blank]
+ *   Qty=...                   ┐
+ *   Size=...                  │
+ *   Media=...                 │ One COMPLETE block per image —
+ *   Date= MMMM DD, YYYY       │ all fields repeated for safety
+ *   Orderid=...               │ (Qty especially must reset per image
+ *   {photoLines, optional}    │  or sticky-field semantics would carry
+ *   Filepath=...              ┘  the previous image's qty forward).
+ *   [blank line between blocks; no trailing blank]
  *
  * Size is resolved from controller.sizeTranslations using the job's product code.
  * Media is resolved from controller.mediaOptionKey + controller.mediaTranslations
  * using the line item's job options.
  *
- * Output filename: {orderRef}.txt  written to controller.outputPath
+ * ExtOrderNum and Orderid both emit `job.outputFilenameStem` (the per-job
+ * identifier — typically the OrderHub job_name like "PXDEMO-D4LNF6-1") so the
+ * value inside the file matches the .txt filename and uniquely identifies the
+ * job within a multi-job order. Falls back to `job.orderRef` if no stem set.
+ *
+ * Photo lines (controller.photoLines) are operator-configured key/value pairs
+ * inserted between Orderid= and Filepath= in every block. Each entry is
+ * { darkroomField, ohdTemplate } — the field name is emitted verbatim on the
+ * left side of `=` and the template is resolved per image using the shared
+ * template-tokens helper. Empty/missing entries are skipped silently. Common
+ * use case: writing back-print captions on the reverse of each photo.
+ *
+ * Output filename: {outputFilenameStem || orderRef}.txt  written to controller.outputPath
  */
 
 // ── Date helpers ──────────────────────────────────────────────────────────────
@@ -96,15 +108,25 @@ function resolveSize(productCode, sizeTranslations, jobOverride) {
 /**
  * Resolve the Darkroom Pro media string from the controller's media config.
  *
- * A per-job manual override (from the Assign modal) takes priority over the
- * translation table lookup.
- * Looks up the value of the configured mediaOptionKey in the line item's options,
- * then translates it via mediaTranslations.
- * Falls back to the raw option value if no translation entry matches —
- * this is intentional (passing `lustre` is better than an empty string).
+ * Resolution order:
+ *   1. Per-job manual override (Assign modal) — wins outright.
+ *   2. Translation table lookup: find the option named mediaOptionKey on the
+ *      line item, then look up its value in mediaTranslations and return `to`.
+ *   3. Otherwise return ''.
  *
- * Returns empty string only when mediaOptionKey is not configured or the option
- * is not present on this line item (and no job override is supplied).
+ * No raw-value fallback. If the option exists on the job but no translation
+ * matches, this returns '' on purpose — the upstream gate in routing-service
+ * (mediaConfigured && !resolvedMedia → unrouted) and the dispatch-time
+ * pre-flight (`if (!media) throw`) both depend on '' meaning "I cannot
+ * resolve this; surface Assign or fail loudly". Returning the raw option
+ * value silently masks option-name mismatches and writes values to the
+ * Darkroom Pro hot folder that customers never see in the OHD UI.
+ *
+ * Empty-string return cases:
+ *   - mediaOptionKey not configured (caller is expected to skip the field)
+ *   - lineItemOptions not an array
+ *   - option not present on the line item (name mismatch)
+ *   - option present but value doesn't match any translation `from`
  *
  * @param {Array}  lineItemOptions   - [{ name, value }] from the job
  * @param {string} mediaOptionKey    - e.g. "finish-options"
@@ -125,7 +147,7 @@ function resolveMedia(lineItemOptions, mediaOptionKey, mediaTranslations, jobOve
     ? mediaTranslations.find(t => t.from && t.from.toLowerCase() === entry.value.toLowerCase())
     : null;
 
-  return translation ? translation.to : entry.value; // raw fallback
+  return translation ? translation.to : '';
 }
 
 // ── Main export ───────────────────────────────────────────────────────────────
@@ -176,6 +198,71 @@ async function generateDarkroomProFile(job, controller) {
     );
   }
 
+  // Media is only required when the controller has mediaOptionKey
+  // configured. For fixed-size products without media variation, the
+  // controller can be set up with size translations only — media is
+  // emitted as an empty value in the file. This mirrors the routing-time
+  // gate in routing-service.js (resolveRoute → mediaConfigured).
+  const mediaConfigured = !!controller.mediaOptionKey;
+  if (mediaConfigured) {
+    for (const lineItem of job.lineItems) {
+      const media = resolveMedia(
+        lineItem.options || [],
+        controller.mediaOptionKey,
+        controller.mediaTranslations,
+        job._mediaOverride
+      );
+      if (!media) {
+        // The job either (a) doesn't carry an option named mediaOptionKey, or
+        // (b) carries one whose value isn't in mediaTranslations. Either way,
+        // dispatch is unsafe — Darkroom Pro would receive Media= blank and
+        // pick whatever default is configured on its side, which is rarely
+        // what the customer ordered. Operators should see the Assign button
+        // for this job instead of a silent dispatch.
+        const optionNames = (lineItem.options || []).map(o => o.name).join(', ') || '(none)';
+        throw new Error(
+          `Darkroom Pro: Could not resolve Media for option key "${controller.mediaOptionKey}". ` +
+          `Job options: [${optionNames}]. ` +
+          `Either the option is missing on this job, or its value isn't in the Media Translations table. ` +
+          `Add a translation entry, fix the Paper Type Option Key, or use Assign to set Media manually.`
+        );
+      }
+    }
+  }
+
+  // The per-job identifier emitted as ExtOrderNum and Orderid. Use the same
+  // stem that the .txt filename uses so the value inside the file matches the
+  // filename and uniquely identifies this job within a multi-job order
+  // (orderRef alone is shared across all jobs in an order). Fall back to
+  // orderRef for back-compat with any caller that hasn't set the stem.
+  const jobIdentifier = job.outputFilenameStem || job.orderRef;
+
+  // Sanitise photoLines once up front — drop entries with no darkroomField
+  // (the left side of `=`); empty templates are allowed (resolves to '').
+  const photoLines = (controller.photoLines || [])
+    .filter(pl => pl && typeof pl.darkroomField === 'string' && pl.darkroomField.trim() !== '')
+    .map(pl => ({
+      darkroomField: pl.darkroomField.trim(),
+      ohdTemplate:   typeof pl.ohdTemplate === 'string' ? pl.ohdTemplate : '',
+    }));
+
+  // Build a job-shaped object the shared template resolver understands. The
+  // resolver expects OrderHub's snake_case fields (customer_name, id, etc.)
+  // — the dpJob shape print-service builds doesn't carry those, so reconstruct
+  // what we can from what we have. customer_name is rebuilt from firstName +
+  // lastName so {customerName}/{firstName}/{lastName} all resolve correctly.
+  const tokenJob = {
+    customer_name: [job.customer.firstName, job.customer.lastName].filter(Boolean).join(' '),
+    id:            job.id || '',
+    order_number:  job.orderRef,
+    job_name:      job.outputFilenameStem || job.orderRef,
+  };
+
+  // Flatten line items into a single per-image stream. The grouping by qty
+  // in print-service.js was an artifact of an older sticky-field design; the
+  // current emitter treats every image as its own complete block so Qty etc.
+  // can never accidentally apply to the wrong image.
+  const allImages = [];
   for (const lineItem of job.lineItems) {
     const media = resolveMedia(
       lineItem.options || [],
@@ -183,11 +270,8 @@ async function generateDarkroomProFile(job, controller) {
       controller.mediaTranslations,
       job._mediaOverride
     );
-    if (!media) {
-      throw new Error(
-        `Darkroom Pro: No media translation found for option key "${controller.mediaOptionKey || '(not set)'}". ` +
-        `Check the Media Option Key and Media Translations in the controller settings.`
-      );
+    for (const image of lineItem.images) {
+      allImages.push({ image, qty: lineItem.qty, media });
     }
   }
 
@@ -197,51 +281,56 @@ async function generateDarkroomProFile(job, controller) {
   lines.push(`OrderFirstName=${job.customer.firstName}`);
   lines.push(`OrderLastName=${formattedLastName}`);
   lines.push(`OrderEmail=${job.customer.email}`);
-  lines.push(`ExtOrderNum=${job.orderRef}`);
+  lines.push(`ExtOrderNum=${jobIdentifier}`);
   lines.push(''); // blank line after header block
 
-  // ── Line item blocks ──────────────────────────────────────────────────────
-  for (let i = 0; i < job.lineItems.length; i++) {
-    const lineItem = job.lineItems[i];
+  // ── Per-image blocks ──────────────────────────────────────────────────────
+  // One complete block per image. Qty/Size/Media/Date/Orderid are repeated
+  // even when they don't change — explicit-per-image is safer than relying
+  // on Darkroom Pro's sticky-field inheritance, especially for Qty which
+  // would otherwise carry forward from the previous image.
+  for (let i = 0; i < allImages.length; i++) {
+    const { image, qty, media } = allImages[i];
 
-    // Size is product-code level (resolved above); Media is per line item.
-    const media = resolveMedia(
-      lineItem.options || [],
-      controller.mediaOptionKey,
-      controller.mediaTranslations,
-      job._mediaOverride
-    );
+    // sourcePath is the resolved absolute local path (enhanced → corrected → raw download).
+    // Normalise to Windows backslashes as Darkroom Pro requires them.
+    const filepath = image.sourcePath.replace(/\//g, '\\');
+    const filename = image.filename || path.basename(filepath);
 
-    lines.push(`Qty=${lineItem.qty}`);
+    lines.push(`Qty=${qty}`);
     lines.push(`Size=${size}`);
     lines.push(`Media=${media}`);
     lines.push(`Date= ${formattedDate}`);
-    lines.push(`Orderid=${job.orderRef}`);
-    lines.push(`Photo.First Name=${lineItem.images[0]?.filename || ''}`);
-    lines.push(`Photo.Last Name=${job.customer.lastName}`);
+    lines.push(`Orderid=${jobIdentifier}`);
 
-    for (const image of lineItem.images) {
-      // sourcePath is the resolved absolute local path (enhanced → corrected → raw download).
-      // Normalise to Windows backslashes as Darkroom Pro requires them.
-      const filepath = image.sourcePath.replace(/\//g, '\\');
-      lines.push(`Filepath=${filepath}`);
+    // Configurable photo lines — resolved per image so {filename} and any
+    // future per-image tokens reflect the current image, not the first one.
+    for (const pl of photoLines) {
+      const value = resolveTemplate(pl.ohdTemplate, tokenJob, { filename });
+      lines.push(`${pl.darkroomField}=${value}`);
     }
 
+    lines.push(`Filepath=${filepath}`);
+
     // Blank line between blocks — not after the last one
-    if (i < job.lineItems.length - 1) {
+    if (i < allImages.length - 1) {
       lines.push('');
     }
   }
 
   // ── Write file ────────────────────────────────────────────────────────────
   const content  = lines.join('\r\n');
-  const filename = `${job.orderRef}.txt`;
+  // Filename uses the same per-job stem written into ExtOrderNum / Orderid
+  // above, so the value inside the file matches the filename. Multi-job
+  // orders need unique filenames or the second job's .txt overwrites the
+  // first — orderRef alone is shared across all jobs in an order.
+  const filename = `${jobIdentifier}.txt`;
   const destPath = path.join(controller.outputPath, filename);
 
   await fs.promises.mkdir(controller.outputPath, { recursive: true });
   await fs.promises.writeFile(destPath, content, 'utf8');
 
-  logger.info('[DarkroomPro] Order file written', { destPath, orderRef: job.orderRef });
+  logger.info('[DarkroomPro] Order file written', { destPath, orderRef: job.orderRef, filename });
 
   return destPath;
 }

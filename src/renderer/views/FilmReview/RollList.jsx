@@ -166,7 +166,17 @@ export function RollList({ refreshKey, onOpenRoll }) {
       {filtered.length > 0 && (
         <div className="fr-roll-grid">
           {filtered.map((r) => (
-            <RollCard key={r.rollId} roll={r} onOpen={onOpenRoll} />
+            <RollCard
+              key={r.rollId}
+              roll={r}
+              onOpen={onOpenRoll}
+              onDeleted={() => setRolls((prev) => prev.filter((x) => x.rollId !== r.rollId))}
+              onApproved={() => setRolls((prev) => prev.map((x) =>
+                x.rollId === r.rollId
+                  ? { ...x, status: 'reviewed', uploadStatus: 'uploading' }
+                  : x
+              ))}
+            />
           ))}
         </div>
       )}
@@ -176,7 +186,9 @@ export function RollList({ refreshKey, onOpenRoll }) {
 
 // ── Sub-components ─────────────────────────────────────────────────────────
 
-function RollCard({ roll, onOpen }) {
+function RollCard({ roll, onOpen, onDeleted, onApproved }) {
+  const [deleting,  setDeleting]  = useState(false);
+  const [approving, setApproving] = useState(false);
   const isReviewed = roll.status === 'reviewed';
 
   // M8-3: provisional rolls (detected/processing) have no frames yet — they
@@ -218,6 +230,91 @@ function RollCard({ roll, onOpen }) {
     }
   };
 
+  // Delete-roll affordance. Disabled for already-uploaded rolls (the IPC
+  // also refuses, but disabling at the UI is friendlier). Confirms via
+  // window.confirm — matches the rest of the panel's lightweight tone
+  // and avoids pulling in a modal component for one button.
+  const isUploaded = us === 'uploaded';
+  const isUploading = us === 'uploading';
+  const canDelete = !isProvisional && !isUploaded && !isUploading && !deleting;
+  const onDeleteClick = async (e) => {
+    // Stop the click from bubbling to the card's onClick (which opens the
+    // roll). Same for keydown so Space/Enter on the button doesn't open.
+    e.stopPropagation();
+    if (!canDelete) return;
+    const ok = window.confirm(
+      `Delete roll ${roll.rollId}?\n\n` +
+      `The local files will be moved aside (renamed __DELETED__) and this roll will not be uploaded to S3. ` +
+      `You can recover the files manually from the storage folder if needed.`
+    );
+    if (!ok) return;
+    setDeleting(true);
+    try {
+      const res = await window.electronAPI.filmReviewDeleteRoll(roll.rollId);
+      if (!res || !res.ok) {
+        window.alert(`Couldn't delete roll: ${res?.error || 'unknown error'}`);
+        setDeleting(false);
+        return;
+      }
+      if (res.warning) {
+        // Soft success — metadata was scrubbed but the folder rename failed.
+        window.alert(res.warning);
+      }
+      // The roll-processed event will also re-fetch, but optimistically
+      // remove from the local list so the card disappears immediately.
+      onDeleted?.();
+    } catch (err) {
+      window.alert(`Couldn't delete roll: ${err?.message || String(err)}`);
+      setDeleting(false);
+    }
+  };
+  const onDeleteKeyDown = (e) => {
+    // Prevent Space/Enter on the button from triggering the card's keydown.
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.stopPropagation();
+    }
+  };
+
+  // Approve & Upload affordance — only shown when the roll is awaiting
+  // approval (Manual / Smart-flagged rolls). Lets the operator skip the
+  // grid view entirely when they trust the roll on sight. Confirms first
+  // since the action commits the upload to S3 without per-frame review.
+  // The IPC awaits the full S3 upload, but `onApproved` updates local
+  // state immediately so the card reflects 'uploading' before the
+  // roll-processed event arrives.
+  const canApprove = !isProvisional && us === 'pending' && !approving && !deleting;
+  const onApproveClick = async (e) => {
+    e.stopPropagation();
+    if (!canApprove) return;
+    const ok = window.confirm(
+      `Approve and upload roll ${roll.rollId}?\n\n` +
+      `${roll.frameCount} frame${roll.frameCount === 1 ? '' : 's'} will be uploaded to S3 without further per-frame review.`
+    );
+    if (!ok) return;
+    setApproving(true);
+    // Reflect the new state immediately — the IPC blocks until S3 is done,
+    // but we don't want the operator to wonder if the click registered.
+    onApproved?.();
+    try {
+      const res = await window.electronAPI.filmReviewApproveRoll(roll.rollId);
+      if (!res || !res.ok) {
+        window.alert(`Couldn't approve roll: ${res?.error || 'unknown error'}`);
+      }
+    } catch (err) {
+      window.alert(`Couldn't approve roll: ${err?.message || String(err)}`);
+    } finally {
+      // The roll-processed event the main side fires will refresh us into
+      // 'uploaded' (or 'failed') state; clearing local approving state lets
+      // that re-render happen cleanly.
+      setApproving(false);
+    }
+  };
+  const onApproveKeyDown = (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.stopPropagation();
+    }
+  };
+
   // Non-clickable provisional cards: no role=button, no tabIndex, no onClick.
   // Keeps assistive tech from announcing them as actionable, and the cursor
   // styling in CSS makes the inert state obvious to mouse users.
@@ -254,6 +351,36 @@ function RollCard({ roll, onOpen }) {
                 {uploadBadge.label}
               </span>
             )}
+            <span className="fr-roll-card__actions">
+              {us === 'pending' && (
+                <button
+                  type="button"
+                  className="fr-roll-card__approve"
+                  onClick={onApproveClick}
+                  onKeyDown={onApproveKeyDown}
+                  disabled={!canApprove}
+                  title={`Approve roll and upload ${roll.frameCount} frame${roll.frameCount === 1 ? '' : 's'} to S3`}
+                  aria-label={`Approve and upload roll ${roll.rollId}`}
+                >
+                  {approving ? 'Approving…' : 'Approve & Upload'}
+                </button>
+              )}
+              <button
+                type="button"
+                className="fr-roll-card__delete"
+                onClick={onDeleteClick}
+                onKeyDown={onDeleteKeyDown}
+                disabled={!canDelete}
+                title={
+                  isUploaded ? 'Already uploaded to S3 — local copy auto-cleaned'
+                  : isUploading ? 'Upload in progress — wait for it to finish'
+                  : 'Delete this roll (will not upload to S3)'
+                }
+                aria-label={`Delete roll ${roll.rollId}`}
+              >
+                {deleting ? 'Deleting…' : 'Delete'}
+              </button>
+            </span>
           </>
         )}
       </div>

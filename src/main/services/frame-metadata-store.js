@@ -494,6 +494,31 @@ class FrameMetadataStore {
   }
 
   /**
+   * Remove every frame record belonging to a given roll. Used by the Film
+   * Review delete-roll flow alongside `deleteRoll(rollId)` — together they
+   * scrub all on-disk metadata for the roll so the panel forgets about it
+   * and the upload path can't see it.
+   *
+   * Returns the number of frame records removed (0 if the roll was unknown
+   * or already had no frames).
+   */
+  deleteFramesByRoll(rollId) {
+    if (!rollId) return 0;
+    const frames = this.store.get('frames', {});
+    let removed = 0;
+    for (const [frameId, rec] of Object.entries(frames)) {
+      if (rec && rec.rollId === rollId) {
+        delete frames[frameId];
+        removed += 1;
+      }
+    }
+    if (removed > 0) {
+      this.store.set('frames', frames);
+    }
+    return removed;
+  }
+
+  /**
    * Test / devtools helper — wipes every frame record. NOT exposed over IPC.
    * Kept private-by-convention (leading underscore).
    */

@@ -4,11 +4,142 @@
   box-sizing: border-box;
 }
 
+/* ──────────────────────────────────────────────────────────────────────────
+ * App-wide design tokens.
+ *
+ * Defined on body so the `body.app-theme-dark` selector below can override
+ * a single class swap. Film Review (`film-review.css`) and Job Review
+ * (`job-review.css`) both alias their internal tokens off of these so the
+ * three styling surfaces stay coherent.
+ *
+ * Naming:
+ *   --app-surface*  background fills, base → raised → sunk → deep
+ *   --app-ink*      text colours, primary → dim → faint
+ *   --app-border*   1px borders/dividers
+ *   --app-accent    Pixfizz blue (chips, focus rings, links)
+ *   --app-brand-green  Pixfizz green (Job Review save / modified semantic)
+ *   --app-amber/red/green   semantic status colours, each with a *-weak fill
+ *   --app-purple-ai  AI Enhancement semantic (purple)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* Typography — same in both themes */
+  --app-font:      'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  --app-font-tech: 'DM Sans', system-ui, sans-serif;
+  --app-mono:      'DM Mono', 'JetBrains Mono', 'Consolas', 'Menlo', monospace;
+
+  /* Spacing scale */
+  --app-s1: 4px;
+  --app-s2: 8px;
+  --app-s3: 12px;
+  --app-s4: 16px;
+  --app-s5: 24px;
+  --app-s6: 32px;
+
+  /* Corner radii */
+  --app-radius:    6px;
+  --app-radius-lg: 10px;
+}
+
+/* Light theme (default) */
 body {
-  font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-  background: #f0f2f5;
+  /* Surfaces — light theme uses near-whites and warm greys */
+  --app-surface:        #f0f2f5;   /* page background */
+  --app-surface-raised: #ffffff;   /* cards, modals, header */
+  --app-surface-sunk:   #e8ebed;   /* inputs, sunken regions */
+  --app-surface-deep:   #dcdfe2;   /* deepest sunken surface */
+
+  /* Ink — text on light surfaces */
+  --app-ink:        #232429;
+  --app-ink-dim:    #5a5f66;
+  --app-ink-faint:  #8a8f96;
+
+  /* Borders */
+  --app-border:        #c5c9cd;
+  --app-border-subtle: #e1e4e7;
+  --app-border-strong: #a8aeb5;
+
+  /* Accent — Pixfizz blue.
+     Two text-coupling tokens with distinct roles:
+       --app-accent-ink   — text on a SOLID --app-accent fill (always
+                            dark navy, both themes, since solid bright
+                            accent stays the same colour in both).
+       --app-accent-text  — text on the SEMI-TRANSPARENT --app-accent-weak
+                            fill (dark navy in light mode where the fill
+                            reads as pale blue; bright accent in dark mode
+                            where the fill reads as dark-blue-tinted near
+                            black). Flips in body.app-theme-dark below. */
+  --app-accent:       #32C5FF;
+  --app-accent-ink:   #003d54;
+  --app-accent-weak:  rgba(50, 197, 255, 0.12);
+  --app-accent-text:  #003d54;
+
+  /* Brand green — Pixfizz logo green, preserved for Job Review save/modified.
+     Same ink/text split as accent (currently unused for text-on-weak but
+     defined for consistency). */
+  --app-brand-green:       #72B622;
+  --app-brand-green-ink:   #2d4d0a;
+  --app-brand-green-weak:  rgba(114, 182, 34, 0.15);
+  --app-brand-green-text:  #2d4d0a;
+
+  /* Status semantics — share names with Film Review tokens */
+  --app-amber:       #F5A623;
+  --app-amber-weak:  #fdf1dc;
+  --app-red:         #E3452F;
+  --app-red-weak:    #fbe3df;
+  --app-green:       #27ae60;
+  --app-green-weak:  #dff3e6;
+
+  /* AI Enhancement — purple */
+  --app-purple-ai:      #9b59b6;
+  --app-purple-ai-weak: rgba(155, 89, 182, 0.15);
+
+  font-family: var(--app-font);
+  background: var(--app-surface);
+  color: var(--app-ink);
   min-height: 100vh;
   overflow: hidden;
+}
+
+/* Dark theme — single-class swap that overrides the surface/ink/border set
+   while keeping accent/semantic hues the same so operators don't have to
+   relearn what amber, red, green, purple mean. */
+body.app-theme-dark {
+  --app-surface:        #1b1d21;
+  --app-surface-raised: #23262b;
+  --app-surface-sunk:   #15171a;
+  --app-surface-deep:   #0f1114;
+
+  --app-ink:        #e7e9ec;
+  --app-ink-dim:    #a9aeb5;
+  --app-ink-faint:  #6b7079;
+
+  --app-border:        #34383e;
+  --app-border-subtle: #2a2d32;
+  --app-border-strong: #4a4e54;
+
+  --app-accent-weak:  rgba(50, 197, 255, 0.18);
+  --app-brand-green-weak:  rgba(114, 182, 34, 0.20);
+
+  --app-amber-weak:   #3a2e18;
+  --app-red-weak:     #3a1f1c;
+  --app-green-weak:   #1c3526;
+  --app-purple-ai-weak: rgba(155, 89, 182, 0.22);
+
+  /* Text-on-weak-fill flip. --app-accent-text and --app-brand-green-text
+     are the colours used when ink sits over the *-weak (semi-transparent)
+     fills. In light mode the fill reads as pale blue/green and dark navy
+     text reads fine; in dark mode the fill reads as dark-blue/dark-green
+     tint over near-black surface, and dark navy text becomes invisible —
+     so we flip these to the bright accent/brand colours.
+
+     Critically we do NOT flip --app-accent-ink itself: it still has to
+     work as text-on-SOLID-accent-fill (e.g. the Film Review filter
+     chips' active state, .fr-roll-card__status--ready, primary buttons),
+     where the background stays bright blue regardless of theme and dark
+     navy is the right text colour. */
+  --app-accent-text:      var(--app-accent);
+  --app-brand-green-text: var(--app-brand-green);
 }
 
 /* ── App frame ── */
@@ -16,7 +147,7 @@ body {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  background: #ffffff;
+  background: var(--app-surface-raised);
 }
 
 /* ── Header bar ── */
@@ -24,8 +155,8 @@ body {
   display: flex;
   align-items: center;
   padding: 10px 20px;
-  background: #f5f6f8;
-  border-bottom: 1px solid #d5dae0;
+  background: var(--app-surface-sunk);
+  border-bottom: 1px solid var(--app-border-subtle);
   flex-shrink: 0;
   -webkit-app-region: drag;   /* makes the frameless header act as the drag handle */
   user-select: none;
@@ -34,6 +165,35 @@ body {
 /* Interactive elements inside the draggable header must opt out */
 .app-header .app-version {
   -webkit-app-region: no-drag;
+}
+
+/* ── Theme toggle button (lifted from FilmReview header during the
+       2026-04-29 theming pass — drives body.app-theme-dark for the
+       whole app) ── */
+.theme-toggle-btn {
+  -webkit-app-region: no-drag;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 24px;
+  margin-left: 12px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--app-ink-dim);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+.theme-toggle-btn::before { content: '\263D'; }            /* moon glyph in light mode */
+body.app-theme-dark .theme-toggle-btn::before { content: '\2600'; }  /* sun glyph in dark mode */
+.theme-toggle-btn:hover {
+  background: var(--app-surface-sunk);
+  color: var(--app-ink);
+  border-color: var(--app-border-subtle);
 }
 
 /* ── Window control buttons (minimise / close) ── */
@@ -52,7 +212,7 @@ body {
   height: 28px;
   background: transparent;
   border: none;
-  color: #8a97a8;
+  color: var(--app-ink-faint);
   font-size: 14px;
   cursor: pointer;
   border-radius: 4px;
@@ -62,13 +222,13 @@ body {
 }
 
 .window-control-btn:hover {
-  background: #e2e5e9;
-  color: #3b4a5a;
+  background: var(--app-border-subtle);
+  color: var(--app-ink);
 }
 
 .window-control-close:hover {
   background: #e81123;
-  color: #ffffff;
+  color: #fff;
 }
 
 .header-logo {
@@ -79,34 +239,34 @@ body {
 .header-divider {
   width: 1px;
   height: 18px;
-  background: #c2c9d1;
+  background: var(--app-border-strong);
   margin: 0 12px;
 }
 
 .header-title {
   font-size: 13px;
   font-weight: 600;
-  color: #3b4a5a;
+  color: var(--app-ink);
   letter-spacing: 0.02em;
 }
 
 .app-version {
   margin-left: auto;
   font-size: 11px;
-  color: #8a97a8;
+  color: var(--app-ink-faint);
   letter-spacing: 0.01em;
 }
 
 .app-version.update-ready {
-  color: #e07b00;
+  color: var(--app-amber);
   font-weight: 600;
 }
 
 /* ── Tab bar ── */
 .tab-bar {
   display: flex;
-  background: #f0f2f5;
-  border-bottom: 1px solid #d5dae0;
+  background: var(--app-surface);
+  border-bottom: 1px solid var(--app-border-subtle);
   padding: 0 8px;
   flex-shrink: 0;
 }
@@ -115,7 +275,7 @@ body {
   padding: 9px 20px;
   font-size: 13px;
   font-weight: 500;
-  color: #5a6a7a;
+  color: var(--app-ink-dim);
   background: transparent;
   border: none;
   border-bottom: 2px solid transparent;
@@ -126,13 +286,13 @@ body {
 }
 
 .tab:hover {
-  color: #1e7b8f;
+  color: var(--app-accent);
 }
 
 .tab.active {
-  color: #1e7b8f;
-  border-bottom-color: #1e7b8f;
-  background: #ffffff;
+  color: var(--app-accent);
+  border-bottom-color: var(--app-accent);
+  background: var(--app-surface-raised);
 }
 
 /* ── Main body ── */
@@ -163,14 +323,14 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: 14px 20px;
-  border-bottom: 1px solid #e2e8f0;
+  border-bottom: 1px solid var(--app-border-subtle);
   flex-shrink: 0;
 }
 
 .jobs-title {
   font-size: 16px;
   font-weight: 600;
-  color: #2d3748;
+  color: var(--app-ink);
 }
 
 /* ── Filter bar ── */
@@ -184,9 +344,9 @@ body {
   font-size: 12px;
   font-weight: 500;
   font-family: inherit;
-  border: 1px solid #d1d5db;
-  background: #f7f8fa;
-  color: #6b7280;
+  border: 1px solid var(--app-border);
+  background: var(--app-surface-sunk);
+  color: var(--app-ink-faint);
   cursor: pointer;
   transition: all 0.15s;
 }
@@ -204,14 +364,14 @@ body {
 }
 
 .jobs-filter:hover {
-  background: #edf0f4;
-  color: #374151;
+  background: var(--app-surface-sunk);
+  color: var(--app-ink-dim);
 }
 
 .jobs-filter.active {
-  background: #1e7b8f;
-  color: #ffffff;
-  border-color: #1e7b8f;
+  background: var(--app-accent);
+  color: #fff;
+  border-color: var(--app-accent);
 }
 
 .jobs-filter.active + .jobs-filter {
@@ -232,10 +392,10 @@ body {
 
 .jobs-date-range {
   padding: 5px 8px;
-  border: 1px solid #c2c9d1;
+  border: 1px solid var(--app-border);
   border-radius: 3px;
-  background: #ffffff;
-  color: #2d3748;
+  background: var(--app-surface-raised);
+  color: var(--app-ink);
   font-size: 12px;
   font-family: inherit;
   cursor: pointer;
@@ -243,13 +403,13 @@ body {
 }
 
 .jobs-date-range:focus {
-  border-color: #1e7b8f;
-  box-shadow: 0 0 0 2px rgba(30, 123, 143, 0.12);
+  border-color: var(--app-accent);
+  box-shadow: 0 0 0 2px var(--app-accent-weak);
 }
 
 .date-range-warning {
   font-size: 10px;
-  color: #b7791f;
+  color: var(--app-amber);
   white-space: nowrap;
 }
 
@@ -257,20 +417,20 @@ body {
 
 .jobs-search {
   padding: 6px 12px;
-  border: 1px solid #c2c9d1;
+  border: 1px solid var(--app-border);
   border-radius: 3px;
   font-size: 12px;
   font-family: inherit;
   width: 220px;
-  color: #2d3748;
-  background: #ffffff;
+  color: var(--app-ink);
+  background: var(--app-surface-raised);
   transition: border-color 0.15s;
 }
 
 .jobs-search:focus {
   outline: none;
-  border-color: #1e7b8f;
-  box-shadow: 0 0 0 2px rgba(30, 123, 143, 0.12);
+  border-color: var(--app-accent);
+  box-shadow: 0 0 0 2px var(--app-accent-weak);
 }
 
 /* ── Table wrapper ── */
@@ -293,12 +453,12 @@ body {
 }
 
 .jobs-table th {
-  background: #f7f8fa;
-  border-bottom: 1px solid #d5dae0;
+  background: var(--app-surface-sunk);
+  border-bottom: 1px solid var(--app-border-subtle);
   padding: 8px 12px;
   text-align: left;
   font-weight: 600;
-  color: #5a6a7a;
+  color: var(--app-ink-dim);
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -311,7 +471,7 @@ body {
 }
 
 .jobs-table th.sortable:hover {
-  color: #1e7b8f;
+  color: var(--app-accent);
 }
 
 .jobs-table th.sort-asc::after {
@@ -326,13 +486,13 @@ body {
 
 .jobs-table td {
   padding: 10px 12px;
-  border-bottom: 1px solid #edf0f4;
-  color: #2d3748;
+  border-bottom: 1px solid var(--app-surface-sunk);
+  color: var(--app-ink);
   vertical-align: middle;
 }
 
 .jobs-table tbody tr:hover {
-  background: #f7fafb;
+  background: var(--app-surface-sunk);
 }
 
 /* ── Status badges ── */
@@ -347,80 +507,80 @@ body {
 }
 
 .badge-pending {
-  background: #e0f2fe;
-  color: #0c6b96;
+  background: var(--app-accent-weak);
+  color: var(--app-accent-text);
 }
 
 .badge-received {
-  background: #e8f5e9;
-  color: #1a7a3a;
+  background: var(--app-green-weak);
+  color: var(--app-green);
 }
 
 .badge-new,
 .badge-pending_download {
-  background: #e0f2fe;
-  color: #0c6b96;
+  background: var(--app-accent-weak);
+  color: var(--app-accent-text);
 }
 
 .badge-downloaded {
-  background: #e8ecf0;
-  color: #4a5568;
+  background: var(--app-surface-sunk);
+  color: var(--app-ink-dim);
 }
 
 .badge-downloading {
-  background: #fef3c7;
-  color: #92600a;
+  background: var(--app-amber-weak);
+  color: var(--app-amber);
 }
 
 .badge-in_production {
-  background: #fff3e0;
-  color: #b45309;
+  background: var(--app-amber-weak);
+  color: var(--app-amber);
 }
 
 .badge-completed {
-  background: #e8f5e9;
-  color: #1a7a3a;
+  background: var(--app-green-weak);
+  color: var(--app-green);
 }
 
 .badge-dpof_accepted {
-  background: #e0f2f1;
-  color: #00695c;
+  background: var(--app-green-weak);
+  color: var(--app-green);
 }
 
 .badge-dpof_failed {
-  background: #fce4ec;
-  color: #c62828;
+  background: var(--app-red-weak);
+  color: var(--app-red);
 }
 
 /* ── DPOF prefix-driven status badges ── */
 .badge-import_error {
-  background: #fce4ec;
-  color: #c62828;
+  background: var(--app-red-weak);
+  color: var(--app-red);
 }
 
 .badge-awaiting_import {
-  background: #fff8e1;
-  color: #92600a;
+  background: var(--app-amber-weak);
+  color: var(--app-amber);
 }
 
 .badge-failed_import {
-  background: #fce4ec;
-  color: #c62828;
+  background: var(--app-red-weak);
+  color: var(--app-red);
 }
 
 .badge-output_printed {
-  background: #e8ecf0;
-  color: #4a5568;
+  background: var(--app-surface-sunk);
+  color: var(--app-ink-dim);
 }
 
 .badge-imported {
-  background: #e0f2f1;
-  color: #00695c;
+  background: var(--app-green-weak);
+  color: var(--app-green);
 }
 
 .badge-printed {
-  background: #e8ecf0;
-  color: #4a5568;
+  background: var(--app-surface-sunk);
+  color: var(--app-ink-dim);
 }
 
 /* ── Toast notification (global, visible from any tab) ── */
@@ -445,17 +605,17 @@ body {
 }
 
 .toast-notification.error {
-  background: #c62828;
+  background: var(--app-red);
   color: #fff;
 }
 
 .toast-notification.success {
-  background: #1a7a3a;
+  background: var(--app-green);
   color: #fff;
 }
 
 .toast-notification.info {
-  background: #1565c0;
+  background: var(--app-accent-ink);
   color: #fff;
 }
 
@@ -463,12 +623,12 @@ body {
 .job-preview {
   width: 48px;
   height: 48px;
-  background: #edf0f4;
+  background: var(--app-surface-sunk);
   border-radius: 3px;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #a0aec0;
+  color: var(--app-ink-faint);
   font-size: 16px;
   overflow: hidden;
 }
@@ -491,7 +651,7 @@ body {
 .job-no {
   font-family: 'Consolas', 'Courier New', monospace;
   font-size: 12px;
-  color: #1e7b8f;
+  color: var(--app-accent);
   cursor: pointer;
   text-decoration: none;
 }
@@ -502,12 +662,12 @@ body {
 
 .customer-name {
   font-size: 11px;
-  color: #a0aec0;
+  color: var(--app-ink-faint);
 }
 
 .ordered-date {
   font-size: 10px;
-  color: #718096;
+  color: var(--app-ink-faint);
 }
 
 /* ── Flags column ── */
@@ -519,31 +679,127 @@ body {
 .flag-icon {
   display: inline-block;
   font-size: 14px;
-  color: #c53030;
+  color: var(--app-red);
   cursor: default;
   margin: 0 2px;
+}
+
+/* AI Quality hold badge — count on top, Release button below.
+   Replaces the earlier icon-only flag-quality span (whose "click to
+   release" affordance lived in a tooltip and was getting missed by
+   new operators). The button is the click target; the existing
+   handler delegates on `.flag-quality[data-quality-job]`. */
+.flag-quality-stack {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  vertical-align: middle;
+  margin: 0 4px;
+}
+.flag-quality-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--app-red);
+  font-weight: 600;
+  font-size: 13px;
+  line-height: 1;
+  cursor: default;
+}
+.flag-quality-release {
+  appearance: none;
+  font: inherit;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  background: var(--app-red-weak);
+  color: var(--app-red);
+  border: 1px solid var(--app-red);
+  border-radius: 3px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s;
+}
+.flag-quality-release:hover {
+  background: var(--app-red);
+  color: #fff;
+}
+.flag-quality-release:focus-visible {
+  outline: 2px solid var(--app-red);
+  outline-offset: 1px;
+}
+
+/* Muted variant — historical badge for processed/dismissed jobs.
+   No Release button is rendered alongside (the action doesn't apply once
+   the job is through), so the stack is just the count in a low-key
+   colour. Communicates "this job had quality issues" without competing
+   with live held-job badges for attention. */
+.flag-quality-stack--muted .flag-quality-count--muted {
+  color: var(--app-ink-faint);
+  font-weight: 500;
+  font-size: 12px;
 }
 
 /* ── Options pills ── */
 .option-pill {
   display: inline-block;
   padding: 2px 8px;
-  background: #edf0f4;
+  background: var(--app-surface-sunk);
   border-radius: 8px;
   font-size: 10px;
-  color: #4a5568;
+  color: var(--app-ink-dim);
   margin: 1px 2px;
   white-space: nowrap;
 }
 
 /* ── Action buttons in table ── */
+/*
+ * Don't override the TD's display:table-cell — `.jobs-table td` already
+ * sets `vertical-align: middle`, which centres any block-level content the
+ * cell contains (the button row plus the optional AI-scoring indicator
+ * stacked beneath it). Using `display: flex` here used to cause the
+ * buttons to anchor to the top of tall rows because the flex container
+ * sized to its content rather than the cell.
+ */
 .job-action-cell {
-  display: flex;
-  flex-direction: column;
+  text-align: center;
+  min-height: 28px;       /* matches btn-action height so empty rows don't collapse */
+  white-space: nowrap;
+}
+
+/* AI Quality scoring indicator — a small caption that appears under the
+   action buttons whenever isPendingAIQuality(job) is true. Communicates
+   *why* the greyed-out buttons (.btn-action.pending) can't be clicked.
+   The dot animation is the same fr-upload-pulse pattern used in Film
+   Review's upload-state pill, kept here as a self-contained @keyframes so
+   styles.css doesn't depend on film-review.css. */
+.ai-q-indicator {
+  display: inline-flex;
   align-items: center;
-  gap: 6px;
-  min-height: 28px;     /* matches btn-action height so empty rows don't collapse */
-  justify-content: center;
+  gap: 5px;
+  margin-top: 4px;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--app-accent);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  user-select: none;
+}
+.ai-q-indicator::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--app-accent);
+  animation: ai-q-pulse 1.4s ease-in-out infinite;
+}
+@keyframes ai-q-pulse {
+  0%, 100% { opacity: 1;    transform: scale(1);   }
+  50%      { opacity: 0.35; transform: scale(0.7); }
 }
 
 .btn-action {
@@ -558,45 +814,68 @@ body {
 }
 
 .btn-send-print {
-  background: #1e7b8f;
-  color: #ffffff;
+  background: var(--app-accent);
+  color: #fff;
 }
 
 .btn-send-print:hover {
-  background: #176a7c;
+  background: var(--app-accent);
 }
 
 .btn-send-print:disabled {
-  background: #c2c9d1;
-  color: #ffffff;
+  background: var(--app-border-strong);
+  color: #fff;
   cursor: default;
 }
 
 .btn-sent {
-  background: #e8f5e9;
-  color: #1a7a3a;
+  background: var(--app-green-weak);
+  color: var(--app-green);
   cursor: default;
 }
 
 .btn-mark-printed {
-  background: #f3e8ff;
-  color: #7c3aed;
+  background: var(--app-purple-ai-weak);
+  color: var(--app-purple-ai);
 }
 
 .btn-mark-printed:hover {
-  background: #ede5ff;
+  background: var(--app-purple-ai-weak);
 }
 
 .btn-mark-printed:disabled {
-  background: #c2c9d1;
-  color: #ffffff;
+  background: var(--app-border-strong);
+  color: #fff;
   cursor: default;
 }
 
 .btn-printed {
-  background: #f3e8ff;
-  color: #7c3aed;
+  background: var(--app-purple-ai-weak);
+  color: var(--app-purple-ai);
   cursor: default;
+}
+
+/* AI Quality scoring in progress — applied to any .btn-action while
+   isPendingAIQuality(job) is true. Operators can hover for the tooltip
+   ("Pending AI Quality check") explaining why the button is greyed out.
+   Re-uses the same desaturated palette as :disabled states above for
+   visual consistency. */
+.btn-action.pending,
+.btn-action.pending:hover {
+  background: var(--app-border-strong);
+  color: #fff;
+  border-color: var(--app-border);
+  cursor: not-allowed;
+  opacity: 0.85;
+}
+
+/* Same treatment for .btn-dismiss (which doesn't carry .btn-action). */
+.btn-dismiss.pending,
+.btn-dismiss.pending:hover {
+  background: var(--app-border-strong);
+  color: #fff;
+  cursor: not-allowed;
+  opacity: 0.85;
 }
 
 .btn-review {
@@ -607,56 +886,56 @@ body {
 
 .btn-review:hover {
   background: #415564;
-  color: #ffffff;
+  color: #fff;
 }
 
 /* DPOF output-status action buttons */
 .btn-mark-printed-dpof {
-  background: #e0f2f1;
-  color: #00695c;
+  background: var(--app-green-weak);
+  color: var(--app-green);
 }
 
 .btn-mark-printed-dpof:hover {
-  background: #b2dfdb;
+  background: var(--app-green);
 }
 
 .btn-mark-printed-dpof:disabled {
-  background: #c2c9d1;
-  color: #ffffff;
+  background: var(--app-border-strong);
+  color: #fff;
   cursor: default;
 }
 
 .btn-resend-dpof {
-  background: #fff3e0;
-  color: #b45309;
-  border: 1px solid #b45309;
+  background: var(--app-amber-weak);
+  color: var(--app-amber);
+  border: 1px solid var(--app-amber);
 }
 
 .btn-resend-dpof:hover {
-  background: #ffe0b2;
+  background: var(--app-amber-weak);
 }
 
 .btn-resend-dpof:disabled {
-  background: #c2c9d1;
-  color: #ffffff;
-  border-color: #c2c9d1;
+  background: var(--app-border-strong);
+  color: #fff;
+  border-color: var(--app-border);
   cursor: default;
 }
 
 .btn-retry-dpof {
   background: transparent;
-  color: #c62828;
-  border: 1px solid #c62828;
+  color: var(--app-red);
+  border: 1px solid var(--app-red);
 }
 
 .btn-retry-dpof:hover {
-  background: #fce4ec;
+  background: var(--app-red-weak);
 }
 
 .btn-retry-dpof:disabled {
-  background: #c2c9d1;
-  color: #ffffff;
-  border-color: #c2c9d1;
+  background: var(--app-border-strong);
+  color: #fff;
+  border-color: var(--app-border);
   cursor: default;
 }
 
@@ -672,27 +951,27 @@ body {
   font-size: 11px;
   font-weight: 500;
   border-radius: 3px;
-  border: 1px solid #c2c9d1;
+  border: 1px solid var(--app-border);
   background: transparent;
-  color: #8a97a8;
+  color: var(--app-ink-faint);
   cursor: pointer;
   white-space: nowrap;
   transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
-.btn-dismiss:hover { background: #f0f2f5; color: #4a5568; border-color: #a8b2bc; }
+.btn-dismiss:hover { background: var(--app-surface); color: var(--app-ink-dim); border-color: var(--app-border-strong); }
 .btn-restore {
   padding: 5px 10px;
   font-size: 11px;
   font-weight: 500;
   border-radius: 3px;
-  border: 1px solid #a0c4cc;
+  border: 1px solid var(--app-accent);
   background: transparent;
-  color: #1e7b8f;
+  color: var(--app-accent);
   cursor: pointer;
   white-space: nowrap;
   transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
-.btn-restore:hover { background: #e0f2f5; border-color: #1e7b8f; }
+.btn-restore:hover { background: var(--app-accent-weak); border-color: var(--app-accent); }
 .dismissed-row { opacity: 0.65; }
 
 /* ── Empty state ── */
@@ -719,13 +998,13 @@ body {
 .empty-title {
   font-size: 16px;
   font-weight: 600;
-  color: #4a5568;
+  color: var(--app-ink-dim);
   margin-bottom: 6px;
 }
 
 .empty-desc {
   font-size: 13px;
-  color: #8a95a5;
+  color: var(--app-ink-faint);
   max-width: 360px;
 }
 
@@ -743,20 +1022,29 @@ body {
   overflow-y: auto;
 }
 
-/* ── Settings sub-tabs ── */
+/* ── Settings sub-tabs ──
+   Sticky-pinned to the top of the Settings scroll container so operators
+   can switch sub-tabs (Connection, Downloads, Routing, etc.) without
+   scrolling back to the top first. The opaque --app-surface-sunk fill
+   keeps scrolled content from bleeding through. z-index 2 matches the
+   Jobs-table thead convention so focused-input stacking contexts below
+   don't paint over the bar. */
 .settings-subtab-bar {
   display: flex;
   gap: 0;
   padding: 0 16px;
-  background: #fafbfc;
-  border-bottom: 1px solid #e2e8f0;
+  background: var(--app-surface-sunk);
+  border-bottom: 1px solid var(--app-border-subtle);
+  position: sticky;
+  top: 0;
+  z-index: 2;
 }
 
 .settings-subtab {
   padding: 8px 16px;
   font-size: 12px;
   font-weight: 500;
-  color: #5a6a7a;
+  color: var(--app-ink-dim);
   background: transparent;
   border: none;
   border-bottom: 2px solid transparent;
@@ -766,12 +1054,12 @@ body {
 }
 
 .settings-subtab:hover {
-  color: #1e7b8f;
+  color: var(--app-accent);
 }
 
 .settings-subtab.active {
-  color: #1e7b8f;
-  border-bottom-color: #1e7b8f;
+  color: var(--app-accent);
+  border-bottom-color: var(--app-accent);
 }
 
 .settings-subtab-panel {
@@ -785,17 +1073,17 @@ body {
 
 /* ── Fieldset sections ── */
 .panel-section {
-  border: 1px solid #dde1e6;
+  border: 1px solid var(--app-border-subtle);
   border-radius: 3px;
   padding: 16px 20px 20px;
   margin-bottom: 16px;
-  background: #ffffff;
+  background: var(--app-surface-raised);
 }
 
 .panel-section legend {
   font-size: 12px;
   font-weight: 600;
-  color: #1e7b8f;
+  color: var(--app-accent);
   padding: 0 6px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -804,7 +1092,7 @@ body {
 /* ── Section description ── */
 .section-desc {
   font-size: 12px;
-  color: #6b7a8a;
+  color: var(--app-ink-faint);
   margin-bottom: 14px;
   line-height: 1.4;
 }
@@ -822,7 +1110,7 @@ body {
   display: block;
   font-size: 12px;
   font-weight: 600;
-  color: #3b4a5a;
+  color: var(--app-ink);
   margin-bottom: 4px;
 }
 
@@ -831,24 +1119,24 @@ body {
 .form-group input[type="number"] {
   width: 100%;
   padding: 7px 10px;
-  border: 1px solid #c2c9d1;
+  border: 1px solid var(--app-border);
   border-radius: 3px;
   font-size: 13px;
   font-family: inherit;
-  color: #2c3e50;
-  background: #ffffff;
+  color: var(--app-ink);
+  background: var(--app-surface-raised);
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 
 .form-group input:focus {
   outline: none;
-  border-color: #1e7b8f;
-  box-shadow: 0 0 0 2px rgba(30, 123, 143, 0.12);
+  border-color: var(--app-accent);
+  box-shadow: 0 0 0 2px var(--app-accent-weak);
 }
 
 .form-group input[readonly] {
-  background: #f5f6f8;
-  color: #5a6a7a;
+  background: var(--app-surface-sunk);
+  color: var(--app-ink-dim);
 }
 
 .form-row {
@@ -886,13 +1174,13 @@ body {
   height: 16px;
   margin-right: 8px;
   cursor: pointer;
-  accent-color: #1e7b8f;
+  accent-color: var(--app-accent);
 }
 
 .checkbox-group span {
   font-size: 13px;
   font-weight: normal;
-  color: #3b4a5a;
+  color: var(--app-ink);
 }
 
 /* M9: Radio rows for the Film Scan Review Mode picker. Mirrors checkbox-group
@@ -901,7 +1189,7 @@ body {
   display: block;
   font-weight: 600;
   font-size: 13px;
-  color: #3b4a5a;
+  color: var(--app-ink);
   margin-bottom: 6px;
 }
 .radio-row {
@@ -918,12 +1206,12 @@ body {
   margin-top: 2px;
   flex-shrink: 0;
   cursor: pointer;
-  accent-color: #1e7b8f;
+  accent-color: var(--app-accent);
 }
 .radio-row span {
   font-size: 13px;
   font-weight: normal;
-  color: #3b4a5a;
+  color: var(--app-ink);
   line-height: 1.4;
 }
 
@@ -937,51 +1225,51 @@ button {
   padding: 8px 28px;
   font-size: 13px;
   font-weight: 600;
-  color: #ffffff;
-  background: #1e7b8f;
-  border: 1px solid #186a7c;
+  color: #fff;
+  background: var(--app-accent);
+  border: 1px solid var(--app-accent);
   border-radius: 3px;
   transition: background 0.15s;
 }
 
 .btn-primary:hover {
-  background: #176a7c;
+  background: var(--app-accent);
 }
 
 .btn-primary:active {
-  background: #135b6b;
+  background: var(--app-accent);
 }
 
 .btn-secondary {
   padding: 6px 16px;
   font-size: 12px;
   font-weight: 500;
-  color: #3b4a5a;
-  background: #f0f2f5;
-  border: 1px solid #c2c9d1;
+  color: var(--app-ink);
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
   border-radius: 3px;
   transition: background 0.15s, border-color 0.15s;
 }
 
 .btn-secondary:hover {
-  background: #e4e8ed;
-  border-color: #a8b2bc;
+  background: var(--app-surface-sunk);
+  border-color: var(--app-border-strong);
 }
 
 .btn-browse {
   padding: 7px 14px;
   font-size: 12px;
   font-weight: 500;
-  color: #3b4a5a;
-  background: #f0f2f5;
-  border: 1px solid #c2c9d1;
+  color: var(--app-ink);
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
   border-radius: 3px;
   white-space: nowrap;
   transition: background 0.15s;
 }
 
 .btn-browse:hover {
-  background: #e4e8ed;
+  background: var(--app-surface-sunk);
 }
 
 /* ── Test row ── */
@@ -999,11 +1287,11 @@ button {
 }
 
 .test-status.success {
-  color: #1a7a3a;
+  color: var(--app-green);
 }
 
 .test-status.error {
-  color: #c0392b;
+  color: var(--app-red);
 }
 
 /* ── Scan controls ── */
@@ -1027,21 +1315,21 @@ button {
 .download-progress.connecting,
 .download-progress.scanning,
 .download-progress.downloading {
-  background: #e0f2fe;
-  color: #0c6b96;
-  border: 1px solid #b3e0f2;
+  background: var(--app-accent-weak);
+  color: var(--app-accent-text);
+  border: 1px solid var(--app-accent);
 }
 
 .download-progress.complete {
-  background: #e8f5e9;
-  color: #1a7a3a;
-  border: 1px solid #c3e6cb;
+  background: var(--app-green-weak);
+  color: var(--app-green);
+  border: 1px solid var(--app-green);
 }
 
 .download-progress.error {
-  background: #fdecea;
-  color: #c0392b;
-  border: 1px solid #f5c6cb;
+  background: var(--app-red-weak);
+  color: var(--app-red);
+  border: 1px solid var(--app-red);
 }
 
 /* ── Form actions (save button) ── */
@@ -1049,8 +1337,8 @@ button {
   display: flex;
   justify-content: flex-end;
   padding: 16px 20px;
-  border-top: 1px solid #e2e8f0;
-  background: #fafbfc;
+  border-top: 1px solid var(--app-border-subtle);
+  background: var(--app-surface-sunk);
 }
 
 /* ── Status message ── */
@@ -1063,23 +1351,23 @@ button {
 }
 
 .status-message.success {
-  background: #e8f5e9;
-  color: #1a7a3a;
-  border: 1px solid #c3e6cb;
+  background: var(--app-green-weak);
+  color: var(--app-green);
+  border: 1px solid var(--app-green);
   display: block;
 }
 
 .status-message.error {
-  background: #fdecea;
-  color: #c0392b;
-  border: 1px solid #f5c6cb;
+  background: var(--app-red-weak);
+  color: var(--app-red);
+  border: 1px solid var(--app-red);
   display: block;
 }
 
 .status-message.info {
-  background: #e0f2fe;
-  color: #0c6b96;
-  border: 1px solid #b3e0f2;
+  background: var(--app-accent-weak);
+  color: var(--app-accent-text);
+  border: 1px solid var(--app-accent);
   display: block;
 }
 
@@ -1087,7 +1375,7 @@ button {
 .field-hint {
   display: block;
   font-size: 11px;
-  color: #7a8a9a;
+  color: var(--app-ink-faint);
   margin-top: 3px;
 }
 
@@ -1096,8 +1384,8 @@ button {
   display: inline-block;
   width: 14px;
   height: 14px;
-  border: 2px solid #c2c9d1;
-  border-top-color: #1e7b8f;
+  border: 2px solid var(--app-border);
+  border-top-color: var(--app-accent);
   border-radius: 50%;
   animation: spin 0.6s linear infinite;
   vertical-align: middle;
@@ -1118,14 +1406,14 @@ button {
   align-items: center;
   justify-content: space-between;
   padding: 14px 20px;
-  border-bottom: 1px solid #e2e8f0;
+  border-bottom: 1px solid var(--app-border-subtle);
   flex-shrink: 0;
 }
 
 .activity-title {
   font-size: 16px;
   font-weight: 600;
-  color: #2d3748;
+  color: var(--app-ink);
 }
 
 .activity-toolbar-right {
@@ -1136,19 +1424,19 @@ button {
 
 .activity-filter {
   padding: 6px 10px;
-  border: 1px solid #c2c9d1;
+  border: 1px solid var(--app-border);
   border-radius: 3px;
   font-size: 12px;
   font-family: inherit;
-  color: #2d3748;
-  background: #ffffff;
+  color: var(--app-ink);
+  background: var(--app-surface-raised);
   cursor: pointer;
 }
 
 .activity-filter:focus {
   outline: none;
-  border-color: #1e7b8f;
-  box-shadow: 0 0 0 2px rgba(30, 123, 143, 0.12);
+  border-color: var(--app-accent);
+  box-shadow: 0 0 0 2px var(--app-accent-weak);
 }
 
 .activity-search-wrap {
@@ -1160,19 +1448,19 @@ button {
 .activity-search {
   width: 220px;
   padding: 6px 28px 6px 10px;
-  border: 1px solid #c2c9d1;
+  border: 1px solid var(--app-border);
   border-radius: 3px;
   font-size: 12px;
   font-family: inherit;
-  color: #2c3e50;
-  background: #ffffff;
+  color: var(--app-ink);
+  background: var(--app-surface-raised);
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 
 .activity-search:focus {
   outline: none;
-  border-color: #1e7b8f;
-  box-shadow: 0 0 0 2px rgba(30, 123, 143, 0.12);
+  border-color: var(--app-accent);
+  box-shadow: 0 0 0 2px var(--app-accent-weak);
 }
 
 .activity-search-clear {
@@ -1183,12 +1471,12 @@ button {
   padding: 0;
   line-height: 1;
   font-size: 15px;
-  color: #8a96a3;
+  color: var(--app-ink-faint);
   cursor: pointer;
 }
 
 .activity-search-clear:hover {
-  color: #2c3e50;
+  color: var(--app-ink);
 }
 
 .activity-search-clear.hidden {
@@ -1208,7 +1496,7 @@ button {
 /* ── Log entry ── */
 .log-entry {
   padding: 3px 0;
-  border-bottom: 1px solid #f5f6f8;
+  border-bottom: 1px solid var(--app-surface-sunk);
   display: flex;
   gap: 8px;
   align-items: baseline;
@@ -1219,7 +1507,7 @@ button {
 }
 
 .log-timestamp {
-  color: #8a95a5;
+  color: var(--app-ink-faint);
   white-space: nowrap;
   flex-shrink: 0;
 }
@@ -1235,36 +1523,36 @@ button {
 }
 
 .log-level-info .log-level-badge {
-  color: #0c6b96;
+  color: var(--app-accent-text);
 }
 
 .log-level-warn .log-level-badge {
-  color: #92600a;
+  color: var(--app-amber);
 }
 
 .log-level-error .log-level-badge {
-  color: #c0392b;
+  color: var(--app-red);
 }
 
 .log-message {
-  color: #2d3748;
+  color: var(--app-ink);
   word-break: break-word;
   min-width: 0;
 }
 
 .log-level-error .log-message {
-  color: #c0392b;
+  color: var(--app-red);
 }
 
 .log-level-warn .log-message {
-  color: #7a5a00;
+  color: var(--app-amber);
 }
 
 .log-details-toggle {
   background: none;
-  border: 1px solid #cbd5e0;
+  border: 1px solid var(--app-border);
   border-radius: 3px;
-  color: #718096;
+  color: var(--app-ink-faint);
   cursor: pointer;
   font-size: 9px;
   padding: 1px 4px;
@@ -1274,19 +1562,19 @@ button {
 }
 
 .log-details-toggle:hover {
-  background: #edf2f7;
-  color: #4a5568;
+  background: var(--app-border-subtle);
+  color: var(--app-ink-dim);
 }
 
 .log-details {
   grid-column: 1 / -1;
-  background: #f7fafc;
-  border: 1px solid #e2e8f0;
+  background: var(--app-surface-sunk);
+  border: 1px solid var(--app-border-subtle);
   border-radius: 4px;
   padding: 8px 12px;
   margin-top: 4px;
   font-size: 11px;
-  color: #718096;
+  color: var(--app-ink-faint);
   white-space: pre-wrap;
   word-break: break-all;
   max-height: 200px;
@@ -1300,11 +1588,11 @@ button {
 /* ── Status bar ── */
 .activity-status-bar {
   font-size: 11px;
-  color: #8a95a5;
+  color: var(--app-ink-faint);
   padding: 8px 20px;
-  border-top: 1px solid #e2e8f0;
+  border-top: 1px solid var(--app-border-subtle);
   flex-shrink: 0;
-  background: #fafbfc;
+  background: var(--app-surface-sunk);
 }
 
 .activity-status-bar:empty {
@@ -1322,7 +1610,7 @@ button {
   gap: 6px;
   margin-bottom: 6px;
   padding-bottom: 6px;
-  border-bottom: 1px solid #edf0f4;
+  border-bottom: 1px solid var(--app-surface-sunk);
 }
 
 .process-mapping-row:last-child {
@@ -1333,42 +1621,42 @@ button {
   width: 130px;
   flex-shrink: 0;
   padding: 7px 6px;
-  border: 1px solid #c2c9d1;
+  border: 1px solid var(--app-border);
   border-radius: 3px;
   font-size: 12px;
   font-family: inherit;
-  color: #2c3e50;
-  background: #ffffff;
+  color: var(--app-ink);
+  background: var(--app-surface-raised);
 }
 
 .mapping-process-name {
   width: 150px;
   flex-shrink: 0;
   padding: 7px 10px;
-  border: 1px solid #c2c9d1;
+  border: 1px solid var(--app-border);
   border-radius: 3px;
   font-size: 13px;
   font-family: inherit;
-  color: #2c3e50;
-  background: #ffffff;
+  color: var(--app-ink);
+  background: var(--app-surface-raised);
   transition: border-color 0.15s;
 }
 
 .mapping-process-name:focus {
   outline: none;
-  border-color: #1e7b8f;
-  box-shadow: 0 0 0 2px rgba(30, 123, 143, 0.12);
+  border-color: var(--app-accent);
+  box-shadow: 0 0 0 2px var(--app-accent-weak);
 }
 
 .mapping-folder-path {
   flex: 1;
   padding: 7px 10px;
-  border: 1px solid #c2c9d1;
+  border: 1px solid var(--app-border);
   border-radius: 3px;
   font-size: 13px;
   font-family: inherit;
-  color: #5a6a7a;
-  background: #f5f6f8;
+  color: var(--app-ink-dim);
+  background: var(--app-surface-sunk);
 }
 
 .btn-remove-mapping {
@@ -1382,7 +1670,7 @@ button {
   border: 1px solid transparent;
   border-radius: 3px;
   font-size: 18px;
-  color: #a0aec0;
+  color: var(--app-ink-faint);
   cursor: pointer;
   transition: color 0.15s, background 0.15s;
   padding: 0;
@@ -1390,9 +1678,9 @@ button {
 }
 
 .btn-remove-mapping:hover {
-  color: #c0392b;
-  background: #fdecea;
-  border-color: #f5c6cb;
+  color: var(--app-red);
+  background: var(--app-red-weak);
+  border-color: var(--app-red);
 }
 
 .btn-add-mapping {
@@ -1401,10 +1689,10 @@ button {
 
 /* ── Print Controller Cards ── */
 .controller-card {
-  border: 1px solid #d1d9e0;
+  border: 1px solid var(--app-border);
   border-radius: 3px;
   margin-bottom: 10px;
-  background: #ffffff;
+  background: var(--app-surface-raised);
   overflow: hidden;
 }
 
@@ -1413,18 +1701,18 @@ button {
   align-items: center;
   gap: 8px;
   padding: 10px 12px;
-  background: #f7f8fa;
+  background: var(--app-surface-sunk);
   cursor: pointer;
   user-select: none;
 }
 
 .controller-header:hover {
-  background: #eef1f5;
+  background: var(--app-surface-sunk);
 }
 
 .controller-expand-icon {
   font-size: 10px;
-  color: #7a8a9a;
+  color: var(--app-ink-faint);
   transition: transform 0.2s ease;
   width: 14px;
   text-align: center;
@@ -1438,12 +1726,12 @@ button {
   flex: 1;
   font-size: 13px;
   font-weight: 600;
-  color: #2d3748;
+  color: var(--app-ink);
 }
 
 .controller-header-type {
   font-size: 11px;
-  color: #7a8a9a;
+  color: var(--app-ink-faint);
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
@@ -1456,33 +1744,33 @@ button {
 }
 
 .controller-active-badge.active {
-  background: #e6f7ee;
-  color: #1a7a4c;
+  background: var(--app-green-weak);
+  color: var(--app-green);
 }
 
 .controller-active-badge.inactive {
-  background: #fce8e8;
-  color: #c53030;
+  background: var(--app-red-weak);
+  color: var(--app-red);
 }
 
 .controller-delete-btn {
   background: none;
   border: none;
   font-size: 16px;
-  color: #a0aec0;
+  color: var(--app-ink-faint);
   cursor: pointer;
   padding: 2px 6px;
   line-height: 1;
 }
 
 .controller-delete-btn:hover {
-  color: #e53e3e;
+  color: var(--app-red);
 }
 
 .controller-body {
   display: none;
   padding: 14px;
-  border-top: 1px solid #e2e8f0;
+  border-top: 1px solid var(--app-border-subtle);
 }
 
 .controller-card.expanded .controller-body {
@@ -1497,7 +1785,7 @@ button {
   display: block;
   font-size: 11px;
   font-weight: 600;
-  color: #3b4a5a;
+  color: var(--app-ink);
   margin-bottom: 3px;
 }
 
@@ -1505,10 +1793,10 @@ button {
 .controller-body .form-group select {
   width: 100%;
   padding: 6px 8px;
-  border: 1px solid #c6cdd5;
+  border: 1px solid var(--app-border);
   border-radius: 3px;
   font-size: 12px;
-  background: #ffffff;
+  background: var(--app-surface-raised);
 }
 
 .controller-body .form-row {
@@ -1540,14 +1828,14 @@ button {
 /* ── Channels Section ── */
 .channels-section {
   margin-top: 14px;
-  border-top: 1px solid #e2e8f0;
+  border-top: 1px solid var(--app-border-subtle);
   padding-top: 10px;
 }
 
 .channels-section-title {
   font-size: 11px;
   font-weight: 600;
-  color: #1e7b8f;
+  color: var(--app-accent);
   text-transform: uppercase;
   letter-spacing: 0.5px;
   margin-bottom: 8px;
@@ -1558,7 +1846,7 @@ button {
   align-items: center;
   gap: 6px;
   padding: 6px 0;
-  border-bottom: 1px solid #edf2f7;
+  border-bottom: 1px solid var(--app-border-subtle);
 }
 
 .channel-row:last-child {
@@ -1567,10 +1855,10 @@ button {
 
 .channel-row input {
   padding: 5px 6px;
-  border: 1px solid #c6cdd5;
+  border: 1px solid var(--app-border);
   border-radius: 3px;
   font-size: 11px;
-  background: #ffffff;
+  background: var(--app-surface-raised);
 }
 
 .channel-row .ch-number { width: 60px; }
@@ -1586,7 +1874,7 @@ button {
   background: none;
   border: none;
   font-size: 14px;
-  color: #a0aec0;
+  color: var(--app-ink-faint);
   cursor: pointer;
   padding: 2px 4px;
   line-height: 1;
@@ -1594,7 +1882,7 @@ button {
 }
 
 .channel-remove-btn:hover {
-  color: #e53e3e;
+  color: var(--app-red);
 }
 
 .channels-header {
@@ -1603,7 +1891,7 @@ button {
   padding: 0 0 4px;
   font-size: 10px;
   font-weight: 600;
-  color: #7a8a9a;
+  color: var(--app-ink-faint);
   text-transform: uppercase;
   letter-spacing: 0.3px;
 }
@@ -1618,7 +1906,7 @@ button {
 
 /* Assign button — amber/warning tone to signal action required */
 .btn-assign-channel {
-  background: #b45309;
+  background: var(--app-amber);
   border: none;
   border-radius: 4px;
   color: #fff;
@@ -1628,13 +1916,13 @@ button {
   padding: 5px 12px;
   transition: background 0.15s;
 }
-.btn-assign-channel:hover { background: #92400e; }
-.btn-assign-channel:active { background: #78350f; }
+.btn-assign-channel:hover { background: var(--app-amber); }
+.btn-assign-channel:active { background: var(--app-amber); }
 .btn-assign-channel:disabled { background: #6b5300; cursor: not-allowed; opacity: 0.6; }
 
 /* Inline "No controller" message in the ACTIONS column */
 .route-unassigned-msg {
-  color: #9ca3af;
+  color: var(--app-ink-faint);
   font-size: 11px;
   font-style: italic;
   line-height: 1.3;
@@ -1644,10 +1932,10 @@ button {
 
 /* Read-only field display inside modals */
 .modal-readonly-value {
-  background: #f0f2f5;
-  border: 1px solid #d5dae0;
+  background: var(--app-surface);
+  border: 1px solid var(--app-border-subtle);
   border-radius: 4px;
-  color: #374151;
+  color: var(--app-ink-dim);
   font-size: 13px;
   min-height: 32px;
   padding: 5px 10px;
@@ -1659,7 +1947,7 @@ button {
 
 /* Small hint text below form inputs */
 .field-hint {
-  color: #6b7280;
+  color: var(--app-ink-faint);
   font-size: 11px;
   margin: 3px 0 0;
 }
@@ -1681,17 +1969,17 @@ button {
 
 .routing-empty {
   font-size: 12px;
-  color: #8a9ab0;
+  color: var(--app-ink-faint);
   font-style: italic;
   margin: 4px 0 8px;
 }
 
 /* Order controller card + exception card */
 .routing-card {
-  border: 1px solid #d5dae0;
+  border: 1px solid var(--app-border-subtle);
   border-radius: 6px;
   margin-bottom: 8px;
-  background: #fafbfc;
+  background: var(--app-surface-sunk);
   overflow: hidden;
 }
 
@@ -1700,30 +1988,30 @@ button {
   align-items: center;
   gap: 10px;
   padding: 9px 12px;
-  background: #f0f2f5;
-  border-bottom: 1px solid #d5dae0;
+  background: var(--app-surface);
+  border-bottom: 1px solid var(--app-border-subtle);
 }
 
 .routing-card-name {
   flex: 1;
   font-weight: 600;
   font-size: 13px;
-  color: #2d3748;
+  color: var(--app-ink);
 }
 
 .routing-card-badge {
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.04em;
-  color: #5a7a9a;
-  background: #e2e8f0;
+  color: var(--app-ink-dim);
+  background: var(--app-border-subtle);
   border-radius: 3px;
   padding: 2px 6px;
 }
 
 .routing-card-meta {
   font-size: 11px;
-  color: #7a8a9a;
+  color: var(--app-ink-faint);
 }
 
 .routing-card-actions {
@@ -1734,7 +2022,7 @@ button {
 .routing-card-body {
   padding: 8px 12px;
   font-size: 12px;
-  color: #4a5568;
+  color: var(--app-ink-dim);
   word-break: break-all;
 }
 
@@ -1744,18 +2032,18 @@ button {
   gap: 6px;
   margin-top: 6px;
   font-size: 12px;
-  color: #2d3748;
+  color: var(--app-ink);
   cursor: pointer;
   user-select: none;
 }
 
 /* Danger-tinted action button */
 .btn-danger-text {
-  color: #c0392b !important;
+  color: var(--app-red) !important;
 }
 .btn-danger-text:hover {
-  background: #fff0f0 !important;
-  border-color: #e0a0a0 !important;
+  background: var(--app-red-weak) !important;
+  border-color: var(--app-red) !important;
 }
 
 /* Process Routing rows */
@@ -1764,14 +2052,14 @@ button {
   align-items: center;
   gap: 12px;
   padding: 7px 0;
-  border-bottom: 1px solid #edf2f7;
+  border-bottom: 1px solid var(--app-border-subtle);
 }
 .process-routing-row:last-child { border-bottom: none; }
 
 .process-routing-label {
   flex: 1;
   font-size: 13px;
-  color: #2d3748;
+  color: var(--app-ink);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1779,7 +2067,7 @@ button {
 }
 
 .process-routing-arrow {
-  color: #a0aec0;
+  color: var(--app-ink-faint);
   font-size: 14px;
   flex-shrink: 0;
 }
@@ -1799,9 +2087,9 @@ button {
   font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: #5a7a9a;
+  color: var(--app-ink-dim);
   padding: 4px 0 6px;
-  border-bottom: 1px solid #d5dae0;
+  border-bottom: 1px solid var(--app-border-subtle);
   margin-bottom: 4px;
 }
 
@@ -1810,7 +2098,7 @@ button {
   align-items: center;
   gap: 10px;
   padding: 6px 4px;
-  border-bottom: 1px solid #edf2f7;
+  border-bottom: 1px solid var(--app-border-subtle);
 }
 .channel-mapping-row:last-child { border-bottom: none; }
 
@@ -1826,16 +2114,16 @@ button {
 
 .channel-mapping-product {
   font-weight: 600;
-  color: #2d3748;
+  color: var(--app-ink);
 }
 
 .channel-mapping-options {
-  color: #7a8a9a;
+  color: var(--app-ink-faint);
   font-size: 11px;
 }
 
 .channel-mapping-channel {
-  color: #2b7a2b;
+  color: var(--app-green);
   font-weight: 600;
   flex-shrink: 0;
 }
@@ -1862,7 +2150,7 @@ button {
   align-items: flex-start;
   gap: 6px;
   padding: 5px 0;
-  border-bottom: 1px solid #edf2f7;
+  border-bottom: 1px solid var(--app-border-subtle);
   font-size: 12px;
 }
 
@@ -1870,10 +2158,10 @@ button {
   border-bottom: none;
 }
 
-.pm-row .pm-code { flex: 1.2; color: #2d3748; font-weight: 500; }
-.pm-row .pm-size { width: 60px; color: #4a5568; }
-.pm-row .pm-opts { flex: 2; color: #718096; font-size: 11px; word-break: break-word; line-height: 1.7; }
-.pm-row .pm-ch   { width: 50px; color: #4a5568; text-align: center; }
+.pm-row .pm-code { flex: 1.2; color: var(--app-ink); font-weight: 500; }
+.pm-row .pm-size { width: 60px; color: var(--app-ink-dim); }
+.pm-row .pm-opts { flex: 2; color: var(--app-ink-faint); font-size: 11px; word-break: break-word; line-height: 1.7; }
+.pm-row .pm-ch   { width: 50px; color: var(--app-ink-dim); text-align: center; }
 
 /* ── Product Mapping Modal ── */
 .pm-modal-overlay {
@@ -1891,19 +2179,57 @@ button {
 }
 
 .pm-modal {
-  background: #ffffff;
+  background: var(--app-surface-raised);
   border-radius: 6px;
   width: 420px;
   max-width: 90vw;
+  /* Cap to viewport so the modal can never grow off-screen on a long form
+     (the Darkroom Pro controller is the canonical case — size + media
+     translation lists push it well past 1080p height). The modal itself
+     scrolls; the overlay stays fixed and centred. */
+  max-height: 90vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  /* Anchor for the absolutely-positioned .pm-modal-close × button. */
+  position: relative;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
   padding: 20px 24px 18px;
 }
 
 .pm-modal h3 {
   margin: 0 0 14px;
+  /* Reserve space on the right for the .pm-modal-close × button. */
+  padding-right: 28px;
   font-size: 14px;
   font-weight: 600;
-  color: #2d3748;
+  color: var(--app-ink);
+}
+
+/* Close × — top-right of the modal, sibling to the h3. */
+.pm-modal-close {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  background: none;
+  border: none;
+  color: var(--app-ink-dim);
+  font-size: 20px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.pm-modal-close:hover {
+  background: var(--app-border-subtle);
+  color: var(--app-ink);
+}
+
+.pm-modal-close:focus-visible {
+  outline: 2px solid var(--app-accent);
+  outline-offset: 1px;
 }
 
 .pm-modal .form-group {
@@ -1914,7 +2240,7 @@ button {
   display: block;
   font-size: 11px;
   font-weight: 600;
-  color: #3b4a5a;
+  color: var(--app-ink);
   margin-bottom: 3px;
 }
 
@@ -1932,7 +2258,7 @@ button {
   width: 16px;
   height: 16px;
   flex-shrink: 0;
-  accent-color: #1e7b8f;
+  accent-color: var(--app-accent);
   cursor: pointer;
 }
 
@@ -1941,11 +2267,11 @@ button {
   width: 100%;
   box-sizing: border-box;
   padding: 6px 8px;
-  border: 1px solid #c6cdd5;
+  border: 1px solid var(--app-border);
   border-radius: 3px;
   font-size: 12px;
   font-family: inherit;
-  background-color: #ffffff;
+  background-color: #fff;
   color: inherit;
 }
 
@@ -1963,8 +2289,8 @@ button {
 .pm-modal .form-group input:focus,
 .pm-modal .form-group select:focus {
   outline: none;
-  border-color: #1e7b8f;
-  box-shadow: 0 0 0 2px rgba(30, 123, 143, 0.12);
+  border-color: var(--app-accent);
+  box-shadow: 0 0 0 2px var(--app-accent-weak);
 }
 
 /* Checkbox rows in the modal */
@@ -1989,7 +2315,7 @@ button {
 .pm-options-label {
   font-size: 11px;
   font-weight: 600;
-  color: #3b4a5a;
+  color: var(--app-ink);
   margin-bottom: 4px;
 }
 
@@ -2003,7 +2329,7 @@ button {
 .pm-option-row input {
   flex: 1;
   padding: 5px 7px;
-  border: 1px solid #c6cdd5;
+  border: 1px solid var(--app-border);
   border-radius: 3px;
   font-size: 12px;
   font-family: inherit;
@@ -2011,14 +2337,14 @@ button {
 
 .pm-option-row input:focus {
   outline: none;
-  border-color: #1e7b8f;
+  border-color: var(--app-accent);
 }
 
 .pm-option-remove {
   background: none;
   border: none;
   font-size: 14px;
-  color: #a0aec0;
+  color: var(--app-ink-faint);
   cursor: pointer;
   padding: 2px 4px;
   line-height: 1;
@@ -2026,7 +2352,7 @@ button {
 }
 
 .pm-option-remove:hover {
-  color: #e53e3e;
+  color: var(--app-red);
 }
 
 .pm-modal-footer {
@@ -2040,8 +2366,8 @@ button {
 .copied-tooltip {
   position: fixed;
   padding: 4px 10px;
-  background: #2d3748;
-  color: #ffffff;
+  background: var(--app-ink);
+  color: #fff;
   font-size: 11px;
   border-radius: 3px;
   pointer-events: none;
@@ -2058,7 +2384,7 @@ button {
 /* ── Update available banner ── */
 .update-banner {
   background: #415564;
-  color: #ffffff;
+  color: #fff;
   flex-shrink: 0;
   padding: 10px 20px;
   border-bottom: 1px solid #344450;
@@ -2119,19 +2445,19 @@ button {
 }
 
 .update-banner .btn-ghost:hover {
-  color: #ffffff;
+  color: #fff;
   background: rgba(255, 255, 255, 0.1);
   border-color: rgba(255, 255, 255, 0.6);
 }
 
 .update-banner .btn-primary {
-  background: #ffffff;
+  background: #fff;
   color: #415564;
   border: none;
 }
 
 .update-banner .btn-primary:hover {
-  background: #eef1f3;
+  background: var(--app-surface-sunk);
 }
 
 .update-banner.mandatory .btn-primary {
@@ -2146,9 +2472,9 @@ button {
 }
 
 .pipeline-step-card {
-  border: 1px solid var(--border, #dde3e8);
+  border: 1px solid var(--app-border-subtle);
   border-radius: 6px;
-  background: var(--surface, #f8f9fa);
+  background: var(--app-surface-sunk);
   overflow: hidden;
 }
 
@@ -2157,15 +2483,15 @@ button {
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
-  background: var(--surface-raised, #eef1f3);
-  border-bottom: 1px solid var(--border, #dde3e8);
+  background: var(--app-surface-raised);
+  border-bottom: 1px solid var(--app-border-subtle);
 }
 
 .pipeline-step-badge {
   font-size: 11px;
   font-weight: 600;
-  color: #415564;
-  background: #d0dde6;
+  color: var(--app-ink-dim);
+  background: var(--app-surface-deep);
   padding: 2px 7px;
   border-radius: 3px;
   white-space: nowrap;
@@ -2174,7 +2500,7 @@ button {
 .pipeline-step-summary {
   flex: 1;
   font-size: 12px;
-  color: var(--text-muted, #666);
+  color: var(--app-ink-dim);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2219,10 +2545,10 @@ button {
   box-sizing: border-box;
   font-size: 12px;
   padding: 4px 8px;
-  border: 1px solid #c6cdd5;
+  border: 1px solid var(--app-border);
   border-radius: 3px;
   font-family: inherit;
-  background-color: #ffffff;
+  background-color: var(--app-surface-raised);
   color: inherit;
 }
 
@@ -2256,8 +2582,8 @@ button {
   align-items: center;
   gap: 6px;
   padding: 4px 8px;
-  background: var(--surface, #f8f9fa);
-  border: 1px solid var(--border, #dde3e8);
+  background: var(--app-surface-sunk);
+  border: 1px solid var(--app-border-subtle);
   border-radius: 4px;
   font-size: 12px;
 }
@@ -2282,10 +2608,10 @@ button {
 .page-simulator {
   margin-top: 10px;
   padding: 8px 10px;
-  background: #f0f4f7;
+  background: var(--app-surface-sunk);
   border-radius: 4px;
   font-size: 12px;
-  color: #415564;
+  color: var(--app-ink-dim);
   line-height: 1.6;
 }
 
@@ -2308,6 +2634,6 @@ button {
 }
 
 .page-simulator-steps {
-  color: #415564;
+  color: var(--app-ink-dim);
   font-size: 12px;
 }

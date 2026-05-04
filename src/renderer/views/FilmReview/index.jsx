@@ -4,8 +4,15 @@
  * Top-level component for the Film Review Panel (PW-007 Phase 1, Milestone 4).
  *
  * Owns the two pieces of state that survive view transitions:
- *   - `tweaks`   (density, theme, showKbdHint) — persisted via IPC
+ *   - `tweaks`   (density, showKbdHint) — persisted via IPC
  *   - `openRollId` — null => show RollList, set => show RollReview
+ *
+ * Light/dark theme used to live here as a panel-local tweak. During the
+ * 2026-04-29 theming consistency pass it was lifted to a single app-header
+ * toggle that drives `body.app-theme-dark`; this panel now picks up the
+ * resulting --app-* token overrides via film-review.css aliases. The
+ * `theme` field is still in the persisted shape (back-compat) but no
+ * longer read from this component.
  *
  * Everything else (rolls list, frame data, flag menus) is fetched lazily by
  * the child components. This keeps the App shell small and means a bug in
@@ -33,6 +40,9 @@ const DENSITIES = [
 
 const DEFAULT_TWEAKS = Object.freeze({
   density: 'regular',
+  // theme: deprecated — kept in the persisted shape for back-compat with
+  // existing film-review-prefs.json files but no longer read by this panel.
+  // The app header now drives body.app-theme-dark globally.
   theme: 'light',
   showKbdHint: true,
 });
@@ -88,17 +98,13 @@ export function FilmReviewApp() {
   }, [tweaks]);
 
   if (!tweaksLoaded) {
-    // Avoid a flash of unstyled content — wait one tick for tweaks so the
-    // dark-theme class is applied on first paint.
+    // Avoid a flash of unstyled content — wait one tick so density
+    // (which affects grid layout) is settled on first paint.
     return null;
   }
 
-  const panelClass =
-    'film-review-panel' +
-    (tweaks.theme === 'dark' ? ' film-review-theme-dark' : '');
-
   return (
-    <div className={panelClass}>
+    <div className="film-review-panel">
       <header className="fr-chrome">
         <span className="fr-chrome__title">Film Review</span>
         {openRollId && (
@@ -137,14 +143,6 @@ export function FilmReviewApp() {
             ))}
           </div>
         )}
-        <button
-          type="button"
-          className="fr-chrome__btn"
-          title="Toggle dark theme"
-          onClick={() => setTweak('theme', tweaks.theme === 'dark' ? 'light' : 'dark')}
-        >
-          {tweaks.theme === 'dark' ? 'Light theme' : 'Dark theme'}
-        </button>
       </header>
 
       {openRollId == null ? (

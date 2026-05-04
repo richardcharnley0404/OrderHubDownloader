@@ -221,7 +221,14 @@ function resolveRoute(job) {
           controller.mediaOptionKey,
           controller.mediaTranslations
         );
-        if (!resolvedSize || !resolvedMedia) {
+        // Media translation is only required when the controller has
+        // mediaOptionKey configured. For fixed-size products without media
+        // variation (e.g., cut prints where the product code IS the size),
+        // size-alone routing is sufficient. Note: the dispatch-time writer
+        // in darkroom-pro-output.js gates its own media validation on the
+        // same mediaOptionKey signal — see generateDarkroomProFile.
+        const mediaConfigured = !!controller.mediaOptionKey;
+        if (!resolvedSize || (mediaConfigured && !resolvedMedia)) {
           // Cannot resolve one or both fields — surface the "Assign" button in the UI
           return { type: 'unrouted', reason: 'no-channel', controller };
         }
@@ -502,14 +509,31 @@ function optionsMatch(mappingOptions, jobOptions) {
 
 // ── Migrations ───────────────────────────────────────────────────────────────
 
+// Routing keys that originally lived in config.json but now live exclusively
+// in routing.json. Defined once so the migrate-in (`migrateRoutingStoreFile`)
+// and the strip-out (`stripDeprecatedConfigJsonKeys`) functions agree on the
+// list — adding a key in only one place would either skip migration or skip
+// cleanup, both subtle bugs.
+const LEGACY_ROUTING_KEYS = [
+  'orderControllers',
+  'processControllerMappings',
+  'channelMappings',
+  'processFolderExceptions',
+  'processFolderPath',
+  '_migrated_v1',
+];
+
 /**
  * One-time migration: copy routing keys from the shared default config store
  * (config.json) into the dedicated routing store (routing.json) so they can no
  * longer be clobbered by config-service writes.
  *
  * The guard flag '_store_migrated_v1' is written to the routing store once the
- * copy is complete. The original keys are left in config.json (harmless — they
- * are simply ignored by routing-service going forward).
+ * copy is complete. The original keys in config.json are subsequently
+ * stripped by `stripDeprecatedConfigJsonKeys` (separate one-time pass) — they
+ * were previously left in place "as harmless leftovers" but they actively
+ * misled debugging, so they're now removed and the file gets a deprecation
+ * marker pointing at routing.json.
  *
  * Called before migrateFromPrintControllerStore so routing data is in place.
  */
@@ -533,17 +557,8 @@ function migrateRoutingStoreFile() {
     // we do NOT keep this instance alive.
     const oldStore = new Store(); // name defaults to 'config'
 
-    const ROUTING_KEYS = [
-      'orderControllers',
-      'processControllerMappings',
-      'channelMappings',
-      'processFolderExceptions',
-      'processFolderPath',
-      '_migrated_v1',
-    ];
-
     let copied = 0;
-    for (const key of ROUTING_KEYS) {
+    for (const key of LEGACY_ROUTING_KEYS) {
       const value = oldStore.get(key);
       if (value !== undefined && !store.has(key)) {
         store.set(key, value);
@@ -556,6 +571,57 @@ function migrateRoutingStoreFile() {
   } catch (err) {
     logger.logError('routing-service: routing store file migration failed', err);
     // Do not set _store_migrated_v1 so it retries on next startup
+  }
+}
+
+/**
+ * One-time cleanup: strip the (now-deprecated) routing keys out of
+ * config.json and stamp a deprecation marker so future debuggers don't get
+ * misled by stale duplicates.
+ *
+ * Background: when routing data was extracted into its own electron-store
+ * file (`routing.json`) via `migrateRoutingStoreFile`, the original keys
+ * were left in `config.json` as a precaution. They turned out to be a
+ * debugging hazard — operators (and humans assisting them) would open
+ * config.json, find an `orderControllers` array with stale entries, and
+ * spend hours chasing a discrepancy with the live routing.json before
+ * realising config.json hadn't been read at runtime since the migration.
+ *
+ * This pass is gated on its own flag (`_config_routing_keys_stripped_v1`,
+ * stored in routing.json) so it runs at most once even on installations
+ * that already completed the original migration. Safe to run multiple
+ * times in principle — `delete` on a non-existent key is a no-op — but
+ * the flag avoids the file write on every startup once it's done.
+ */
+function stripDeprecatedConfigJsonKeys() {
+  if (store.get('_config_routing_keys_stripped_v1', false)) return;
+
+  try {
+    const oldStore = new Store(); // name defaults to 'config'
+
+    let stripped = 0;
+    for (const key of LEGACY_ROUTING_KEYS) {
+      if (oldStore.has(key)) {
+        oldStore.delete(key);
+        stripped++;
+      }
+    }
+
+    // Stamp a marker so anyone who opens config.json sees immediately that
+    // routing data lives elsewhere now. Cheap insurance against future
+    // confusion. The exact value isn't read by anything — its presence is
+    // the signal.
+    oldStore.set('_DEPRECATED_ROUTING_KEYS_SEE_ROUTING_JSON', true);
+
+    store.set('_config_routing_keys_stripped_v1', true);
+    logger.info('routing-service: stripped deprecated routing keys from config.json', {
+      keysStripped:   stripped,
+      configPath:     oldStore.path,
+      routingPath:    store.path,
+    });
+  } catch (err) {
+    logger.logError('routing-service: stripping deprecated config.json keys failed', err);
+    // Do not set the flag so it retries on next startup
   }
 }
 
@@ -645,6 +711,7 @@ function migrateFromPrintControllerStore() {
 module.exports = {
   resolveRoute,
   migrateFromPrintControllerStore,
+  stripDeprecatedConfigJsonKeys,
   // Controllers
   getControllers,
   saveController,

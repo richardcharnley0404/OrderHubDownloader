@@ -25,7 +25,7 @@ class WindowManager {
       },
       // icon.ico works in both dev and packaged builds (assets/ is in the build files array)
       icon: path.join(__dirname, '../../assets/icon.ico'),
-      title: 'OrderHub Downloader',
+      title: 'OrderHub Desktop',
       autoHideMenuBar: true
     });
 

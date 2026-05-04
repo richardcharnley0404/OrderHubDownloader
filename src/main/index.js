@@ -9,6 +9,7 @@ const orientationService = require('./services/orientation-service');
 const aiInferenceClient = require('./services/ai-inference-client');
 const logger = require('./services/logger');
 const updater = require('./updater');
+const { runIntegrityQuarantineMigration } = require('./services/integrity-quarantine-migration');
 
 // Disable libvips' operation cache. The cache retains file descriptors on
 // recently-read images so subsequent passes are faster — but on a slow SMB
@@ -33,8 +34,22 @@ if (!gotTheLock) {
   });
 
   // This method will be called when Electron has finished initialization
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     logger.info('Application starting', { version: app.getVersion() });
+
+    // v1.3.2 integrity-quarantine pivot — one-shot migration that restores
+    // any legacy `<file>.quarantine` artifacts left by older builds and
+    // archives their `_ohd-quarantine.json` manifests. Awaited (not
+    // fire-and-forget) so the first FTP sweep sees the restored files in
+    // their normal extensions; the walk is bounded to the download
+    // directory and short on a typical install. Idempotent on re-launch
+    // via the `_integrityQuarantineMigratedAt` config flag. Failures here
+    // do NOT block startup — the flag stays unset so we retry next launch.
+    try {
+      await runIntegrityQuarantineMigration();
+    } catch (err) {
+      logger.logError('[migration] Integrity-quarantine migration threw — flag stays unset, will retry on next launch', err);
+    }
 
     // Setup IPC handlers (pass windowManager so jobs:updated events can reach renderer)
     setupIpcHandlers(pollingService, ftpService, windowManager);

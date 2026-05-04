@@ -1,0 +1,35 @@
+# Treat ONNX models as binary so git doesn't try to diff them as text.
+# Applies even to models that bypass .gitignore (e.g. the smaller orientation
+# model that ships in-repo).
+*.onnx binary
+
+# Other binary asset extensions that shouldn't be auto-CRLF'd or text-diffed.
+*.ico binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.pdf binary
+*.zip binary
+*.exe binary
+*.dll binary
+*.dylib binary
+*.so binary
+*.tflite binary
+*.pt binary
+*.bin binary
+
+# Force LF line endings on text source files. Avoids the "LF will be replaced
+# by CRLF" warnings on every Windows-side git operation.
+*.js text eol=lf
+*.jsx text eol=lf
+*.json text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sh text eol=lf

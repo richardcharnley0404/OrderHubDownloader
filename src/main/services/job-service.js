@@ -166,8 +166,16 @@ class JobService {
       if (!existing) return newJob;
       const preserved = {};
       if (existing._status && existing._status !== 'pending') {
-        // Preserve local status (received, in_production) — don't overwrite with 'pending'
+        // Preserve local status (received, in_production, warning, error) —
+        // don't overwrite with 'pending'. The accompanying explanatory message
+        // (set alongside the status by polling-service for warning, by
+        // print-service / ipc-handlers for error) must be preserved together;
+        // without this the renderer's "Unknown warning/error — check Activity
+        // Log" fallback takes over from the next poll onward and the operator
+        // loses the diagnostic context.
         preserved._status = existing._status;
+        if (existing._warningMessage) preserved._warningMessage = existing._warningMessage;
+        if (existing._errorMessage)   preserved._errorMessage   = existing._errorMessage;
       }
       if (existing._dpofNotified) {
         // Preserve the DPOF terminal-notification flag so re-fetching from the API
@@ -366,23 +374,49 @@ class JobService {
   }
 
   /**
-   * Sync in_production jobs against the OrderHub API.
+   * Sync locally-active jobs against the OrderHub API.
    *
-   * For each locally-cached job with _status === 'in_production', fetches the
-   * current status from GET /jobs/{jobId}. If OH reports the job as "completed"
-   * (case-insensitive), the local status is updated to 'completed' directly —
-   * without POSTing back to OH (OH already knows).
+   * For each locally-cached job whose _status is one of
+   * ACTIVE_LOCAL_STATUSES (see below), fetches the current status from
+   * GET /jobs/{jobId}. If OH reports the job as terminal — `completed`
+   * or `cancelled` (case-insensitive) — the local _status is updated to
+   * 'completed' directly. No POST back to OH; OH already knows.
    *
-   * Individual job failures are logged and skipped; they never abort the loop.
+   * Why three local statuses are checked instead of just `in_production`:
+   *   - in_production: jobs OHD itself dispatched (the original sync target)
+   *   - received:      jobs OHD downloaded but hasn't sent to print yet —
+   *                    covers OH-side completion via another OHD instance,
+   *                    a manual mark-complete in the OH UI, or an external
+   *                    integration. Without this branch the row stays in
+   *                    Awaiting Processing forever (OH stops returning the
+   *                    job from /jobs/pending and _mergeJobs deliberately
+   *                    keeps locally-tracked received jobs).
+   *   - pending:       jobs OHD has queued but artwork hasn't arrived.
+   *                    Covers POS / walk-in orders that get cancelled in OH
+   *                    before artwork ever syncs down.
+   *
+   * Both `completed` and `cancelled` collapse to local _status='completed'
+   * — from OHD's perspective they're the same terminal state ("OH is done
+   * with this job"); the operator doesn't need to act on either, and
+   * existing UI already routes _status='completed' to the Processed tab.
+   *
+   * Requests are chunked (CHUNK_SIZE concurrent) so a busy lab with 50+
+   * active jobs doesn't sit through a 5-second sequential roundtrip on
+   * every poll cycle. Individual job failures are logged and skipped;
+   * they never abort the chunk or the overall loop.
    *
    * @returns {Promise<number>} Count of jobs auto-completed in this run
    */
-  async syncInProductionFromOH() {
+  async syncJobStatusFromOH() {
     const { baseUrl, key: apiKey, organizationId, locationId } = configService.getApiSettings();
     if (!apiKey) return 0;
 
-    const inProdJobs = this.getJobsByStatus('in_production');
-    if (inProdJobs.length === 0) return 0;
+    const ACTIVE_LOCAL_STATUSES = ['in_production', 'received', 'pending'];
+    const TERMINAL_OH_STATUSES  = ['completed', 'cancelled'];
+    const CHUNK_SIZE = 8;
+
+    const activeJobs = this.jobs.filter(j => ACTIVE_LOCAL_STATUSES.includes(j._status));
+    if (activeJobs.length === 0) return 0;
 
     const extraHeaders = {};
     if (organizationId) extraHeaders['X-Organization-ID'] = organizationId;
@@ -390,32 +424,51 @@ class JobService {
 
     let autoCompleted = 0;
 
-    for (const job of inProdJobs) {
-      try {
-        const response = await this._httpRequest(
-          'GET', `${baseUrl}/jobs/${job.id}`, apiKey, null, extraHeaders
-        );
-
-        if (response.statusCode >= 200 && response.statusCode < 300) {
-          const data = JSON.parse(response.body);
-          if ((data.status || '').toLowerCase() === 'completed') {
-            this.updateJobLocally(job.id, { _status: 'completed' });
-            logger.info(`[sync] Job ${job.id} auto-completed from OH status`);
-            autoCompleted++;
+    for (let i = 0; i < activeJobs.length; i += CHUNK_SIZE) {
+      const chunk = activeJobs.slice(i, i + CHUNK_SIZE);
+      const results = await Promise.all(chunk.map(async job => {
+        try {
+          const response = await this._httpRequest(
+            'GET', `${baseUrl}/jobs/${job.id}`, apiKey, null, extraHeaders
+          );
+          if (response.statusCode >= 200 && response.statusCode < 300) {
+            const data = JSON.parse(response.body);
+            const ohStatus = (data.status || '').toLowerCase();
+            if (TERMINAL_OH_STATUSES.includes(ohStatus)) {
+              return { jobId: job.id, terminal: true, ohStatus };
+            }
+          } else {
+            logger.logWarning('[sync] Failed to fetch job status from OH', {
+              jobId: job.id, statusCode: response.statusCode,
+            });
           }
-        } else {
-          logger.logWarning('[sync] Failed to fetch job status from OH', {
-            jobId: job.id, statusCode: response.statusCode,
+        } catch (err) {
+          logger.logWarning('[sync] Error fetching job status from OH — skipping', {
+            jobId: job.id, error: err.message,
           });
         }
-      } catch (err) {
-        logger.logWarning('[sync] Error fetching job status from OH — skipping', {
-          jobId: job.id, error: err.message,
-        });
+        return { jobId: job.id, terminal: false };
+      }));
+      for (const r of results) {
+        if (r.terminal) {
+          this.updateJobLocally(r.jobId, { _status: 'completed' });
+          logger.info(`[sync] Job ${r.jobId} auto-completed from OH status`, { ohStatus: r.ohStatus });
+          autoCompleted++;
+        }
       }
     }
 
     return autoCompleted;
+  }
+
+  /**
+   * Backwards-compatible alias for the renamed sync method.
+   * Older call sites referenced the in-production-only name; both now
+   * resolve to the broader sync. Kept to avoid breaking anything outside
+   * src/ that might reach in (smoke tests, ad-hoc scripts).
+   */
+  async syncInProductionFromOH() {
+    return this.syncJobStatusFromOH();
   }
 
   /**

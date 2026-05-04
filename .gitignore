@@ -28,6 +28,19 @@ config.json
 *.asar
 nul
 .claude/
+.playwright-mcp/
 # Cowork workspace folder (accidental nested copy of repo)
 /OrderHub Dowloader/
-git rm --cached .claude/settings.local.json
+
+# ONNX export workspace — Python venv (~3GB) + pyiqa-downloaded weights (~250MB)
+tools/onnx-export/
+
+# Bundled ONNX models — kept on disk for electron-builder extraResources at
+# build time, but not tracked in git. MUSIQ alone is 131 MB (over GitHub's
+# 100 MB hard limit) and Real-ESRGAN is a binary blob that doesn't diff
+# usefully. Build machines fetch these once from S3/Release attachments.
+resources/models/musiq/*.onnx
+resources/models/realesrgan/*.onnx
+
+# Scratch files
+release-status.txt

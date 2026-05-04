@@ -143,10 +143,21 @@ function _defaultBlock() {
     scored: false,
     score: null,
     thresholdAtScoreTime: null,
+    // Phase C: 'warn' | 'block' at scoring time. Useful in the Quality
+    // Review tooltip for calibration workflows — operators can tell whether
+    // a sub-threshold score happened while the gate was passive (warn) or
+    // actively holding the job (block).
+    modeAtScoreTime: null,
     passed: true,
     modelVersion: null,
     inferenceMs: null,
     scoredAt: null,
+    // File fingerprint at score time (Phase 3) — used by the orchestrator
+    // to decide whether to re-score after an inference error. Defaults are
+    // null (not undefined) so consumers using `!= null` semantics treat a
+    // pristine sidecar identically to an old one written before Phase 3.
+    fileSizeAtScoreTime: null,
+    fileMtimeAtScoreTime: null,
     error: null,
     fixupHistory: [],
     operatorDecision: { kind: 'none', decidedAt: null, note: null },

@@ -13,6 +13,9 @@ import { CMYSliders } from './CMYSliders.jsx';
  *   - Reprint flag toggle
  *   - Reset image button
  *
+ * Styling: classes defined in src/renderer/job-review.css. Theming follows
+ * the app-wide --app-* tokens (see styles.css).
+ *
  * Props (all from useJobReview):
  *   images           ImageEntry[]
  *   selected         ImageEntry | null
@@ -29,15 +32,6 @@ import { CMYSliders } from './CMYSliders.jsx';
  *   onResetImage     (filename) => Promise<void>
  */
 
-// ── Palette ───────────────────────────────────────────────────────────────────
-const BRAND_GREEN = '#72B622';
-const BG_DEEP     = '#2a3a45';
-const BG_BASE     = '#324452';
-const BORDER_DIM  = '#3a4e5e';
-const TEXT_DIM    = '#8aa8be';
-const TEXT_MUTED  = '#5d7a8a';
-const PURPLE_AI   = '#9b59b6';
-
 // ── Enhancement models ────────────────────────────────────────────────────────
 const MODELS = [
   { value: 'Standard V2',      label: 'Standard V2' },
@@ -49,19 +43,11 @@ const MODELS = [
 // ── Sub-components ────────────────────────────────────────────────────────────
 
 function SectionLabel({ children }) {
-  return (
-    <div style={{
-      fontSize: 10, fontFamily: "'DM Mono', monospace",
-      color: TEXT_MUTED, letterSpacing: '0.1em',
-      textTransform: 'uppercase', marginBottom: 10,
-    }}>
-      {children}
-    </div>
-  );
+  return <div className="jr-section-label">{children}</div>;
 }
 
 function Divider() {
-  return <div style={{ borderTop: '1px solid #1e2c35', margin: '4px 0' }} />;
+  return <div className="jr-divider" />;
 }
 
 // ── QTY control ───────────────────────────────────────────────────────────────
@@ -73,49 +59,31 @@ function QtyControl({ image, onUpdateQty }) {
   return (
     <div>
       <SectionLabel>Quantity</SectionLabel>
-      <div style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        background: BG_BASE, border: '1px solid #1e2c35',
-        borderRadius: 5, padding: '10px 14px',
-      }}>
+      <div className="jr-qty">
         <button
           onClick={() => onUpdateQty(filename, -1)}
           aria-label="Decrease quantity"
-          style={qtyBtnStyle}
+          className="jr-qty__btn"
         >−</button>
 
-        <div style={{ textAlign: 'center' }}>
-          <div style={{
-            fontFamily: "'DM Mono', monospace", fontSize: 24, fontWeight: 600,
-            color: isModified ? BRAND_GREEN : '#c8d8e0',
-          }}>
+        <div className="jr-qty__readout">
+          <div className={'jr-qty__value' + (isModified ? ' is-modified' : '')}>
             {qtyCurrent}
           </div>
           {isModified && (
-            <div style={{ fontSize: 10, color: TEXT_MUTED, fontFamily: "'DM Mono', monospace" }}>
-              orig: {qtyOriginal}
-            </div>
+            <div className="jr-qty__orig">orig: {qtyOriginal}</div>
           )}
         </div>
 
         <button
           onClick={() => onUpdateQty(filename, +1)}
           aria-label="Increase quantity"
-          style={qtyBtnStyle}
+          className="jr-qty__btn"
         >+</button>
       </div>
     </div>
   );
 }
-
-const qtyBtnStyle = {
-  width: 28, height: 28,
-  background: BORDER_DIM, border: 'none', borderRadius: 4,
-  color: '#c8d8e0', fontSize: 18,
-  cursor: 'pointer',
-  display: 'flex', alignItems: 'center', justifyContent: 'center',
-  padding: 0,
-};
 
 // ── Hold Correction toggle ─────────────────────────────────────────────────────
 
@@ -127,32 +95,14 @@ function HoldToggle({ holdCorrection, onToggleHold }) {
       aria-checked={holdCorrection}
       tabIndex={0}
       onKeyDown={e => e.key === 'Enter' && onToggleHold()}
-      style={{
-        marginTop: 12,
-        display: 'flex', alignItems: 'center', gap: 8,
-        background: holdCorrection ? '#1a2d1a' : BG_BASE,
-        border: `1px solid ${holdCorrection ? BRAND_GREEN + '88' : BORDER_DIM}`,
-        borderRadius: 4, padding: '7px 10px', cursor: 'pointer',
-      }}
+      className={'jr-toggle' + (holdCorrection ? ' is-on' : '')}
     >
-      <div style={{
-        width: 14, height: 14, borderRadius: 3, flexShrink: 0,
-        background: holdCorrection ? BRAND_GREEN : BORDER_DIM,
-        border: `2px solid ${holdCorrection ? BRAND_GREEN : '#4a6070'}`,
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        transition: 'all 0.15s',
-      }}>
-        {holdCorrection && (
-          <span style={{ color: '#fff', fontSize: 9, fontWeight: 700, lineHeight: 1 }}>✓</span>
-        )}
+      <div className="jr-toggle__check">
+        {holdCorrection && <span className="jr-toggle__check-mark">✓</span>}
       </div>
       <div>
-        <div style={{ fontSize: 11, color: holdCorrection ? BRAND_GREEN : TEXT_DIM, fontWeight: 500 }}>
-          Hold Correction
-        </div>
-        <div style={{ fontSize: 9, color: TEXT_MUTED, fontFamily: "'DM Mono', monospace" }}>
-          Apply to all images
-        </div>
+        <div className="jr-toggle__label">Hold Correction</div>
+        <div className="jr-toggle__hint">Apply to all images</div>
       </div>
     </div>
   );
@@ -173,30 +123,16 @@ function ReprintToggle({ image, reprintCount, jobId, onToggleReprint }) {
         aria-checked={reprint}
         tabIndex={0}
         onKeyDown={e => e.key === 'Enter' && onToggleReprint(filename)}
-        style={{
-          display: 'flex', alignItems: 'center', gap: 10,
-          background: reprint ? '#1e0a0a' : BG_BASE,
-          border: `1px solid ${reprint ? '#cc3333' : BORDER_DIM}`,
-          borderRadius: 5, padding: '10px 12px', cursor: 'pointer',
-          transition: 'all 0.15s',
-        }}
+        className={'jr-reprint' + (reprint ? ' is-on' : '')}
       >
-        <div style={{
-          width: 16, height: 16, borderRadius: '50%', flexShrink: 0,
-          background: reprint ? '#cc3333' : BORDER_DIM,
-          border: `2px solid ${reprint ? '#cc3333' : '#4a6070'}`,
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          transition: 'all 0.15s',
-        }}>
-          {reprint && (
-            <span style={{ color: '#fff', fontSize: 10, lineHeight: 1 }}>✕</span>
-          )}
+        <div className="jr-reprint__dot">
+          {reprint && <span className="jr-reprint__dot-mark">✕</span>}
         </div>
         <div>
-          <div style={{ fontSize: 11, color: reprint ? '#ff6666' : TEXT_DIM, fontWeight: 500 }}>
+          <div className="jr-reprint__label">
             {reprint ? 'Flagged for Reprint' : 'Flag for Reprint'}
           </div>
-          <div style={{ fontSize: 9, color: TEXT_MUTED, fontFamily: "'DM Mono', monospace" }}>
+          <div className="jr-reprint__hint">
             {reprintCount > 0
               ? `next: ${jobId}-r${nextN}`
               : `creates ${jobId}-r1`}
@@ -207,25 +143,11 @@ function ReprintToggle({ image, reprintCount, jobId, onToggleReprint }) {
   );
 }
 
-// ── Enhancement panel button style helper ─────────────────────────────────────
-
-function enhBtnStyle(variant) {
-  const base = {
-    fontSize: 11, fontFamily: "'DM Mono', monospace",
-    padding: '7px 12px', borderRadius: 4, cursor: 'pointer',
-    fontWeight: 600, letterSpacing: '0.03em',
-    display: 'block', border: 'none', width: '100%',
-  };
-  if (variant === 'primary')  return { ...base, background: PURPLE_AI, color: '#fff' };
-  if (variant === 'cancel')   return { ...base, background: '#3a2020', border: '1px solid #cc3333', color: '#ff8888' };
-  /* secondary */              return { ...base, background: 'none', border: `1px solid ${BORDER_DIM}`, color: TEXT_DIM };
-}
-
 // ── AI Enhancement panel ──────────────────────────────────────────────────────
 
 function EnhancementPanel({ selected, jobId, jobPath, onRefreshSidecar }) {
   const [hasKey,          setHasKey]          = useState(false);
-  const [provider,        setProvider]        = useState('replicate');
+  const [provider,        setProvider]        = useState('local');
   const [autoEnhance,     setAutoEnhance]     = useState(false);
   const [model,           setModel]           = useState('Standard V2');
   const [faceEnhancement, setFaceEnhancement] = useState(false);
@@ -234,20 +156,22 @@ function EnhancementPanel({ selected, jobId, jobPath, onRefreshSidecar }) {
   const [error,           setError]           = useState(null);
   const pollRef = useRef(null);
 
-  // Load config defaults on mount
+  // Load config defaults on mount.
+  // hasKey semantics:
+  //   - 'local' (Pixfizz AI): no key needed — always ready (true).
+  //   - 'topaz': true iff topazApiKey is configured.
   useEffect(() => {
     window.electronAPI.getConfig()
       .then(cfg => {
-        // hasKey is true if the configured provider has a key set
-        const p   = cfg.enhancementProvider || 'replicate';
-        const key = p === 'topaz' ? cfg.topazApiKey : cfg.replicateApiKey;
-        setHasKey(Boolean(key));
+        // Defensive remap of legacy stored 'replicate' value.
+        let p = cfg.enhancementProvider || 'local';
+        if (p === 'replicate') p = 'local';
         setProvider(p);
+        setHasKey(p === 'local' ? true : Boolean(cfg.topazApiKey));
         setAutoEnhance(Boolean(cfg.autoEnhance));
-        // Default model comes from whichever provider is active
         const defaultModel = p === 'topaz'
-          ? (cfg.topazDefaultModel        || 'Standard V2')
-          : (cfg.enhancementDefaultModel  || 'Standard V2');
+          ? (cfg.topazDefaultModel || 'Standard V2')
+          : 'realesr-general-x4v3';
         setModel(defaultModel);
         setFaceEnhancement(Boolean(cfg.enhancementFaceEnhancement));
       })
@@ -341,17 +265,17 @@ function EnhancementPanel({ selected, jobId, jobPath, onRefreshSidecar }) {
     }
   }
 
-  // ── State: no API key ───────────────────────────────────────────────────────
+  // ── State: provider not ready ──────────────────────────────────────────────
+  // For Topaz this means the API key isn't set. The 'local' branch
+  // can't reach this state because hasKey is hard-coded true above
+  // — Pixfizz AI Enhancement requires no configuration.
   if (!hasKey) {
     return (
       <div>
         <SectionLabel>AI Enhancement</SectionLabel>
-        <div style={{
-          background: BG_BASE, border: '1px solid #1e2c35',
-          borderRadius: 5, padding: '12px 14px',
-        }}>
-          <div style={{ fontSize: 11, color: TEXT_MUTED, marginBottom: 10, lineHeight: 1.5 }}>
-            Configure {provider === 'topaz' ? 'a Topaz' : 'a Replicate'} API key in Settings to enable AI {provider === 'topaz' ? 'enhancement' : 'upscaling'}.
+        <div className="jr-enh-card">
+          <div className="jr-enh-message">
+            Configure a Topaz API key in Settings to enable AI enhancement.
           </div>
           <button
             onClick={() => {
@@ -366,7 +290,7 @@ function EnhancementPanel({ selected, jobId, jobPath, onRefreshSidecar }) {
                 }, 80);
               }, 300);
             }}
-            style={enhBtnStyle('secondary')}
+            className="jr-enh-btn jr-enh-btn--secondary"
           >
             Open Settings
           </button>
@@ -380,20 +304,16 @@ function EnhancementPanel({ selected, jobId, jobPath, onRefreshSidecar }) {
     return (
       <div>
         <SectionLabel>AI Enhancement</SectionLabel>
-        <div style={{
-          background: BG_BASE, border: '1px solid #2a3e50',
-          borderRadius: 5, padding: '12px 14px',
-        }}>
-          <div style={{ fontSize: 12, color: '#7ec8e3', fontWeight: 600, marginBottom: 4 }}>
-            ⟳ Enhancing via {provider === 'topaz' ? 'Topaz' : 'Replicate'}...
+        <div className="jr-enh-card jr-enh-card--processing">
+          <div className="jr-enh-status jr-enh-status--processing">
+            ⟳ Enhancing via {provider === 'topaz' ? 'Topaz' : 'Pixfizz AI'}…
           </div>
-          <div style={{
-            fontSize: 10, color: TEXT_MUTED,
-            fontFamily: "'DM Mono', monospace", marginBottom: 12,
-          }}>
-            This may take 30–60 seconds
+          <div className="jr-enh-status-hint">
+            {provider === 'topaz'
+              ? 'This may take 30–60 seconds (cloud)'
+              : 'Running locally — typical 6 MP photo takes ~50 seconds'}
           </div>
-          <button onClick={handleCancel} style={enhBtnStyle('cancel')}>
+          <button onClick={handleCancel} className="jr-enh-btn jr-enh-btn--cancel">
             Cancel
           </button>
         </div>
@@ -406,20 +326,18 @@ function EnhancementPanel({ selected, jobId, jobPath, onRefreshSidecar }) {
     return (
       <div>
         <SectionLabel>AI Enhancement</SectionLabel>
-        <div style={{
-          background: '#1a0a2e', border: `1px solid ${PURPLE_AI}55`,
-          borderRadius: 5, padding: '12px 14px',
-        }}>
-          <div style={{ fontSize: 12, color: PURPLE_AI, fontWeight: 600, marginBottom: 2 }}>
-            ✓ Enhanced via {selected.enhancementSource === 'topaz-direct' ? 'Topaz' : 'Replicate'}
+        <div className="jr-enh-card jr-enh-card--enhanced">
+          <div className="jr-enh-status">
+            ✓ Enhanced via {
+              selected.enhancementSource === 'topaz-direct' ? 'Topaz' :
+              selected.enhancementSource === 'local' ? 'Pixfizz AI' :
+              'AI Enhancement'
+            }
           </div>
-          <div style={{
-            fontSize: 10, color: TEXT_MUTED,
-            fontFamily: "'DM Mono', monospace", marginBottom: 10,
-          }}>
-            Model: {selected.enhancementModel || 'Topaz'}
+          <div className="jr-enh-status-hint">
+            Model: {selected.enhancementModel || '—'}
           </div>
-          <button onClick={handleRun} style={enhBtnStyle('primary')}>
+          <button onClick={handleRun} className="jr-enh-btn jr-enh-btn--primary">
             Re-enhance
           </button>
         </div>
@@ -431,26 +349,14 @@ function EnhancementPanel({ selected, jobId, jobPath, onRefreshSidecar }) {
   return (
     <div>
       <SectionLabel>AI Enhancement</SectionLabel>
-      <div style={{
-        background: BG_BASE, border: '1px solid #1e2c35',
-        borderRadius: 5, padding: '12px 14px',
-      }}>
+      <div className="jr-enh-card">
         {/* Model selector */}
-        <div style={{ marginBottom: 8 }}>
-          <div style={{
-            fontSize: 9, color: TEXT_MUTED, fontFamily: "'DM Mono', monospace",
-            letterSpacing: '0.08em', marginBottom: 4,
-          }}>
-            MODEL
-          </div>
+        <div className="jr-enh-field">
+          <div className="jr-crop-label">MODEL</div>
           <select
             value={model}
             onChange={e => setModel(e.target.value)}
-            style={{
-              width: '100%', background: BG_DEEP, color: '#c8d8e0',
-              border: `1px solid ${BORDER_DIM}`, borderRadius: 4,
-              fontSize: 11, padding: '4px 6px', cursor: 'pointer',
-            }}
+            className="jr-select"
           >
             {MODELS.map(m => (
               <option key={m.value} value={m.value}>{m.label}</option>
@@ -465,39 +371,19 @@ function EnhancementPanel({ selected, jobId, jobPath, onRefreshSidecar }) {
           aria-checked={faceEnhancement}
           tabIndex={0}
           onKeyDown={e => e.key === 'Enter' && setFaceEnhancement(f => !f)}
-          style={{
-            display: 'flex', alignItems: 'center', gap: 8,
-            cursor: 'pointer', marginBottom: 10, padding: '2px 0',
-          }}
+          className={'jr-enh-checkbox' + (faceEnhancement ? ' is-on' : '')}
         >
-          <div style={{
-            width: 12, height: 12, borderRadius: 2, flexShrink: 0,
-            background: faceEnhancement ? PURPLE_AI : BORDER_DIM,
-            border: `2px solid ${faceEnhancement ? PURPLE_AI : '#4a6070'}`,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            transition: 'all 0.15s',
-          }}>
-            {faceEnhancement && (
-              <span style={{ color: '#fff', fontSize: 8, fontWeight: 700, lineHeight: 1 }}>✓</span>
-            )}
+          <div className="jr-enh-checkbox__box">
+            {faceEnhancement && <span className="jr-enh-checkbox__mark">✓</span>}
           </div>
-          <span style={{ fontSize: 10, color: faceEnhancement ? PURPLE_AI : TEXT_DIM }}>
-            Face enhancement
-          </span>
+          <span className="jr-enh-checkbox__label">Face enhancement</span>
         </div>
 
         {/* Error message */}
-        {error && (
-          <div style={{
-            fontSize: 10, color: '#ff8888', marginBottom: 8,
-            wordBreak: 'break-word', lineHeight: 1.4,
-          }}>
-            {error}
-          </div>
-        )}
+        {error && <div className="jr-enh-error">{error}</div>}
 
         {/* Run button */}
-        <button onClick={handleRun} style={enhBtnStyle('primary')}>
+        <button onClick={handleRun} className="jr-enh-btn jr-enh-btn--primary">
           ✨ Upscale This Image
         </button>
       </div>
@@ -551,76 +437,42 @@ function CropSection({ selected, allSizeOptions, cropSizeOption, onOpenCropEdito
   return (
     <div>
       <SectionLabel>Crop to Size</SectionLabel>
-      <div style={{
-        background: BG_BASE, border: `1px solid ${BORDER_DIM}`,
-        borderRadius: 5, padding: '12px 14px',
-      }}>
-        <>
-          {/* Size dropdown */}
-          <div style={{ marginBottom: 10 }}>
-            <div style={{
-              fontSize: 9, color: TEXT_MUTED,
-              fontFamily: "'DM Mono', monospace",
-              letterSpacing: '0.08em', marginBottom: 4,
-            }}>
-              TARGET SIZE
-            </div>
-            <select
-              value={selectedId}
-              onChange={e => setSelectedId(e.target.value)}
-              style={{
-                width: '100%', background: BG_DEEP, color: '#c8d8e0',
-                border: `1px solid ${BORDER_DIM}`, borderRadius: 4,
-                fontSize: 11, padding: '4px 6px', cursor: 'pointer',
-              }}
-            >
-              <option value="">\u2014 select size \u2014</option>
-              {sizeOptions.map(opt => (
-                <option key={opt.id} value={opt.id}>
-                  {opt.label}{opt.channelNumber != null ? ` — ch.${opt.channelNumber} \u2713` : ''}
-                </option>
-              ))}
-            </select>
-            {selectedOption?.channelMappingId && (
-              <div style={{ fontSize: 9, color: '#55aa77', marginTop: 3 }}>
-                Channel {selectedOption.channelNumber} \u2014 routing will be overridden
-              </div>
-            )}
-          </div>
-
-          {/* Crop applied badge */}
-          {cropApplied && (
-            <div style={{
-              display: 'inline-flex', alignItems: 'center', gap: 4,
-              fontSize: 9, color: '#55cc88',
-              fontFamily: "'DM Mono', monospace",
-              letterSpacing: '0.06em',
-              marginBottom: 8,
-            }}>
-              \u2702 CROPPED
+      <div className="jr-crop-card">
+        {/* Size dropdown */}
+        <div className="jr-crop-field">
+          <div className="jr-crop-label">TARGET SIZE</div>
+          <select
+            value={selectedId}
+            onChange={e => setSelectedId(e.target.value)}
+            className="jr-select"
+          >
+            <option value="">— select size —</option>
+            {sizeOptions.map(opt => (
+              <option key={opt.id} value={opt.id}>
+                {opt.label}{opt.channelNumber != null ? ` — ch.${opt.channelNumber} ✓` : ''}
+              </option>
+            ))}
+          </select>
+          {selectedOption?.channelMappingId && (
+            <div className="jr-crop-routing">
+              Channel {selectedOption.channelNumber} — routing will be overridden
             </div>
           )}
+        </div>
 
-          {/* Crop / re-crop button */}
-          <button
-            disabled={!selectedOption}
-            onClick={() => onOpenCropEditor(selectedOption)}
-            style={{
-              width: '100%',
-              padding: '7px 12px',
-              fontSize: 11,
-              fontFamily: "'DM Mono', monospace",
-              letterSpacing: '0.05em',
-              background: selectedOption ? '#1a3a4a' : BG_DEEP,
-              color: selectedOption ? '#a8d8f0' : TEXT_MUTED,
-              border: `1px solid ${selectedOption ? '#2a5a7a' : BORDER_DIM}`,
-              borderRadius: 4,
-              cursor: selectedOption ? 'pointer' : 'not-allowed',
-            }}
-          >
-            {cropApplied ? '\u2702 Re-Crop' : '\u2702 Crop Image'}
-          </button>
-        </>
+        {/* Crop applied badge */}
+        {cropApplied && (
+          <div className="jr-crop-applied">✂ CROPPED</div>
+        )}
+
+        {/* Crop / re-crop button */}
+        <button
+          disabled={!selectedOption}
+          onClick={() => onOpenCropEditor(selectedOption)}
+          className="jr-btn-crop"
+        >
+          {cropApplied ? '✂ Re-Crop' : '✂ Crop Image'}
+        </button>
       </div>
     </div>
   );
@@ -662,12 +514,7 @@ export function ControlSidebar({
   }
 
   return (
-    <div style={{
-      width: 260, background: BG_DEEP, borderLeft: '1px solid #1e2c35',
-      padding: 20, overflowY: 'auto',
-      display: 'flex', flexDirection: 'column', gap: 20,
-      flexShrink: 0,
-    }}>
+    <div className="jr-sidebar">
       {/* QTY */}
       <QtyControl image={selected} onUpdateQty={onUpdateQty} />
 
@@ -675,25 +522,15 @@ export function ControlSidebar({
 
       {/* CMY */}
       <div>
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          marginBottom: 12,
-        }}>
+        <div className="jr-cmy-header">
           <SectionLabel>Colour Correction</SectionLabel>
           {hasCorrections && (
             <button
               onClick={handleReset}
               disabled={resetting}
-              style={{
-                fontSize: 9, fontFamily: "'DM Mono', monospace",
-                color: '#cc6644', background: 'none',
-                border: '1px solid #cc664444', borderRadius: 3,
-                padding: '2px 7px', cursor: 'pointer',
-                letterSpacing: '0.05em',
-                opacity: resetting ? 0.5 : 1,
-              }}
+              className="jr-btn-reset"
             >
-              {resetting ? '\u2026' : 'RESET'}
+              {resetting ? '…' : 'RESET'}
             </button>
           )}
         </div>
@@ -732,7 +569,7 @@ export function ControlSidebar({
       <EnhancementPanel
         selected={selected}
         jobId={jobId}
-                jobPath={jobPath}
+        jobPath={jobPath}
         onRefreshSidecar={onRefreshSidecar}
       />
     </div>
