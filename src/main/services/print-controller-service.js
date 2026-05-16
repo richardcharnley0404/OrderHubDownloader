@@ -6,11 +6,12 @@ const { dpofGenerator } = require('./dpof-generator');
 const { orderFolderWriter } = require('./order-folder-writer');
 const { FolderMonitor } = require('./folder-monitor');
 const { DarkroomProMonitor } = require('./darkroom-pro-monitor');
+const { FujiJobMakerMonitor } = require('./fuji-jobmaker-monitor');
 const logger = require('./logger');
 
 class PrintControllerService {
   constructor() {
-    // controllerId → FolderMonitor | DarkroomProMonitor
+    // controllerId → FolderMonitor | DarkroomProMonitor | FujiJobMakerMonitor
     this.monitors = new Map();
   }
 
@@ -90,6 +91,49 @@ class PrintControllerService {
         controller: controller.name,
         hotFolder: controller.hotFolderPath,
         processedFolder: processedFolderName
+      });
+    } else if (controller.type === 'fujijobmaker') {
+      // Fuji JobMaker: watches for .txt disappearance (accepted, Frontier
+      // consumes the file) and runs a timeout sweep for stuck files. There is
+      // no in-band failure signal — see docs/print-controllers/FUJI-JOBMAKER-FORMAT.md.
+      const monitor = new FujiJobMakerMonitor();
+
+      // Wrap onStatusChange to translate the Fuji event shape to the JobStore's
+      // expected shape. Fuji emits per-file status (one event per .txt) with
+      // 'accepted' or 'timed_out'. We map:
+      //   'accepted'   → JobStore status 'accepted'
+      //   'timed_out'  → JobStore status 'failed'   + warning log entry
+      const onFujiStatus = (event) => {
+        if (event.status === 'timed_out') {
+          logger.warn('Fuji JobMaker submission stuck — file not consumed within failure timeout', {
+            controller: controller.name,
+            orderRef:  event.orderRef,
+            surface:   event.surface,
+            filename:  event.filename,
+          });
+        }
+        onStatusChange({
+          // The legacy callback signature uses `orderNumber`; preserve that.
+          orderNumber: event.orderRef,
+          status:      event.status === 'accepted' ? 'accepted' : 'failed',
+          timestamp:   event.timestamp,
+        });
+      };
+
+      monitor.startMonitoring(
+        controller.hotFolderPath,
+        {
+          failureTimeoutMs: controller.failureTimeoutMs,
+          // sweepIntervalMs uses the monitor's default (60 s).
+        },
+        onFujiStatus
+      );
+      this.monitors.set(controllerId, monitor);
+
+      logger.info('Started Fuji JobMaker monitoring', {
+        controller: controller.name,
+        hotFolder:  controller.hotFolderPath,
+        failureTimeoutMs: controller.failureTimeoutMs || 30 * 60 * 1000,
       });
     } else {
       // DPOF controllers (Noritsu, Epson): watches for folder prefix renames (o→e, o→q)

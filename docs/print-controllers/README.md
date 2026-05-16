@@ -1,6 +1,6 @@
 # Print Controller Integration
 
-This document describes how OrderHub Downloader routes print jobs to physical print controllers via the DPOF (Digital Print Order Format) protocol.
+This document describes how OrderHub Desktop routes print jobs to physical print controllers via the DPOF (Digital Print Order Format) protocol.
 
 ---
 
@@ -8,7 +8,7 @@ This document describes how OrderHub Downloader routes print jobs to physical pr
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                        OrderHub Downloader                          │
+│                        OrderHub Desktop                          │
 │                                                                     │
 │  ┌──────────────┐    IPC     ┌─────────────────────────────────┐   │
 │  │   Renderer   │◄──────────►│         Main Process            │   │
@@ -105,7 +105,7 @@ See [DPOF-FORMAT.md](DPOF-FORMAT.md) for the complete format specification.
 
 ### Hot Folders
 
-A **hot folder** is a filesystem directory monitored by the print controller software. When OrderHub Downloader writes an order folder into the hot folder, the controller picks it up automatically.
+A **hot folder** is a filesystem directory monitored by the print controller software. When OrderHub Desktop writes an order folder into the hot folder, the controller picks it up automatically.
 
 **Folder naming convention:**
 
@@ -159,6 +159,8 @@ For detailed setup instructions, see [SETUP.md](SETUP.md).
 |----------|-------------|
 | [SETUP.md](SETUP.md) | How to configure controllers, channels, and process mappings |
 | [DPOF-FORMAT.md](DPOF-FORMAT.md) | DPOF file format specification with annotated examples |
+| [DARKROOM-PRO-FORMAT.md](DARKROOM-PRO-FORMAT.md) | Darkroom Pro `.TXT` order file format specification |
+| [FUJI-JOBMAKER-FORMAT.md](FUJI-JOBMAKER-FORMAT.md) | Fuji JobMaker (Frontier MS01) order file format specification |
 | [WORKFLOW.md](WORKFLOW.md) | Process flow diagrams and job lifecycle |
 | [API.md](API.md) | Developer reference for all services |
 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Common issues and how to diagnose them |
