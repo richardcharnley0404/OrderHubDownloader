@@ -84,26 +84,55 @@ async function scanWorkingImages(jobPath) {
  *   1. Scan /working/ to discover what image files actually exist on disk.
  *   2. Try to read {jobPath}/{jobId}.json.
  *      a. If found: parse it.  If any on-disk filenames are missing from the
- *         sidecar's images array, add fresh entries for them and re-save.
+ *         sidecar's images array, add fresh entries for them.  Also back-fill
+ *         `originalFilename` on any existing entry whose value is null when
+ *         the manifest now supplies one (sidecars created before the
+ *         Customer Originals feature shipped pick the field up on next
+ *         load).  Re-save when anything changed.
  *      b. If not found (ENOENT): build a fresh sidecar from the scanned
  *         filenames and save it immediately.
  *   3. Return { sidecar, filenames } so callers get both in one call.
  *
- * @param {string}           jobId
- * @param {string}           jobPath      - Root folder of the job
- * @param {Map<string,number>} [quantityMap] - Optional map of bare filename →
- *   authoritative quantity from the order manifest.  When supplied, new image
- *   entries (both on first creation and during reconcile) use the mapped
- *   quantity instead of defaulting to 1.  Existing sidecar entries are never
- *   overwritten — operator changes are preserved.
+ * Reconcile principle: operator-mutable fields are never re-applied from
+ * the manifest (qtyCurrent may have been adjusted, corrections, reprint flag,
+ * aiQuality, integritySuspect, etc).  `originalFilename` is the one field
+ * that's safe to back-fill precisely because nothing else writes to it —
+ * it's null on legacy entries and the manifest is the authoritative source.
+ * Defence-in-depth: if a legacy entry already has a different
+ * `originalFilename` from what the manifest now provides, leave it alone
+ * (first-write wins — keeps the no-clobber contract clean).
+ *
+ * @param {string} jobId
+ * @param {string} jobPath - Root folder of the job
+ * @param {Map<string, number|{qty:number, originalFilename:(string|null)}>} [metaMap]
+ *   Optional map keyed by bare working-filename:
+ *     - legacy form: `Map<filename, qty>` — quantity only
+ *     - new form:    `Map<filename, { qty, originalFilename }>` — quantity
+ *                    plus the manifest-relative path to the uncropped
+ *                    customer upload (null when not present in the manifest)
+ *   When supplied, new image entries (both on first creation and during
+ *   reconcile) use the mapped quantity instead of defaulting to 1, and
+ *   originalFilename is populated from the meta.  Existing sidecar entries
+ *   are never overwritten — operator changes are preserved.
  * @returns {Promise<{ sidecar: object, filenames: string[] }>}
  */
-async function loadSidecar(jobId, jobPath, quantityMap = null) {
+async function loadSidecar(jobId, jobPath, metaMap = null) {
   const filenames = await scanWorkingImages(jobPath);
   const jsonPath  = sidecarPath(jobId, jobPath);
 
-  // Resolve quantity for a filename: use the map if provided, otherwise 1.
-  const resolveQty = (fn) => (quantityMap && quantityMap.get(fn)) || 1;
+  // Normalise the meta lookup so callers can pass either shape.  Returns
+  // `{ qty, originalFilename }` with `qty=1, originalFilename=null` as the
+  // fallback when nothing was supplied for this filename.
+  const resolveMeta = (fn) => {
+    if (!metaMap) return { qty: 1, originalFilename: null };
+    const v = metaMap.get(fn);
+    if (v == null) return { qty: 1, originalFilename: null };
+    if (typeof v === 'number') return { qty: v, originalFilename: null };
+    return {
+      qty: Number.isFinite(v.qty) && v.qty > 0 ? v.qty : 1,
+      originalFilename: (typeof v.originalFilename === 'string' && v.originalFilename) || null,
+    };
+  };
 
   let sidecar;
 
@@ -111,23 +140,144 @@ async function loadSidecar(jobId, jobPath, quantityMap = null) {
     const raw = await fs.readFile(jsonPath, 'utf8');
     sidecar = JSON.parse(raw);
 
-    // Reconcile: add entries for files that exist on disk but not in sidecar.
+    // Reconcile A: add entries for files that exist on disk but not in sidecar.
     // This handles images added to /working/ after the sidecar was first created.
     const known      = new Set(sidecar.images.map(img => img.filename));
     const newEntries = filenames
       .filter(fn => !known.has(fn))
-      .map(fn => createImageEntry(fn, resolveQty(fn)));
+      .map(fn => {
+        const meta = resolveMeta(fn);
+        return createImageEntry(fn, meta.qty, meta.originalFilename);
+      });
 
-    if (newEntries.length > 0) {
-      sidecar = { ...sidecar, images: [...sidecar.images, ...newEntries] };
+    // Reconcile B: back-fill `originalFilename` on existing entries created
+    // before the Customer Originals feature shipped.  Touch only this one
+    // field, and only when the existing value is null — never clobber an
+    // already-set value, even if it differs from what the manifest says.
+    let backfilledAny = false;
+    const reconciledExisting = sidecar.images.map(entry => {
+      const desired = resolveMeta(entry.filename).originalFilename;
+      if (!desired) return entry;
+      // Tolerate sidecars that pre-date the schema bump and have no key.
+      const current = Object.prototype.hasOwnProperty.call(entry, 'originalFilename')
+        ? entry.originalFilename
+        : null;
+      if (current != null) return entry; // first-write wins, even if mismatched
+      backfilledAny = true;
+      return { ...entry, originalFilename: desired };
+    });
+
+    // Reconcile C: hydrate S3-artwork-channel fields on entries / job-level
+    // that pre-date the M1 schema bump (2026-05-24). Missing fields are set
+    // to null defaults (job-level array → []); already-populated values are
+    // never touched. The defaults round-trip cleanly on subsequent loads.
+    const S3_DEFAULTS = {
+      artworkFileId:    null,
+      artworkSource:    null,
+      artworkType:      null,
+      productionReady:  null,
+      originalFileName: null,
+      // M3 (2026-05-24): per-file copies multiplier. Same null-default
+      // pattern as the M1 fields — hydration adds the key in-memory so
+      // consumers can read `entry.copies` uniformly; never triggers a
+      // save (preserved "no spurious save" contract).
+      copies:           null,
+    };
+    let migratedS3Any = false;
+    const s3MigratedExisting = reconciledExisting.map(entry => {
+      let next = entry;
+      for (const k of Object.keys(S3_DEFAULTS)) {
+        if (!Object.prototype.hasOwnProperty.call(next, k)) {
+          if (next === entry) next = { ...entry };
+          next[k] = S3_DEFAULTS[k];
+          migratedS3Any = true;
+        }
+      }
+      return next;
+    });
+    let s3ArtworkFileIdsKnown = sidecar.s3ArtworkFileIdsKnown;
+    let migratedS3Job = false;
+    if (!Array.isArray(s3ArtworkFileIdsKnown)) {
+      s3ArtworkFileIdsKnown = [];
+      migratedS3Job = true;
+    }
+
+    // Reconcile D: hydrate M5b (Manual Cropping, 2026-05-25) batch-crop
+    // metadata on entries / job-level that pre-date the schema bump.
+    // Same null-default + no-spurious-save pattern as Reconcile C.
+    //
+    // Per-image flat siblings: cropOrientation, cropSource, cropAppliedAt,
+    // cropRotation. Note these are siblings of the pre-existing
+    // cropApplied / croppedPath / cropRect / channelMappingId — NOT
+    // nested under a crop:{...} object (would force a migration that the
+    // brief explicitly rejected). Casing trap warning: `cropOrientation`
+    // lowercase; distinct from `croppedPath` (different concept).
+    //
+    // Job-level: batchCropDefaultRect, batchCropDefaultOrientation,
+    // batchCropLastAppliedAt — persisted operator defaults so an OHD
+    // restart restores the workflow state.
+    const M5B_IMAGE_DEFAULTS = {
+      cropOrientation: null,
+      cropSource:      null,
+      cropAppliedAt:   null,
+      cropRotation:    null,
+    };
+    let migratedM5bAny = false;
+    const m5bMigratedExisting = s3MigratedExisting.map((entry) => {
+      let next = entry;
+      for (const k of Object.keys(M5B_IMAGE_DEFAULTS)) {
+        if (!Object.prototype.hasOwnProperty.call(next, k)) {
+          if (next === entry) next = { ...entry };
+          next[k] = M5B_IMAGE_DEFAULTS[k];
+          migratedM5bAny = true;
+        }
+      }
+      return next;
+    });
+    const M5B_JOB_DEFAULTS = {
+      batchCropDefaultRect:        null,
+      batchCropDefaultOrientation: null,
+      batchCropLastAppliedAt:      null,
+    };
+    let migratedM5bJob = false;
+    const m5bJobFields = {};
+    for (const k of Object.keys(M5B_JOB_DEFAULTS)) {
+      if (!Object.prototype.hasOwnProperty.call(sidecar, k)) {
+        m5bJobFields[k] = M5B_JOB_DEFAULTS[k];
+        migratedM5bJob = true;
+      }
+    }
+
+    // In-memory hydration is ALWAYS applied so consumers of loadSidecar see
+    // the hydrated shape (S3 fields present, job-level array present, M5b
+    // fields present). Persistence, by contrast, is gated on the original
+    // reconcile triggers (new files on disk / originalFilename back-fill) —
+    // NOT on the S3 / M5b hydration alone, otherwise every load of a
+    // legacy sidecar would write unnecessarily (regression caught by
+    // sidecarManager.test.js "no spurious save"). Disk catches up on the
+    // next meaningful save, e.g. when the S3 downloader appends an entry
+    // or batch crop persists per-image.
+    sidecar = {
+      ...sidecar,
+      ...m5bJobFields,
+      images: [...m5bMigratedExisting, ...newEntries],
+      s3ArtworkFileIdsKnown,
+    };
+    if (newEntries.length > 0 || backfilledAny) {
       sidecar = await saveSidecar(sidecar, jobPath);
     }
+    // Hydration flags intentionally not in the save condition.
+    void migratedS3Any; void migratedS3Job;
+    void migratedM5bAny; void migratedM5bJob;
   } catch (err) {
     if (err.code !== 'ENOENT') throw err;
 
     // No sidecar on disk yet — build a fresh one from scanned images,
-    // using manifest quantities where available.
-    const images = filenames.map(fn => createImageEntry(fn, resolveQty(fn)));
+    // using manifest quantities + originalFilename where available.
+    const images = filenames.map(fn => {
+      const meta = resolveMeta(fn);
+      return createImageEntry(fn, meta.qty, meta.originalFilename);
+    });
     sidecar = createSidecar(jobId, images);
     sidecar = await saveSidecar(sidecar, jobPath);
   }

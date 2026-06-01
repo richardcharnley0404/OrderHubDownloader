@@ -32,6 +32,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // File Uploads status
   getFileUploadsStatus: () => ipcRenderer.invoke('fileUploads:getStatus'),
 
+  // Order XML Hot Folders (Mode 4)
+  orderXmlListRecords: (args) => ipcRenderer.invoke('orderXml:listRecords', args),
+  orderXmlGetStatus:   ()     => ipcRenderer.invoke('orderXml:getStatus'),
+  orderXmlClear:       ()     => ipcRenderer.invoke('orderXml:clearRecords'),
+  orderXmlRetryFailed: (id)   => ipcRenderer.invoke('orderXml:retryFailed', { id }),
+  orderXmlGetHotFolders: ()   => ipcRenderer.invoke('orderXml:getHotFolders'),
+  orderXmlListParserFormats: () => ipcRenderer.invoke('orderXml:listParserFormats'),
+  orderXmlOpenFolder:  (id, which) => ipcRenderer.invoke('orderXml:openFolder', { id, which }),
+
   // Status updates from main process
   onStatusUpdate: (callback) => ipcRenderer.on('status:update', (event, data) => callback(data)),
 
@@ -96,8 +105,46 @@ contextBridge.exposeInMainWorld('electronAPI', {
   jobSave:        (payload) => ipcRenderer.invoke('ohd:job:save',       payload),
   jobResetImage:  (payload) => ipcRenderer.invoke('ohd:job:reset-image', payload),
   jobResetAll:    (payload) => ipcRenderer.invoke('ohd:job:reset-all',   payload),
+  // Payload: { jobPath, sidecar, filename, cropRect: {x,y,w,h}, channelMappingId?,
+  //            darkroomSize?, ohJobId?, cropRotation?: 0|90|180|270 }
+  // M5c (2026-05-26): cropRotation default 0 keeps byte-identical sharp chain;
+  // non-zero applies sharp.rotate(N).extract(rect) — rect is in POST-rotation
+  // image coords (per the brief's implementer note).
   jobCropImage:   (payload) => ipcRenderer.invoke('ohd:job:crop-image',  payload),
   reprintCreate:  (payload) => ipcRenderer.invoke('ohd:reprint:create',  payload),
+  reprintCreateSingle: (payload) => ipcRenderer.invoke('ohd:reprint:createSingle', payload),
+
+  // Customer Originals (Phase 1) — open / reveal the customer's uncropped
+  // upload in the OS's default viewer / Explorer-Finder. Both take the
+  // manifest-relative path stored on the sidecar entry and let the main
+  // side resolve to absolute + verify existence before the shell call.
+  originalOpen:   (payload) => ipcRenderer.invoke('ohd:original:open',   payload),
+  originalReveal: (payload) => ipcRenderer.invoke('ohd:original:reveal', payload),
+
+  // Customer Originals (Phase 2) — re-crop the customer's uncropped upload
+  // through sharp into /recrops/ + /working/, then return the updated sidecar.
+  // Payload: { jobPath, sidecar, filename, cropRect: {x,y,w,h} }
+  jobRecropFromOriginal: (payload) => ipcRenderer.invoke('ohd:job:recrop-from-original', payload),
+
+  // Manual Cropping M5b (2026-05-25) — batch crop for manual-source jobs.
+  // Payload: { jobPath, sidecar, filenames, fractionalRect: {x,y,w,h},
+  //            orientation: 'portrait'|'landscape',
+  //            channelMappingId?, darkroomSize?, ohJobId? }
+  // Returns: { success, sidecar, succeeded, failed, skipped, aborted? }
+  jobBatchCropApply:  (payload) => ipcRenderer.invoke('ohd:job:batch-crop-apply', payload),
+  // Read-only target-size resolution: route → matching allSizeOptions
+  // entry. Used by the batch crop top-bar's size pill. If no route or
+  // no size translation, returns { ok: false, reason }.
+  resolveTargetSize:  (payload) => ipcRenderer.invoke('ohd:job:resolve-target-size', payload),
+  // Per-image progress stream from a running batch. Channel-specific
+  // (matches the existing onJobsUpdated / onDownloadProgress pattern).
+  // Returns an unsubscribe function so the renderer can clean up on
+  // mode exit / unmount.
+  onBatchCropProgress: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on('ohd:batch-crop:progress', handler);
+    return () => ipcRenderer.removeListener('ohd:batch-crop:progress', handler);
+  },
 
   // AI Enhancement (Phase 3+)
   enhancementTest:   (payload) => ipcRenderer.invoke('ohd:enhancement:test',   payload),
@@ -149,7 +196,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // job-review.css / film-review.css / styles.css token definitions.
   appGetTheme:                ()                       => ipcRenderer.invoke('ohd:app:get-theme'),
   appSetTheme:                (value)                  => ipcRenderer.invoke('ohd:app:set-theme', value),
-
   // AI Quality Gate (v1.2.0)
   aiQualityListHeldJobs:    ()                                => ipcRenderer.invoke('aiQuality:listHeldJobs'),
   aiQualityGetJobQuality:   (jobId)                           => ipcRenderer.invoke('aiQuality:getJobQuality', jobId),
@@ -157,4 +203,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
   aiQualityApproveImage:    (jobId, filename, note)           => ipcRenderer.invoke('aiQuality:approveImage', { jobId, filename, note }),
   onAiQualityJobHeld:       (callback) =>
     ipcRenderer.on('aiQuality:jobHeld', (event, data) => callback(data)),
+
+  // Backup & Restore (v1.6+)
+  //
+  // Snapshots all non-sensitive electron-store state to a single JSON file on
+  // a network share (UNC), local disk, or mapped drive. Credentials are
+  // never written; the operator re-enters them after restore. See
+  // docs/backup-restore.md.
+  backupRunNow:         (opts)                      => ipcRenderer.invoke('ohd:backup:run-now', opts || {}),
+  backupList:           (args)                      => ipcRenderer.invoke('ohd:backup:list', args || {}),
+  backupRead:           (filePath)                  => ipcRenderer.invoke('ohd:backup:read', { filePath }),
+  backupRestore:        (filePath, selections)      => ipcRenderer.invoke('ohd:backup:restore', { filePath, selections }),
+  backupRelaunch:       ()                          => ipcRenderer.invoke('ohd:backup:relaunch'),
+  backupChooseFolder:   ()                          => ipcRenderer.invoke('ohd:backup:choose-folder'),
+  backupChooseFile:     ()                          => ipcRenderer.invoke('ohd:backup:choose-file'),
+  backupValidateFolder: (folderPath)                => ipcRenderer.invoke('ohd:backup:validate-folder', { folderPath }),
 });

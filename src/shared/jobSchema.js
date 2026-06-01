@@ -38,6 +38,22 @@
  *     sourceHeight
  *     outputWidth           4× source dims (after upscale)
  *     outputHeight
+ *
+ * Customer-originals fields (Customer Originals Phase 1, schema-bumped here
+ * with the Phase 2 fields so we only mutate the shape once):
+ *
+ *     originalFilename      Manifest-relative path to the uncropped customer
+ *                           upload, e.g. "PXDEMO-XYZ_123/original-files/1-IMG.jpg".
+ *                           null when the order didn't ship an original (non-
+ *                           Pixfizz, or just missing from the manifest). Stored
+ *                           verbatim from the manifest — do not bake the
+ *                           "original-files" folder name into OHD code paths.
+ *     recropPath            Phase 2: absolute path to a re-cropped JPEG written
+ *                           by the operator from the customer original. null
+ *                           until first re-crop. Not surfaced in UI yet.
+ *     recropOf              Phase 2: bare basename of the customer original
+ *                           used as the source for the re-crop.
+ *     recroppedAt           Phase 2: ISO 8601 timestamp of the re-crop.
  */
 
 'use strict';
@@ -53,11 +69,38 @@ const CORRECTION_RANGE = Object.freeze({ min: -20, max: 20 });
 /**
  * Create a single image entry for the sidecar images array.
  *
- * @param {string} filename   - Bare filename, e.g. "IMG_001.jpg"
- * @param {number} qty        - Initial quantity (becomes both qtyOriginal and qtyCurrent)
+ * @param {string}      filename            - Bare filename, e.g. "IMG_001.jpg"
+ * @param {number}      [qty=1]             - Initial quantity (becomes both qtyOriginal and qtyCurrent)
+ * @param {string|null} [originalFilename]  - Manifest-relative path to the
+ *   uncropped customer upload, or null when the order didn't ship one.
+ *   Stored verbatim from the manifest (e.g. "PXDEMO-XYZ_123/original-files/1-IMG.jpg")
+ *   so OHD stays agnostic to where Pixfizz Core puts the files.
+ * @param {object|null} [s3Fields]          - S3 artwork channel metadata
+ *   (M1, 2026-05-24; +copies in M3). All six fields default to null when
+ *   omitted, so FTP-delivered entries round-trip unchanged. Renderer uses
+ *   `null` to distinguish "legacy FTP file" from "S3 file with explicit
+ *   metadata".
+ *   Shape:
+ *     {
+ *       artworkFileId:    string,        // UUID from /pending-jobs artwork_files[].id
+ *       artworkSource:    'pixfizz'|'manual',
+ *       artworkType:      'optimized'|'manipulated'|'original' (or any string
+ *                                        // the API ships — values like 'pages' /
+ *                                        // 'text' also appear; persisted verbatim,
+ *                                        // unknowns are NOT filtered)
+ *       productionReady:  boolean,
+ *       originalFileName: string,        // API's file_name verbatim; distinct from
+ *                                        // `originalFilename` (lowercase n) above
+ *       copies:           number,        // M3: API's `copies` (default 1 when
+ *                                        // absent). Drives qtyOriginal math
+ *                                        // (job.quantity × file.copies) at
+ *                                        // entry creation; persisted so the
+ *                                        // renderer can show a "×N copies"
+ *                                        // chip on the file row.
+ *     }
  * @returns {ImageEntry}
  */
-function createImageEntry(filename, qty = 1) {
+function createImageEntry(filename, qty = 1, originalFilename = null, s3Fields = null) {
   if (!filename || typeof filename !== 'string') {
     throw new Error('createImageEntry: filename must be a non-empty string');
   }
@@ -125,6 +168,68 @@ function createImageEntry(filename, qty = 1) {
         note:      null,
       },
     },
+
+    // Customer Originals (Phase 1 — schema-only here).
+    //
+    // `originalFilename` is the manifest-relative path to the uncropped
+    // customer upload. Stored verbatim from the manifest so OHD doesn't
+    // bake the Pixfizz "original-files/" folder name into its code. null
+    // when the order didn't ship one (non-Pixfizz, pre-feature orders,
+    // or simply missing from the manifest); UI treats any falsy value
+    // as "no original available" and degrades silently.
+    //
+    // The three `recrop*` fields land here as null defaults so Phase 2
+    // can write into them without a second schema bump — see the header
+    // comment for the Phase 2 lifecycle.
+    originalFilename: originalFilename || null,
+    recropPath:       null,
+    recropOf:         null,
+    recroppedAt:      null,
+
+    // S3 artwork channel (M1, 2026-05-24).
+    //
+    // Five fields populated only when the entry came from the new S3
+    // download path; null for FTP-delivered entries. Renderer uses null
+    // to distinguish "legacy FTP file" from "S3 file with explicit metadata".
+    //
+    // NOTE the casing: `originalFileName` (capital F-N) is the API's
+    // `file_name` for the S3 file, preserved so the renderer can show the
+    // original upload name when our on-disk name was collision-renamed
+    // (e.g. "IMG_0123.jpg" while disk has "IMG_0123__a1b2c3d4.jpg").
+    // DISTINCT from `originalFilename` (lowercase n) above, which is the
+    // manifest-relative path to the customer's pre-crop upload for the
+    // Customer Originals subsystem. Unrelated concepts.
+    artworkFileId:    (s3Fields && s3Fields.artworkFileId)    || null,
+    artworkSource:    (s3Fields && s3Fields.artworkSource)    || null,
+    artworkType:      (s3Fields && s3Fields.artworkType)      || null,
+    productionReady:  s3Fields && typeof s3Fields.productionReady === 'boolean'
+                        ? s3Fields.productionReady
+                        : null,
+    originalFileName: (s3Fields && s3Fields.originalFileName) || null,
+    // M3 (2026-05-24): per-file copies multiplier. Null for FTP-delivered
+    // entries and any pre-M3 sidecar that didn't ship the field — distinct
+    // from `1` (explicit single copy) so the renderer "×N copies" chip
+    // suppresses for both legacy entries and the common copies=1 case.
+    copies:           s3Fields && Number.isFinite(s3Fields.copies) && s3Fields.copies > 0
+                        ? s3Fields.copies
+                        : null,
+
+    // M5b (Manual Cropping, 2026-05-25): batch-crop metadata. Flat
+    // sibling fields — NOT nested under crop:{...} — so the existing
+    // M5a fields (cropApplied / croppedPath / cropRect / channelMappingId)
+    // and the new ones live alongside each other and no on-disk sidecar
+    // migration is needed. See OHD_ManualCropping_ClaudeCode_Brief.md
+    // §"Brief vs. as-built" under M5a for the casing trap (NB:
+    // cropOrientation lowercase) and rationale.
+    //
+    //   cropOrientation  'portrait' | 'landscape' (null on legacy / pre-M5b entries)
+    //   cropSource       'batch' | 'per-image' — which UX produced the crop
+    //   cropAppliedAt    ISO 8601 timestamp of the crop apply
+    //   cropRotation     0|90|180|270 — M5c will bake into the file; null here
+    cropOrientation:  null,
+    cropSource:       null,
+    cropAppliedAt:    null,
+    cropRotation:     null,
   };
 }
 
@@ -150,6 +255,28 @@ function createSidecar(jobId, images = [], reprintOf = null) {
     modifiedAt:    now,
     reprintOf:     reprintOf || null,
     images:        images,
+
+    // S3 artwork channel — job-level set of artwork_files[].id values that
+    // OHD has already materialised on disk (M1, 2026-05-24). The downloader
+    // diffs against this on each poll to decide which files are new. Empty
+    // for FTP-only jobs and for fresh sidecars; sidecarManager hydrates the
+    // field on legacy sidecars that pre-date the schema bump.
+    s3ArtworkFileIdsKnown: [],
+
+    // M5b (Manual Cropping, 2026-05-25): job-level batch-crop defaults.
+    // Persisted so that re-opening the drawer mid-job (or after an OHD
+    // restart) restores the operator's last-used default rect /
+    // orientation. The rect is in IMAGE-RELATIVE FRACTIONS so it scales
+    // across heterogeneous image dimensions; per-image entries snapshot
+    // the PIXEL rect that was actually applied (matches the pre-M5
+    // cropRect contract).
+    //
+    // Flat top-level fields (no batchCrop:{...} wrapper) — same rationale
+    // as the per-image fields. See OHD_ManualCropping_ClaudeCode_Brief.md
+    // §"Brief vs. as-built" under M5a.
+    batchCropDefaultRect:        null,  // { x, y, w, h } fractions, 0..1
+    batchCropDefaultOrientation: null,  // 'portrait' | 'landscape'
+    batchCropLastAppliedAt:      null,  // ISO 8601
   };
 }
 

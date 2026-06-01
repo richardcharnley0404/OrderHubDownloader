@@ -8,6 +8,7 @@ const { runTest: runPrintControllerTest } = require('./services/test-print-contr
 const { printControllerStore } = require('./services/print-controller-store');
 const routingService = require('./services/routing-service');
 const processFolderService = require('./services/process-folder-service');
+const fujiJobMakerConfig = require('./services/fuji-jobmaker-config');
 const logger = require('./services/logger');
 // Film Review panel (PW-007 Phase 1 — Milestone 4)
 const frameMetadataStore = require('./services/frame-metadata-store');
@@ -136,7 +137,8 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
       });
 
       // Restart or stop polling based on any mode being enabled
-      const anyModeEnabled = config.pollingEnabled || config.filmScansEnabled || config.fileUploadsEnabled;
+      const anyModeEnabled = config.pollingEnabled || config.filmScansEnabled ||
+                             config.fileUploadsEnabled || config.orderXmlEnabled;
       if (anyModeEnabled) {
         if (pollingService.isRunning()) {
           pollingService.stop();
@@ -322,6 +324,105 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
     return {
       lastCheckTime: status.lastFileUploadsCheck
     };
+  });
+
+  // ── Order XML hot folders (Mode 4) ────────────────────────
+  // Lazy-required so disabled installs don't load the watcher / ingestion
+  // store / chokidar at IPC-handler-registration time.
+  const orderXmlHelpers = require('./services/order-xml-ipc-helpers');
+
+  ipcMain.handle('orderXml:listRecords', async (event, args) => {
+    try {
+      const ingestionStore = require('./services/order-xml-ingestion-store').getDefaultInstance();
+      return orderXmlHelpers.listRecords({ ingestionStore }, args || {});
+    } catch (err) {
+      logger.logError('orderXml:listRecords failed', err);
+      return { ok: false, error: err.message, records: [], total: 0 };
+    }
+  });
+
+  ipcMain.handle('orderXml:getStatus', async () => {
+    try {
+      const ingestionStore = require('./services/order-xml-ingestion-store').getDefaultInstance();
+      return orderXmlHelpers.getStatus({ ingestionStore, configService, pollingService });
+    } catch (err) {
+      logger.logError('orderXml:getStatus failed', err);
+      return { ok: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('orderXml:clearRecords', async () => {
+    try {
+      const ingestionStore = require('./services/order-xml-ingestion-store').getDefaultInstance();
+      return orderXmlHelpers.clearRecords({ ingestionStore });
+    } catch (err) {
+      logger.logError('orderXml:clearRecords failed', err);
+      return { ok: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('orderXml:retryFailed', async (event, args) => {
+    try {
+      const ingestionStore = require('./services/order-xml-ingestion-store').getDefaultInstance();
+      return orderXmlHelpers.retryFailed(
+        { ingestionStore, configService },
+        args || {}
+      );
+    } catch (err) {
+      logger.logError('orderXml:retryFailed failed', err);
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Returns the registered parser formats. Used by the settings UI dropdown
+  // when the operator picks a sourceFormat for a hot folder. Whatever this
+  // returns IS the dropdown — adding ROES/dotphoto later means dropping a
+  // parser file in src/main/services/order-xml-parsers/ and the UI updates
+  // automatically.
+  ipcMain.handle('orderXml:listParserFormats', async () => {
+    try {
+      const registry = require('./services/order-xml-parsers');
+      return { ok: true, formats: registry.list() };
+    } catch (err) {
+      logger.logError('orderXml:listParserFormats failed', err);
+      return { ok: false, error: err.message, formats: [] };
+    }
+  });
+
+  // Returns the operator-managed hot folder configs. Used by both the panel
+  // (filter-by-folder dropdown) and the settings UI (list editor).
+  ipcMain.handle('orderXml:getHotFolders', async () => {
+    try {
+      return { ok: true, hotFolders: configService.getAllHotFolders() };
+    } catch (err) {
+      logger.logError('orderXml:getHotFolders failed', err);
+      return { ok: false, error: err.message, hotFolders: [] };
+    }
+  });
+
+  // Open a hot folder's directory in the OS file manager.
+  // `which` is 'watch' | 'processed' | 'failed' — failed/ resolves to
+  // <processedFolder>/failed.
+  ipcMain.handle('orderXml:openFolder', async (event, args) => {
+    try {
+      const which = args && args.which;
+      const id    = args && args.id;
+      if (!id || !which) return { ok: false, error: 'id and which are required' };
+      const hf = configService.getAllHotFolders().find((h) => h.id === id);
+      if (!hf) return { ok: false, error: `hot folder ${id} not found` };
+      let target = null;
+      if (which === 'watch')     target = hf.watchFolder;
+      if (which === 'processed') target = hf.processedFolder;
+      if (which === 'failed')    target = hf.processedFolder ? path.join(hf.processedFolder, 'failed') : null;
+      if (!target) return { ok: false, error: `hot folder has no ${which} path` };
+      const result = await shell.openPath(target);
+      // shell.openPath returns '' on success and an error string on failure.
+      if (result) return { ok: false, error: result };
+      return { ok: true };
+    } catch (err) {
+      logger.logError('orderXml:openFolder failed', err);
+      return { ok: false, error: err.message };
+    }
   });
 
   // Test S3 connection
@@ -538,23 +639,26 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
       // Darkroom Pro or any job that predates the new routing system.
       let outputFolderPath = null;
 
+      let includeCustomerInFolder = true;
       const route = routingService.resolveRoute(job);
       if (route.type === 'controller') {
         // New system: routingService controller with outputPath
         const ctrl = routingService.getControllers().find(c => c.id === route.controllerId);
         outputFolderPath = ctrl ? ctrl.outputPath : null;
+        if (ctrl) includeCustomerInFolder = ctrl.includeCustomerInFolder !== false;
       } else if (route.type !== 'process-folder') {
         // Fallback: old configService + printControllerStore
         const mapping = configService.getProcessMapping(job.process);
         if (mapping.controllerId) {
           const ctrl = printControllerStore.getController(mapping.controllerId);
           outputFolderPath = ctrl ? ctrl.hotFolderPath : null;
+          if (ctrl) includeCustomerInFolder = ctrl.includeCustomerInFolder !== false;
         }
       }
 
       if (!outputFolderPath) return null;
 
-      const status = await getJobOutputStatus(job, outputFolderPath);
+      const status = await getJobOutputStatus(job, outputFolderPath, null, { includeCustomerName: includeCustomerInFolder });
       if (!status) return null;
 
       // Check if operator has manually marked this job as printed (OHD-internal flag).
@@ -586,16 +690,19 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
 
       // Resolve output folder via new routing system, fall back to old system.
       let outputFolderPath = null;
+      let includeCustomerInFolder = true;
 
       const route = routingService.resolveRoute(job);
       if (route.type === 'controller') {
         const ctrl = routingService.getControllers().find(c => c.id === route.controllerId);
         outputFolderPath = ctrl ? ctrl.outputPath : null;
+        if (ctrl) includeCustomerInFolder = ctrl.includeCustomerInFolder !== false;
       } else if (route.type !== 'process-folder') {
         const mapping = configService.getProcessMapping(job.process);
         if (mapping.controllerId) {
           const ctrl = printControllerStore.getController(mapping.controllerId);
           outputFolderPath = ctrl ? ctrl.hotFolderPath : null;
+          if (ctrl) includeCustomerInFolder = ctrl.includeCustomerInFolder !== false;
         }
       }
 
@@ -603,7 +710,7 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
         return { success: false, error: 'Controller or output folder not found.' };
       }
 
-      const status = await getJobOutputStatus(job, outputFolderPath);
+      const status = await getJobOutputStatus(job, outputFolderPath, null, { includeCustomerName: includeCustomerInFolder });
       if (!status) {
         return { success: false, error: 'Output folder not found for this job.' };
       }
@@ -893,6 +1000,24 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
         return { success: false, error: msg };
       }
 
+      // Fuji JobMaker — single source of truth for required-field rules and
+      // defaults lives in fuji-jobmaker-config.js. Run it at the save boundary
+      // so a malformed payload (from a future renderer bug, an external IPC
+      // call, or a stale dev build) can't persist invalid state. Merge the
+      // normalised shape back into the record we hand to routingService.
+      if (controller && controller.type === 'fujijobmaker') {
+        const { valid, errors, normalized } = fujiJobMakerConfig.validateControllerConfig(controller);
+        if (!valid) {
+          logger.logWarning('[routing] save-controller rejected — Fuji JobMaker validation', {
+            controllerId: controller.id,
+            name:         controller.name,
+            errors,
+          });
+          return { success: false, error: errors.join('; ') };
+        }
+        Object.assign(controller, normalized);
+      }
+
       routingService.saveController(controller);
 
       // Darkroom Pro controllers are dual-written to the legacy printControllerStore
@@ -987,6 +1112,43 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
 
   ipcMain.handle('ohd:routing:save-channel-mapping', async (event, mapping) => {
     try {
+      // Fuji JobMaker mappings get validated against fuji-jobmaker-config so
+      // printCode/surface are required and surfaceCode defaults from surface's
+      // first letter. Look up the parent controller to decide whether to apply
+      // the Fuji rules — other controller types keep their existing behaviour.
+      //
+      // Options shape: the legacy renderer/routingService stores
+      // `options: [{ name, value }, …]` but the Fuji validator expects the
+      // spec form `{ name: value }`. Convert just for validation; keep the
+      // persisted shape unchanged so the existing matcher keeps working.
+      if (mapping && mapping.controllerId) {
+        const parentCtrl = routingService.getControllers().find(c => c.id === mapping.controllerId);
+        if (parentCtrl && parentCtrl.type === 'fujijobmaker') {
+          const optionsObj = Array.isArray(mapping.options)
+            ? mapping.options.reduce((acc, { name, value }) => {
+                if (name) acc[name] = value;
+                return acc;
+              }, {})
+            : (mapping.options || {});
+          const validationInput = { ...mapping, options: optionsObj };
+          const { valid, errors, normalized } = fujiJobMakerConfig.validateProductMappingConfig(validationInput);
+          if (!valid) {
+            logger.logWarning('[routing] save-channel-mapping rejected — Fuji JobMaker validation', {
+              controllerId: mapping.controllerId,
+              productCode:  mapping.productCode,
+              errors,
+            });
+            return { success: false, error: errors.join('; ') };
+          }
+          // Adopt the validator's normalised Fuji-specific fields. Leave
+          // `options` alone — the persisted array form is what the matcher
+          // expects.
+          mapping.printCode   = normalized.printCode;
+          mapping.surface     = normalized.surface;
+          mapping.surfaceCode = normalized.surfaceCode;
+        }
+      }
+
       routingService.saveChannelMapping(mapping);
       // A new channel mapping may make previously-unrouted jobs eligible for auto-print
       runAutoPrint().catch(err => logger.logError('[auto-print] post-channel-mapping check failed', err));
@@ -1232,14 +1394,35 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
       // Ensure the /cache/ folder exists (Phase 3 hook — always empty for now).
       await fsPromises.mkdir(path.join(jobPath, 'cache'), { recursive: true });
 
-      // Build a filename→quantity map from the order manifest so that first-time
-      // sidecar creation uses the ordered quantity rather than defaulting to 1.
-      // If the manifest is missing or unreadable, the map is empty and loadSidecar
-      // falls back to qty = 1 as before.
-      const quantityMap = await _buildManifestQuantityMap(jobId, jobPath);
+      // Build a filename→{qty, originalFilename} meta map from the order
+      // manifest so first-time sidecar creation uses both ordered quantity
+      // and the manifest-relative path to the customer's uncropped upload.
+      // If the manifest is missing or unreadable, the map is empty and
+      // loadSidecar falls back to qty=1 / originalFilename=null as before.
+      // Reconcile inside loadSidecar back-fills `originalFilename` on
+      // sidecars created before this feature shipped.
+      const metaMap = await _buildManifestImageMetaMap(jobId, jobPath);
 
-      const { sidecar, filenames } = await loadSidecar(jobId, jobPath, quantityMap);
-      return { success: true, sidecar, filenames };
+      const { sidecar, filenames } = await loadSidecar(jobId, jobPath, metaMap);
+
+      // Count existing reprint siblings (-r1, -r2, …) so the renderer can
+      // label the next Send-button suffix correctly when the panel is
+      // re-opened after a previous reprint was dispatched. The reprint
+      // create handler derives its own suffix the same way; this is a
+      // display-only seed for the Job Review UI.
+      const parentDir = path.dirname(jobPath);
+      let reprintCount = 0;
+      while (true) { // eslint-disable-line no-constant-condition
+        const candidate = path.join(parentDir, `${jobId}-r${reprintCount + 1}`);
+        try {
+          await fsPromises.access(candidate);
+          reprintCount++;
+        } catch {
+          break;
+        }
+      }
+
+      return { success: true, sidecar, filenames, reprintCount };
     } catch (error) {
       logger.logError('ohd:job:load error', error, { jobId });
       return { success: false, error: error.message };
@@ -1313,90 +1496,172 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
    * 4. Stores _channelMappingOverride on the job-service cache so that when the
    *    job is next sent to print the overridden channel is used automatically.
    */
-  ipcMain.handle('ohd:job:crop-image', async (event, { jobPath, sidecar, filename, cropRect, channelMappingId, darkroomSize, ohJobId }) => {
+  ipcMain.handle('ohd:job:crop-image', async (event, { jobPath, sidecar, filename, cropRect, channelMappingId, darkroomSize, ohJobId, cropRotation }) => {
+    // M5b (2026-05-25): the 75-line crop body that used to live here has
+    // been extracted to `batchCropActions._applyCropToSingleImage` so the
+    // new batch IPC can reuse the same primitive. Behaviour is
+    // byte-identical from the IPC contract's perspective — the M5a tests
+    // (manualCrop.test.js + manualCrop.dispatch.test.js) lock the
+    // contract and exercise this wrapper end-to-end on every run.
+    // `cropSource: 'per-image'` differentiates from batch in the sidecar.
+    //
+    // M5c (2026-05-26): optional `cropRotation` (0/90/180/270, default 0)
+    // routes the sharp pipeline through `.rotate(N).extract(...)` when
+    // non-zero. Default 0 keeps the byte-identical chain — locked by
+    // the M5c regression test in batchCrop.test.js.
     try {
-      let sharp;
-      try {
-        sharp = require('sharp');
-      } catch (e) {
-        return { success: false, error: 'sharp is not installed — cannot crop. Run: npm install sharp' };
-      }
-
-      // Prefer the working copy; fall back to originals if working/ was never written.
-      const workingDir  = path.join(jobPath, 'working');
-      const workingPath = path.join(workingDir, filename);
-      const originalsPath = path.join(jobPath, 'originals', filename);
-
-      let sourcePath;
-      if (fs.existsSync(workingPath)) {
-        sourcePath = workingPath;
-      } else if (fs.existsSync(originalsPath)) {
-        sourcePath = originalsPath;
-      } else {
-        return { success: false, error: `Source image not found: ${filename}` };
-      }
-
-      // Ensure /working/ exists
-      await fsPromises.mkdir(workingDir, { recursive: true });
-
-      // Crop via Sharp — write to a temp file then rename so we never leave a
-      // half-written file at the destination path.
-      const tempPath = workingPath + '.crop_tmp';
-      await sharp(sourcePath)
-        .extract({
-          left:   Math.max(0, cropRect.x),
-          top:    Math.max(0, cropRect.y),
-          width:  Math.max(1, cropRect.w),
-          height: Math.max(1, cropRect.h),
-        })
-        .jpeg({ quality: 95 })
-        .toFile(tempPath);
-
-      // Atomic rename: replace working copy with the cropped version
-      await fsPromises.rename(tempPath, workingPath);
-
-      logger.info('Crop applied', {
-        filename, cropRect,
-        channelMappingId,
-        ohJobId,
-        croppedPath: workingPath,
+      // eslint-disable-next-line global-require
+      const { _applyCropToSingleImage } = require('./jobs/batchCropActions');
+      const result = await _applyCropToSingleImage({
+        jobPath, sidecar, filename, cropRect,
+        channelMappingId, darkroomSize, ohJobId,
+        cropSource: 'per-image',
+        cropRotation,  // optional — pass through; helper normalises invalid values to 0
+        deps: { jobService, logger },
       });
-
-      // Update the sidecar image entry
-      const updatedSidecar = {
-        ...sidecar,
-        images: sidecar.images.map(img => {
-          if (img.filename !== filename) return img;
-          return {
-            ...img,
-            cropApplied:      true,
-            croppedPath:      workingPath,
-            cropRect:         { x: cropRect.x, y: cropRect.y, w: cropRect.w, h: cropRect.h },
-            channelMappingId,
-          };
-        }),
-      };
-
-      const saved = await saveSidecar(updatedSidecar, jobPath);
-
-      // Store routing overrides on the in-memory job cache.
-      // DPOF controllers: _channelMappingOverride → routes to the specific channel.
-      // Darkroom Pro:     _darkroomProSize        → overrides the size sent to Darkroom.
-      // Plain-size crops (no source mapping) leave routing unchanged.
-      if (ohJobId && (channelMappingId || darkroomSize)) {
-        const numericId = Number(ohJobId);
-        if (!isNaN(numericId)) {
-          const updates = {};
-          if (channelMappingId) updates._channelMappingOverride = channelMappingId;
-          if (darkroomSize)     updates._darkroomProSize        = darkroomSize;
-          jobService.updateJobLocally(numericId, updates);
-        }
+      if (!result.success) {
+        return { success: false, error: result.error };
       }
-
-      return { success: true, sidecar: saved };
+      return { success: true, sidecar: result.sidecar };
     } catch (error) {
       logger.logError('ohd:job:crop-image error', error, { filename, cropRect });
       return { success: false, error: error.message };
+    }
+  });
+
+  /**
+   * ohd:job:batch-crop-apply  (M5b — 2026-05-25)
+   * Payload:  { jobPath, sidecar, filenames, fractionalRect, orientation,
+   *             channelMappingId?, darkroomSize?, ohJobId? }
+   * Returns:  { success, sidecar, succeeded:[], failed:[], skipped:[], aborted? }
+   *
+   * Loops the M5a crop primitive over `filenames`, computing the per-image
+   * pixel rect from `fractionalRect` × that image's source dimensions.
+   * Strictly serial — libvips cache + SMB sensitivity make parallelism
+   * risky. Per-image progress events emit on `ohd:batch-crop:progress`
+   * for the renderer's live progress bar; one job-level sidecar save at
+   * the end stamps the batchCropDefault* fields.
+   *
+   * Failure policy is continue-best-effort (Richard, 2026-05-25):
+   * per-image failures land in `failed[]` and do NOT abort the batch.
+   * Safety belt: 10 consecutive failures sharing the same error.code →
+   * abort under reason 'consecutive-same-error'. See
+   * batchCropActions.applyBatchCrop for the canonical comment.
+   */
+  ipcMain.handle('ohd:job:batch-crop-apply', async (event, payload = {}) => {
+    try {
+      // eslint-disable-next-line global-require
+      const { applyBatchCrop } = require('./jobs/batchCropActions');
+      const onProgress = (progress) => {
+        // Best-effort emit to the sender. event.sender may be destroyed
+        // mid-batch (window closed) — guard the send so we don't crash
+        // the worker loop.
+        try {
+          if (event && event.sender && !event.sender.isDestroyed()) {
+            event.sender.send('ohd:batch-crop:progress', progress);
+          }
+        } catch (_) { /* best-effort */ }
+      };
+      const result = await applyBatchCrop({
+        ...payload,
+        onProgress,
+        deps: { jobService, logger },
+      });
+      return result;
+    } catch (error) {
+      logger.logError('ohd:job:batch-crop-apply error', error, { jobPath: payload && payload.jobPath });
+      return { success: false, error: error.message, succeeded: [], failed: [], skipped: [] };
+    }
+  });
+
+  /**
+   * ohd:job:resolve-target-size  (M5b — 2026-05-25)
+   * Payload:  { job }
+   * Returns:  { ok: true, sizeOption: { w, h, label, ...routeMeta } }
+   *           | { ok: false, reason: 'unrouted'|'no-size-translation'|'no-channel'|'pdf-or-folder-copy' }
+   *
+   * Used by the batch crop UI for the read-only target-size pill. Calls
+   * routingService.resolveRoute(job) and derives a canonical { w, h }
+   * from the resolved route. If no route OR no resolvable size, returns
+   * a structured reason so the renderer can show an actionable tooltip
+   * (and disable batch mode) — NEVER falls back to a silent default.
+   */
+  ipcMain.handle('ohd:job:resolve-target-size', async (event, { job } = {}) => {
+    // M5b bug-1 fix (2026-05-25): matcher logic extracted to
+    // batchCropActions.resolveTargetSize so it can be unit-tested
+    // without the IPC layer + real routing-service singleton. Three
+    // independent lookup paths (DPOF channel-mapping, Darkroom
+    // sizeTranslations, regex-on-printSizeCode fallback) — only
+    // returns 'no-size-translation' when ALL three fail.
+    // eslint-disable-next-line global-require
+    const { resolveTargetSize } = require('./jobs/batchCropActions');
+    return resolveTargetSize(job, {
+      resolveRoute:        routingService.resolveRoute,
+      getAllSizeOptions:   routingService.getAllSizeOptions,
+      getChannelMappings:  routingService.getChannelMappings,
+      getControllers:      routingService.getControllers,
+      logger,
+    });
+  });
+
+  // ── Customer Originals (Phase 1) ─────────────────────────────────────────
+  //
+  //   ohd:original:open     → shell.openPath          (default viewer)
+  //   ohd:original:reveal   → shell.showItemInFolder  (Explorer/Finder, file selected)
+  //
+  // Both validate existence first so a race / partial download / manual
+  // deletion produces a structured `{ ok:false, error:'not-found' }` rather
+  // than a silent shell call that does nothing visible to the operator.
+  //
+  // The resolve + access + shell-out logic lives in
+  // `src/main/jobs/customerOriginalsActions.js` so it can be unit-tested
+  // without standing up the whole IPC layer.
+  const { createCustomerOriginalsActions } = require('./jobs/customerOriginalsActions');
+  const _customerOriginalsActions = createCustomerOriginalsActions({ shell, logger });
+
+  ipcMain.handle('ohd:original:open',   (event, args) => _customerOriginalsActions.openOriginal(args || {}));
+  ipcMain.handle('ohd:original:reveal', (event, args) => _customerOriginalsActions.revealOriginal(args || {}));
+
+  // ── Customer Originals (Phase 2) — re-crop from original ─────────────────
+  //
+  // Re-crops the customer's uncropped upload through sharp into
+  //   {jobPath}/recrops/{baseNoExt}_{ts}.jpeg      (canonical audit record)
+  // and copies it to
+  //   {jobPath}/working/{newBasename}              (active source — sendReprint /
+  //                                                  scoring scanner / originals
+  //                                                  manager all read /working/
+  //                                                  unchanged, see locked
+  //                                                  decision Option A in the brief)
+  // Sidecar `entry.filename` re-points to the new basename; pixel-derived
+  // fields reset; operator-intent fields persist. See
+  // src/main/jobs/customerRecropActions.js for the contract.
+  //
+  // Lazy-required so the renderer-only flow doesn't drag sharp into the
+  // module graph at app boot.
+  let _customerRecropActions = null;
+  function _getCustomerRecropActions() {
+    if (_customerRecropActions) return _customerRecropActions;
+    let sharp;
+    try {
+      sharp = require('sharp');
+    } catch {
+      return null;
+    }
+    const { createCustomerRecropActions } = require('./jobs/customerRecropActions');
+    _customerRecropActions = createCustomerRecropActions({ sharp, logger });
+    return _customerRecropActions;
+  }
+
+  ipcMain.handle('ohd:job:recrop-from-original', async (event, args = {}) => {
+    const actions = _getCustomerRecropActions();
+    if (!actions) {
+      return { success: false, error: 'sharp is not installed — cannot re-crop. Run: npm install sharp' };
+    }
+    try {
+      return await actions.recropFromOriginal(args);
+    } catch (err) {
+      logger.logError('[ohd:job:recrop-from-original] handler threw', err);
+      return { success: false, error: err.message || String(err) };
     }
   });
 
@@ -1457,9 +1722,13 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
         reprintJobId,
       });
 
-      // Send through the full DPOF print pipeline with the reprint suffix.
-      // Images are read from result.reprintJobPath/originals/.
-      const printResult = await printService._sendReprintViaDPOF(
+      // Dispatch through the reprint orchestrator. It resolves the parent
+      // job's route and picks the right controller-type pipeline (Darkroom
+      // Pro, DPOF, …). The folder is already built at this point — if
+      // dispatch fails the folder stays on disk so the operator can fix
+      // the routing config and try again (the next attempt will create
+      // -r2 / -r3 as the folder-name scan loop sees the orphaned -r1).
+      const printResult = await printService.sendReprint(
         parentJob,
         result.reprintJobPath,
         reprintSuffix,
@@ -1467,14 +1736,28 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
       );
 
       if (!printResult.success) {
-        logger.logWarning('Reprint folder created but print send failed', {
+        // Surface the print failure to the renderer instead of returning
+        // success: true with a warning. Pre-2026-05-12 the handler swallowed
+        // dispatch errors here, which meant operators sending Darkroom Pro
+        // reprints saw the "JOB-r1 sent ✓" pill but no .txt ever landed in
+        // the hot folder. See bugfixes.md 2026-05-12 entry.
+        logger.logWarning('Reprint folder created but print dispatch failed', {
           reprintJobId,
-          error: printResult.error
+          error: printResult.error,
         });
+        return {
+          success: false,
+          error: `Reprint folder ${reprintJobId} created but dispatch failed: ${printResult.error}`,
+          // Surface the folder ID so the renderer can show a useful message
+          // and so future "retry dispatch" logic (not implemented today)
+          // can pick up where this attempt left off.
+          reprintJobId: result.reprintJobId,
+          reprintJobPath: result.reprintJobPath,
+        };
       }
 
       // If the reprint was sent to a DPOF controller, resume status polling.
-      if (printResult && printResult.success) {
+      if (printResult.method === 'dpof-reprint') {
         startStatusPolling(windowManager);
       }
 
@@ -1489,6 +1772,139 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
       return { success: true, ...result, printResult };
     } catch (error) {
       logger.logError('ohd:reprint:create error', error, { jobId });
+      return { success: false, error: error.message };
+    }
+  });
+
+  /**
+   * ohd:reprint:createSingle
+   * Payload:  { jobId, jobPath, imageFilename }
+   * Returns:  { success, reprintJobId, reprintJobPath, printResult } | { success:false, error }
+   *
+   * Single-image reprint — dispatches JUST one image, without bundling the
+   * other flagged images. Backs the crop modal's "Apply & Send Reprint"
+   * button. Mirrors ohd:reprint:create; the differences:
+   *   - The sidecar handed to createReprint is filtered to the one target
+   *     entry with reprint:true forced — createReprint re-filters its input
+   *     on `reprint === true` and throws on an empty set (reprintManager.js).
+   *   - On success only the dispatched image's reprint flag is cleared;
+   *     other flagged images stay flagged for the bundle flow.
+   *
+   * `imageFilename` is the POST-apply sidecar filename (a re-crop re-points
+   * it) — the caller applies the crop first, then calls this.
+   *
+   * Source-file precedence: single-image reprints inherit reprintManager's
+   * /originals/ → /working/ copy precedence (see the reprintManager.js file
+   * header for the full explanation). For a job that has a separate customer
+   * original, an in-place customer-mode re-crop is NOT reflected in the
+   * dispatched file — the uncropped /originals/ copy takes precedence. For
+   * that case the operator must use the crop modal's "Original" mode, which
+   * re-points the entry to a /working/-only basename that the precedence
+   * then resolves to the recropped pixels. (Decision A — documented limitation.)
+   */
+  ipcMain.handle('ohd:reprint:createSingle', async (event, { jobId, jobPath, imageFilename }) => {
+    try {
+      // Load the current sidecar (post-apply — the crop is already saved).
+      const { sidecar } = await loadSidecar(jobId, jobPath);
+
+      // Identify the target entry by filename — the identifier convention
+      // used throughout the recrop flow (customerRecropActions.js).
+      const targetImage = sidecar.images.find(img => img.filename === imageFilename);
+      if (!targetImage) {
+        return { success: false, error: `Image "${imageFilename}" not in sidecar` };
+      }
+
+      // Resolve the parent API job from the local cache (same id split as
+      // ohd:reprint:create).
+      const { jobs } = jobService.getLocalJobs();
+      const rawJobId = String(jobId);
+      const lastUnderscore = rawJobId.lastIndexOf('_');
+      const apiJobId = lastUnderscore !== -1
+        ? rawJobId.substring(lastUnderscore + 1)
+        : rawJobId;
+
+      const parentJob = jobs.find(j => String(j.id) === apiJobId);
+      if (!parentJob) {
+        return { success: false, error: `Parent job ${jobId} (apiJobId: ${apiJobId}) not found in local cache. Try refreshing the job list.` };
+      }
+
+      // Derive the next reprint suffix (r1, r2, …).
+      const parentDir = path.dirname(jobPath);
+      let n = 1;
+      while (true) { // eslint-disable-line no-constant-condition
+        const candidate = path.join(parentDir, `${jobId}-r${n}`);
+        try {
+          await fsPromises.access(candidate);
+          n++;
+        } catch {
+          break;
+        }
+      }
+      const reprintJobId  = `${jobId}-r${n}`;
+      const reprintSuffix = `r${n}`;
+
+      // Sidecar filtered to JUST the target image. reprint:true is forced so
+      // createReprint's internal `reprint === true` filter keeps it even if
+      // the operator never ticked the reprint checkbox.
+      const singleImageSidecar = {
+        ...sidecar,
+        images: [{ ...targetImage, reprint: true }],
+      };
+
+      // Build the reprint folder — contains only the one image.
+      const result = await createReprint({
+        parentJobId:   jobId,
+        parentJobPath: jobPath,
+        sidecar:       singleImageSidecar,
+        reprintJobId,
+      });
+
+      // Dispatch through the reprint orchestrator (folder_copy, darkroompro,
+      // dpof; other types fall through to its catch-all, same as the bundle).
+      const printResult = await printService.sendReprint(
+        parentJob,
+        result.reprintJobPath,
+        reprintSuffix,
+        result.reprintSidecar.images
+      );
+
+      if (!printResult.success) {
+        logger.logWarning('Single-image reprint folder created but print dispatch failed', {
+          reprintJobId,
+          imageFilename,
+          error: printResult.error,
+        });
+        return {
+          success: false,
+          error: `Reprint folder ${reprintJobId} created but dispatch failed: ${printResult.error}`,
+          reprintJobId: result.reprintJobId,
+          reprintJobPath: result.reprintJobPath,
+        };
+      }
+
+      if (printResult.method === 'dpof-reprint') {
+        startStatusPolling(windowManager);
+      }
+
+      logger.info('Single-image reprint sent', {
+        reprintJobId,
+        imageFilename,
+        jobId,
+        method: printResult.method,
+      });
+
+      // Clear the reprint flag for ONLY the dispatched image — other flagged
+      // images stay flagged for the bundle flow.
+      const clearedImages = sidecar.images.map(img =>
+        img.filename === imageFilename
+          ? { ...img, reprint: false, reprintJobId: result.reprintJobId }
+          : img
+      );
+      await saveSidecar({ ...sidecar, images: clearedImages }, jobPath);
+
+      return { success: true, ...result, printResult };
+    } catch (error) {
+      logger.logError('ohd:reprint:createSingle error', error, { jobId, imageFilename });
       return { success: false, error: error.message };
     }
   });
@@ -1625,6 +2041,122 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
     }
   });
 
+  // ── Backup & Restore (v1.6+) ──
+  //
+  // Lazy-init the backup-service singleton so a broken backup module never
+  // breaks the rest of IPC registration. All channels validate input and
+  // surface errors as `{success:false, error}` rather than throwing — the
+  // renderer can rely on a structured response.
+  const backupServiceModule = require('./services/backup-service');
+
+  ipcMain.handle('ohd:backup:run-now', async (event, args = {}) => {
+    // `takeOverFolder` is the explicit operator opt-in to delete a colliding
+    // hostname's existing backups on the share and write a fresh one — used
+    // when an old PC's backups must be replaced by this PC's. Everything
+    // else flows through the normal collision check.
+    const overrides = {
+      takeOverFolder: Boolean(args && args.takeOverFolder),
+    };
+    try {
+      return await backupServiceModule.getDefault().runBackup({
+        trigger: 'manual',
+        overrides,
+      });
+    } catch (err) {
+      logger.logError('[backup] run-now handler threw', err);
+      return { success: false, error: err.message || String(err) };
+    }
+  });
+
+  ipcMain.handle('ohd:backup:list', async (event, args = {}) => {
+    try {
+      const folderPath = args && typeof args.folderPath === 'string' && args.folderPath
+        ? args.folderPath
+        : undefined;
+      const allHosts = Boolean(args && args.allHosts);
+      return await backupServiceModule.getDefault().listBackups(folderPath, { allHosts });
+    } catch (err) {
+      logger.logError('[backup] list handler threw', err);
+      return [];
+    }
+  });
+
+  ipcMain.handle('ohd:backup:read', async (event, args = {}) => {
+    if (!args || typeof args.filePath !== 'string' || !args.filePath) {
+      return { envelope: null, error: 'filePath is required' };
+    }
+    try {
+      return await backupServiceModule.getDefault().readBackup(args.filePath);
+    } catch (err) {
+      logger.logError('[backup] read handler threw', err);
+      return { envelope: null, error: err.message || String(err) };
+    }
+  });
+
+  ipcMain.handle('ohd:backup:restore', async (event, args = {}) => {
+    if (!args || typeof args.filePath !== 'string' || !args.filePath) {
+      return { success: false, error: 'filePath is required' };
+    }
+    const selections = args.selections && typeof args.selections === 'object'
+      ? args.selections
+      : undefined;
+    try {
+      return await backupServiceModule.getDefault().restore({
+        filePath: args.filePath,
+        selections,
+      });
+    } catch (err) {
+      logger.logError('[backup] restore handler threw', err);
+      return { success: false, error: err.message || String(err) };
+    }
+  });
+
+  ipcMain.handle('ohd:backup:relaunch', async () => {
+    logger.info('[backup] relaunching to apply restored configuration');
+    app.relaunch();
+    app.exit(0);
+    return { ok: true };
+  });
+
+  ipcMain.handle('ohd:backup:validate-folder', async (event, args = {}) => {
+    const folderPath = args && typeof args.folderPath === 'string' ? args.folderPath : '';
+    try {
+      return await backupServiceModule.getDefault().validateFolder(folderPath);
+    } catch (err) {
+      logger.logError('[backup] validate-folder handler threw', err);
+      return { ok: false, error: err.message || String(err) };
+    }
+  });
+
+  ipcMain.handle('ohd:backup:choose-folder', async () => {
+    try {
+      const result = await dialog.showOpenDialog({
+        title: 'Select Backup Folder',
+        properties: ['openDirectory', 'createDirectory'],
+      });
+      if (result.canceled || !result.filePaths.length) return { canceled: true };
+      return { canceled: false, path: result.filePaths[0] };
+    } catch (err) {
+      logger.logError('[backup] choose-folder failed', err);
+      return { canceled: true, error: err.message };
+    }
+  });
+
+  ipcMain.handle('ohd:backup:choose-file', async () => {
+    try {
+      const result = await dialog.showOpenDialog({
+        title: 'Choose Backup File to Restore',
+        properties: ['openFile'],
+        filters: [{ name: 'OHD Backup Files', extensions: ['json'] }],
+      });
+      if (result.canceled || !result.filePaths.length) return { canceled: true };
+      return { canceled: false, path: result.filePaths[0] };
+    } catch (err) {
+      logger.logError('[backup] choose-file failed', err);
+      return { canceled: true, error: err.message };
+    }
+  });
+
   // Start DPOF output status polling on app launch.
   // It will self-pause when no jobs are in "o" (Awaiting Import) status and
   // resume each time a job is successfully sent to a DPOF controller.
@@ -1675,7 +2207,7 @@ async function _pollAwaitingJobs() {
       // New routing system — get outputPath from routingService
       const ctrl = routingService.getControllers().find(c => c.id === route.controllerId);
       if (ctrl && ctrl.outputPath) {
-        dpofJobs.push({ job, outputFolderPath: ctrl.outputPath });
+        dpofJobs.push({ job, outputFolderPath: ctrl.outputPath, includeCustomerInFolder: ctrl.includeCustomerInFolder !== false });
       }
     } else {
       // Fallback: old configService + printControllerStore
@@ -1683,7 +2215,7 @@ async function _pollAwaitingJobs() {
       if (mapping.controllerId) {
         const ctrl = printControllerStore.getController(mapping.controllerId);
         if (ctrl && ctrl.type !== 'darkroompro' && ctrl.hotFolderPath) {
-          dpofJobs.push({ job, outputFolderPath: ctrl.hotFolderPath });
+          dpofJobs.push({ job, outputFolderPath: ctrl.hotFolderPath, includeCustomerInFolder: ctrl.includeCustomerInFolder !== false });
         }
       }
     }
@@ -1691,9 +2223,9 @@ async function _pollAwaitingJobs() {
 
   let hasAwaitingJobs = false;
 
-  for (const { job, outputFolderPath } of dpofJobs) {
+  for (const { job, outputFolderPath, includeCustomerInFolder } of dpofJobs) {
     try {
-      const status     = await getJobOutputStatus(job, outputFolderPath);
+      const status     = await getJobOutputStatus(job, outputFolderPath, null, { includeCustomerName: includeCustomerInFolder });
 
       if (!status) continue;
 
@@ -1791,6 +2323,15 @@ async function runAutoPrint() {
       // Operator releases via the Quality flag on the Jobs grid (M2).
       // Flag-OFF behaviour: this whole block is skipped, byte-identical
       // to pre-feature behaviour.
+      //
+      // Ordering note (2026-05-24): this block runs BEFORE the S3-channel
+      // manual-review hold gate below. AI scoring is a per-image quality
+      // signal that needs to populate the sidecar (and the per-image
+      // chip / Review tab) for EVERY job that has files on disk, including
+      // manual-source jobs that the M2 hold gate will skip from dispatch.
+      // An earlier placement of the M2 gate ahead of this block caused
+      // "AI scoring…" to stick in the UI indefinitely for held jobs —
+      // see CHANGELOG Unreleased / Fix 1.
       if (configService.get('aiQualityEnabled')) {
         const local = jobDownloadService.checkLocalFiles(job);
         if (!local.found) {
@@ -1823,6 +2364,30 @@ async function runAutoPrint() {
         } catch (err) {
           logger.logError('[ai-quality] scoreJob threw — passing through', err, { jobId: job.id });
         }
+      }
+
+      // S3 Artwork Channel M2 (2026-05-24): per-job manual-review hold.
+      // Derive fresh from artwork_source + artwork_files instead of trusting
+      // the pre-set `_holdForReview` on the job object. job-service does set
+      // the field in _mapApiJob and _mergeJobs, but jobs that pre-date the
+      // M2 schema in the persistent cache (jobs-cache.json) can come through
+      // missing the field — surfaced by POS-5MAMUF retest 2026-05-24 where
+      // legacy-cached manual jobs got dispatched. Re-deriving here is cheap,
+      // idempotent, and guarantees the gate's correctness regardless of
+      // cache state. See src/shared/holdForReview.js for the rule.
+      //
+      // Skips AUTO dispatch only; operator Send-to-Print is unaffected.
+      // Runs AFTER the AI Quality block above so held jobs still get
+      // scored (so the per-image chips populate); only the dispatch is
+      // skipped.
+      const { computeHoldForReview } = require('../shared/holdForReview');
+      const hold = computeHoldForReview(job);
+      if (hold._holdForReview) {
+        logger.info('[auto-print] job held for review (manual artwork)', {
+          jobId: job.id,
+          reasons: hold._holdReasons,
+        });
+        continue;
       }
 
       const route = routingService.resolveRoute(job);
@@ -2038,6 +2603,42 @@ function testApiConnection(baseUrl, apiKey) {
  * @returns {Promise<Map<string, number>>}
  */
 async function _buildManifestQuantityMap(jobId, jobPath) {
+  // Legacy thin wrapper — preserved so any external caller that only wanted
+  // qtys keeps working. Internal callers should use _buildManifestImageMetaMap
+  // and read .qty from the per-filename meta record.
+  const meta = await _buildManifestImageMetaMap(jobId, jobPath);
+  const out = new Map();
+  for (const [name, m] of meta.entries()) {
+    if (Number.isFinite(m.qty) && m.qty > 0) out.set(name, m.qty);
+  }
+  return out;
+}
+
+/**
+ * Parse the order manifest and return a Map keyed by the printable JPEG
+ * basename → { qty, originalFilename }.
+ *
+ *   qty               number  ordered quantity from manifest (1 fallback)
+ *   originalFilename  string  manifest-relative path to the uncropped
+ *                             customer upload, e.g.
+ *                             "PXDEMO-AD31D5_38432891/original-files/1-IMG-….jpg"
+ *                             or null when the manifest doesn't carry one
+ *                             (non-Pixfizz orders, pre-feature manifests).
+ *
+ * Path stays manifest-relative on purpose — OHD resolves to absolute via
+ *   path.join(path.dirname(jobPath), originalFilename)
+ * at the point of use, so a future Pixfizz Core change to the folder
+ * layout (e.g. renaming "original-files/") is transparent to OHD.
+ *
+ * Returns an empty Map on any error (missing manifest, parse failure, etc.)
+ * so callers fall back gracefully — first-time sidecar creation still uses
+ * qty=1 / originalFilename=null when the manifest can't be read.
+ *
+ * @param {string} jobId   - Sidecar job ID, format "{orderNumber}_{apiJobId}"
+ * @param {string} jobPath - Absolute path to the job's root folder
+ * @returns {Promise<Map<string, { qty: number, originalFilename: string|null }>>}
+ */
+async function _buildManifestImageMetaMap(jobId, jobPath) {
   try {
     const sep          = jobId.lastIndexOf('_');
     if (sep === -1) return new Map();
@@ -2054,14 +2655,17 @@ async function _buildManifestQuantityMap(jobId, jobPath) {
     const jobEntry = (manifest.jobs || []).find(j => String(j.jobId) === apiJobId);
     if (!jobEntry) return new Map();
 
-    // Build filename (basename) → quantity map
+    // Build basename → { qty, originalFilename } map
     const map = new Map();
     for (const img of (jobEntry.images || [])) {
       const basename = path.basename(img.filename);
-      const qty      = Number(img.quantity);
-      if (basename && Number.isFinite(qty) && qty > 0) {
-        map.set(basename, qty);
-      }
+      if (!basename) continue;
+      const qtyNum   = Number(img.quantity);
+      const qty      = Number.isFinite(qtyNum) && qtyNum > 0 ? qtyNum : 1;
+      const original = (typeof img.originalFilename === 'string' && img.originalFilename)
+        ? img.originalFilename
+        : null;
+      map.set(basename, { qty, originalFilename: original });
     }
     return map;
   } catch {
@@ -2724,6 +3328,8 @@ ipcMain.handle('aiQuality:listHeldJobs', async () => {
       const failed = rows.filter((r) => {
         const aq = r.aiQuality || {};
         if (!aq.scored || aq.passed) return false;
+        // Mirror deriveHeld() in ai-quality-store.js: an operator decision of
+        // 'fixed' or 'approved_as_is' clears the failure.
         const decision = (aq.operatorDecision && aq.operatorDecision.kind) || 'none';
         return decision !== 'fixed' && decision !== 'approved_as_is';
       }).length;
