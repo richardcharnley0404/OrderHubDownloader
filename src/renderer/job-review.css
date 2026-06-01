@@ -1392,12 +1392,34 @@
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
-   M5b — Batch crop mode (2026-05-25, OHD_ManualCropping brief §M5b)
+   Manual Crop redesign (2026-06-01) — per-image-first cropping workflow.
    Mounted instead of the standard `.jr-body` when the shared trigger
-   predicate says the job is manual-source with uncropped images. Uses
-   only --app-* tokens so both themes work without extra selectors. */
+   predicate says the job is manual-source with uncropped images.
+   Uses only --app-* tokens so both themes work without extra selectors.
 
-.jr-batch-mode {
+   Structure:
+     .jr-crop-approval                  container (renamed from .jr-batch-mode)
+       .jr-crop-approval__topbar          target pill + progress + exit
+       .jr-crop-approval__body            grid row: rail + stage
+         .jr-crop-rail                    left thumbnail rail (CropThumbRail)
+         .jr-crop-stage                   right per-image editor (CropStage)
+       .jr-crop-approval__bottombar       apply-default + status + send-to-print
+
+   Naming notes:
+     - .jr-batch-target*, .jr-batch-exit, .jr-orientation-toggle,
+       .jr-orient-btn, .jr-batch-remaining-bar, .jr-batch-remaining-cta
+       are KEPT verbatim (still consumed by ManualCropMode's topbar /
+       the drawer's standard-mode CTA — they're shared visual atoms,
+       not batch-specific).
+     - .jr-focused-* classes survive as inline-promoted atoms. The
+       modal-only ones (.jr-focused-crop, -backdrop, -topbar, -body,
+       -bottombar, -close, -title, -status) are deleted — their roles
+       are taken by .jr-crop-stage__* equivalents. The badges, rotate
+       controls, nav buttons, apply button, and error label live on
+       under their .jr-focused-* names because they're style atoms,
+       not layout containers. */
+
+.jr-crop-approval {
   display: grid;
   grid-template-rows: auto 1fr auto;
   background: var(--app-surface);
@@ -1406,7 +1428,7 @@
   overflow: hidden;
 }
 
-.jr-batch-topbar {
+.jr-crop-approval__topbar {
   display: flex;
   align-items: center;
   gap: 16px;
@@ -1416,6 +1438,16 @@
   font-family: var(--app-font);
   font-size: 13px;
 }
+.jr-crop-approval__progress {
+  color: var(--app-ink-dim);
+  font-family: var(--app-mono);
+  font-size: 12px;
+  margin-left: auto;
+}
+
+/* ── Shared topbar atoms — kept verbatim from the M5b naming so the
+   visual elements (target pill, orientation toggle, exit button)
+   stay byte-identical across modes. ──────────────────────────────── */
 
 .jr-batch-target { display: flex; align-items: center; gap: 8px; }
 .jr-batch-target-label { color: var(--app-ink-dim); font-weight: 600; }
@@ -1451,27 +1483,6 @@
 .jr-orient-btn.is-active            { background: var(--app-accent); color: var(--app-accent-ink); font-weight: 600; }
 .jr-orient-btn:disabled             { cursor: not-allowed; opacity: 0.5; }
 
-.jr-batch-apply-cta {
-  background: var(--app-accent);
-  color: var(--app-accent-ink);
-  border: 0;
-  padding: 8px 18px;
-  border-radius: var(--app-radius);
-  font: inherit;
-  font-weight: 600;
-  cursor: pointer;
-  transition: filter 120ms ease;
-}
-.jr-batch-apply-cta:hover:not(:disabled) { filter: brightness(1.08); }
-.jr-batch-apply-cta:disabled              { opacity: 0.45; cursor: not-allowed; }
-
-.jr-batch-progress-text {
-  color: var(--app-ink-dim);
-  font-family: var(--app-mono);
-  font-size: 12px;
-  margin-left: auto;
-}
-
 .jr-batch-exit {
   background: transparent;
   border: 1px solid var(--app-border);
@@ -1484,139 +1495,119 @@
 .jr-batch-exit:hover:not(:disabled) { background: var(--app-border-subtle); color: var(--app-ink); }
 .jr-batch-exit:disabled              { opacity: 0.45; cursor: not-allowed; }
 
-.jr-batch-body {
+.jr-crop-approval__body {
   display: grid;
-  grid-template-columns: minmax(280px, 38%) 1fr;
+  grid-template-columns: minmax(280px, 460px) 1fr;
   gap: 12px;
   padding: 12px;
   min-height: 0;
   overflow: hidden;
 }
 
-.jr-batch-editor {
-  position: relative;
-  background: var(--app-surface-deep);
+/* ── CropThumbRail (left column) ────────────────────────────────────────────
+   Mirrors the standard JobReview's .jr-grid-col width (~460px max, 3-col
+   grid inside) so muscle memory transfers between modes. The header div
+   was deliberately omitted in phase 1 — TopBar already shows progress. */
+
+.jr-crop-rail {
+  display: flex;
+  flex-direction: column;
+  background: var(--app-surface-raised);
   border: 1px solid var(--app-border-subtle);
   border-radius: var(--app-radius-lg);
   overflow: hidden;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  user-select: none;
+  min-height: 0;
 }
-.jr-batch-editor.is-disabled {
-  filter: grayscale(0.6) brightness(0.85);
-  opacity: 0.7;
-}
-/* M5b 2026-05-25 bug-fix (Issue 1): the imgbox is the aspect-constrained
-   inner container. CSS aspect-ratio makes it match the image's natural
-   aspect, sized to fit within the editor frame. Both img and overlay
-   fill the imgbox at 100%/100% so the overlay's fractional coords map
-   to displayed-image bounds — not the editor's landscape frame bounds. */
-.jr-batch-editor-imgbox {
-  position: relative;
-  /* `aspect-ratio` is set inline to the image's natural ratio. With
-     width: 100% + max-height: 100%, Chromium scales the box to the
-     largest size that fits within the editor frame at the given
-     aspect-ratio — pillarboxing/letterboxing as needed. Square
-     images get a square box; landscape gets a wide box; portrait
-     gets a tall box. */
-  width: 100%;
-  max-width: 100%;
-  max-height: 100%;
-  cursor: grab;
-}
-.jr-batch-editor-imgbox:active { cursor: grabbing; }
-.jr-batch-editor-imgbox.is-inert { cursor: not-allowed; }
-.jr-batch-editor-img {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  pointer-events: none;
-  display: block;
-}
-.jr-batch-overlay {
-  position: absolute;
-  border: 2px solid var(--app-accent);
-  background: var(--app-accent-weak);
-  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.35);
-  /* pointer-events: none on the OVERLAY itself means clicks fall
-     through to the imgbox (drag-to-move). The HANDLES re-enable
-     pointer-events explicitly so their mousedown captures first. */
-  pointer-events: none;
-  border-radius: 2px;
-}
-/* M5b resize handles (Issue 2, 2026-05-25) — four corner squares,
-   aspect-locked resize on drag. Sized large enough to grab without
-   being intrusive (10px); cursor mirrors the resize direction. */
-.jr-batch-handle {
-  position: absolute;
-  width: 12px;
-  height: 12px;
-  background: var(--app-accent);
-  border: 2px solid #fff;
-  border-radius: 50%;
-  pointer-events: auto;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
-  z-index: 2;
-}
-.jr-batch-handle--tl { top: -6px;    left: -6px;    cursor: nwse-resize; }
-.jr-batch-handle--tr { top: -6px;    right: -6px;   cursor: nesw-resize; }
-.jr-batch-handle--bl { bottom: -6px; left: -6px;    cursor: nesw-resize; }
-.jr-batch-handle--br { bottom: -6px; right: -6px;   cursor: nwse-resize; }
-.jr-batch-handle:hover { background: var(--app-accent); filter: brightness(1.1); }
-.jr-batch-editor-hint {
-  position: absolute;
-  bottom: 8px; left: 50%; transform: translateX(-50%);
-  background: rgba(0, 0, 0, 0.55);
-  color: #fff;
-  padding: 4px 10px;
-  border-radius: var(--app-radius);
-  font-size: 11px;
-  pointer-events: none;
-  font-family: var(--app-font);
-}
-
-.jr-batch-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-  gap: 10px;
+.jr-crop-rail-scroll {
+  flex: 1;
   overflow-y: auto;
-  padding: 4px;
+  padding: 12px;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
   align-content: start;
 }
-.jr-batch-thumb {
+.jr-crop-rail-empty {
+  grid-column: 1 / -1;
+  color: var(--app-ink-faint);
+  font-family: var(--app-mono);
+  font-size: 12px;
+  text-align: center;
+  padding: 40px 0;
+}
+
+.jr-crop-rail-thumb {
   position: relative;
   background: var(--app-surface-sunk);
-  border: 1px solid var(--app-border-subtle);
+  border: 2px solid transparent;
   border-radius: var(--app-radius);
   overflow: hidden;
+  cursor: pointer;
   display: flex;
   flex-direction: column;
-  font-family: var(--app-font);
+  outline: none;
+  transition: border-color 120ms ease;
 }
-.jr-batch-thumb img {
+.jr-crop-rail-thumb:hover         { border-color: var(--app-border); }
+.jr-crop-rail-thumb:focus-visible { border-color: var(--app-accent); }
+.jr-crop-rail-thumb.is-selected   { border-color: var(--app-accent); }
+.jr-crop-rail-thumb.is-applying   { opacity: 0.7; cursor: progress; }
+.jr-crop-rail-thumb.is-approved   { border-color: var(--app-brand-green); }
+.jr-crop-rail-thumb.is-approved.is-selected { border-color: var(--app-accent); }
+.jr-crop-rail-thumb.is-modified   { border-color: var(--app-amber); }
+.jr-crop-rail-thumb.is-error      { border-color: var(--app-red); }
+/* Pending is the default — base .jr-crop-rail-thumb already provides
+   the right look (transparent border + grey .jr-crop-rail-thumb__badge
+   --pending). Rule kept as a no-op for symmetry with the other state
+   modifiers so future readers see the full state matrix in one place. */
+.jr-crop-rail-thumb.is-pending    { /* no override — base style applies */ }
+
+.jr-crop-rail-thumb__imgbox {
+  position: relative;
   width: 100%;
-  height: 105px;
-  /* M5b 2026-05-25 spec rewrite: switched from cover → contain so the
-     thumb's displayed image bounds match the source's natural aspect.
-     The overlay's fractional coords are image-relative; if the img
-     were cover-fitted, the overlay's positioning would drift from the
-     actual visible image content. With `contain`, letterboxing /
-     pillarboxing keeps the math consistent. */
-  object-fit: contain;
-  display: block;
   background: var(--app-surface-deep);
+  overflow: hidden;
+  /* aspect-ratio is set inline to the image's natural ratio so the
+     overlay's percentage positions map to displayed-image bounds. */
 }
-.jr-batch-thumb-overlay {
+.jr-crop-rail-thumb__imgbox img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+  pointer-events: none;
+}
+.jr-crop-rail-thumb__overlay {
   position: absolute;
-  top: 0;
   border: 1px solid var(--app-accent);
   background: var(--app-accent-weak);
   pointer-events: none;
   border-radius: 1px;
 }
-.jr-batch-thumb-name {
+
+.jr-crop-rail-thumb__badge {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 22px;
+  height: 22px;
+  border-radius: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 13px;
+  background: var(--app-surface-raised);
+  color: var(--app-ink-dim);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+}
+.jr-crop-rail-thumb__badge--applying { background: var(--app-accent-weak);    color: var(--app-accent); }
+.jr-crop-rail-thumb__badge--error    { background: var(--app-red);            color: #fff; }
+.jr-crop-rail-thumb__badge--modified { background: var(--app-amber);          color: var(--app-accent-ink); }
+.jr-crop-rail-thumb__badge--approved { background: var(--app-brand-green);    color: #fff; }
+.jr-crop-rail-thumb__badge--pending  { background: var(--app-surface-raised); color: var(--app-ink-faint); }
+
+.jr-crop-rail-thumb__name {
   font-family: var(--app-mono);
   font-size: 10px;
   color: var(--app-ink-dim);
@@ -1625,144 +1616,31 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.jr-batch-thumb.is-cropped {
-  border-color: var(--app-brand-green);
-  background: var(--app-brand-green-weak);
+
+/* ── CropStage (right column) ───────────────────────────────────────────────
+   Inlines the chrome that used to live in the modal FocusedCropFrame.
+   Layout is grid-row (header / body / footer). The .jr-focused-* atoms
+   below are promoted from their former modal context and styled
+   unchanged for the badges / rotate / nav / apply controls. */
+
+.jr-crop-stage {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  background: var(--app-surface-deep);
+  border: 1px solid var(--app-border-subtle);
+  border-radius: var(--app-radius-lg);
+  overflow: hidden;
+  min-height: 0;
 }
-.jr-batch-thumb-check {
-  position: absolute;
-  top: 4px; right: 4px;
-  background: var(--app-brand-green);
-  color: #fff;
-  width: 22px; height: 22px;
-  border-radius: 11px;
+.jr-crop-stage--empty {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-weight: 700;
-  font-size: 13px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
-}
-.jr-batch-thumb.is-current {
-  outline: 2px solid var(--app-amber);
-  outline-offset: -2px;
-}
-
-.jr-batch-bottombar {
-  padding: 10px 16px;
-  background: var(--app-surface-raised);
-  border-top: 1px solid var(--app-border-subtle);
-  font-family: var(--app-font);
-  font-size: 12px;
-  min-height: 40px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.jr-batch-bottombar-status { flex: 1; min-width: 0; }
-.jr-batch-send-to-print {
-  background: var(--app-brand-green);
-  color: var(--app-brand-green-ink);
-  border: 0;
-  padding: 8px 18px;
-  border-radius: var(--app-radius);
-  font: inherit;
-  font-weight: 600;
-  cursor: pointer;
-  transition: filter 120ms ease;
-  white-space: nowrap;
-}
-.jr-batch-send-to-print:hover:not(:disabled) { filter: brightness(1.08); }
-.jr-batch-send-to-print:disabled              { opacity: 0.45; cursor: not-allowed; }
-.jr-batch-send-error {
-  margin-top: 4px;
-  color: var(--app-red);
-  font-size: 11px;
-  font-weight: 600;
-}
-.jr-batch-status { color: var(--app-ink-dim); }
-.jr-batch-summary {
-  color: var(--app-brand-green-text);
-  font-weight: 600;
-}
-.jr-batch-summary.has-errors { color: var(--app-amber); }
-.jr-batch-error-details {
-  margin-left: 12px;
-  display: inline-block;
-}
-.jr-batch-error-details summary {
-  cursor: pointer;
-  color: var(--app-red);
-  font-weight: 600;
-}
-.jr-batch-error-details ul {
-  margin: 6px 0 0; padding-left: 18px;
-  max-height: 120px; overflow-y: auto;
-  font-size: 11px;
-  color: var(--app-ink);
-}
-.jr-batch-error-details code {
+  color: var(--app-ink-faint);
   font-family: var(--app-mono);
-  color: var(--app-ink-dim);
+  font-size: 13px;
 }
-
-/* "Batch Crop Remaining (X)" CTA bar — shown in the standard drawer body
-   when the trigger says BUTTON mode or when the operator exited an
-   active batch but uncropped images remain. */
-.jr-batch-remaining-bar {
-  grid-column: 1 / -1;
-  padding: 8px 16px;
-  background: var(--app-amber-weak);
-  border-bottom: 1px solid var(--app-border-subtle);
-  text-align: center;
-}
-.jr-batch-remaining-cta {
-  background: var(--app-amber);
-  color: var(--app-accent-ink);
-  border: 0;
-  padding: 7px 16px;
-  border-radius: var(--app-radius);
-  font: inherit;
-  font-weight: 600;
-  cursor: pointer;
-}
-.jr-batch-remaining-cta:hover { filter: brightness(1.08); }
-
-/* Thumbnails in batch grid are now clickable (M5c — opens focused mode). */
-.jr-batch-thumb.is-clickable { cursor: pointer; }
-.jr-batch-thumb.is-clickable:hover {
-  border-color: var(--app-accent);
-  filter: brightness(1.05);
-}
-.jr-batch-thumb.is-clickable:focus-visible {
-  outline: 2px solid var(--app-accent);
-  outline-offset: 1px;
-}
-
-/* ─────────────────────────────────────────────────────────────────────────
-   M5c — Focused per-image override mode (2026-05-26)
-   Full-overlay UI mounted over the batch body when an operator clicks
-   a thumbnail. Mirrors FilmReview's FocusedFrame layout: top chrome
-   with nav, body with CropEditor (chrome hidden), bottom action bar. */
-
-.jr-focused-crop {
-  position: fixed;
-  inset: 0;
-  z-index: 100;
-  display: grid;
-  grid-template-rows: auto 1fr auto;
-  background: var(--app-surface);
-  color: var(--app-ink);
-  font-family: var(--app-font);
-}
-.jr-focused-backdrop {
-  position: absolute;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.55);
-  z-index: -1;
-}
-
-.jr-focused-topbar {
+.jr-crop-stage__topbar {
   display: flex;
   align-items: center;
   gap: 14px;
@@ -1771,24 +1649,50 @@
   border-bottom: 1px solid var(--app-border-subtle);
   font-size: 13px;
 }
-.jr-focused-close {
-  background: transparent;
-  border: 1px solid var(--app-border);
-  color: var(--app-ink-dim);
-  padding: 6px 12px;
-  border-radius: var(--app-radius);
-  font: inherit;
-  cursor: pointer;
-}
-.jr-focused-close:hover { background: var(--app-border-subtle); color: var(--app-ink); }
-
-.jr-focused-title {
+.jr-crop-stage__title {
   flex: 1;
   display: flex;
   align-items: center;
   gap: 10px;
   min-width: 0;
 }
+.jr-crop-stage__body {
+  position: relative;
+  overflow: hidden;
+  background: var(--app-surface-deep);
+  min-height: 0;
+}
+/* CropEditor uses its own modal-overlay shell. When hideOwnChrome is set
+   the shell still mounts but with transparent chrome; force it to fill
+   the stage body. Same override pattern the old .jr-focused-body had. */
+.jr-crop-stage__body > .jr-crop-modal,
+.jr-crop-stage__body > .jr-crop-overlay {
+  position: absolute;
+  inset: 0;
+  background: transparent;
+}
+.jr-crop-stage__bottombar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--app-surface-raised);
+  border-top: 1px solid var(--app-border-subtle);
+  font-size: 12px;
+}
+.jr-crop-stage__status {
+  flex: 1;
+  text-align: center;
+  color: var(--app-ink-dim);
+  font-family: var(--app-mono);
+  font-size: 11px;
+}
+
+/* ── Promoted .jr-focused-* atoms ──────────────────────────────────────────
+   These survived the FocusedCropFrame deletion because they're per-element
+   styling (badges, buttons, labels), not container layout. ManualCropMode's
+   CropStage reuses them inline. */
+
 .jr-focused-counter {
   font-family: var(--app-mono);
   color: var(--app-ink-dim);
@@ -1813,6 +1717,13 @@
   text-transform: uppercase;
   letter-spacing: 0.04em;
   flex-shrink: 0;
+}
+/* Manual Crop redesign (2026-06-01): "modified" modifier for the
+   approved-but-edited-since state — operator dragged a rect on an
+   already-approved image; Send to Print stays gated until re-approve. */
+.jr-focused-cropped-badge--modified {
+  background: var(--app-amber-weak);
+  color: var(--app-amber);
 }
 .jr-focused-rotation-badge {
   background: var(--app-amber-weak);
@@ -1845,29 +1756,6 @@
 }
 .jr-focused-rotate-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
-.jr-focused-body {
-  position: relative;
-  overflow: hidden;
-  background: var(--app-surface-deep);
-}
-/* CropEditor uses its own layout — override its overlay-modal mounting
-   so it fills our body when hideOwnChrome is set. */
-.jr-focused-body > .jr-crop-modal,
-.jr-focused-body > .jr-crop-overlay {
-  position: absolute;
-  inset: 0;
-  background: transparent;
-}
-
-.jr-focused-bottombar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 16px;
-  background: var(--app-surface-raised);
-  border-top: 1px solid var(--app-border-subtle);
-  font-size: 12px;
-}
 .jr-focused-nav-btn {
   background: var(--app-surface-sunk);
   border: 1px solid var(--app-border-subtle);
@@ -1883,13 +1771,6 @@
 }
 .jr-focused-nav-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
-.jr-focused-status {
-  flex: 1;
-  text-align: center;
-  color: var(--app-ink-dim);
-  font-family: var(--app-mono);
-  font-size: 11px;
-}
 .jr-focused-error {
   color: var(--app-red);
   font-weight: 600;
@@ -1907,4 +1788,74 @@
   transition: filter 120ms ease;
 }
 .jr-focused-apply:hover:not(:disabled) { filter: brightness(1.08); }
-.jr-focused-apply:disabled { opacity: 0.45; cursor: not-allowed; }
+.jr-focused-apply:disabled              { opacity: 0.45; cursor: not-allowed; }
+
+/* ── BottomBar ──────────────────────────────────────────────────────────── */
+
+.jr-crop-approval__bottombar {
+  padding: 10px 16px;
+  background: var(--app-surface-raised);
+  border-top: 1px solid var(--app-border-subtle);
+  font-family: var(--app-font);
+  font-size: 12px;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.jr-crop-approval__bottombar-status { flex: 1; min-width: 0; }
+
+.jr-crop-approval__apply-default {
+  background: var(--app-surface-sunk);
+  border: 1px solid var(--app-border-subtle);
+  color: var(--app-ink);
+  padding: 7px 14px;
+  border-radius: var(--app-radius);
+  font: inherit;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.jr-crop-approval__apply-default:hover:not(:disabled) { background: var(--app-border-subtle); }
+.jr-crop-approval__apply-default:disabled              { opacity: 0.45; cursor: not-allowed; }
+
+.jr-crop-approval__send-to-print {
+  background: var(--app-brand-green);
+  color: var(--app-brand-green-ink);
+  border: 0;
+  padding: 8px 18px;
+  border-radius: var(--app-radius);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 120ms ease;
+  white-space: nowrap;
+}
+.jr-crop-approval__send-to-print:hover:not(:disabled) { filter: brightness(1.08); }
+.jr-crop-approval__send-to-print:disabled              { opacity: 0.45; cursor: not-allowed; }
+
+.jr-crop-approval__error { color: var(--app-red); font-weight: 600; }
+.jr-crop-approval__hint  { color: var(--app-ink-dim); }
+
+/* "Batch Crop Remaining (X)" CTA bar — shown in the standard drawer body
+   when the trigger says BUTTON mode or when the operator exited an
+   active batch but uncropped images remain. Kept under .jr-batch-* names
+   because it's rendered from the standard-mode drawer body, not from
+   ManualCropMode. */
+.jr-batch-remaining-bar {
+  grid-column: 1 / -1;
+  padding: 8px 16px;
+  background: var(--app-amber-weak);
+  border-bottom: 1px solid var(--app-border-subtle);
+  text-align: center;
+}
+.jr-batch-remaining-cta {
+  background: var(--app-amber);
+  color: var(--app-accent-ink);
+  border: 0;
+  padding: 7px 16px;
+  border-radius: var(--app-radius);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.jr-batch-remaining-cta:hover { filter: brightness(1.08); }
