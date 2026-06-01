@@ -269,7 +269,7 @@ export function useJobReview(jobId, jobPath, ohJobId = null) {
 
   // M5b (2026-05-25): drop-in replacement of the in-memory sidecar with a
   // server-returned one. Mirrors resetImage/resetAll's setSidecar +
-  // persistedSidecarRef + clear-dirty pattern. Used by BatchCropMode
+  // persistedSidecarRef + clear-dirty pattern. Used by ManualCropMode
   // after `jobBatchCropApply` returns to flow the post-save sidecar
   // back into the renderer state without a round-trip through loadSidecar.
   const replaceSidecar = useCallback((next) => {

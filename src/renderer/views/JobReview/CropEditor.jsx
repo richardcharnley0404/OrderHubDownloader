@@ -223,16 +223,18 @@ export function CropEditor({
   onApply, onApplyOriginal, onApplyAndSendReprint,
   onCancel,
   // M5c (2026-05-26): optional rotation + chrome-hiding props for
-  // FocusedCropFrame. Both default to compatible-with-pre-M5c
-  // behaviour so the standard-drawer caller is unaffected.
+  // ManualCropMode (originally FocusedCropFrame, deleted in the
+  // 2026-06-01 redesign that inlined its chrome into CropStage).
+  // Both default to compatible-with-pre-M5c behaviour so the
+  // standard-drawer caller is unaffected.
   imageRotation = 0,        // 0|90|180|270; rotates the displayed image + crop coord space
   hideOwnChrome = false,    // when true, suppresses Apply/Cancel/source/orientation chrome
   onCropRectChange,         // optional (cropRect) => void; emitted on every cropRect change
-                            // so FocusedCropFrame can track + apply imperatively on Enter
+                            // so ManualCropMode can track + apply imperatively on Enter
   onImgLoadedChange,        // optional (boolean) => void; signals image-loaded state for
-                            // FocusedCropFrame's Apply gate
+                            // ManualCropMode's Approve gate
   controlledOrientation, // optional 'portrait'|'landscape' — when present, overrides the
-                         // internal orientationOverride state so FocusedCropFrame can drive
+                         // internal orientationOverride state so ManualCropMode can drive
                          // the toggle from outside in hideOwnChrome mode
 }) {
   const canvasRef   = useRef(null);
@@ -278,7 +280,7 @@ export function CropEditor({
   // that the routed size is the authoritative aspect even on the original.
   const baseAspect  = sizeOption ? sizeOption.w / sizeOption.h : 1;
   const isSquare    = !sizeOption || Math.abs(baseAspect - 1) < 0.001;
-  // M5c: external override wins when supplied (FocusedCropFrame's
+  // M5c: external override wins when supplied (ManualCropMode's
   // per-image orientation toggle in hideOwnChrome mode). Falls
   // through to the internal state for the standard-drawer caller.
   const effectiveOrientationOverride = controlledOrientation || orientationOverride;
@@ -367,7 +369,7 @@ export function CropEditor({
   }, [imgLoaded, cropRect, naturalSize, imageRotation]);
 
   // M5c (2026-05-26): when imageRotation changes while mounted (e.g.
-  // FocusedCropFrame's R / L shortcut), swap naturalSize.w/h so the
+  // ManualCropMode's R / L shortcut), swap naturalSize.w/h so the
   // crop-coord space matches the rotated view. Only fires when the
   // image is already loaded — the onLoad branch handles initial seed.
   useEffect(() => {
@@ -380,7 +382,7 @@ export function CropEditor({
     setNaturalSize((curr) => (curr.w === desired.w && curr.h === desired.h) ? curr : desired);
   }, [imageRotation, imgLoaded]);
 
-  // M5c: emit cropRect + imgLoaded to the parent. FocusedCropFrame
+  // M5c: emit cropRect + imgLoaded to the parent. ManualCropMode
   // uses these to fire its own apply (via electronAPI.jobCropImage)
   // when the operator hits Enter / Space — bypassing CropEditor's
   // internal handleApply since hideOwnChrome is set.
@@ -571,9 +573,9 @@ export function CropEditor({
       />
 
       {/* Header label — suppressed when the parent owns the chrome
-          (FocusedCropFrame in M5c). The standard-drawer caller
-          leaves hideOwnChrome at the default false so its chrome
-          renders unchanged. */}
+          (ManualCropMode's inline CropStage). The standard-drawer
+          caller leaves hideOwnChrome at the default false so its
+          chrome renders unchanged. */}
       {!hideOwnChrome && (
       <div className="jr-crop-header">
         {sizeOption
@@ -659,8 +661,8 @@ export function CropEditor({
         <div className="jr-crop-loading">Loading image…</div>
       )}
 
-      {/* Buttons — suppressed in hideOwnChrome mode (FocusedCropFrame
-          owns its own Apply/Cancel/nav chrome). */}
+      {/* Buttons — suppressed in hideOwnChrome mode (ManualCropMode
+          owns its own Approve/nav chrome). */}
       {!hideOwnChrome && (
       <div className="jr-crop-buttons">
         <button
