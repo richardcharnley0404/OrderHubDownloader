@@ -276,14 +276,17 @@ test('M5b integration: 5-image batch — all production files land in working/, 
       `${entry.filename}: filename stays the original basename`);
   }
 
-  // Job-level batchCropDefault* — new {centerX, centerY, scale} shape.
-  assert.deepEqual(onDisk.batchCropDefaultRect, {
-    centerX: fractionalSpec.centerX,
-    centerY: fractionalSpec.centerY,
-    scale:   fractionalSpec.scale,
-  }, 'batchCropDefaultRect persists the spec shape verbatim (new {centerX,centerY,scale} model)');
-  assert.equal(onDisk.batchCropDefaultOrientation, 'landscape');
+  // Job-level telemetry. Manual Crop redesign (2026-06-01): the two
+  // batchCropDefault* fields were removed from the schema when per-image
+  // pending state replaced the shared spec, so applyBatchCrop only stamps
+  // the last-applied timestamp now. The two removed fields must NOT be
+  // re-introduced by applyBatchCrop — sidecarManager.js Reconcile E would
+  // just drop them again on next load.
   assert.equal(typeof onDisk.batchCropLastAppliedAt, 'string');
+  assert.equal(Object.prototype.hasOwnProperty.call(onDisk, 'batchCropDefaultRect'),        false,
+    'batchCropDefaultRect must not be re-written by applyBatchCrop (redesign 2026-06-01)');
+  assert.equal(Object.prototype.hasOwnProperty.call(onDisk, 'batchCropDefaultOrientation'), false,
+    'batchCropDefaultOrientation must not be re-written by applyBatchCrop (redesign 2026-06-01)');
 
   // Progress callback fired 5 times, monotonic increasing completed counts.
   assert.equal(progressCalls.length, 5);

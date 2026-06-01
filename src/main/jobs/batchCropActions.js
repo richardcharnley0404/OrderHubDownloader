@@ -545,26 +545,18 @@ async function applyBatchCrop(opts) {
     }
   }
 
-  // Stamp job-level batchCropDefault* once at the end. Persist regardless
-  // of per-image successes — the operator's last-used default rect /
-  // orientation are useful even on a failed run (e.g. retry after fixing
-  // a corrupt-file issue).
+  // Stamp job-level batchCropLastAppliedAt once at the end. Persist
+  // regardless of per-image successes — even a failed run is useful
+  // telemetry (e.g. retry after fixing a corrupt-file issue).
   //
-  // 2026-05-25: schema for batchCropDefaultRect changed from
-  // { x, y, w, h } fractional to { centerX, centerY, scale } spec.
-  // Sidecar storage is opaque (just JSON) so the schema change is
-  // backward-compatible at the JSON level. The renderer's load path
-  // accepts only the new shape and falls back to a default when an
-  // older shape is encountered.
+  // Manual Crop redesign (2026-06-01): the two batchCropDefault* fields
+  // (`Rect`, `Orientation`) were removed when per-image pending state
+  // replaced the shared spec. The renderer no longer reads them and
+  // sidecarManager.js Reconcile E drops them from any legacy sidecar
+  // on load; writing them back here would re-introduce dead data.
   sidecar = {
     ...sidecar,
-    batchCropDefaultRect: {
-      centerX: fractionalSpec.centerX,
-      centerY: fractionalSpec.centerY,
-      scale:   fractionalSpec.scale,
-    },
-    batchCropDefaultOrientation: orientation,
-    batchCropLastAppliedAt:      batchAppliedAt,
+    batchCropLastAppliedAt: batchAppliedAt,
   };
   try {
     sidecar = await saveSidecar(sidecar, jobPath);
