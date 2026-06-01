@@ -1,9 +1,9 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useJobReview } from './useJobReview.js';
 import { ThumbnailGrid } from './ThumbnailGrid.jsx';
 import { ControlSidebar } from './ControlPanel.jsx';
 import { CropEditor } from './CropEditor.jsx';
-import BatchCropMode from './BatchCropMode.jsx';
+import ManualCropMode from './ManualCropMode.jsx';
 // M5b (2026-05-25): shared trigger predicate — same module the main side
 // uses for defensive logging, so renderer + main agree on which jobs
 // enter batch crop mode.
@@ -427,27 +427,22 @@ export function JobReviewDrawer({ jobId, jobPath, ohJobId, onClose }) {
                               && batchTrigger.enter
                               && !inBatchMode;
 
-  // ── M5c (2026-05-26): suppress drawer-level arrow-nav while
-  // FocusedCropFrame is mounted ────────────────────────────────────────────
+  // ── Drawer-level keyboard handler ────────────────────────────────────────
   //
-  // FocusedCropFrame uses ArrowLeft/ArrowRight for rotation (L / R
-  // mirrors). The drawer's existing handler at line ~430 also binds
-  // ArrowLeft/ArrowRight (for image-selection nav). Without
-  // suppression both would fire on the same keypress, advancing
-  // the selected image WHILE the operator is trying to rotate. A
-  // ref-based check (not state) so it's read at event-fire time —
-  // not closure-captured per render.
-  const focusedFrameOpenRef = useRef(false);
-  const setFocusedFrameOpen = useCallback((open) => {
-    focusedFrameOpenRef.current = !!open;
-  }, []);
-
+  // Manual Crop redesign (2026-06-01): the M5c focusedFrameOpenRef
+  // suppression flag was deleted along with FocusedCropFrame. In batch
+  // mode, ManualCropMode owns [ / ] (prev/next), R / L (rotation),
+  // ArrowLeft / ArrowRight (rotation aliases), and Enter (approve +
+  // advance) via its own document-level listener. We defer to it by
+  // early-returning when inBatchMode is true. Escape stays drawer-owned
+  // in both modes (closes the drawer; ManualCropMode doesn't bind Esc).
   useEffect(() => {
     function onKey(e) {
-      // M5c: defer all drawer keyboard handling when FocusedCropFrame
-      // is mounted — it binds its own document-level handler.
-      if (focusedFrameOpenRef.current) return;
-      if (e.key === 'Escape') handleClose();
+      if (e.key === 'Escape') {
+        handleClose();
+        return;
+      }
+      if (inBatchMode) return;
       if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
         const idx = images.findIndex(i => i.filename === selectedId);
         if (idx < images.length - 1) selectImage(images[idx + 1].filename);
@@ -460,7 +455,7 @@ export function JobReviewDrawer({ jobId, jobPath, ohJobId, onClose }) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [images, selectedId]);
+  }, [images, selectedId, inBatchMode]);
 
   const handleClose = useCallback(async () => {
     if (isDirty) {
@@ -494,7 +489,7 @@ export function JobReviewDrawer({ jobId, jobPath, ohJobId, onClose }) {
       ) : loadError ? (
         <div className="jr-state jr-state--error">Error: {loadError}</div>
       ) : inBatchMode ? (
-        <BatchCropMode
+        <ManualCropMode
           sidecar={sidecar}
           images={images}
           jobPath={jobPath}
@@ -502,7 +497,6 @@ export function JobReviewDrawer({ jobId, jobPath, ohJobId, onClose }) {
           onBatchApplied={replaceSidecar}
           onExit={() => setUserOverride('standard')}
           onSentToPrint={onClose}
-          onFocusedFrameChange={setFocusedFrameOpen}
         />
       ) : (
         <div className="jr-body">

@@ -47,11 +47,6 @@ import { CropThumbRail } from './CropThumbRail.jsx';
  *   onBatchApplied      (sidecar)      after IPC returns; renderer reloads state
  *   onExit              ()             caller exits batch mode (collapses to standard)
  *   onSentToPrint       ()             optional — fires after Send-to-Print success
- *   onFocusedFrameChange(boolean)      drawer-level arrow-nav suppression flag.
- *                                      ManualCropMode signals `true` on mount,
- *                                      `false` on unmount. Phase 4 of the redesign
- *                                      will replace this with an in-drawer
- *                                      "in batch mode" check and remove the prop.
  */
 
 const KNOWN_ROTATIONS = [0, 90, 180, 270];
@@ -250,7 +245,6 @@ export default function ManualCropMode({
   onBatchApplied,
   onExit,
   onSentToPrint,
-  onFocusedFrameChange,
 }) {
   // ── Target size resolution (unchanged from BatchCropMode) ────────────────
   const [targetSize, setTargetSize] = useState(null);
@@ -298,19 +292,6 @@ export default function ManualCropMode({
   useEffect(() => { sidecarRef.current       = sidecar;       }, [sidecar]);
   useEffect(() => { imagesRef.current        = images;        }, [images]);
   useEffect(() => { jobPathRef.current       = jobPath;       }, [jobPath]);
-
-  // ── Drawer-level arrow-nav suppression ───────────────────────────────────
-  //
-  // The drawer (index.jsx:451) listens for ArrowLeft/ArrowRight to navigate
-  // the standard-mode thumbnail grid. Since our stage owns those keys for
-  // rotation, signal `true` on mount and `false` on unmount so the drawer's
-  // handler early-returns while we're active. Phase 4 of the redesign
-  // replaces this prop with an in-drawer "in batch mode" check.
-  useEffect(() => {
-    if (typeof onFocusedFrameChange !== 'function') return undefined;
-    onFocusedFrameChange(true);
-    return () => onFocusedFrameChange(false);
-  }, [onFocusedFrameChange]);
 
   // ── Drain pending state on unmount ───────────────────────────────────────
   //
