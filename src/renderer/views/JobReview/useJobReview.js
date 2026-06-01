@@ -440,6 +440,35 @@ export function useJobReview(jobId, jobPath, ohJobId = null) {
     return filename;
   }, []);
 
+  // -- Manual Crop redesign (2026-06-01): drain in-progress per-image state ----
+  //
+  // Persists per-image pendingCropRect / pendingRotation / pendingOrientation
+  // to the sidecar without touching /working/. Called by the manual-crop
+  // drawer on close so the operator can resume the same in-flight crop
+  // session on next open. `updates` is the array form already expected by
+  // the IPC — caller owns the diff against perImageState. No-op (returns
+  // success without a disk write) when the updates array is empty.
+  //
+  // Commit 1 stub: declared + exported, not yet called by any UI surface.
+  // The manual-crop UI (commit 2) is the only intended caller.
+  const savePendingCrops = useCallback(async (updates) => {
+    const snapshot = sidecarRef.current;
+    if (!snapshot) throw new Error('No sidecar loaded');
+    if (!Array.isArray(updates) || updates.length === 0) return snapshot;
+
+    const result = await window.electronAPI.jobSavePendingCrops({
+      jobPath: jobPathRef.current,
+      sidecar: snapshot,
+      updates,
+    });
+    if (!result || !result.success) {
+      throw new Error((result && result.error) || 'Save pending crops failed');
+    }
+    setSidecar(result.sidecar);
+    persistedSidecarRef.current = result.sidecar;
+    return result.sidecar;
+  }, []);
+
   // -- Customer Originals (Phase 2): re-crop from the customer upload ----------
   //
   // The current row's filename is changed by the main side to the new
@@ -591,6 +620,7 @@ export function useJobReview(jobId, jobPath, ohJobId = null) {
     cropImage,
     recropFromOriginal,
     applyCropAndSendReprint,
+    savePendingCrops,
 
     // AI Quality
     aiQualityThreshold,

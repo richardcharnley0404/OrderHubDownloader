@@ -132,6 +132,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   //            channelMappingId?, darkroomSize?, ohJobId? }
   // Returns: { success, sidecar, succeeded, failed, skipped, aborted? }
   jobBatchCropApply:  (payload) => ipcRenderer.invoke('ohd:job:batch-crop-apply', payload),
+
+  // Manual Crop redesign (2026-06-01) — persist in-progress per-image crop
+  // state when the operator closes the drawer mid-job without approving.
+  // Partial mutation: only pendingCropRect / pendingRotation /
+  // pendingOrientation on matched image entries are written. Applied-crop
+  // fields (cropApplied, cropRect, cropRotation, cropOrientation) are
+  // never touched here — those are owned by jobCropImage / jobBatchCropApply.
+  // Payload: { jobPath, sidecar, updates: [{ filename, pendingCropRect,
+  //            pendingRotation, pendingOrientation }] }
+  // Returns: { success, sidecar } | { success: false, error }
+  jobSavePendingCrops: (payload) => ipcRenderer.invoke('ohd:job:save-pending-crops', payload),
   // Read-only target-size resolution: route → matching allSizeOptions
   // entry. Used by the batch crop top-bar's size pill. If no route or
   // no size translation, returns { ok: false, reason }.

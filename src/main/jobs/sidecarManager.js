@@ -213,14 +213,23 @@ async function loadSidecar(jobId, jobPath, metaMap = null) {
     // brief explicitly rejected). Casing trap warning: `cropOrientation`
     // lowercase; distinct from `croppedPath` (different concept).
     //
-    // Job-level: batchCropDefaultRect, batchCropDefaultOrientation,
-    // batchCropLastAppliedAt — persisted operator defaults so an OHD
-    // restart restores the workflow state.
+    // Manual Crop redesign (2026-06-01): three new per-image pending
+    // fields hold the operator's in-progress (not-yet-approved) crop so
+    // closing the drawer mid-job restores progress on reopen. Cleared by
+    // `ohd:job:crop-image` on Approve. Hydrated null on legacy entries.
+    //
+    // Job-level: batchCropLastAppliedAt only — `batchCropDefaultRect`
+    // and `batchCropDefaultOrientation` were removed in the redesign
+    // (replaced by per-image pending state) and are dropped from any
+    // legacy sidecar on load via Reconcile E below.
     const M5B_IMAGE_DEFAULTS = {
-      cropOrientation: null,
-      cropSource:      null,
-      cropAppliedAt:   null,
-      cropRotation:    null,
+      cropOrientation:    null,
+      cropSource:         null,
+      cropAppliedAt:      null,
+      cropRotation:       null,
+      pendingCropRect:    null,
+      pendingRotation:    null,
+      pendingOrientation: null,
     };
     let migratedM5bAny = false;
     const m5bMigratedExisting = s3MigratedExisting.map((entry) => {
@@ -235,9 +244,7 @@ async function loadSidecar(jobId, jobPath, metaMap = null) {
       return next;
     });
     const M5B_JOB_DEFAULTS = {
-      batchCropDefaultRect:        null,
-      batchCropDefaultOrientation: null,
-      batchCropLastAppliedAt:      null,
+      batchCropLastAppliedAt: null,
     };
     let migratedM5bJob = false;
     const m5bJobFields = {};
@@ -246,6 +253,26 @@ async function loadSidecar(jobId, jobPath, metaMap = null) {
         m5bJobFields[k] = M5B_JOB_DEFAULTS[k];
         migratedM5bJob = true;
       }
+    }
+
+    // Reconcile E: Manual Crop redesign (2026-06-01) — drop legacy job-level
+    // batch-crop defaults. The old shape was a fractional {centerX, centerY,
+    // scale} for one shared rect; the new model has per-image pendingCropRect
+    // (image-space pixels), so the shared rect is meaningless. We don't try
+    // to convert — the old shape required imageAspect to project per-image,
+    // and M5b was only a week in production. Operators redo any in-flight
+    // crops. Unlike hydrate, this DOES trigger a save so disk is cleaned up
+    // immediately rather than carrying orphaned data until the next
+    // unrelated save.
+    let droppedLegacyM5bDefaults = false;
+    let legacyM5bShape = null;
+    if (Object.prototype.hasOwnProperty.call(sidecar, 'batchCropDefaultRect')
+        || Object.prototype.hasOwnProperty.call(sidecar, 'batchCropDefaultOrientation')) {
+      legacyM5bShape = {
+        hadRect:        Object.prototype.hasOwnProperty.call(sidecar, 'batchCropDefaultRect'),
+        hadOrientation: Object.prototype.hasOwnProperty.call(sidecar, 'batchCropDefaultOrientation'),
+      };
+      droppedLegacyM5bDefaults = true;
     }
 
     // In-memory hydration is ALWAYS applied so consumers of loadSidecar see
@@ -257,13 +284,29 @@ async function loadSidecar(jobId, jobPath, metaMap = null) {
     // sidecarManager.test.js "no spurious save"). Disk catches up on the
     // next meaningful save, e.g. when the S3 downloader appends an entry
     // or batch crop persists per-image.
-    sidecar = {
+    //
+    // EXCEPTION: Reconcile E (legacy batch-crop default drop) DOES force a
+    // save. The legacy fields are dead data; leaving them on disk means
+    // they survive indefinitely until some other write happens, which on
+    // a stable job may be never. Save now and be done with it.
+    const assembled = {
       ...sidecar,
       ...m5bJobFields,
       images: [...m5bMigratedExisting, ...newEntries],
       s3ArtworkFileIdsKnown,
     };
-    if (newEntries.length > 0 || backfilledAny) {
+    if (droppedLegacyM5bDefaults) {
+      delete assembled.batchCropDefaultRect;
+      delete assembled.batchCropDefaultOrientation;
+      // eslint-disable-next-line no-console
+      console.warn('[sidecar] dropped legacy M5b batch-crop default fields', {
+        jobId:          assembled.jobId,
+        hadRect:        legacyM5bShape && legacyM5bShape.hadRect,
+        hadOrientation: legacyM5bShape && legacyM5bShape.hadOrientation,
+      });
+    }
+    sidecar = assembled;
+    if (newEntries.length > 0 || backfilledAny || droppedLegacyM5bDefaults) {
       sidecar = await saveSidecar(sidecar, jobPath);
     }
     // Hydration flags intentionally not in the save condition.

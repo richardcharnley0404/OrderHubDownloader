@@ -230,6 +230,21 @@ function createImageEntry(filename, qty = 1, originalFilename = null, s3Fields =
     cropSource:       null,
     cropAppliedAt:    null,
     cropRotation:     null,
+
+    // Manual Crop redesign (2026-06-01): per-image pending in-progress state.
+    // Holds the operator's not-yet-approved crop while they walk through the
+    // thumbnail rail, persisted to sidecar so closing the drawer mid-job
+    // restores progress on reopen. Cleared on successful Approve — replaced
+    // by the canonical applied cropRect / cropRotation / cropOrientation
+    // fields on the same entry.
+    //
+    //   pendingCropRect    { x, y, w, h } image-space pixels, same coord
+    //                      system as the applied cropRect
+    //   pendingRotation    0|90|180|270
+    //   pendingOrientation 'portrait' | 'landscape' | null
+    pendingCropRect:    null,
+    pendingRotation:    null,
+    pendingOrientation: null,
   };
 }
 
@@ -263,20 +278,14 @@ function createSidecar(jobId, images = [], reprintOf = null) {
     // field on legacy sidecars that pre-date the schema bump.
     s3ArtworkFileIdsKnown: [],
 
-    // M5b (Manual Cropping, 2026-05-25): job-level batch-crop defaults.
-    // Persisted so that re-opening the drawer mid-job (or after an OHD
-    // restart) restores the operator's last-used default rect /
-    // orientation. The rect is in IMAGE-RELATIVE FRACTIONS so it scales
-    // across heterogeneous image dimensions; per-image entries snapshot
-    // the PIXEL rect that was actually applied (matches the pre-M5
-    // cropRect contract).
-    //
-    // Flat top-level fields (no batchCrop:{...} wrapper) — same rationale
-    // as the per-image fields. See OHD_ManualCropping_ClaudeCode_Brief.md
-    // §"Brief vs. as-built" under M5a.
-    batchCropDefaultRect:        null,  // { x, y, w, h } fractions, 0..1
-    batchCropDefaultOrientation: null,  // 'portrait' | 'landscape'
-    batchCropLastAppliedAt:      null,  // ISO 8601
+    // M5b → Manual Crop redesign (2026-06-01): the two job-level batch-crop
+    // defaults (`batchCropDefaultRect`, `batchCropDefaultOrientation`) were
+    // removed when per-image pending state replaced the shared spec. Each
+    // image now carries its own pendingCropRect / pendingRotation /
+    // pendingOrientation. `batchCropLastAppliedAt` survives as job-level
+    // telemetry — stamped by jobBatchCropApply on a successful "Apply
+    // Default to All" run.
+    batchCropLastAppliedAt: null,  // ISO 8601
   };
 }
 

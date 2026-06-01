@@ -1575,6 +1575,74 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
   });
 
   /**
+   * ohd:job:save-pending-crops  (Manual Crop redesign — 2026-06-01)
+   *
+   * Payload:  { jobPath, sidecar, updates: [{ filename, pendingCropRect,
+   *             pendingRotation, pendingOrientation }] }
+   * Returns:  { success: true, sidecar } | { success: false, error }
+   *
+   * Persists per-image in-progress crop state to the sidecar without
+   * touching anything on /working/. Called from the manual-crop drawer
+   * when the operator closes mid-job — drains the in-memory perImageState
+   * deltas so reopening restores progress.
+   *
+   * Strictly a partial mutation: only the three pendingCrop* fields on
+   * matched image entries are written. cropApplied / cropRect / cropRotation /
+   * cropOrientation are NEVER touched here — those are owned by
+   * `ohd:job:crop-image` (per-image Approve) and `ohd:job:batch-crop-apply`
+   * (Apply Default to All). Updates against filenames missing from the
+   * sidecar are silently skipped (renamed-since-load race).
+   *
+   * No `_applyCropToSingleImage` reuse — no sharp call, no disk I/O on
+   * /working/. The whole operation is one sidecar JSON write.
+   */
+  ipcMain.handle('ohd:job:save-pending-crops', async (event, payload = {}) => {
+    const { jobPath, sidecar, updates } = payload;
+    try {
+      if (!jobPath || !sidecar || !Array.isArray(sidecar.images)) {
+        return { success: false, error: 'invalid-payload' };
+      }
+      if (!Array.isArray(updates) || updates.length === 0) {
+        // No-op — return the sidecar unchanged. Renderer can treat this
+        // as success; saves a disk write when there's nothing to persist.
+        return { success: true, sidecar };
+      }
+      const byFilename = new Map();
+      for (const u of updates) {
+        if (u && typeof u.filename === 'string') byFilename.set(u.filename, u);
+      }
+      const nextImages = sidecar.images.map((img) => {
+        const u = byFilename.get(img.filename);
+        if (!u) return img;
+        // Normalise: accept null / undefined / absent → null. Accept
+        // explicit values only when they parse cleanly. Rotation must be
+        // a finite multiple of 90; orientation must be one of the two
+        // known strings. Anything else is coerced to null rather than
+        // round-tripping garbage to disk.
+        const rectOk = u.pendingCropRect
+          && Number.isFinite(u.pendingCropRect.x)
+          && Number.isFinite(u.pendingCropRect.y)
+          && Number.isFinite(u.pendingCropRect.w)
+          && Number.isFinite(u.pendingCropRect.h);
+        const rotOk = Number.isFinite(u.pendingRotation)
+          && [0, 90, 180, 270].includes(u.pendingRotation);
+        const orientOk = u.pendingOrientation === 'portrait' || u.pendingOrientation === 'landscape';
+        return {
+          ...img,
+          pendingCropRect:    rectOk   ? { x: u.pendingCropRect.x, y: u.pendingCropRect.y, w: u.pendingCropRect.w, h: u.pendingCropRect.h } : null,
+          pendingRotation:    rotOk    ? u.pendingRotation    : null,
+          pendingOrientation: orientOk ? u.pendingOrientation : null,
+        };
+      });
+      const saved = await saveSidecar({ ...sidecar, images: nextImages }, jobPath);
+      return { success: true, sidecar: saved };
+    } catch (error) {
+      logger.logError('ohd:job:save-pending-crops error', error, { jobPath });
+      return { success: false, error: error.message };
+    }
+  });
+
+  /**
    * ohd:job:resolve-target-size  (M5b — 2026-05-25)
    * Payload:  { job }
    * Returns:  { ok: true, sizeOption: { w, h, label, ...routeMeta } }
