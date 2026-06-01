@@ -31,6 +31,14 @@
   color: var(--app-ink);
   transform: translateX(100%);
   transition: transform 0.25s ease;
+  /* The drawer overlays the .app-header, which is a drag region
+     (styles.css:161 — frameless BrowserWindow needs its own drag handle).
+     Without this opt-out, Chromium's drag-region hit-test pre-empts click
+     delivery to anything in the drawer that overlaps the header's
+     vertical band (~top 30px), so the topbar's Send button silently
+     swallowed clicks at y≈16. `no-drag` inherits, so descendants opt
+     out automatically. */
+  -webkit-app-region: no-drag;
 }
 
 .jr-root.is-visible { transform: translateX(0); }
@@ -58,13 +66,52 @@
 /* ─── Top bar (DrawerTopBar) ─────────────────────────────────────────── */
 
 .jr-topbar {
-  display: flex;
+  /* Grid (not flex) — see the long comment below the columns. */
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
   gap: var(--app-s3);
   padding: 10px var(--app-s4);
   background: var(--app-surface-raised);
   border-bottom: 1px solid var(--app-border-subtle);
   flex-shrink: 0;
+  /* Belt-and-braces — opt out of .app-header's drag region (see .jr-root).
+     Inherited from .jr-root today; explicit here so a future container
+     inserted between .jr-root and .jr-topbar can't accidentally make
+     the Send button unclickable again. */
+  -webkit-app-region: no-drag;
+}
+
+/* Three-column layout (2026-05-18, grid-based since 2026-05-18 v2).
+ *
+ * The earlier flex implementation rendered correctly but caught real
+ * mouse clicks on the centre Send button — the right-hand flex item's
+ * box extended leftward into the centre column's airspace, even though
+ * its CONTENT was right-aligned, and that invisible airspace blocked
+ * pointer events. (DevTools confirmed: programmatic .click() worked,
+ * real clicks did not.) CSS Grid puts each cell on its own track with
+ * no overlap, so the centre cell's button is the topmost element at
+ * its own coordinates. Do NOT revert to flex without re-checking this.
+ */
+.jr-topbar__left {
+  display: flex;
+  align-items: center;
+  gap: var(--app-s2);
+  min-width: 0;       /* allow breadcrumb to ellipsis-truncate */
+  overflow: hidden;   /* belt-and-braces — don't let long filenames bleed across */
+}
+.jr-topbar__center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--app-s2);
+}
+.jr-topbar__right {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--app-s3);
+  min-width: 0;
 }
 
 .jr-crumb {
@@ -155,6 +202,14 @@
   color: var(--app-ink-faint);
   letter-spacing: 0.08em;
 }
+.jr-stat__subline {
+  font-family: var(--app-mono);
+  font-size: 9px;
+  color: var(--app-ink-faint);
+  margin-top: 2px;
+  letter-spacing: 0.04em;
+}
+.jr-stat--danger .jr-stat__subline { color: var(--app-red); }
 
 .jr-btn-save {
   background: var(--app-brand-green);
@@ -213,12 +268,76 @@
   border-right: 1px solid var(--app-border-subtle);
   overflow: hidden;
 }
+.jr-grid-header {
+  display: flex;
+  align-items: center;
+  gap: var(--app-s2);
+  padding: var(--app-s2) var(--app-s3);
+  border-bottom: 1px solid var(--app-border-subtle);
+  background: var(--app-surface-deep);
+  flex-shrink: 0;
+}
+.jr-grid-bulk-btn {
+  background: var(--app-surface-raised);
+  border: 1px solid var(--app-border-subtle);
+  border-radius: 4px;
+  color: var(--app-ink);
+  font-family: var(--app-sans);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 5px 10px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.jr-grid-bulk-btn:hover {
+  background: var(--app-red-weak);
+  border-color: var(--app-red);
+  color: var(--app-red);
+}
+.jr-grid-bulk-btn.is-clear {
+  background: var(--app-red-weak);
+  border-color: var(--app-red);
+  color: var(--app-red);
+}
+.jr-grid-bulk-btn.is-clear:hover {
+  background: var(--app-surface-raised);
+  border-color: var(--app-border-subtle);
+  color: var(--app-ink);
+}
+.jr-grid-bulk-link {
+  background: transparent;
+  border: none;
+  color: var(--app-ink-faint);
+  font-family: var(--app-sans);
+  font-size: 11px;
+  padding: 0 4px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.jr-grid-bulk-link:hover { color: var(--app-red); }
+.jr-grid-header__count {
+  margin-left: auto;
+  font-family: var(--app-mono);
+  font-size: 11px;
+  color: var(--app-ink-faint);
+  letter-spacing: 0.04em;
+}
 .jr-grid-scroll {
   flex: 1;
   overflow-y: auto;
   padding: var(--app-s3);
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  /* `minmax(0, 1fr)` instead of plain `1fr` (2026-05-24 layout fix).
+     Grid items default to `min-width: auto`, which expands columns to
+     fit their content's intrinsic minimum size. After the M2 label
+     strip added `.jr-card__filename` to each card, long filenames
+     (e.g. "PXDEMO-…_576629810001.jpg_Q1_pages1.jpeg") forced the
+     columns wider than 1fr. The fixed-width canvas (128 px) then sat
+     in the top-left of an over-wide card with empty whitespace to its
+     right. `minmax(0, 1fr)` explicitly sets the column min to 0, so
+     filename text ellipsis-truncates inside the card instead of
+     pushing the column wider. */
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--app-s2);
   align-content: start;
 }
@@ -265,10 +384,29 @@
   display: flex;
   gap: 3px;
 }
-.jr-badge-tr {
+/* Top-right chip overlay (M3 layout fix, 2026-05-24).
+   Replaces the earlier single-slot .jr-badge-tr (kept only operator-mod
+   ×qty) with a flex column that stacks up to three optional indicators
+   without colliding with the bottom-right AI score or the bottom label
+   strip. Stacking order top-to-bottom: operator-mod ×N, "Not finalised",
+   "×N copies". pointer-events: none on the container so the overlay
+   never swallows card-select clicks — each child re-enables its own
+   pointer events for tooltips. align-items: flex-end keeps chips of
+   differing widths flush to the right edge of the card. */
+.jr-card__chip-overlay {
   position: absolute;
   top: var(--app-s2);
   right: var(--app-s2);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+  z-index: 2;
+  pointer-events: none;
+  max-width: calc(100% - var(--app-s2) * 2);
+}
+.jr-card__chip-overlay > * {
+  pointer-events: auto;
 }
 .jr-badge {
   border-radius: 2px;
@@ -283,6 +421,44 @@
 .jr-badge--mod     { background: var(--app-brand-green); }
 .jr-badge--ai      { background: var(--app-purple-ai); }
 .jr-badge--qty     { background: var(--app-border-strong); }
+
+/* Inline reprint flag toggle — always-visible button on every card.
+   Default: faint dark, "FLAG" text. Flagged: solid red, "REPRINT" text
+   (visually matches the previous .jr-badge--reprint look so the card
+   reads the same when flagged). Click stops propagation in the JSX so
+   toggling never also selects the image for the main preview. */
+.jr-card__flag {
+  border: none;
+  border-radius: 2px;
+  padding: 1px 5px;
+  font-size: 9px;
+  font-family: var(--app-mono);
+  letter-spacing: 0.05em;
+  line-height: 1.6;
+  cursor: pointer;
+  background: rgba(0, 0, 0, 0.55);
+  color: rgba(255, 255, 255, 0.85);
+  transition: background 0.12s, color 0.12s, opacity 0.12s;
+  opacity: 0.7;
+}
+.jr-card__flag:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.78);
+  color: #fff;
+}
+.jr-card__flag.is-on {
+  background: var(--app-red);
+  color: #fff;
+  opacity: 1;
+}
+.jr-card__flag.is-on:hover {
+  background: var(--app-red);
+  opacity: 0.85;
+}
+.jr-card__flag:focus-visible {
+  outline: 2px solid var(--app-brand-green);
+  outline-offset: 1px;
+}
 
 /* AI Quality score pill — bottom-right */
 .jr-score {
@@ -304,6 +480,82 @@
 .jr-score--sub {
   color: var(--app-red);
   border-color: var(--app-red);
+}
+
+/* ─── Customer Originals (Phase 1) ───────────────────────────────────── */
+
+/* Small thumbnail + two action icons rendered at the bottom-left of the
+   card. Only present when `image.originalFilename` is truthy — so
+   non-Pixfizz orders and pre-feature jobs leave the card visually
+   identical to before. Clicks inside this strip are stopped from
+   bubbling in the JSX so neither the buttons nor the thumbnail change
+   the main-preview selection. */
+.jr-card__original {
+  position: absolute;
+  bottom: var(--app-s2);
+  left:   var(--app-s2);
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 3px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.45);
+}
+.jr-card__original-thumb {
+  display: block;
+  width:  32px;
+  height: 24px;
+  object-fit: cover;
+  border-radius: 2px;
+  border: 1px solid var(--app-border-subtle);
+  background: var(--app-surface-deep);
+  /* Clickable — opens the customer original in the default OS viewer
+     (Problem 2 fix, 2026-05-18). Cursor + hover scale tell the operator
+     the thumbnail is interactive, matching the now-departed ⤢ button. */
+  cursor: pointer;
+  transition: border-color 0.12s, transform 0.12s;
+}
+.jr-card__original-thumb:hover {
+  border-color: var(--app-ink);
+  transform: scale(1.05);
+}
+.jr-card__original-thumb:focus-visible {
+  outline: 2px solid var(--app-brand-green);
+  outline-offset: 1px;
+}
+.jr-card__original-btn {
+  border: none;
+  background: transparent;
+  color: #fff;
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 4px;
+  cursor: pointer;
+  border-radius: 2px;
+  transition: background 0.12s;
+}
+.jr-card__original-btn:hover  { background: rgba(255, 255, 255, 0.18); }
+.jr-card__original-btn:focus-visible {
+  outline: 2px solid var(--app-brand-green);
+  outline-offset: 1px;
+}
+
+/* Inline error notice when a customer original is missing from disk.
+   Auto-clears after 4s; positioned over the bottom-right of the card so
+   it doesn't fight the score pill. */
+.jr-card__original-error {
+  position: absolute;
+  left:   var(--app-s2);
+  right:  var(--app-s2);
+  bottom: calc(var(--app-s2) + 32px);
+  padding: 3px 6px;
+  border-radius: 3px;
+  background: var(--app-red);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1.3;
+  text-align: center;
+  pointer-events: none;
 }
 
 /* ─── Preview area (centre) ──────────────────────────────────────────── */
@@ -757,27 +1009,12 @@
   color: var(--app-ink-dim);
 }
 
-/* ─── Bottom action bar (reprint dispatch) ───────────────────────────── */
+/* ─── Send-reprint action (top-bar pill, was bottom bar pre-2026-05-18) ── */
 
-.jr-actionbar {
-  background: var(--app-red-weak);
-  border-top: 1px solid var(--app-red);
-  padding: 10px 20px;
-  display: flex;
-  align-items: center;
-  gap: var(--app-s3);
-  flex-shrink: 0;
-}
-.jr-actionbar__sent {
-  font-family: var(--app-mono);
-  font-size: 12px;
-  color: var(--app-red);
-}
-.jr-actionbar__count {
-  font-size: 12px;
-  color: var(--app-red);
-}
-.jr-actionbar__spacer { flex: 1; }
+/* The Send button used to live in a sticky red footer; it now sits in the
+   topbar centre column so it doesn't compete visually with the per-thumbnail
+   reprint affordances. The button styling stays red — that's the universal
+   "this dispatches print work" signal across the app. */
 .jr-btn-send {
   background: var(--app-red);
   border: none;
@@ -788,8 +1025,116 @@
   padding: 7px 20px;
   cursor: pointer;
   letter-spacing: 0.04em;
+  white-space: nowrap;
+  /* 2026-05-18: belt-and-braces stacking — the button got reported as
+     "renders but isn't clickable", which is almost always something
+     invisible overlapping. Lift the button into its own stacking
+     context and explicitly accept pointer events. */
+  position: relative;
+  z-index: 1;
+  pointer-events: auto;
 }
 .jr-btn-send:disabled { opacity: 0.6; cursor: not-allowed; }
+.jr-btn-send--inline {
+  padding: 5px 12px;
+  font-size: 11px;
+}
+
+.jr-send-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--app-s2);
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-family: var(--app-mono);
+  font-size: 12px;
+}
+.jr-send-pill--sent {
+  background: var(--app-red-weak);
+  color: var(--app-red);
+  cursor: pointer; /* click-to-dismiss */
+}
+.jr-send-pill--sent:hover {
+  filter: brightness(1.05);
+}
+.jr-send-pill--sending {
+  background: var(--app-red);
+  color: #fff;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+}
+.jr-send-pill--error {
+  background: var(--app-red-weak);
+  color: var(--app-red);
+  max-width: 480px;
+}
+.jr-send-pill__error-text {
+  /* Truncate long error messages so the topbar layout stays stable;
+     full text remains available via the title tooltip on hover. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 320px;
+}
+
+/* ─── Sending-reprint overlay (full drawer, blocking) ──────────────────── */
+/*
+ * Shown while the reprintCreate IPC is in flight. Sits above the body and
+ * sidebar but below the crop overlay (z-index 200), so a stray crop in
+ * progress wouldn't be hidden behind the spinner.
+ *
+ * Wraps the whole drawer in a translucent scrim so the operator gets an
+ * unmistakable "yes, the click registered" signal — the prior UX (button
+ * text changes to "SENDING…") was missed by operators in field testing
+ * (2026-05-18). The card sits dead-centre with a spinner + plain-English
+ * status so non-technical lab staff don't have to guess.
+ */
+.jr-sending-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 150;
+  background: rgba(10, 18, 24, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Make sure clicks don't fall through to the body / sidebar. */
+  pointer-events: auto;
+}
+.jr-sending-overlay__card {
+  background: var(--app-surface-raised);
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  padding: 28px 36px;
+  min-width: 280px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--app-s3);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+.jr-sending-overlay__spinner {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 3px solid var(--app-red-weak);
+  border-top-color: var(--app-red);
+  animation: jr-sending-spin 0.9s linear infinite;
+}
+@keyframes jr-sending-spin {
+  to { transform: rotate(360deg); }
+}
+.jr-sending-overlay__title {
+  font-family: var(--app-mono);
+  font-size: 14px;
+  letter-spacing: 0.05em;
+  color: var(--app-ink);
+  text-transform: uppercase;
+}
+.jr-sending-overlay__sub {
+  font-size: 12px;
+  color: var(--app-ink-dim);
+  text-align: center;
+}
 
 /* ─── Crop editor overlay ────────────────────────────────────────────── */
 
@@ -831,6 +1176,81 @@
   letter-spacing: 0.08em;
   margin-bottom: 10px;
   text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+/* Customer Originals (Phase 2) — Source segmented control inside the
+   crop header. Only rendered when the row has an originalFilename + the
+   re-crop handler is wired up. Visually mirrors the file-tab style used
+   elsewhere in the panel. */
+.jr-crop-source-toggle {
+  display: inline-flex;
+  border: 1px solid var(--app-border-subtle);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.jr-crop-source-btn {
+  border: none;
+  background: transparent;
+  color: var(--app-ink-dim);
+  font-family: var(--app-mono);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  padding: 4px 10px;
+  cursor: pointer;
+  text-transform: uppercase;
+  transition: background 0.12s, color 0.12s;
+}
+.jr-crop-source-btn:hover { background: var(--app-surface-deep); }
+.jr-crop-source-btn.is-on {
+  background: var(--app-brand-green);
+  color: #fff;
+}
+.jr-crop-source-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.jr-crop-source-btn:focus-visible {
+  outline: 2px solid var(--app-brand-green);
+  outline-offset: 1px;
+}
+
+/* Re-Crop orientation toggle — flips a non-square size between portrait
+   and landscape (e.g. pull a landscape 4×6 from a landscape original).
+   Hidden for square sizes. Cloned from .jr-crop-source-* above so the two
+   segmented controls read as a visual pair. */
+.jr-crop-orient-toggle {
+  display: inline-flex;
+  border: 1px solid var(--app-border-subtle);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.jr-crop-orient-btn {
+  border: none;
+  background: transparent;
+  color: var(--app-ink-dim);
+  font-family: var(--app-mono);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  padding: 4px 10px;
+  cursor: pointer;
+  text-transform: uppercase;
+  transition: background 0.12s, color 0.12s;
+}
+.jr-crop-orient-btn:hover { background: var(--app-surface-deep); }
+.jr-crop-orient-btn.is-on {
+  background: var(--app-brand-green);
+  color: #fff;
+}
+.jr-crop-orient-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.jr-crop-orient-btn:focus-visible {
+  outline: 2px solid var(--app-brand-green);
+  outline-offset: 1px;
 }
 .jr-crop-canvas {
   width: min(880px, 88vw);
@@ -869,6 +1289,13 @@
   color: #fff;
   padding: 8px 28px;
 }
+/* Apply & Send Reprint — green outline: reads as a sibling of Apply Crop
+   (solid green) but visibly a distinct, more consequential action. */
+.jr-crop-btn--reprint {
+  background: none;
+  border: 1px solid var(--app-brand-green);
+  color: var(--app-brand-green);
+}
 .jr-crop-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .jr-crop-readout {
   margin-top: 10px;
@@ -876,3 +1303,608 @@
   font-family: var(--app-mono);
   color: var(--app-ink-faint);
 }
+
+/* ── S3 Artwork Channel M2 (2026-05-24) ──────────────────────────────────
+   Per-file source tag in the thumbnail grid + the filename label strip
+   that hosts it. Tag only renders when the file's source differs from
+   the job-level source — see ThumbnailCard.jsx. Colours via --app-* so
+   light/dark themes track the existing palette. */
+.jr-card__label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px 0;
+  font-family: var(--app-mono);
+  font-size: 10px;
+  line-height: 1.2;
+  color: var(--app-ink-dim);
+}
+.jr-card__filename {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.jr-source-tag {
+  flex: 0 0 auto;
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 2px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border: 1px solid currentColor;
+}
+.jr-source-tag--manual {
+  background: var(--app-amber-weak);
+  color: var(--app-amber);
+}
+.jr-source-tag--pixfizz {
+  background: var(--app-surface-deep);
+  color: var(--app-ink-dim);
+}
+
+/* M3 (2026-05-24): per-file "Not finalised" warning chip. Amber palette
+   matches the M2 hold-chip + manual-source-tag family so the warning reads
+   as a softer member of the same group. Triggered solely by
+   productionReady === false (boolean), independent of artwork_type.
+   Layout-fix 2026-05-24: relocated from .jr-card__label (bottom strip)
+   to the top-right .jr-card__chip-overlay column — removed the
+   `flex: 0 0 auto` row-shrink prop (irrelevant in the new column
+   context) and added a subtle text-shadow so the amber-on-amber chip
+   stays readable when it overlays a busy thumbnail image. */
+.jr-not-finalised-tag {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 2px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border: 1px solid currentColor;
+  background: var(--app-amber-weak);
+  color: var(--app-amber);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  white-space: nowrap;
+}
+
+/* M3 (2026-05-24): per-file "×N copies" chip. Neutral palette — purely
+   informational breakdown of how qtyOriginal was derived (job.quantity ×
+   file.copies). Suppressed for copies=1 and for legacy/FTP entries
+   where copies is null. Same layout-fix as the not-finalised chip:
+   relocated to the top-right overlay column; readability shadow added
+   for thumbnail overlay. */
+.jr-copies-tag {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 2px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border: 1px solid currentColor;
+  background: var(--app-surface-deep);
+  color: var(--app-ink-dim);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  white-space: nowrap;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   M5b — Batch crop mode (2026-05-25, OHD_ManualCropping brief §M5b)
+   Mounted instead of the standard `.jr-body` when the shared trigger
+   predicate says the job is manual-source with uncropped images. Uses
+   only --app-* tokens so both themes work without extra selectors. */
+
+.jr-batch-mode {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  background: var(--app-surface);
+  color: var(--app-ink);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.jr-batch-topbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 16px;
+  background: var(--app-surface-raised);
+  border-bottom: 1px solid var(--app-border-subtle);
+  font-family: var(--app-font);
+  font-size: 13px;
+}
+
+.jr-batch-target { display: flex; align-items: center; gap: 8px; }
+.jr-batch-target-label { color: var(--app-ink-dim); font-weight: 600; }
+.jr-batch-target-pill {
+  background: var(--app-accent-weak);
+  color: var(--app-accent-text);
+  padding: 4px 10px;
+  border-radius: var(--app-radius);
+  font-family: var(--app-mono);
+  font-weight: 600;
+  font-size: 12px;
+}
+.jr-batch-target-pill--loading { background: var(--app-surface-deep); color: var(--app-ink-faint); }
+.jr-batch-target-pill--error   { background: var(--app-amber-weak);   color: var(--app-amber);     }
+
+.jr-orientation-toggle {
+  display: inline-flex;
+  background: var(--app-surface-sunk);
+  border: 1px solid var(--app-border-subtle);
+  border-radius: var(--app-radius);
+  overflow: hidden;
+}
+.jr-orient-btn {
+  background: transparent;
+  border: 0;
+  padding: 6px 14px;
+  font: inherit;
+  color: var(--app-ink-dim);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.jr-orient-btn:hover:not(:disabled) { background: var(--app-border-subtle); color: var(--app-ink); }
+.jr-orient-btn.is-active            { background: var(--app-accent); color: var(--app-accent-ink); font-weight: 600; }
+.jr-orient-btn:disabled             { cursor: not-allowed; opacity: 0.5; }
+
+.jr-batch-apply-cta {
+  background: var(--app-accent);
+  color: var(--app-accent-ink);
+  border: 0;
+  padding: 8px 18px;
+  border-radius: var(--app-radius);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 120ms ease;
+}
+.jr-batch-apply-cta:hover:not(:disabled) { filter: brightness(1.08); }
+.jr-batch-apply-cta:disabled              { opacity: 0.45; cursor: not-allowed; }
+
+.jr-batch-progress-text {
+  color: var(--app-ink-dim);
+  font-family: var(--app-mono);
+  font-size: 12px;
+  margin-left: auto;
+}
+
+.jr-batch-exit {
+  background: transparent;
+  border: 1px solid var(--app-border);
+  color: var(--app-ink-dim);
+  padding: 6px 12px;
+  border-radius: var(--app-radius);
+  font: inherit;
+  cursor: pointer;
+}
+.jr-batch-exit:hover:not(:disabled) { background: var(--app-border-subtle); color: var(--app-ink); }
+.jr-batch-exit:disabled              { opacity: 0.45; cursor: not-allowed; }
+
+.jr-batch-body {
+  display: grid;
+  grid-template-columns: minmax(280px, 38%) 1fr;
+  gap: 12px;
+  padding: 12px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.jr-batch-editor {
+  position: relative;
+  background: var(--app-surface-deep);
+  border: 1px solid var(--app-border-subtle);
+  border-radius: var(--app-radius-lg);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+}
+.jr-batch-editor.is-disabled {
+  filter: grayscale(0.6) brightness(0.85);
+  opacity: 0.7;
+}
+/* M5b 2026-05-25 bug-fix (Issue 1): the imgbox is the aspect-constrained
+   inner container. CSS aspect-ratio makes it match the image's natural
+   aspect, sized to fit within the editor frame. Both img and overlay
+   fill the imgbox at 100%/100% so the overlay's fractional coords map
+   to displayed-image bounds — not the editor's landscape frame bounds. */
+.jr-batch-editor-imgbox {
+  position: relative;
+  /* `aspect-ratio` is set inline to the image's natural ratio. With
+     width: 100% + max-height: 100%, Chromium scales the box to the
+     largest size that fits within the editor frame at the given
+     aspect-ratio — pillarboxing/letterboxing as needed. Square
+     images get a square box; landscape gets a wide box; portrait
+     gets a tall box. */
+  width: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  cursor: grab;
+}
+.jr-batch-editor-imgbox:active { cursor: grabbing; }
+.jr-batch-editor-imgbox.is-inert { cursor: not-allowed; }
+.jr-batch-editor-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+  display: block;
+}
+.jr-batch-overlay {
+  position: absolute;
+  border: 2px solid var(--app-accent);
+  background: var(--app-accent-weak);
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.35);
+  /* pointer-events: none on the OVERLAY itself means clicks fall
+     through to the imgbox (drag-to-move). The HANDLES re-enable
+     pointer-events explicitly so their mousedown captures first. */
+  pointer-events: none;
+  border-radius: 2px;
+}
+/* M5b resize handles (Issue 2, 2026-05-25) — four corner squares,
+   aspect-locked resize on drag. Sized large enough to grab without
+   being intrusive (10px); cursor mirrors the resize direction. */
+.jr-batch-handle {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  background: var(--app-accent);
+  border: 2px solid #fff;
+  border-radius: 50%;
+  pointer-events: auto;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  z-index: 2;
+}
+.jr-batch-handle--tl { top: -6px;    left: -6px;    cursor: nwse-resize; }
+.jr-batch-handle--tr { top: -6px;    right: -6px;   cursor: nesw-resize; }
+.jr-batch-handle--bl { bottom: -6px; left: -6px;    cursor: nesw-resize; }
+.jr-batch-handle--br { bottom: -6px; right: -6px;   cursor: nwse-resize; }
+.jr-batch-handle:hover { background: var(--app-accent); filter: brightness(1.1); }
+.jr-batch-editor-hint {
+  position: absolute;
+  bottom: 8px; left: 50%; transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  padding: 4px 10px;
+  border-radius: var(--app-radius);
+  font-size: 11px;
+  pointer-events: none;
+  font-family: var(--app-font);
+}
+
+.jr-batch-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+  overflow-y: auto;
+  padding: 4px;
+  align-content: start;
+}
+.jr-batch-thumb {
+  position: relative;
+  background: var(--app-surface-sunk);
+  border: 1px solid var(--app-border-subtle);
+  border-radius: var(--app-radius);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  font-family: var(--app-font);
+}
+.jr-batch-thumb img {
+  width: 100%;
+  height: 105px;
+  /* M5b 2026-05-25 spec rewrite: switched from cover → contain so the
+     thumb's displayed image bounds match the source's natural aspect.
+     The overlay's fractional coords are image-relative; if the img
+     were cover-fitted, the overlay's positioning would drift from the
+     actual visible image content. With `contain`, letterboxing /
+     pillarboxing keeps the math consistent. */
+  object-fit: contain;
+  display: block;
+  background: var(--app-surface-deep);
+}
+.jr-batch-thumb-overlay {
+  position: absolute;
+  top: 0;
+  border: 1px solid var(--app-accent);
+  background: var(--app-accent-weak);
+  pointer-events: none;
+  border-radius: 1px;
+}
+.jr-batch-thumb-name {
+  font-family: var(--app-mono);
+  font-size: 10px;
+  color: var(--app-ink-dim);
+  padding: 4px 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.jr-batch-thumb.is-cropped {
+  border-color: var(--app-brand-green);
+  background: var(--app-brand-green-weak);
+}
+.jr-batch-thumb-check {
+  position: absolute;
+  top: 4px; right: 4px;
+  background: var(--app-brand-green);
+  color: #fff;
+  width: 22px; height: 22px;
+  border-radius: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 13px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+}
+.jr-batch-thumb.is-current {
+  outline: 2px solid var(--app-amber);
+  outline-offset: -2px;
+}
+
+.jr-batch-bottombar {
+  padding: 10px 16px;
+  background: var(--app-surface-raised);
+  border-top: 1px solid var(--app-border-subtle);
+  font-family: var(--app-font);
+  font-size: 12px;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.jr-batch-bottombar-status { flex: 1; min-width: 0; }
+.jr-batch-send-to-print {
+  background: var(--app-brand-green);
+  color: var(--app-brand-green-ink);
+  border: 0;
+  padding: 8px 18px;
+  border-radius: var(--app-radius);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 120ms ease;
+  white-space: nowrap;
+}
+.jr-batch-send-to-print:hover:not(:disabled) { filter: brightness(1.08); }
+.jr-batch-send-to-print:disabled              { opacity: 0.45; cursor: not-allowed; }
+.jr-batch-send-error {
+  margin-top: 4px;
+  color: var(--app-red);
+  font-size: 11px;
+  font-weight: 600;
+}
+.jr-batch-status { color: var(--app-ink-dim); }
+.jr-batch-summary {
+  color: var(--app-brand-green-text);
+  font-weight: 600;
+}
+.jr-batch-summary.has-errors { color: var(--app-amber); }
+.jr-batch-error-details {
+  margin-left: 12px;
+  display: inline-block;
+}
+.jr-batch-error-details summary {
+  cursor: pointer;
+  color: var(--app-red);
+  font-weight: 600;
+}
+.jr-batch-error-details ul {
+  margin: 6px 0 0; padding-left: 18px;
+  max-height: 120px; overflow-y: auto;
+  font-size: 11px;
+  color: var(--app-ink);
+}
+.jr-batch-error-details code {
+  font-family: var(--app-mono);
+  color: var(--app-ink-dim);
+}
+
+/* "Batch Crop Remaining (X)" CTA bar — shown in the standard drawer body
+   when the trigger says BUTTON mode or when the operator exited an
+   active batch but uncropped images remain. */
+.jr-batch-remaining-bar {
+  grid-column: 1 / -1;
+  padding: 8px 16px;
+  background: var(--app-amber-weak);
+  border-bottom: 1px solid var(--app-border-subtle);
+  text-align: center;
+}
+.jr-batch-remaining-cta {
+  background: var(--app-amber);
+  color: var(--app-accent-ink);
+  border: 0;
+  padding: 7px 16px;
+  border-radius: var(--app-radius);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.jr-batch-remaining-cta:hover { filter: brightness(1.08); }
+
+/* Thumbnails in batch grid are now clickable (M5c — opens focused mode). */
+.jr-batch-thumb.is-clickable { cursor: pointer; }
+.jr-batch-thumb.is-clickable:hover {
+  border-color: var(--app-accent);
+  filter: brightness(1.05);
+}
+.jr-batch-thumb.is-clickable:focus-visible {
+  outline: 2px solid var(--app-accent);
+  outline-offset: 1px;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   M5c — Focused per-image override mode (2026-05-26)
+   Full-overlay UI mounted over the batch body when an operator clicks
+   a thumbnail. Mirrors FilmReview's FocusedFrame layout: top chrome
+   with nav, body with CropEditor (chrome hidden), bottom action bar. */
+
+.jr-focused-crop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  background: var(--app-surface);
+  color: var(--app-ink);
+  font-family: var(--app-font);
+}
+.jr-focused-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: -1;
+}
+
+.jr-focused-topbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 16px;
+  background: var(--app-surface-raised);
+  border-bottom: 1px solid var(--app-border-subtle);
+  font-size: 13px;
+}
+.jr-focused-close {
+  background: transparent;
+  border: 1px solid var(--app-border);
+  color: var(--app-ink-dim);
+  padding: 6px 12px;
+  border-radius: var(--app-radius);
+  font: inherit;
+  cursor: pointer;
+}
+.jr-focused-close:hover { background: var(--app-border-subtle); color: var(--app-ink); }
+
+.jr-focused-title {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.jr-focused-counter {
+  font-family: var(--app-mono);
+  color: var(--app-ink-dim);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.jr-focused-filename {
+  font-family: var(--app-mono);
+  font-size: 12px;
+  color: var(--app-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.jr-focused-cropped-badge {
+  background: var(--app-brand-green-weak);
+  color: var(--app-brand-green-text);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: var(--app-radius);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+.jr-focused-rotation-badge {
+  background: var(--app-amber-weak);
+  color: var(--app-amber);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: var(--app-radius);
+  flex-shrink: 0;
+  font-family: var(--app-mono);
+}
+
+.jr-focused-rotate-controls {
+  display: inline-flex;
+  gap: 4px;
+}
+.jr-focused-rotate-btn {
+  background: var(--app-surface-sunk);
+  border: 1px solid var(--app-border-subtle);
+  color: var(--app-ink-dim);
+  padding: 6px 12px;
+  border-radius: var(--app-radius);
+  font: inherit;
+  cursor: pointer;
+  font-family: var(--app-mono);
+}
+.jr-focused-rotate-btn:hover:not(:disabled) {
+  background: var(--app-border-subtle);
+  color: var(--app-ink);
+}
+.jr-focused-rotate-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.jr-focused-body {
+  position: relative;
+  overflow: hidden;
+  background: var(--app-surface-deep);
+}
+/* CropEditor uses its own layout — override its overlay-modal mounting
+   so it fills our body when hideOwnChrome is set. */
+.jr-focused-body > .jr-crop-modal,
+.jr-focused-body > .jr-crop-overlay {
+  position: absolute;
+  inset: 0;
+  background: transparent;
+}
+
+.jr-focused-bottombar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--app-surface-raised);
+  border-top: 1px solid var(--app-border-subtle);
+  font-size: 12px;
+}
+.jr-focused-nav-btn {
+  background: var(--app-surface-sunk);
+  border: 1px solid var(--app-border-subtle);
+  color: var(--app-ink-dim);
+  padding: 7px 14px;
+  border-radius: var(--app-radius);
+  font: inherit;
+  cursor: pointer;
+}
+.jr-focused-nav-btn:hover:not(:disabled) {
+  background: var(--app-border-subtle);
+  color: var(--app-ink);
+}
+.jr-focused-nav-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.jr-focused-status {
+  flex: 1;
+  text-align: center;
+  color: var(--app-ink-dim);
+  font-family: var(--app-mono);
+  font-size: 11px;
+}
+.jr-focused-error {
+  color: var(--app-red);
+  font-weight: 600;
+}
+
+.jr-focused-apply {
+  background: var(--app-accent);
+  color: var(--app-accent-ink);
+  border: 0;
+  padding: 8px 18px;
+  border-radius: var(--app-radius);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 120ms ease;
+}
+.jr-focused-apply:hover:not(:disabled) { filter: brightness(1.08); }
+.jr-focused-apply:disabled { opacity: 0.45; cursor: not-allowed; }

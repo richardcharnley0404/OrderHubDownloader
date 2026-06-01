@@ -18,11 +18,16 @@ import { useState, useEffect, useRef, useCallback } from 'react';
  * directly to Sharp without any rescaling.
  *
  * Props:
- *   image           ImageEntry   - selected image (filename, cropRect?)
- *   jobPath         string       - absolute path to the job root folder
- *   channelMapping  object|null  - selected channel mapping (used to infer aspect ratio)
- *   onApply         (cropRect) => void  - called with { x, y, w, h } in image-space pixels
- *   onCancel        () => void
+ *   image            ImageEntry  - selected image (filename, cropRect?)
+ *   jobPath          string      - absolute path to the job root folder
+ *   sizeOption       object|null - selected size option; w/h drive the aspect lock
+ *   originalPath     string|null - absolute path to the customer's uncropped upload;
+ *                                  truthy enables the Source = Customer crop | Original
+ *                                  toggle (Phase 2 of Customer Originals)
+ *   onApply          (cropRect) => void  - re-crop the printable JPEG (current behaviour)
+ *   onApplyOriginal  (cropRect) => void  - re-crop the customer upload (Phase 2);
+ *                                  only invoked when source toggle is "Original"
+ *   onCancel         () => void
  */
 
 // ── Size parser ───────────────────────────────────────────────────────────────
@@ -83,10 +88,17 @@ function layoutForCanvas(canvas, imgW, imgH) {
   return { scale, offsetX, offsetY, displayW, displayH };
 }
 
-function drawCanvas(canvas, imgEl, naturalSize, cropRect) {
+function drawCanvas(canvas, imgEl, naturalSize, cropRect, imageRotation = 0) {
   if (!canvas || !imgEl || !naturalSize.w || !cropRect) return;
 
   const ctx = canvas.getContext('2d');
+  // M5c (2026-05-26): when imageRotation is 90/270 the EFFECTIVE
+  // natural dimensions swap. naturalSize as passed in is the
+  // POST-rotation dimensions (the caller computes them); cropRect's
+  // coords are in that same post-rotation space. drawCanvas's job
+  // here is just to render the rotated image at the right place on
+  // the canvas — the rest of the math (crop box, handles, hit
+  // testing) operates in the post-rotation coordinate system.
   const { w: iw, h: ih } = naturalSize;
   const layout = layoutForCanvas(canvas, iw, ih);
   const { scale, offsetX, offsetY, displayW, displayH } = layout;
@@ -97,7 +109,30 @@ function drawCanvas(canvas, imgEl, naturalSize, cropRect) {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
   // ── Image ──────────────────────────────────────────────────────────────────
-  ctx.drawImage(imgEl, offsetX, offsetY, displayW, displayH);
+  //
+  // For rotation === 0: draw the image directly at the canvas-space
+  // layout. M5a/b path; byte-identical visual to pre-M5c.
+  //
+  // For rotation !== 0: rotate the canvas around the centre of the
+  // would-be displayW × displayH region, then draw the image
+  // centred at origin. When rotation is 90 or 270, the source
+  // image's natural dims are SWAPPED relative to displayW/displayH
+  // — that's the whole point of swapping naturalSize at the caller.
+  if (!imageRotation || imageRotation === 0) {
+    ctx.drawImage(imgEl, offsetX, offsetY, displayW, displayH);
+  } else {
+    const centerX = offsetX + displayW / 2;
+    const centerY = offsetY + displayH / 2;
+    ctx.save();
+    ctx.translate(centerX, centerY);
+    ctx.rotate((imageRotation * Math.PI) / 180);
+    // After rotation, the image draws at its OWN natural-axis
+    // dimensions, swapped. drawImage is centered at origin.
+    const sourceDisplayW = (imageRotation === 90 || imageRotation === 270) ? displayH : displayW;
+    const sourceDisplayH = (imageRotation === 90 || imageRotation === 270) ? displayW : displayH;
+    ctx.drawImage(imgEl, -sourceDisplayW / 2, -sourceDisplayH / 2, sourceDisplayW, sourceDisplayH);
+    ctx.restore();
+  }
 
   // ── Crop box in canvas space ───────────────────────────────────────────────
   const cx = offsetX + cropRect.x * scale;
@@ -182,7 +217,24 @@ function detectHandle(px, py, canvas, cropRect, scale, offsetX, offsetY) {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export function CropEditor({ image, jobPath, sizeOption, onApply, onCancel }) {
+export function CropEditor({
+  image, jobPath, sizeOption,
+  originalPath = null,
+  onApply, onApplyOriginal, onApplyAndSendReprint,
+  onCancel,
+  // M5c (2026-05-26): optional rotation + chrome-hiding props for
+  // FocusedCropFrame. Both default to compatible-with-pre-M5c
+  // behaviour so the standard-drawer caller is unaffected.
+  imageRotation = 0,        // 0|90|180|270; rotates the displayed image + crop coord space
+  hideOwnChrome = false,    // when true, suppresses Apply/Cancel/source/orientation chrome
+  onCropRectChange,         // optional (cropRect) => void; emitted on every cropRect change
+                            // so FocusedCropFrame can track + apply imperatively on Enter
+  onImgLoadedChange,        // optional (boolean) => void; signals image-loaded state for
+                            // FocusedCropFrame's Apply gate
+  controlledOrientation, // optional 'portrait'|'landscape' — when present, overrides the
+                         // internal orientationOverride state so FocusedCropFrame can drive
+                         // the toggle from outside in hideOwnChrome mode
+}) {
   const canvasRef   = useRef(null);
   const imgRef      = useRef(null);
   const dragRef     = useRef(null);   // { handle, startX, startY, startRect }
@@ -192,23 +244,103 @@ export function CropEditor({ image, jobPath, sizeOption, onApply, onCancel }) {
   const [cropRect,     setCropRect]     = useState(null);   // image-space { x, y, w, h }
   const [applying,     setApplying]     = useState(false);
 
-  // Aspect ratio comes directly from the sizeOption; default to square if unset.
-  const aspectRatio = sizeOption ? sizeOption.w / sizeOption.h : 1;
+  // Orientation override for the crop box. null = follow the routed size
+  // as-is (fresh row, no saved crop); 'portrait' / 'landscape' = pinned,
+  // either by the operator flipping the toggle or — on reopen — seeded from
+  // a saved cropRect so the toggle and the aspect lock match the box that's
+  // about to be drawn (no lock-state desync). Ephemeral per cropper session:
+  // CropEditor remounts on every modal open, so this is never persisted.
+  const [orientationOverride, setOrientationOverride] = useState(() => {
+    const r = image?.cropRect;
+    if (!r || !r.w || !r.h) return null;
+    return r.w >= r.h ? 'landscape' : 'portrait';
+  });
 
-  // Working-copy URL — the image in /working/ is what the user sees
-  const imageSrc = jobPath && image?.filename
-    ? `file://${jobPath.replace(/\\/g, '/')}/working/${image.filename}`
-    : null;
+  // Customer Originals (Phase 2) — Source toggle.
+  // The toggle is offered only when the renderer can resolve an originalPath
+  // for this image AND a re-crop handler is wired up. With no original or no
+  // handler we behave exactly like the pre-Phase-2 cropper (Customer crop only).
+  const canUseOriginal = Boolean(originalPath && onApplyOriginal);
+  const [source, setSource] = useState('customer'); // 'customer' | 'original'
+  // If the cropper is re-opened on a row that lost its original, fall back
+  // safely to customer mode rather than rendering a dead toggle.
+  useEffect(() => {
+    if (!canUseOriginal && source !== 'customer') setSource('customer');
+  }, [canUseOriginal, source]);
+
+  // Aspect ratio is derived from the routed sizeOption; default to square if
+  // unset. `orientationOverride` lets the operator flip a non-square size
+  // between portrait and landscape without changing the routed size itself.
+  // Math.max/min over baseAspect and 1/baseAspect keeps this robust to a
+  // sizeOption that is already landscape (e.g. a 6×4 channel mapping):
+  // landscape always resolves to the >1 ratio, portrait to the <1.
+  // The lock applies identically to both source modes — the brief is explicit
+  // that the routed size is the authoritative aspect even on the original.
+  const baseAspect  = sizeOption ? sizeOption.w / sizeOption.h : 1;
+  const isSquare    = !sizeOption || Math.abs(baseAspect - 1) < 0.001;
+  // M5c: external override wins when supplied (FocusedCropFrame's
+  // per-image orientation toggle in hideOwnChrome mode). Falls
+  // through to the internal state for the standard-drawer caller.
+  const effectiveOrientationOverride = controlledOrientation || orientationOverride;
+  const orientation = effectiveOrientationOverride
+    ?? (baseAspect >= 1 ? 'landscape' : 'portrait');
+  const aspectRatio = orientation === 'landscape'
+    ? Math.max(baseAspect, 1 / baseAspect)
+    : Math.min(baseAspect, 1 / baseAspect);
+
+  // Image source:
+  //   customer → /working/{image.filename}   (the printable JPEG)
+  //   original → originalPath                (manifest-resolved customer upload)
+  const imageSrc = (() => {
+    if (source === 'original' && canUseOriginal) {
+      return `file:///${originalPath.replace(/\\/g, '/').replace(/^\/+/, '')}`;
+    }
+    return jobPath && image?.filename
+      ? `file://${jobPath.replace(/\\/g, '/')}/working/${image.filename}`
+      : null;
+  })();
+
+  // Reset the load + rect state when the source toggle flips — the cropper
+  // is about to point at a different file with different natural dimensions,
+  // so any previous crop rect is meaningless until the new image loads.
+  useEffect(() => {
+    setImgLoaded(false);
+    setNaturalSize({ w: 0, h: 0 });
+    setCropRect(null);
+  }, [source]);
 
   // ── Initialise crop rect once the image is loaded ─────────────────────────
 
   useEffect(() => {
     if (!imgLoaded || !naturalSize.w) return;
 
-    // Reuse any existing crop that was applied previously
-    if (image?.cropRect) {
-      setCropRect({ ...image.cropRect });
-      return;
+    // Reuse any existing crop ONLY in customer-crop mode. On the original
+    // upload the dimensions are different from the printable JPEG, so a
+    // saved cropRect against the printable wouldn't translate cleanly.
+    // Two gates before reusing the saved rect:
+    //   1. It must FIT the image currently loaded. ohd:job:crop-image does
+    //      an IN-PLACE crop — it overwrites /working/{filename} with the
+    //      cropped (smaller) result, while the saved cropRect stays in the
+    //      PRE-crop coordinate space. Reusing it against the now-smaller
+    //      working image yields an out-of-bounds rect that crashes
+    //      sharp.extract() ("extract_area: bad extract area"). If it no
+    //      longer fits, fall through and re-fit a fresh box.
+    //   2. Its derived orientation must match the current effective
+    //      `orientation` (compared via the rect's own w/h — robust to
+    //      orientationOverride being nulled with a saved rect present).
+    // A genuine orientation flip changes aspectRatio (in the deps below),
+    // re-runs this effect, and falls through to the re-fit branch.
+    if (source === 'customer' && image?.cropRect) {
+      const r = image.cropRect;
+      const fitsLoadedImage =
+        r.x >= 0 && r.y >= 0 && r.w > 0 && r.h > 0 &&
+        r.x + r.w <= naturalSize.w &&
+        r.y + r.h <= naturalSize.h;
+      const savedOrientation = r.w >= r.h ? 'landscape' : 'portrait';
+      if (fitsLoadedImage && savedOrientation === orientation) {
+        setCropRect({ ...r });
+        return;
+      }
     }
 
     // Fit the largest possible crop box of the target aspect ratio
@@ -225,14 +357,39 @@ export function CropEditor({ image, jobPath, sizeOption, onApply, onCancel }) {
     const cy = (ih - ch) / 2;
     setCropRect({ x: Math.round(cx), y: Math.round(cy), w: Math.round(cw), h: Math.round(ch) });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [imgLoaded, naturalSize.w, naturalSize.h, aspectRatio]);
+  }, [imgLoaded, naturalSize.w, naturalSize.h, aspectRatio, source]);
 
   // ── Redraw canvas whenever crop rect changes ───────────────────────────────
 
   useEffect(() => {
     if (!imgLoaded || !cropRect) return;
-    drawCanvas(canvasRef.current, imgRef.current, naturalSize, cropRect);
-  }, [imgLoaded, cropRect, naturalSize]);
+    drawCanvas(canvasRef.current, imgRef.current, naturalSize, cropRect, imageRotation);
+  }, [imgLoaded, cropRect, naturalSize, imageRotation]);
+
+  // M5c (2026-05-26): when imageRotation changes while mounted (e.g.
+  // FocusedCropFrame's R / L shortcut), swap naturalSize.w/h so the
+  // crop-coord space matches the rotated view. Only fires when the
+  // image is already loaded — the onLoad branch handles initial seed.
+  useEffect(() => {
+    if (!imgLoaded || !imgRef.current) return;
+    const nw = imgRef.current.naturalWidth;
+    const nh = imgRef.current.naturalHeight;
+    if (!nw || !nh) return;
+    const swap = (imageRotation === 90 || imageRotation === 270);
+    const desired = { w: swap ? nh : nw, h: swap ? nw : nh };
+    setNaturalSize((curr) => (curr.w === desired.w && curr.h === desired.h) ? curr : desired);
+  }, [imageRotation, imgLoaded]);
+
+  // M5c: emit cropRect + imgLoaded to the parent. FocusedCropFrame
+  // uses these to fire its own apply (via electronAPI.jobCropImage)
+  // when the operator hits Enter / Space — bypassing CropEditor's
+  // internal handleApply since hideOwnChrome is set.
+  useEffect(() => {
+    if (typeof onCropRectChange === 'function') onCropRectChange(cropRect);
+  }, [cropRect, onCropRectChange]);
+  useEffect(() => {
+    if (typeof onImgLoadedChange === 'function') onImgLoadedChange(imgLoaded);
+  }, [imgLoaded, onImgLoadedChange]);
 
   // ── Canvas size matches its container ────────────────────────────────────
 
@@ -352,7 +509,29 @@ export function CropEditor({ image, jobPath, sizeOption, onApply, onCancel }) {
     if (!cropRect || !imgLoaded) return;
     setApplying(true);
     try {
-      await onApply(cropRect);
+      if (source === 'original' && canUseOriginal) {
+        await onApplyOriginal(cropRect);
+      } else {
+        await onApply(cropRect);
+      }
+    } finally {
+      setApplying(false);
+    }
+  }
+
+  // Apply the crop AND dispatch just this one image as a reprint. The parent
+  // owns the sequence (apply → dispatch); `source` is passed so it can pick
+  // the right apply path. Mirrors handleApply's applying-state handling.
+  //
+  // Apply & Send dispatches via the same path as the bundle
+  // flow; for jobs with a customer original, customer-mode
+  // in-place crops are not reflected in the reprint output —
+  // use Original mode for those. See reprintManager.js header.
+  async function handleApplyAndSend() {
+    if (!cropRect || !imgLoaded) return;
+    setApplying(true);
+    try {
+      await onApplyAndSendReprint(cropRect, source);
     } finally {
       setApplying(false);
     }
@@ -373,19 +552,98 @@ export function CropEditor({ image, jobPath, sizeOption, onApply, onCancel }) {
         src={imageSrc}
         style={{ display: 'none' }}
         onLoad={e => {
-          setNaturalSize({ w: e.target.naturalWidth, h: e.target.naturalHeight });
+          // M5c (2026-05-26): when imageRotation is 90/270, the
+          // EFFECTIVE image dimensions swap. Store the post-rotation
+          // dims as `naturalSize` so all downstream math (canvas
+          // layout, crop-rect coords, handle hit-testing) operates
+          // in the rotated coordinate space. drawCanvas reuses
+          // `imageRotation` to position/rotate the image element
+          // itself; the crop math is rotation-agnostic past this
+          // setNaturalSize call.
+          const nw = e.target.naturalWidth;
+          const nh = e.target.naturalHeight;
+          const swap = (imageRotation === 90 || imageRotation === 270);
+          setNaturalSize({ w: swap ? nh : nw, h: swap ? nw : nh });
           setImgLoaded(true);
         }}
         onError={() => setImgLoaded(false)}
         alt=""
       />
 
-      {/* Header label */}
+      {/* Header label — suppressed when the parent owns the chrome
+          (FocusedCropFrame in M5c). The standard-drawer caller
+          leaves hideOwnChrome at the default false so its chrome
+          renders unchanged. */}
+      {!hideOwnChrome && (
       <div className="jr-crop-header">
         {sizeOption
           ? `Crop to ${sizeOption.label} — drag corners to resize`
           : 'Crop image — drag corners to resize'}
+        {canUseOriginal && (
+          <span
+            role="radiogroup"
+            aria-label="Crop source"
+            className="jr-crop-source-toggle"
+          >
+            <button
+              type="button"
+              role="radio"
+              aria-checked={source === 'customer'}
+              className={'jr-crop-source-btn' + (source === 'customer' ? ' is-on' : '')}
+              onClick={() => setSource('customer')}
+              disabled={applying}
+              title="Crop against the customer's printable JPEG"
+            >
+              Customer crop
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={source === 'original'}
+              className={'jr-crop-source-btn' + (source === 'original' ? ' is-on' : '')}
+              onClick={() => setSource('original')}
+              disabled={applying}
+              title="Crop against the customer's uncropped upload"
+            >
+              Original
+            </button>
+          </span>
+        )}
+
+        {/* Orientation toggle — flip a non-square size between portrait and
+            landscape. Hidden for square sizes (nothing to flip). */}
+        {!isSquare && (
+          <span
+            role="radiogroup"
+            aria-label="Crop orientation"
+            className="jr-crop-orient-toggle"
+          >
+            <button
+              type="button"
+              role="radio"
+              aria-checked={orientation === 'portrait'}
+              className={'jr-crop-orient-btn' + (orientation === 'portrait' ? ' is-on' : '')}
+              onClick={() => setOrientationOverride('portrait')}
+              disabled={applying}
+              title="Crop a portrait (tall) box"
+            >
+              Portrait
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={orientation === 'landscape'}
+              className={'jr-crop-orient-btn' + (orientation === 'landscape' ? ' is-on' : '')}
+              onClick={() => setOrientationOverride('landscape')}
+              disabled={applying}
+              title="Crop a landscape (wide) box"
+            >
+              Landscape
+            </button>
+          </span>
+        )}
       </div>
+      )}
 
       {/* Canvas */}
       <canvas
@@ -401,7 +659,9 @@ export function CropEditor({ image, jobPath, sizeOption, onApply, onCancel }) {
         <div className="jr-crop-loading">Loading image…</div>
       )}
 
-      {/* Buttons */}
+      {/* Buttons — suppressed in hideOwnChrome mode (FocusedCropFrame
+          owns its own Apply/Cancel/nav chrome). */}
+      {!hideOwnChrome && (
       <div className="jr-crop-buttons">
         <button
           onClick={onCancel}
@@ -411,19 +671,36 @@ export function CropEditor({ image, jobPath, sizeOption, onApply, onCancel }) {
           Cancel
         </button>
 
+        {/* Single-image reprint — applies the crop then dispatches just this
+            image. Hidden when the parent doesn't wire up the handler. */}
+        {onApplyAndSendReprint && (
+          <button
+            onClick={handleApplyAndSend}
+            disabled={!cropRect || !imgLoaded || applying}
+            className="jr-crop-btn jr-crop-btn--reprint"
+            title="Apply this crop and send just this image as a reprint"
+          >
+            {applying ? 'Applying…' : 'Apply & Send Reprint'}
+          </button>
+        )}
+
         <button
           onClick={handleApply}
           disabled={!cropRect || !imgLoaded || applying}
           className="jr-crop-btn jr-crop-btn--apply"
         >
-          {applying ? 'Applying…' : 'Apply Crop'}
+          {applying
+            ? 'Applying…'
+            : (source === 'original' ? 'Re-Crop from Original' : 'Apply Crop')}
         </button>
       </div>
+      )}
 
       {/* Crop dimensions readout */}
-      {cropRect && imgLoaded && (
+      {!hideOwnChrome && cropRect && imgLoaded && (
         <div className="jr-crop-readout">
           {cropRect.w} × {cropRect.h} px  |  source: {naturalSize.w} × {naturalSize.h} px
+          {source === 'original' && ' — customer upload'}
         </div>
       )}
     </div>

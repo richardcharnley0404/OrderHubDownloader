@@ -558,6 +558,31 @@ body.app-theme-dark .theme-toggle-btn::before { content: '\2600'; }  /* sun glyp
   color: var(--app-red);
 }
 
+/* `_status: 'error'` set by the auto-print catch handler — see the 10 sites
+   listed in src/main/ipc-handlers.js + src/main/services/print-service.js.
+   Re-uses the same red treatment as import-error so the visual language
+   stays consistent across error classes. */
+.badge-error {
+  background: var(--app-red-weak);
+  color: var(--app-red);
+}
+
+/* One-line truncated `_errorMessage` shown directly under the error badge
+   so operators don't have to hover the badge to find out why the job
+   failed. Full message still available via the `title` attribute on both
+   the badge and this hint. */
+.job-error-hint {
+  margin-top: 3px;
+  font-size: 10px;
+  line-height: 1.3;
+  color: var(--app-red);
+  max-width: 220px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: help;
+}
+
 .badge-awaiting_import {
   background: var(--app-amber-weak);
   color: var(--app-amber);
@@ -1992,6 +2017,49 @@ button {
   border-bottom: 1px solid var(--app-border-subtle);
 }
 
+/* Order XML hot folder card — always-editable variant of .routing-card.
+   The header has a label input (instead of a static name) and an enabled
+   toggle, so we slightly tweak the .routing-card-header layout when the
+   .orderxml-card class is present. */
+.orderxml-card .routing-card-header {
+  align-items: center;
+}
+.orderxml-card .orderxml-label {
+  flex: 1;
+  /* Match the regular .form-group input styling so the field reads as an
+     input, not as static text. Previously transparent with a hover-revealed
+     border, which was too subtle inside the grey card header. */
+  padding: 7px 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 3px;
+  font-size: 13px;
+  font-family: inherit;
+  font-weight: 600;
+  color: var(--app-ink);
+  background: var(--app-surface-raised);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.orderxml-card .orderxml-label:focus {
+  outline: none;
+  border-color: var(--app-accent);
+  box-shadow: 0 0 0 2px var(--app-accent-weak);
+}
+.orderxml-card .orderxml-enabled-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--app-ink-dim);
+  cursor: pointer;
+}
+.orderxml-card .orderxml-enabled-toggle input { margin: 0; }
+.orderxml-card .routing-card-body {
+  padding: 12px;
+}
+.orderxml-card .form-row {
+  align-items: flex-start;
+}
+
 .routing-card-name {
   flex: 1;
   font-weight: 600;
@@ -2636,4 +2704,237 @@ button {
 .page-simulator-steps {
   color: var(--app-ink-dim);
   font-size: 12px;
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   Order XML panel (Mode 4) — tab-level ingestion history grid.
+   Reuses .jobs-toolbar / .jobs-table / .jobs-filter / .jobs-empty-state
+   from the Jobs tab; only the per-row visual differences are added here
+   (status badges, monospace filename, error notes).
+   ───────────────────�
+/* ─────────────────────────────────────────────────────────────────
+   Order XML Product Mappings (Settings → Order XML, chunk 7d)
+   Per-format editable table with Add/Remove. Reuses --app-* tokens.
+   ───────────────────────────────────────────────────────────────── */
+
+.orderxml-mappings-section {
+  margin-bottom: 16px;
+  padding: 12px;
+  border: 1px solid var(--app-border-subtle);
+  border-radius: 4px;
+  background: var(--app-surface-sunk);
+}
+.orderxml-mappings-heading {
+  margin: 0 0 10px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--app-ink);
+}
+.orderxml-mappings-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 8px;
+}
+.orderxml-mappings-table th,
+.orderxml-mappings-table td {
+  padding: 6px 8px;
+  text-align: left;
+  vertical-align: middle;
+  font-size: 12px;
+  border-bottom: 1px solid var(--app-border-subtle);
+}
+.orderxml-mappings-table th {
+  font-weight: 600;
+  color: var(--app-ink-dim);
+  background: transparent;
+}
+.orderxml-mappings-table tr.orderxml-mappings-empty td {
+  color: var(--app-ink-dim);
+  font-style: italic;
+  text-align: center;
+  padding: 12px;
+}
+.orderxml-mappings-table input[type="text"] {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--app-border);
+  border-radius: 3px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--app-ink);
+  background: var(--app-surface-raised);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.orderxml-mappings-table input[type="text"]:focus {
+  outline: none;
+  border-color: var(--app-accent);
+  box-shadow: 0 0 0 2px var(--app-accent-weak);
+}
+.orderxml-mapping-add {
+  margin-top: 4px;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * Backup & Restore (Settings → Backup subtab)
+ *
+ * Reuses .panel-section, .form-group, .pm-modal, .field-hint conventions —
+ * the rules below only style the bits that don't already exist (status
+ * badges, machine-id display, file list, link).
+ * ────────────────────────────────────────────────────────────────────────── */
+
+.backup-folder-status {
+  margin-top: 6px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  border: 1px solid transparent;
+}
+.backup-folder-status.ok {
+  background: var(--app-accent-weak, #e6f4ea);
+  border-color: var(--app-accent, #1f7a3f);
+  color: var(--app-ink, #20323e);
+}
+.backup-folder-status.error {
+  background: #fceaea;
+  border-color: #b03030;
+  color: #6e1818;
+}
+.backup-folder-status.pending {
+  background: var(--app-surface-raised, #f3f4f6);
+  border-color: var(--app-border-subtle, #d6dde3);
+  color: var(--app-ink-dim, #4a5662);
+  font-style: italic;
+}
+
+.backup-last-status {
+  padding: 8px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  background: var(--app-surface-raised, #f5f7f9);
+  border: 1px solid var(--app-border-subtle, #d6dde3);
+}
+.backup-last-status.ok      { border-color: var(--app-accent, #1f7a3f); }
+.backup-last-status.amber   { background: #fff5e1; border-color: #c98e1c; color: #6c4811; }
+.backup-last-status.red     { background: #fceaea; border-color: #b03030; color: #6e1818; }
+.backup-last-status.error   { background: #fceaea; border-color: #b03030; color: #6e1818; }
+
+.backup-machine-identity {
+  font-family: var(--app-font-mono, ui-monospace, SFMono-Regular, "Cascadia Mono", monospace);
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  background: var(--app-surface-raised, #f5f7f9);
+  border: 1px solid var(--app-border-subtle, #d6dde3);
+  cursor: pointer;
+  user-select: all;
+}
+.backup-machine-identity:hover {
+  border-color: var(--app-accent, #1f7a3f);
+}
+
+.backup-list {
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--app-border-subtle, #d6dde3);
+  border-radius: 4px;
+  background: var(--app-surface, #fff);
+}
+.backup-list-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--app-border-subtle, #d6dde3);
+}
+.backup-list-row:last-child { border-bottom: none; }
+.backup-list-row:hover { background: var(--app-surface-raised, #f3f4f6); }
+.backup-list-row .backup-list-when {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--app-ink, #20323e);
+}
+.backup-list-row .backup-list-meta {
+  font-size: 11px;
+  color: var(--app-ink-dim, #4a5662);
+}
+.backup-list-empty {
+  padding: 18px 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--app-ink-dim, #4a5662);
+  font-style: italic;
+}
+
+.backup-link {
+  font-size: 12px;
+  color: var(--app-accent, #1f7a3f);
+  text-decoration: underline;
+}
+
+.backup-preview-summary {
+  padding: 8px 10px;
+  background: var(--app-surface-raised, #f5f7f9);
+  border: 1px solid var(--app-border-subtle, #d6dde3);
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.backup-preview-redacted {
+  margin: 4px 0 0;
+  padding-left: 20px;
+  font-size: 12px;
+  color: var(--app-ink-dim, #4a5662);
+}
+.backup-preview-warning {
+  margin: 8px 0;
+  padding: 8px 10px;
+  background: #fff5e1;
+  border: 1px solid #c98e1c;
+  border-radius: 4px;
+  color: #6c4811;
+  font-size: 12px;
+}
+
+.backup-relaunch-notes {
+  margin: 6px 0 10px;
+  padding: 8px 10px;
+  background: var(--app-surface-raised, #f5f7f9);
+  border: 1px solid var(--app-border-subtle, #d6dde3);
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--app-ink-dim, #4a5662);
+  max-height: 140px;
+  overflow-y: auto;
+}
+.backup-relaunch-notes:empty { display: none; }
+
+.btn-danger {
+  background: #b03030;
+  color: #fff;
+  border: 1px solid #8a2222;
+}
+.btn-danger:hover { background: #8a2222; }
+
+/* ── S3 Artwork Channel M2 (2026-05-24) ──────────────────────────────────
+   Yellow "Manual — review required" chip on the job-list row. Sits in the
+   flags-cell alongside the AI-quality and order-notes badges. The
+   _holdForReview gate is server-side computed; this chip is the
+   operator-facing surface. Colours via --app-amber* tokens so the warn
+   semantic matches the rest of the app and tracks light/dark themes. */
+.hold-review-chip {
+  display: inline-block;
+  margin: 0 4px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: var(--app-amber-weak);
+  color: var(--app-amber);
+  border: 1px solid var(--app-amber);
+  white-space: nowrap;
+  cursor: help;
+  vertical-align: middle;
 }

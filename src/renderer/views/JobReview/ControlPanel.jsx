@@ -22,12 +22,10 @@ import { CMYSliders } from './CMYSliders.jsx';
  *   selectedId       string
  *   jobPath          string
  *   holdCorrection   boolean
- *   reprintCount     number
- *   jobId            string
+ *   jobId            string         (used by AI Enhancement panel)
  *   onSelectImage    (filename) => void
  *   onUpdateCorrection (channel, value) => void
  *   onUpdateQty      (filename, delta) => void
- *   onToggleReprint  (filename) => void
  *   onToggleHold     () => void
  *   onResetImage     (filename) => Promise<void>
  */
@@ -108,40 +106,13 @@ function HoldToggle({ holdCorrection, onToggleHold }) {
   );
 }
 
-// ── Reprint toggle ─────────────────────────────────────────────────────────────
-
-function ReprintToggle({ image, reprintCount, jobId, onToggleReprint }) {
-  const { filename, reprint } = image;
-  const nextN = reprintCount + 1;
-
-  return (
-    <div>
-      <SectionLabel>Reprint</SectionLabel>
-      <div
-        onClick={() => onToggleReprint(filename)}
-        role="checkbox"
-        aria-checked={reprint}
-        tabIndex={0}
-        onKeyDown={e => e.key === 'Enter' && onToggleReprint(filename)}
-        className={'jr-reprint' + (reprint ? ' is-on' : '')}
-      >
-        <div className="jr-reprint__dot">
-          {reprint && <span className="jr-reprint__dot-mark">✕</span>}
-        </div>
-        <div>
-          <div className="jr-reprint__label">
-            {reprint ? 'Flagged for Reprint' : 'Flag for Reprint'}
-          </div>
-          <div className="jr-reprint__hint">
-            {reprintCount > 0
-              ? `next: ${jobId}-r${nextN}`
-              : `creates ${jobId}-r1`}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
+// ── Reprint toggle (removed 2026-05-18) ────────────────────────────────────────
+//
+// The side-panel "Flag for Reprint" was a duplicate of the per-thumbnail
+// flag — both called the same `onToggleReprint(filename)` handler. Removed
+// after Job Review UX simplification; the thumbnail flag is now the single
+// affordance. The bulk Flag-all/Clear-all controls in the thumbnail grid
+// header cover the "set every image at once" case.
 
 // ── AI Enhancement panel ──────────────────────────────────────────────────────
 
@@ -486,12 +457,10 @@ export function ControlSidebar({
   selectedId,
   jobPath,
   holdCorrection,
-  reprintCount,
   jobId,
   onSelectImage,
   onUpdateCorrection,
   onUpdateQty,
-  onToggleReprint,
   onToggleHold,
   onResetImage,
   onRefreshSidecar,
@@ -542,16 +511,6 @@ export function ControlSidebar({
 
         <HoldToggle holdCorrection={holdCorrection} onToggleHold={onToggleHold} />
       </div>
-
-      <Divider />
-
-      {/* Reprint */}
-      <ReprintToggle
-        image={selected}
-        reprintCount={reprintCount}
-        jobId={jobId}
-        onToggleReprint={onToggleReprint}
-      />
 
       <Divider />
 
