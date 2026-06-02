@@ -106,10 +106,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   jobResetImage:  (payload) => ipcRenderer.invoke('ohd:job:reset-image', payload),
   jobResetAll:    (payload) => ipcRenderer.invoke('ohd:job:reset-all',   payload),
   // Payload: { jobPath, sidecar, filename, cropRect: {x,y,w,h}, channelMappingId?,
-  //            darkroomSize?, ohJobId?, cropRotation?: 0|90|180|270 }
+  //            darkroomSize?, ohJobId?, cropRotation?: 0|90|180|270,
+  //            sourceFrom?: 'working'|'originals' }
   // M5c (2026-05-26): cropRotation default 0 keeps byte-identical sharp chain;
   // non-zero applies sharp.rotate(N).extract(rect) — rect is in POST-rotation
   // image coords (per the brief's implementer note).
+  // Manual Crop redesign (2026-06-02): sourceFrom default 'working' preserves
+  // M5a semantics; 'originals' (set by ManualCropMode) reads pristine pixels
+  // from /originals/<filename> so re-approves don't crop a previous crop's
+  // output. Falls back to /working/ if /originals/ is missing.
   jobCropImage:   (payload) => ipcRenderer.invoke('ohd:job:crop-image',  payload),
   reprintCreate:  (payload) => ipcRenderer.invoke('ohd:reprint:create',  payload),
   reprintCreateSingle: (payload) => ipcRenderer.invoke('ohd:reprint:createSingle', payload),
@@ -129,8 +134,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Manual Cropping M5b (2026-05-25) — batch crop for manual-source jobs.
   // Payload: { jobPath, sidecar, filenames, fractionalRect: {x,y,w,h},
   //            orientation: 'portrait'|'landscape',
-  //            channelMappingId?, darkroomSize?, ohJobId? }
+  //            channelMappingId?, darkroomSize?, ohJobId?,
+  //            sourceFrom?: 'working'|'originals' }
   // Returns: { success, sidecar, succeeded, failed, skipped, aborted? }
+  // Manual Crop redesign (2026-06-02): sourceFrom default 'working' preserves
+  // M5b semantics; 'originals' (set by ManualCropMode's Apply Default to All)
+  // sources every target image from /originals/<filename>.
   jobBatchCropApply:  (payload) => ipcRenderer.invoke('ohd:job:batch-crop-apply', payload),
 
   // Manual Crop redesign (2026-06-01) — persist in-progress per-image crop
@@ -143,6 +152,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   //            pendingRotation, pendingOrientation }] }
   // Returns: { success, sidecar } | { success: false, error }
   jobSavePendingCrops: (payload) => ipcRenderer.invoke('ohd:job:save-pending-crops', payload),
+
+  // Manual Crop redesign (2026-06-02) — Delete / Restore. Toggles the
+  // operator-driven `discarded` flag on a single sidecar image entry
+  // and persists. Recoverable: cropApplied / cropRect / pendingCropRect
+  // are left intact. No file deletion on disk.
+  // Payload: { jobPath, sidecar, filename, discarded: boolean }
+  // Returns: { success, sidecar } | { success: false, error }
+  jobSetImageDiscarded: (payload) => ipcRenderer.invoke('ohd:job:set-image-discarded', payload),
   // Read-only target-size resolution: route → matching allSizeOptions
   // entry. Used by the batch crop top-bar's size pill. If no route or
   // no size translation, returns { ok: false, reason }.

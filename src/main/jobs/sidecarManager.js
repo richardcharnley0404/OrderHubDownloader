@@ -255,6 +255,25 @@ async function loadSidecar(jobId, jobPath, metaMap = null) {
       }
     }
 
+    // Reconcile F: hydrate Manual Crop redesign (2026-06-02) `discarded`
+    // field on legacy entries that pre-date the schema bump. Same null-
+    // default + no-spurious-save pattern as Reconcile C/D. Default `false`
+    // (not null) because `discarded` is a boolean by contract, and the
+    // renderer reads it with strict === true semantics.
+    const M6_IMAGE_DEFAULTS = { discarded: false };
+    let migratedM6Any = false;
+    const m6MigratedExisting = m5bMigratedExisting.map((entry) => {
+      let next = entry;
+      for (const k of Object.keys(M6_IMAGE_DEFAULTS)) {
+        if (!Object.prototype.hasOwnProperty.call(next, k)) {
+          if (next === entry) next = { ...entry };
+          next[k] = M6_IMAGE_DEFAULTS[k];
+          migratedM6Any = true;
+        }
+      }
+      return next;
+    });
+
     // Reconcile E: Manual Crop redesign (2026-06-01) — drop legacy job-level
     // batch-crop defaults. The old shape was a fractional {centerX, centerY,
     // scale} for one shared rect; the new model has per-image pendingCropRect
@@ -292,7 +311,7 @@ async function loadSidecar(jobId, jobPath, metaMap = null) {
     const assembled = {
       ...sidecar,
       ...m5bJobFields,
-      images: [...m5bMigratedExisting, ...newEntries],
+      images: [...m6MigratedExisting, ...newEntries],
       s3ArtworkFileIdsKnown,
     };
     if (droppedLegacyM5bDefaults) {
@@ -312,6 +331,7 @@ async function loadSidecar(jobId, jobPath, metaMap = null) {
     // Hydration flags intentionally not in the save condition.
     void migratedS3Any; void migratedS3Job;
     void migratedM5bAny; void migratedM5bJob;
+    void migratedM6Any;
   } catch (err) {
     if (err.code !== 'ENOENT') throw err;
 

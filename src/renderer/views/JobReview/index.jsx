@@ -415,17 +415,40 @@ export function JobReviewDrawer({ jobId, jobPath, ohJobId, onClose }) {
     { artwork_source: jobArtworkSource },
     sidecar,
   );
-  const effectiveMode = userOverride === 'batch'    ? BATCH_MODE.AUTO
-                      : userOverride === 'standard' ? BATCH_MODE.STANDARD
-                      : batchTrigger.mode;
+
+  // Manual Crop redesign (2026-06-01): sticky-once-entered. The trigger
+  // recomputes on every render and transitions AUTO → BUTTON → STANDARD
+  // as images get approved. Without stickiness, the first Approve+Next
+  // would flip trigger.mode to BUTTON and kick the drawer back to
+  // standard mode (the M5b BatchCropMode behaviour, where partial state
+  // was a natural review checkpoint). Under the new per-image flow that
+  // bounce is harmful — operator should stay in ManualCropMode until
+  // they explicitly Exit Batch or hit Send to Print.
+  //
+  // Solution: on first detection of needing batch mode, lift userOverride
+  // to 'batch'. From that point, trigger.mode doesn't drive routing —
+  // only operator action does. The trigger still classifies AUTO / BUTTON
+  // / STANDARD honestly (it's a pure predicate); the drawer just stops
+  // caring about the AUTO/BUTTON distinction.
+  useEffect(() => {
+    if (userOverride === null
+        && !isLoading
+        && !loadError
+        && batchTrigger.enter) {
+      setUserOverride('batch');
+    }
+  }, [userOverride, isLoading, loadError, batchTrigger.enter]);
+
   const inBatchMode = !isLoading && !loadError
-                    && batchTrigger.enter
-                    && effectiveMode === BATCH_MODE.AUTO;
-  // CTA shown whenever the trigger wants batch mode but we're not in it
-  // (BUTTON natural mode, or user exited an AUTO/BUTTON job to standard).
+                    && (userOverride === 'batch'
+                        || (userOverride === null && batchTrigger.enter));
+  // CTA shows iff operator explicitly Exit-Batched AND uncropped manual
+  // work remains — gives them a one-click way back in. Partial state no
+  // longer falls back to standard mode (see sticky-lift above), so the
+  // "BUTTON natural mode" CTA case from M5b no longer fires here.
   const showBatchRemainingCTA = !isLoading && !loadError
                               && batchTrigger.enter
-                              && !inBatchMode;
+                              && userOverride === 'standard';
 
   // ── Drawer-level keyboard handler ────────────────────────────────────────
   //

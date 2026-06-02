@@ -245,6 +245,14 @@ function createImageEntry(filename, qty = 1, originalFilename = null, s3Fields =
     pendingCropRect:    null,
     pendingRotation:    null,
     pendingOrientation: null,
+
+    // Manual Crop redesign (2026-06-02). Operator-discarded flag. Excludes
+    // the image from Total Prints, Send to Print's gate, and the print
+    // pipeline's dispatch list. Recoverable — `cropApplied` / `cropRect` /
+    // `pendingCropRect` are LEFT INTACT so a restore brings back exactly
+    // the prior approval state. No file deletion on disk; /working/ and
+    // /originals/ files stay sacrosanct.
+    discarded: false,
   };
 }
 

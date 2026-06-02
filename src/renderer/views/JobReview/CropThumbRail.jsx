@@ -90,9 +90,13 @@ function CropRailThumb({ image, jobPath, state, targetSizeReady, isSelected, onC
 
   // Project pendingCropRect (image-space pixels) to fractions of the
   // natural dims so the overlay can be CSS-positioned via percentages.
-  // No overlay when the rect is absent or the image hasn't loaded yet.
+  // No overlay when the rect is absent, the image hasn't loaded yet,
+  // OR the image is discarded (drawing a saved rect on a discarded
+  // thumb is visual noise — the strikethrough + dimmed thumb is
+  // enough of a signal).
   const overlayLayout = useMemo(() => {
     if (!targetSizeReady || !naturalDims) return null;
+    if (state.discarded) return null;
     const rect = state.pendingCropRect;
     if (!rect || !rect.w || !rect.h) return null;
     return {
@@ -101,32 +105,39 @@ function CropRailThumb({ image, jobPath, state, targetSizeReady, isSelected, onC
       widthFrac:  rect.w / naturalDims.w,
       heightFrac: rect.h / naturalDims.h,
     };
-  }, [targetSizeReady, naturalDims, state.pendingCropRect]);
+  }, [targetSizeReady, naturalDims, state.pendingCropRect, state.discarded]);
 
   // First-match-wins state classification. Drives both the badge glyph
-  // and the modifier class so CSS (phase 5) can colour them per-kind.
-  const stateKind = state.applying
-    ? 'applying'
-    : state.applyError
-      ? 'error'
-      : (state.cropAppliedOnDisk && state.modifiedSinceApproval)
-        ? 'modified'
-        : state.cropAppliedOnDisk
-          ? 'approved'
-          : 'pending';
+  // and the modifier class so CSS can colour them per-kind. `discarded`
+  // has the highest precedence — it overrides every other state because
+  // it's the operator's latest expressed intent (an approved-then-
+  // discarded image renders discarded, not approved).
+  const stateKind = state.discarded
+    ? 'discarded'
+    : state.applying
+      ? 'applying'
+      : state.applyError
+        ? 'error'
+        : (state.cropAppliedOnDisk && state.modifiedSinceApproval)
+          ? 'modified'
+          : state.cropAppliedOnDisk
+            ? 'approved'
+            : 'pending';
 
   const badgeGlyph =
-      stateKind === 'applying' ? '⏳'
-    : stateKind === 'error'    ? '⚠'
-    : stateKind === 'modified' ? '⚠'
-    : stateKind === 'approved' ? '✓'
+      stateKind === 'discarded' ? '✕'
+    : stateKind === 'applying'  ? '⏳'
+    : stateKind === 'error'     ? '⚠'
+    : stateKind === 'modified'  ? '⚠'
+    : stateKind === 'approved'  ? '✓'
     : '•';
 
   const stateLabel =
-      stateKind === 'applying' ? 'Applying crop…'
-    : stateKind === 'error'    ? `Apply failed${state.applyError ? `: ${state.applyError}` : ''}`
-    : stateKind === 'modified' ? 'Modified — re-approve'
-    : stateKind === 'approved' ? 'Approved'
+      stateKind === 'discarded' ? 'Discarded — click to restore'
+    : stateKind === 'applying'  ? 'Applying crop…'
+    : stateKind === 'error'     ? `Apply failed${state.applyError ? `: ${state.applyError}` : ''}`
+    : stateKind === 'modified'  ? 'Modified — re-approve'
+    : stateKind === 'approved'  ? 'Approved'
     : 'Pending';
 
   const className = 'jr-crop-rail-thumb'

@@ -69,11 +69,18 @@ class ProcessFolderService {
       // Copy all files from the job folder flat — no IMAGES/MISC sub-structure.
       // Sub-folders (originals, working, cache) are skipped; only the top-level
       // image files and any existing files in the root are copied.
+      // Manual Crop redesign (2026-06-02): skip files matching the
+      // operator-discarded set stamped on job._excludedFilenames by the
+      // IPC handler. Same property-stamping pattern as print-service.
+      const excluded = (job && job._excludedFilenames) || null;
+      const isExcluded = (name) => excluded && excluded.size > 0 && excluded.has(name);
+
       const entries = await fs.promises.readdir(sourcePath, { withFileTypes: true });
       let copied = 0;
 
       for (const entry of entries) {
         if (!entry.isFile()) continue; // skip sub-folders
+        if (isExcluded(entry.name)) continue;
 
         const src  = path.join(sourcePath, entry.name);
         const dest = path.join(destPath,   entry.name);
@@ -89,6 +96,7 @@ class ProcessFolderService {
           const workingEntries = await fs.promises.readdir(workingPath, { withFileTypes: true });
           for (const entry of workingEntries) {
             if (!entry.isFile()) continue;
+            if (isExcluded(entry.name)) continue;
             const src  = path.join(workingPath, entry.name);
             const dest = path.join(destPath,    entry.name);
             await fs.promises.copyFile(src, dest);

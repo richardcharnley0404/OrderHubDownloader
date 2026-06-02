@@ -548,6 +548,49 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
         }
       }
 
+      // Manual Crop redesign (2026-06-02). Stamp the operator-discarded
+      // basename set onto the job as a non-enumerable property so the
+      // print pipelines filter it out without needing a signature change.
+      // The set is read at every _findJobInManifest call (central
+      // manifest filter) plus _copyFolder + processFolderService's
+      // direct file iteration. Stamping is a no-op for jobs without
+      // sidecars or without any discarded images.
+      try {
+        const sidecarJobId = _resolveSidecarJobId(job);
+        const jobFolderPath = _resolveJobPath(job);
+        if (sidecarJobId && jobFolderPath && fsPromises) {
+          const sidecarPath = path.join(jobFolderPath, `${sidecarJobId}.json`);
+          let raw;
+          try {
+            raw = await fsPromises.readFile(sidecarPath, 'utf8');
+          } catch (readErr) {
+            if (readErr.code !== 'ENOENT') throw readErr;
+          }
+          if (raw) {
+            const sc = JSON.parse(raw);
+            const discardedBasenames = (sc.images || [])
+              .filter((img) => img && img.discarded === true && typeof img.filename === 'string')
+              .map((img) => img.filename);
+            if (discardedBasenames.length > 0) {
+              Object.defineProperty(job, '_excludedFilenames', {
+                value:        new Set(discardedBasenames),
+                enumerable:   false,
+                configurable: true,
+              });
+              logger.info('[send-to-print] applying discarded-image filter', {
+                jobId:           job.id,
+                discardedCount:  discardedBasenames.length,
+              });
+            }
+          }
+        }
+      } catch (err) {
+        logger.logWarning('[send-to-print] failed to load discarded-image set; proceeding without filter', {
+          jobId: job.id,
+          error: err.message,
+        });
+      }
+
       // ── New routing system ─────────────────────────────────────────────────
       // Attempt to resolve via the routing-service decision tree first.
       // Fall back to the old printControllerStore path if the job is unrouted.
@@ -1496,7 +1539,7 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
    * 4. Stores _channelMappingOverride on the job-service cache so that when the
    *    job is next sent to print the overridden channel is used automatically.
    */
-  ipcMain.handle('ohd:job:crop-image', async (event, { jobPath, sidecar, filename, cropRect, channelMappingId, darkroomSize, ohJobId, cropRotation }) => {
+  ipcMain.handle('ohd:job:crop-image', async (event, { jobPath, sidecar, filename, cropRect, channelMappingId, darkroomSize, ohJobId, cropRotation, sourceFrom }) => {
     // M5b (2026-05-25): the 75-line crop body that used to live here has
     // been extracted to `batchCropActions._applyCropToSingleImage` so the
     // new batch IPC can reuse the same primitive. Behaviour is
@@ -1517,6 +1560,7 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
         channelMappingId, darkroomSize, ohJobId,
         cropSource: 'per-image',
         cropRotation,  // optional — pass through; helper normalises invalid values to 0
+        sourceFrom,    // Manual Crop redesign (2026-06-02) — 'originals' from ManualCropMode
         deps: { jobService, logger },
       });
       if (!result.success) {
@@ -1638,6 +1682,47 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
       return { success: true, sidecar: saved };
     } catch (error) {
       logger.logError('ohd:job:save-pending-crops error', error, { jobPath });
+      return { success: false, error: error.message };
+    }
+  });
+
+  /**
+   * ohd:job:set-image-discarded  (Manual Crop redesign — 2026-06-02)
+   *
+   * Payload:  { jobPath, sidecar, filename, discarded: boolean }
+   * Returns:  { success: true, sidecar } | { success: false, error }
+   *
+   * Toggles the operator-driven `discarded` flag on a single sidecar image
+   * entry and persists the sidecar. Recoverable — the entry's
+   * cropApplied / cropRect / pendingCropRect are LEFT INTACT so a restore
+   * (discarded:false) recovers the prior approval state exactly. No file
+   * deletion on disk.
+   *
+   * Discarded images are excluded from Send to Print's gate and the
+   * print-service dispatch pipelines (see Step 10).
+   */
+  ipcMain.handle('ohd:job:set-image-discarded', async (event, payload = {}) => {
+    const { jobPath, sidecar, filename, discarded } = payload;
+    try {
+      if (!jobPath || !sidecar || !Array.isArray(sidecar.images)) {
+        return { success: false, error: 'invalid-payload' };
+      }
+      if (typeof filename !== 'string' || !filename) {
+        return { success: false, error: 'filename is required' };
+      }
+      let found = false;
+      const nextImages = sidecar.images.map((img) => {
+        if (img.filename !== filename) return img;
+        found = true;
+        return { ...img, discarded: discarded === true };
+      });
+      if (!found) {
+        return { success: false, error: `filename not in sidecar: ${filename}` };
+      }
+      const saved = await saveSidecar({ ...sidecar, images: nextImages }, jobPath);
+      return { success: true, sidecar: saved };
+    } catch (error) {
+      logger.logError('ohd:job:set-image-discarded error', error, { jobPath, filename });
       return { success: false, error: error.message };
     }
   });

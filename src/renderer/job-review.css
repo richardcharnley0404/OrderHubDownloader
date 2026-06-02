@@ -1424,6 +1424,10 @@
   grid-template-rows: auto 1fr auto;
   background: var(--app-surface);
   color: var(--app-ink);
+  /* .jr-root is a flex column; without flex:1 this grid container collapses
+     to intrinsic content-height instead of filling the drawer body. Standard
+     mode's .jr-body has flex:1 for the same reason. */
+  flex: 1;
   min-height: 0;
   overflow: hidden;
 }
@@ -1520,10 +1524,21 @@
 }
 .jr-crop-rail-scroll {
   flex: 1;
+  /* Flex items default to min-height: auto (intrinsic content size).
+     With 37 thumbs in a 3-col grid the content height is ~1800px;
+     without this override the scroll element refuses to shrink below
+     that and overflow-y: auto never engages. Same pattern is used on
+     ThumbnailGrid's .jr-grid-scroll for the same reason. */
+  min-height: 0;
   overflow-y: auto;
   padding: 12px;
   display: grid;
   grid-template-columns: repeat(3, 1fr);
+  /* Belt-and-braces: auto would also work since align-content: start
+     prevents stretch, but explicit min-content guarantees rows take
+     intrinsic content height even if some future ancestor rule tries
+     to redistribute available height. */
+  grid-auto-rows: min-content;
   gap: 10px;
   align-content: start;
 }
@@ -1561,6 +1576,32 @@
    --pending). Rule kept as a no-op for symmetry with the other state
    modifiers so future readers see the full state matrix in one place. */
 .jr-crop-rail-thumb.is-pending    { /* no override — base style applies */ }
+/* Manual Crop redesign (2026-06-02). Discarded thumbs get a strong
+   visual treatment so they read clearly at the rail's 3-col density:
+   - 3px solid red border around the thumb (existing border-color
+     pattern, just promoted to a thicker stroke).
+   - Image contents at 40% opacity — image is still recognisable so
+     the operator can tell what they discarded, but visibly suppressed.
+   - Filename strip stays full opacity for readability + strikethrough.
+   - Corner ✕ badge grows + flips to solid red (see __badge--discarded
+     override below).
+   Selection still wins over discarded for the border colour so a
+   selected-and-discarded thumb shows the accent border (operator
+   needs to see what they've selected, regardless of state). */
+.jr-crop-rail-thumb.is-discarded {
+  border-color: var(--app-red);
+  border-width: 3px;
+}
+.jr-crop-rail-thumb.is-discarded.is-selected {
+  border-color: var(--app-accent);
+}
+.jr-crop-rail-thumb.is-discarded .jr-crop-rail-thumb__imgbox img {
+  opacity: 0.4;
+}
+.jr-crop-rail-thumb.is-discarded .jr-crop-rail-thumb__name {
+  text-decoration: line-through;
+  color: var(--app-ink-faint);
+}
 
 .jr-crop-rail-thumb__imgbox {
   position: relative;
@@ -1606,6 +1647,19 @@
 .jr-crop-rail-thumb__badge--modified { background: var(--app-amber);          color: var(--app-accent-ink); }
 .jr-crop-rail-thumb__badge--approved { background: var(--app-brand-green);    color: #fff; }
 .jr-crop-rail-thumb__badge--pending  { background: var(--app-surface-raised); color: var(--app-ink-faint); }
+/* Manual Crop redesign (2026-06-02). Discarded badge is intentionally
+   larger + stronger than the other state badges (22px → 28px, solid red
+   + white glyph) because the discarded state needs to be unmistakeable
+   at the rail's 3-col density. Pairs with the 3px red border + image
+   opacity 0.4 + strikethrough name set above. */
+.jr-crop-rail-thumb__badge--discarded {
+  width:         28px;
+  height:        28px;
+  border-radius: 14px;
+  font-size:     16px;
+  background:    var(--app-red);
+  color:         #fff;
+}
 
 .jr-crop-rail-thumb__name {
   font-family: var(--app-mono);
@@ -1670,6 +1724,19 @@
   position: absolute;
   inset: 0;
   background: transparent;
+}
+/* CropEditor's .jr-crop-canvas defaults to viewport-relative dims
+   (min(880px, 88vw) × min(580px, 70vh)) — correct for modal usage but
+   wrong inline: the canvas centers in the overlay's flex column at a
+   fixed pixel size that doesn't fill the stage body. Force 100%/100%
+   so it fills the overlay (which now fills .jr-crop-stage__body via
+   inset:0); the ResizeObserver inside CropEditor then resyncs the
+   canvas backing store to the new offsetWidth/offsetHeight. */
+.jr-crop-stage__body .jr-crop-canvas {
+  width:  100%;
+  height: 100%;
+  max-width:  none;
+  max-height: none;
 }
 .jr-crop-stage__bottombar {
   display: flex;
@@ -1770,6 +1837,22 @@
   color: var(--app-ink);
 }
 .jr-focused-nav-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* Manual Crop redesign (2026-06-02). Destructive-action red treatment
+   for the Delete button in CropStage's footer. Applied conditionally
+   based on !state.discarded — when the same button slot shows "Restore"
+   it falls back to the neutral .jr-focused-nav-btn styling because
+   restoring an image is a recovery, not a destructive, action. */
+.jr-focused-nav-btn--destructive {
+  border-color: var(--app-red);
+  color:        var(--app-red);
+}
+.jr-focused-nav-btn--destructive:hover:not(:disabled) {
+  background:   var(--app-red-weak);
+  color:        var(--app-red);
+  border-color: var(--app-red);
+}
+.jr-focused-nav-btn--destructive:disabled { opacity: 0.45; }
 
 .jr-focused-error {
   color: var(--app-red);

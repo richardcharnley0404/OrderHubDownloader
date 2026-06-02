@@ -469,6 +469,30 @@ export function useJobReview(jobId, jobPath, ohJobId = null) {
     return result.sidecar;
   }, []);
 
+  // -- Manual Crop redesign (2026-06-02): Delete / Restore ---------------------
+  //
+  // Toggles the operator-driven `discarded` flag on a single image and
+  // persists the sidecar. Recoverable — cropApplied / cropRect /
+  // pendingCropRect are left intact. ManualCropMode is the only intended
+  // caller.
+  const setImageDiscarded = useCallback(async (filename, discarded) => {
+    const snapshot = sidecarRef.current;
+    if (!snapshot) throw new Error('No sidecar loaded');
+
+    const result = await window.electronAPI.jobSetImageDiscarded({
+      jobPath: jobPathRef.current,
+      sidecar: snapshot,
+      filename,
+      discarded,
+    });
+    if (!result || !result.success) {
+      throw new Error((result && result.error) || 'Set discarded failed');
+    }
+    setSidecar(result.sidecar);
+    persistedSidecarRef.current = result.sidecar;
+    return result.sidecar;
+  }, []);
+
   // -- Customer Originals (Phase 2): re-crop from the customer upload ----------
   //
   // The current row's filename is changed by the main side to the new
@@ -621,6 +645,7 @@ export function useJobReview(jobId, jobPath, ohJobId = null) {
     recropFromOriginal,
     applyCropAndSendReprint,
     savePendingCrops,
+    setImageDiscarded,
 
     // AI Quality
     aiQualityThreshold,

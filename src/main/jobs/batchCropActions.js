@@ -106,6 +106,56 @@ function _fractionalToPixelRect(fractional, srcWidth, srcHeight) {
   return { x: left, y: top, w: width, h: height };
 }
 
+// =============================================================================
+// Source-path resolution
+// =============================================================================
+
+/**
+ * Resolve the absolute path to read pixels from for a given filename.
+ *
+ *   sourceFrom === 'working'  (default — M5a contract, Pixfizz Customer
+ *                              Originals Phase 2, reset-from-original,
+ *                              reprintManager): prefer /working/<filename>,
+ *                              fall back to /originals/<filename>.
+ *
+ *   sourceFrom === 'originals' (Manual Crop redesign 2026-06-02): prefer
+ *                              /originals/<filename> so a SECOND approve
+ *                              doesn't crop the FIRST approve's output;
+ *                              fall back to /working/<filename> with a
+ *                              warn log if /originals/ is missing
+ *                              (defensive — ensureWorkingSetup normally
+ *                              guarantees it exists for every job).
+ *
+ * Returns null when neither file exists; caller emits SOURCE_MISSING.
+ *
+ * @param {string}  jobPath
+ * @param {string}  filename
+ * @param {'working'|'originals'} sourceFrom
+ * @param {object}  fs   - node:fs-compatible
+ * @param {object}  log  - logger with logWarning/warn
+ * @returns {string|null}
+ */
+function _resolveSourcePath(jobPath, filename, sourceFrom, fs, log) {
+  const workingPath   = path.join(jobPath, 'working',   filename);
+  const originalsPath = path.join(jobPath, 'originals', filename);
+
+  if (sourceFrom === 'originals') {
+    if (fs.existsSync(originalsPath)) return originalsPath;
+    if (fs.existsSync(workingPath)) {
+      (log.logWarning || log.warn || (() => {})).call(log,
+        '[crop] sourceFrom=originals requested but /originals/<filename> missing; falling back to /working/',
+        { filename, jobPath });
+      return workingPath;
+    }
+    return null;
+  }
+
+  // Default: 'working' — M5a legacy preference.
+  if (fs.existsSync(workingPath))   return workingPath;
+  if (fs.existsSync(originalsPath)) return originalsPath;
+  return null;
+}
+
 // ─── Single-image primitive (extracted from ipc-handlers.js:1499 pre-M5b) ──
 
 /**
@@ -141,6 +191,14 @@ function _fractionalToPixelRect(fractional, srcWidth, srcHeight) {
  *   `sharp(src).rotate(rotation).extract(rect)...` — rotation happens
  *   BEFORE extract so the rect's coordinates are interpreted in the
  *   POST-rotation image space (per the brief's implementer note).
+ * @param {'working'|'originals'} [opts.sourceFrom='working']
+ *   Manual Crop redesign (2026-06-02). Which on-disk folder to source
+ *   pristine pixels from. Default 'working' preserves M5a semantics for
+ *   all pre-existing callers (Pixfizz Customer Originals Phase 2,
+ *   reset-from-original, reprintManager). 'originals' is set by
+ *   ManualCropMode so re-approves source the pristine /originals/<filename>
+ *   instead of the previous crop's output in /working/<filename>.
+ *   Falls back to /working/ with a warn log if /originals/ is missing.
  * @param {object} [opts.deps]             dep injection (sharp, fs, fsPromises, saveSidecar, jobService, logger)
  * @returns {Promise<{success:boolean, sidecar?:object, croppedPath?:string, pixelRect?:object, error?:string, errorCode?:string}>}
  */
@@ -154,6 +212,7 @@ async function _applyCropToSingleImage(opts) {
     cropSource       = 'per-image',
     cropAppliedAt,
     cropRotation     = 0,
+    sourceFrom       = 'working',
     deps = {},
   } = opts;
 
@@ -176,18 +235,13 @@ async function _applyCropToSingleImage(opts) {
   const log           = deps.logger        || { info: () => {}, warn: () => {}, logWarning: () => {}, logError: () => {} };
   const jobService    = deps.jobService    || null; // optional — only used for routing override stamp
 
-  // Source resolution: prefer working/<filename>, fall back to
-  // originals/<filename>. (Matches M5a behaviour verbatim.)
-  const workingDir    = path.join(jobPath, 'working');
-  const workingPath   = path.join(workingDir, filename);
-  const originalsPath = path.join(jobPath, 'originals', filename);
-
-  let sourcePath;
-  if (fs.existsSync(workingPath)) {
-    sourcePath = workingPath;
-  } else if (fs.existsSync(originalsPath)) {
-    sourcePath = originalsPath;
-  } else {
+  // Source resolution — see _resolveSourcePath header for the policy.
+  // /working/ stays the destination regardless; only the READ source
+  // varies by sourceFrom.
+  const workingDir  = path.join(jobPath, 'working');
+  const workingPath = path.join(workingDir, filename);
+  const sourcePath  = _resolveSourcePath(jobPath, filename, sourceFrom, fs, log);
+  if (!sourcePath) {
     return { success: false, error: `Source image not found: ${filename}`, errorCode: 'SOURCE_MISSING' };
   }
 
@@ -342,6 +396,11 @@ async function _applyCropToSingleImage(opts) {
  * @param {string|null} [opts.darkroomSize]
  * @param {string|number|null} [opts.ohJobId]
  * @param {(progress:{completed:number,total:number,filename:string,ok:boolean,error?:string}) => void} [opts.onProgress]
+ * @param {'working'|'originals'} [opts.sourceFrom='working']
+ *   Manual Crop redesign (2026-06-02) — see _applyCropToSingleImage's
+ *   sourceFrom docs. Forwarded verbatim to every per-image apply, and
+ *   also governs this driver's per-image dimension read (which it does
+ *   to project fractionalSpec → pixel rect).
  * @param {object} [opts.deps]
  * @returns {Promise<{
  *   success: true,
@@ -366,6 +425,7 @@ async function applyBatchCrop(opts) {
     channelMappingId = null,
     darkroomSize     = null,
     ohJobId          = null,
+    sourceFrom       = 'working',
     onProgress,
     deps = {},
   } = opts;
@@ -446,11 +506,7 @@ async function applyBatchCrop(opts) {
     // The crop primitive itself also reads metadata (for clamping); we
     // do it once here to compute the rect, and the primitive does it
     // again to clamp. Two reads is fine — sharp caches metadata cheaply.
-    const workingPath   = path.join(jobPath, 'working', filename);
-    const originalsPath = path.join(jobPath, 'originals', filename);
-    const sourcePath = fs.existsSync(workingPath) ? workingPath
-                     : fs.existsSync(originalsPath) ? originalsPath
-                     : null;
+    const sourcePath = _resolveSourcePath(jobPath, filename, sourceFrom, fs, log);
     if (!sourcePath) {
       failed.push({ filename, error: `Source image not found: ${filename}`, errorCode: 'SOURCE_MISSING' });
       // Track for safety belt.
@@ -515,6 +571,7 @@ async function applyBatchCrop(opts) {
       cropOrientation: orientation,
       cropSource:      'batch',
       cropAppliedAt:   batchAppliedAt,
+      sourceFrom,
       deps: { sharp, fs, fsPromises: fsPromisesDep, saveSidecar, jobService, logger: log },
     });
 

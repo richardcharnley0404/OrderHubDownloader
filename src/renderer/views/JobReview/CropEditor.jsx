@@ -236,6 +236,16 @@ export function CropEditor({
   controlledOrientation, // optional 'portrait'|'landscape' — when present, overrides the
                          // internal orientationOverride state so ManualCropMode can drive
                          // the toggle from outside in hideOwnChrome mode
+  // Manual Crop redesign (2026-06-02). Which job-relative folder to load
+  // pixels from when source === 'customer'. Default 'working' preserves
+  // M5a semantics for the standard-drawer caller and the Customer
+  // Originals Phase 2 "Customer crop" toggle. ManualCropMode passes
+  // 'originals' so the stage shows the pristine pre-crop source —
+  // otherwise the saved cropRect doesn't fit the already-cropped
+  // /working/<filename> for previously-approved images and the seed
+  // effect below falls through to auto-fit, emitting a spurious
+  // "modified" state via onCropRectChange.
+  folderName = 'working',
 }) {
   const canvasRef   = useRef(null);
   const imgRef      = useRef(null);
@@ -291,14 +301,15 @@ export function CropEditor({
     : Math.min(baseAspect, 1 / baseAspect);
 
   // Image source:
-  //   customer → /working/{image.filename}   (the printable JPEG)
+  //   customer → /{folderName}/{image.filename}  (default folderName='working';
+  //                                                ManualCropMode passes 'originals')
   //   original → originalPath                (manifest-resolved customer upload)
   const imageSrc = (() => {
     if (source === 'original' && canUseOriginal) {
       return `file:///${originalPath.replace(/\\/g, '/').replace(/^\/+/, '')}`;
     }
     return jobPath && image?.filename
-      ? `file://${jobPath.replace(/\\/g, '/')}/working/${image.filename}`
+      ? `file://${jobPath.replace(/\\/g, '/')}/${folderName}/${image.filename}`
       : null;
   })();
 

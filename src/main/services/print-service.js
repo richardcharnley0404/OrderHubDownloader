@@ -13,6 +13,8 @@ const { darkroomProFileWriter } = require('./darkroom-pro-file-writer');
 const { generateDarkroomProFile } = require('./darkroom-pro-output');
 const { frontlineGenerator } = require('./frontline-generator');
 const { frontlineFileWriter } = require('./frontline-file-writer');
+const { generateFujiJobMakerFiles } = require('./fuji-jobmaker-generator');
+const { fujiJobMakerFileWriter } = require('./fuji-jobmaker-file-writer');
 const { printControllerService } = require('./print-controller-service');
 const logger = require('./logger');
 const { buildFolderName } = require('../../shared/printUtils');
@@ -212,6 +214,9 @@ class PrintService {
     if (route.controllerType === 'frontline') {
       return this._sendViaFrontlineRouted(job, route);
     }
+    if (route.controllerType === 'fujijobmaker') {
+      return this._sendViaFujiJobMakerRouted(job, route);
+    }
 
     const downloadDirectory = configService.get('downloadDirectory');
     if (!downloadDirectory) {
@@ -306,16 +311,25 @@ class PrintService {
       controllerType: route.controllerType || 'noritsu',
     });
 
+    // Folder-name options sourced from the controller via routing-service.
+    // Default on for back-compat (route.includeCustomerInFolder !== false).
+    const nameOpts = {
+      includeCustomerName: route.includeCustomerInFolder !== false,
+      customerName:        job.customer_name || '',
+    };
+
     let writeResult;
     try {
       writeResult = await orderFolderWriter.writeOrderFolder(
         route.outputPath,
         job,
         dpofContent,
-        imageFiles
+        imageFiles,
+        null,
+        nameOpts
       );
     } catch (writeErr) {
-      const tempFolderName = buildFolderName('p', job);
+      const tempFolderName = buildFolderName('p', job, null, nameOpts);
       logger.logError('DPOF write failed — p folder left in hot folder', writeErr, {
         jobId: job.id,
         tempFolder: tempFolderName
@@ -467,6 +481,12 @@ class PrintService {
       controllerType: controller.type,
     });
 
+    // Folder-name options sourced from the controller. Default on for back-compat.
+    const nameOpts = {
+      includeCustomerName: controller.includeCustomerInFolder !== false,
+      customerName:        job.customer_name || '',
+    };
+
     // Write to hot folder using prefix-swap pattern (p → o on success)
     let writeResult;
     try {
@@ -474,11 +494,13 @@ class PrintService {
         controller.hotFolderPath,
         job,
         dpofContent,
-        imageFiles
+        imageFiles,
+        null,
+        nameOpts
       );
     } catch (writeErr) {
       // Leave the "p" folder in place — operator will see "Import Error" status
-      const tempFolderName = buildFolderName('p', job);
+      const tempFolderName = buildFolderName('p', job, null, nameOpts);
       logger.logError('DPOF write failed — p folder left in hot folder', writeErr, {
         jobId: job.id,
         tempFolder: tempFolderName
@@ -542,7 +564,17 @@ class PrintService {
       throw new Error(`Print controller "${controller.name}" is not active.`);
     }
     if (controller.type === 'darkroompro') {
-      return { success: false, error: 'Darkroom Pro reprints are not yet supported.' };
+      // Darkroom Pro reprints used to short-circuit here. They now have a
+      // proper pipeline (_sendReprintViaDarkroomPro) but reaching this
+      // method on a Darkroom Pro parent should never happen — the
+      // orchestrator (sendReprint) is responsible for dispatching to the
+      // correct controller-type method. If we land here it means a caller
+      // bypassed the orchestrator and called this DPOF-specific method
+      // directly; loud failure beats silent wrong-pipeline dispatch.
+      return {
+        success: false,
+        error: 'Darkroom Pro reprints must go through sendReprint() — _sendReprintViaDPOF received a Darkroom Pro parent.'
+      };
     }
 
     // Resolve product/channel mapping using parent job's product code + options
@@ -603,6 +635,12 @@ class PrintService {
       controllerType: controller.type,
     });
 
+    // Folder-name options sourced from the controller. Default on for back-compat.
+    const nameOpts = {
+      includeCustomerName: controller.includeCustomerInFolder !== false,
+      customerName:        parentJob.customer_name || '',
+    };
+
     // Write to hot folder using prefix-swap pattern (p → o on success)
     let writeResult;
     try {
@@ -611,10 +649,11 @@ class PrintService {
         parentJob,
         dpofContent,
         imageFiles,
-        reprintSuffix
+        reprintSuffix,
+        nameOpts
       );
     } catch (writeErr) {
-      const tempFolderName = buildFolderName('p', parentJob, reprintSuffix);
+      const tempFolderName = buildFolderName('p', parentJob, reprintSuffix, nameOpts);
       logger.logError('Reprint DPOF write failed — p folder left in hot folder', writeErr, {
         parentJobId: parentJob.id,
         reprintSuffix,
@@ -637,6 +676,343 @@ class PrintService {
       method:     'dpof-reprint',
       destPath:   writeResult.folderPath,
       folderName: writeResult.folderName
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Reprint orchestrator
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Public entry point for sending a freshly-built reprint job to the
+   * appropriate printer pipeline. Resolves the parent job's route once
+   * via the new routing-service and dispatches to the matching
+   * controller-type method.
+   *
+   * The reprint folder must already exist on disk (i.e. createReprint
+   * has run); this method does not build the folder, only the print
+   * envelope. Status changes on the parent OH job are not made here —
+   * a reprint is a sibling job that lives only in OHD's local files
+   * and on the printer's queue.
+   *
+   * Returns the same shape the per-pipeline methods do:
+   *   { success: true, method, destPath, ... }
+   *   { success: false, error }
+   *
+   * Pre-2026-05-12 the IPC handler called _sendReprintViaDPOF directly,
+   * which short-circuited with "Darkroom Pro reprints are not yet
+   * supported" — silently for the operator, because the IPC handler
+   * returned success: true regardless and only logged a warning. See
+   * bugfixes.md 2026-05-12 entry on the Darkroom reprint pipeline.
+   *
+   * @param {object} parentJob       - Parent API job (from job-service cache)
+   * @param {string} reprintJobPath  - Absolute path to the reprint job folder
+   * @param {string} reprintSuffix   - 'r1', 'r2', …
+   * @param {Array}  reprintImages   - Array from the reprint sidecar.images
+   *                                   ({ filename, qtyCurrent, corrections })
+   * @returns {Promise<{success:boolean, method?:string, destPath?:string, error?:string}>}
+   */
+  async sendReprint(parentJob, reprintJobPath, reprintSuffix, reprintImages) {
+    const { resolveRoute } = require('./routing-service');
+    const route = resolveRoute(parentJob);
+
+    if (route.type === 'unrouted') {
+      return {
+        success: false,
+        error: `Parent job has no usable route (reason: ${route.reason}). Configure routing in Settings before sending a reprint.`,
+      };
+    }
+    if (route.type !== 'controller') {
+      return {
+        success: false,
+        error: `Reprints are only supported for controller routes (parent is routed to a ${route.type}). Send a fresh print for that workflow instead.`,
+      };
+    }
+
+    if (route.controllerType === 'darkroompro') {
+      return this._sendReprintViaDarkroomPro(parentJob, route, reprintJobPath, reprintSuffix, reprintImages);
+    }
+    if (route.controllerType === 'folder_copy') {
+      return this._sendReprintViaFolderCopy(parentJob, route, reprintJobPath, reprintSuffix, reprintImages);
+    }
+    // DPOF path covers controllerType 'dpof' and legacy / unspecified —
+    // existing _sendReprintViaDPOF resolves its own controller config via
+    // the legacy printControllerStore so we don't need to pass the route.
+    if (!route.controllerType || route.controllerType === 'dpof') {
+      return this._sendReprintViaDPOF(parentJob, reprintJobPath, reprintSuffix, reprintImages);
+    }
+
+    return {
+      success: false,
+      error: `Reprints are not yet supported for controller type "${route.controllerType}".`,
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Reprint — Darkroom Pro pipeline
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Send a built reprint job to a Darkroom Pro controller.
+   *
+   * Mirrors `_sendViaDarkroomProRouted` but with three key differences:
+   *
+   *   1. Images come from `{reprintJobPath}/originals/` (the clean copies
+   *      that reprintManager produced), not the parent's download folder.
+   *      No manifest is consulted — the reprint sidecar's `images` array
+   *      is the source of truth for which files print and at what qty.
+   *   2. CMY corrections are read from the reprint sidecar (parent
+   *      corrections were carried in by reprintManager). They get
+   *      re-applied to `{reprintJobPath}/working/` so the on-disk JPEGs
+   *      Darkroom Pro reads from carry the operator's adjustments.
+   *      Enhanced images are NOT propagated to reprints — the design
+   *      intent (see reprintManager.js header) is that reprints always
+   *      start from /originals/ for a predictable result.
+   *   3. The output .txt is named `{job_name}-r{n}.txt` via
+   *      `outputFilenameStem` so it doesn't collide with the parent's
+   *      `{job_name}.txt` in the controller's hot folder.
+   *
+   * Parent job status is left untouched — the reprint is a sibling
+   * concept that does not advance the OH-side lifecycle.
+   *
+   * @param {object} parentJob       - Parent API job
+   * @param {object} route           - Pre-resolved route ({ controllerId, artworkRootPath, outputPath, orderLastNameFormat, checkOrderStatus, … })
+   * @param {string} reprintJobPath  - Absolute path to the reprint job folder
+   * @param {string} reprintSuffix   - 'r1', 'r2', …
+   * @param {Array}  reprintImages   - Array from reprint sidecar.images
+   * @returns {Promise<{success:boolean, method?:string, destPath?:string, error?:string}>}
+   */
+  async _sendReprintViaDarkroomPro(parentJob, route, reprintJobPath, reprintSuffix, reprintImages) {
+    if (!Array.isArray(reprintImages) || reprintImages.length === 0) {
+      return { success: false, error: 'Reprint has no images to send.' };
+    }
+
+    const originalsPath = path.join(reprintJobPath, 'originals');
+    const workingPath   = path.join(reprintJobPath, 'working');
+
+    // Build per-image entries straight from the reprint sidecar. No
+    // manifest, no enhanced-path lookup — reprints intentionally start
+    // from /originals/ (see reprintManager.js header for the rationale).
+    let imageFiles = reprintImages.map(img => ({
+      sourcePath: path.join(originalsPath, img.filename),
+      filename:   img.filename,
+    }));
+
+    // Verify all source images exist on disk before doing any writes.
+    // reprintManager copied them in, so this is a safety net against
+    // a manually-mutated reprint folder.
+    for (const img of imageFiles) {
+      if (!fs.existsSync(img.sourcePath)) {
+        return {
+          success: false,
+          error: `Reprint image not found on disk: ${img.sourcePath}`,
+        };
+      }
+    }
+
+    // Apply CMY corrections — writes `{filename}_corrected.jpg` into
+    // the reprint's /working/ folder where any image with non-zero
+    // corrections needs it, and patches imageFiles[i].sourcePath to
+    // point at the corrected copy.
+    const correctionsMap = new Map(
+      reprintImages.map(img => [img.filename, img.corrections || {}])
+    );
+    imageFiles = await this._applyCorrectionsToImageFiles(
+      imageFiles,
+      workingPath,
+      correctionsMap,
+    );
+
+    // Customer name split, identical to the non-reprint path.
+    const fullName  = (parentJob.customer_name || '').trim();
+    const spaceIdx  = fullName.indexOf(' ');
+    const firstName = spaceIdx === -1 ? fullName : fullName.substring(0, spaceIdx);
+    const lastName  = spaceIdx === -1 ? ''        : fullName.substring(spaceIdx + 1).trim();
+
+    // Group images by their reprint-time quantity so the generator emits
+    // one line-item block per distinct qty (matches the non-reprint shape).
+    const imagesByQty = new Map();
+    reprintImages.forEach((img, i) => {
+      const qty = img.qtyCurrent || 1;
+      if (!imagesByQty.has(qty)) imagesByQty.set(qty, []);
+      imagesByQty.get(qty).push({
+        filename:   imageFiles[i].filename,
+        sourcePath: imageFiles[i].sourcePath,
+      });
+    });
+
+    // Job-level options drive media resolution; reprints use parent's options.
+    const jobOptions = parentJob.options || [];
+    const lineItems = [];
+    for (const [qty, images] of imagesByQty) {
+      lineItems.push({ qty, options: jobOptions, images });
+    }
+
+    // Derive the .txt filename stem from the parent's job_name with the
+    // reprint suffix appended. Falls back to a composite when job_name
+    // isn't set (paranoia — production rows always have one).
+    const baseStem = parentJob.job_name
+      || `${parentJob.order_number || ''}_${parentJob.id}`;
+    const reprintStem = `${baseStem}-${reprintSuffix}`;
+
+    const dpJob = {
+      id:                 parentJob.id,
+      orderRef:           parentJob.order_number || '',
+      outputFilenameStem: reprintStem,
+      productCode:        parentJob.product_code || '',
+      customer:           { firstName, lastName, email: parentJob.customer_email || '' },
+      labCode:            parentJob.website || '',
+      orderDate:          parentJob.created_at ? new Date(parentJob.created_at) : new Date(),
+      lineItems,
+      // Carry per-job overrides from the original Assign-modal flow so a
+      // manually-assigned size/media on the parent applies to the reprint
+      // too. Without this a reprint of an Assigned job would re-trigger
+      // translation-table resolution and possibly land on a different
+      // size/media than the original print used.
+      _sizeOverride:      parentJob._darkroomProSize  || null,
+      _mediaOverride:     parentJob._darkroomProMedia || null,
+    };
+
+    // Fetch the full controller record so we have the translation tables
+    // and configurable photo lines — the route object alone doesn't carry
+    // them.
+    const { getControllers } = require('./routing-service');
+    const fullController = getControllers().find(c => c.id === route.controllerId);
+
+    const controller = {
+      artworkRootPath:     route.artworkRootPath,
+      orderLastNameFormat: route.orderLastNameFormat,
+      outputPath:          route.outputPath,
+      sizeTranslations:    fullController?.sizeTranslations  || [],
+      mediaOptionKey:      fullController?.mediaOptionKey    || '',
+      mediaTranslations:   fullController?.mediaTranslations || [],
+      photoLines:          fullController?.photoLines        || [],
+    };
+
+    let destPath;
+    try {
+      destPath = await generateDarkroomProFile(dpJob, controller);
+    } catch (writeErr) {
+      logger.logError('Darkroom Pro reprint write failed', writeErr, {
+        parentJobId:  parentJob.id,
+        reprintSuffix,
+        controller:   route.controllerName,
+        reprintStem,
+      });
+      return { success: false, error: writeErr.message };
+    }
+
+    logger.info('Reprint sent via Darkroom Pro', {
+      parentJobId:  parentJob.id,
+      reprintSuffix,
+      controller:   route.controllerName,
+      destPath,
+      lineItems:    lineItems.length,
+    });
+
+    return {
+      success:  true,
+      method:   'darkroompro-reprint',
+      destPath,
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Reprint — folder-copy pipeline
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Send a built reprint job to a "folder_copy" controller (Wide Format,
+   * "Fuji Pic Pro - Folders", POD, …).
+   *
+   * Mirrors the first-send path `_sendViaFolderCopyRouted` — a plain file
+   * copy into `{outputPath}/{folder}/` with no DPOF envelope and no index
+   * file — with the reprint-family adaptations the other two reprint
+   * methods (`_sendReprintViaDPOF`, `_sendReprintViaDarkroomPro`) use:
+   *
+   *   1. Images come from `{reprintJobPath}/working/`, enumerated from the
+   *      reprint sidecar's `images` array — no manifest is consulted.
+   *   2. The destination folder is the reprint folder's own name
+   *      (`…_{id}-r{n}`, via `path.basename(reprintJobPath)`) so it does
+   *      not collide with the parent job's `…_{id}` folder in the
+   *      controller output.
+   *   3. No CMY corrections and no enhanced-image substitution — this
+   *      deliberately matches `_sendViaFolderCopyRouted` (folder_copy
+   *      targets wide-format/POD workflows where neither applies) rather
+   *      than the DPOF / Darkroom Pro reprint pipelines.
+   *
+   * Like `_sendReprintViaDPOF` / `_sendReprintViaDarkroomPro` — and unlike
+   * `_sendViaFolderCopyRouted` — this method does NOT call `_markCompleted`:
+   * a reprint is a sibling job that does not advance the parent's OH-side
+   * lifecycle (see the `sendReprint` docstring). It also does not consult
+   * AI quality scoring / auto-print / Hold-Auto-Print — both existing
+   * reprint methods bypass them (the operator reviews rows before
+   * triggering a reprint); this mirrors that stance.
+   *
+   * @param {object} parentJob       - Parent API job (from job-service cache)
+   * @param {object} route           - Pre-resolved route ({ controllerType:'folder_copy', controllerName, outputPath, … })
+   * @param {string} reprintJobPath  - Absolute path to the reprint job folder
+   * @param {string} reprintSuffix   - 'r1', 'r2', …
+   * @param {Array}  reprintImages   - Array from reprint sidecar.images ({ filename, qtyCurrent, corrections })
+   * @returns {Promise<{success:boolean, method?:string, destPath?:string, error?:string}>}
+   */
+  async _sendReprintViaFolderCopy(parentJob, route, reprintJobPath, reprintSuffix, reprintImages) {
+    if (!Array.isArray(reprintImages) || reprintImages.length === 0) {
+      return { success: false, error: 'Reprint has no images to send.' };
+    }
+
+    // Source is the reprint folder's /working/ directory — the operator-
+    // reviewed copies reprintManager produced. No manifest, no enhanced-path
+    // lookup, no CMY corrections (see method docstring).
+    const workingPath = path.join(reprintJobPath, 'working');
+
+    const imageFiles = reprintImages.map(img => ({
+      sourcePath: path.join(workingPath, img.filename),
+      filename:   img.filename,
+    }));
+
+    // Verify every source image exists before any write. Return (don't
+    // throw) so sendReprint keeps its documented { success:false } contract,
+    // matching _sendReprintViaDarkroomPro's safety net.
+    for (const img of imageFiles) {
+      if (!fs.existsSync(img.sourcePath)) {
+        return { success: false, error: `Reprint image not found on disk: ${img.sourcePath}` };
+      }
+    }
+
+    // Destination folder name = the reprint folder's own name (`…_{id}-r{n}`),
+    // keeping it distinct from the parent's `…_{id}` folder in the output.
+    const reprintFolderName = path.basename(reprintJobPath);
+    const destFolder        = path.join(route.outputPath, reprintFolderName);
+
+    try {
+      fs.mkdirSync(destFolder, { recursive: true });
+      for (const img of imageFiles) {
+        fs.copyFileSync(img.sourcePath, path.join(destFolder, img.filename));
+      }
+    } catch (writeErr) {
+      logger.logError('Folder-copy reprint write failed', writeErr, {
+        parentJobId: parentJob.id,
+        reprintSuffix,
+        destFolder,
+      });
+      return { success: false, error: writeErr.message };
+    }
+
+    logger.info('Reprint sent via folder copy (routed)', {
+      parentJobId:  parentJob.id,
+      reprintSuffix,
+      reprintJobId: reprintFolderName,
+      controller:   route.controllerName,
+      destFolder,
+      images:       imageFiles.length,
+    });
+
+    return {
+      success:    true,
+      method:     'folder_copy-reprint',
+      sourcePath: workingPath,
+      destPath:   destFolder,
     };
   }
 
@@ -866,6 +1242,206 @@ class PrintService {
       method:     'darkroompro-routed',
       sourcePath: jobFolderPath,
       destPath,
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Fuji JobMaker pipeline (routed)
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Fuji JobMaker pipeline — routed entry point.
+   *
+   * Mirrors `_sendViaDarkroomProRouted` but emits Fujifilm Frontier's
+   * `[OrderInfo]` / `[ImageInfo]` / `[Print]` format and stages images into a
+   * per-order folder under `imageStagingRoot` (Frontier reads them from there
+   * via `ImagePath=`).
+   *
+   * v0 model: one OH job → one product mapping → one Surface → one `.txt`
+   * file. Multi-surface within a single OH job is supported by the underlying
+   * generator (it accepts `surfaceGroups[]`) but not exposed here yet — that's
+   * a future refinement and needs to be paired with a UI for assigning
+   * per-image surfaces.
+   *
+   * Spec: docs/print-controllers/FUJI-JOBMAKER-FORMAT.md
+   *
+   * @param {object} job   Job record from the OH API cache.
+   * @param {object} route Resolved route from routingService:
+   *   {
+   *     controllerId, controllerName, controllerType: 'fujijobmaker',
+   *     outputPath,                  // hot folder
+   *     imageStagingRoot,            // where the per-order image folder is created
+   *     printerName,                 // optional — emitted as Printer=
+   *     autoCorrect,                 // null | true | false
+   *     backprintMode,               // 'none' | 'text' (image deferred in v0)
+   *     backprintTemplate,           // when backprintMode === 'text'
+   *     checkOrderStatus,            // when false, mark completed immediately
+   *   }
+   */
+  async _sendViaFujiJobMakerRouted(job, route) {
+    const downloadDirectory = configService.get('downloadDirectory');
+    if (!downloadDirectory) {
+      throw new Error('Download directory is not configured.');
+    }
+
+    const orderFolderName = `${job.order_number}_${job.order_id}`;
+    const jobFolderName   = `${job.order_number}_${job.id}`;
+    const orderFolderPath = path.join(downloadDirectory, orderFolderName);
+    const jobFolderPath   = path.join(orderFolderPath, jobFolderName);
+
+    if (!fs.existsSync(jobFolderPath)) {
+      throw new Error(`Job folder not found: ${jobFolderPath}`);
+    }
+
+    const manifest    = this._readManifest(orderFolderPath, job.order_number);
+    const jobManifest = this._findJobInManifest(manifest, job);
+
+    if (!jobManifest) {
+      throw new Error(`Job ${job.id} not found in order manifest.`);
+    }
+
+    // ── Pull resolved channel fields off the route ─────────────────────────
+    // routingService.resolveRoute() has already done the productCode+options
+    // lookup and surfaced printCode / surface / surfaceCode onto the route.
+    // Validation here is a belt-and-braces check in case the route was
+    // hand-constructed by a caller other than routingService.
+    if (!route.surface || !route.printCode) {
+      const errMsg =
+        `Fuji JobMaker route is missing surface or printCode for product "${job.product_code || '(none)'}". ` +
+        `Add a channel mapping for this product in Settings → Routing.`;
+      jobService.updateJobLocally(job.id, { _status: 'error', _errorMessage: errMsg });
+      return { success: false, error: errMsg };
+    }
+
+    // ── Resolve image paths (enhanced → corrected → raw, same as DPOF) ─────
+    const enhancedMap    = await this._getEnhancedPathMap(jobFolderName, jobFolderPath);
+    const correctionsMap = await this._getCorrectionsMap(jobFolderName, jobFolderPath);
+
+    let imageFiles = jobManifest.images.map(img => {
+      const basename     = path.basename(img.filename);
+      const enhancedPath = enhancedMap.get(basename);
+      if (enhancedPath) {
+        logger.info('Using enhanced image for Fuji JobMaker print', { filename: basename, enhancedPath });
+      }
+      return {
+        sourcePath: enhancedPath || path.join(orderFolderPath, img.filename),
+        filename:   basename,
+      };
+    });
+
+    imageFiles = await this._applyCorrectionsToImageFiles(
+      imageFiles,
+      path.join(jobFolderPath, 'working'),
+      correctionsMap
+    );
+
+    for (const img of imageFiles) {
+      if (!fs.existsSync(img.sourcePath)) {
+        throw new Error(`Image not found: ${img.sourcePath}`);
+      }
+    }
+
+    // ── Assemble the generator input (single surface group, v0) ────────────
+    const fullName    = (job.customer_name || '').trim();
+    const surface     = route.surface;
+    const surfaceCode = route.surfaceCode || (surface ? surface.charAt(0).toUpperCase() : '');
+
+    const fujiJob = {
+      orderRef: job.order_number || '',
+      id:       job.id,
+      jobName:  job.job_name || job.order_number || '',
+      dueAt:    job.due_at || null,
+      customer: {
+        fullName,
+        email: job.customer_email || '',
+        phone: job.customer_phone || '',
+      },
+      surfaceGroups: [{
+        surface,
+        surfaceCode,
+        images: jobManifest.images.map((manifestImg, i) => ({
+          filename:  imageFiles[i].filename,
+          printCode: route.printCode,
+          quantity:  manifestImg.quantity || 1,
+          // backPrint is left undefined — 'image' mode is deferred in v0.
+        })),
+      }],
+    };
+
+    const controllerCfg = {
+      imageStagingRoot:  route.imageStagingRoot,
+      printerName:       route.printerName || '',
+      autoCorrect:       route.autoCorrect === undefined ? null : route.autoCorrect,
+      backprintMode:     route.backprintMode     || 'none',
+      backprintTemplate: route.backprintTemplate || '',
+    };
+
+    // ── Generate + write ───────────────────────────────────────────────────
+    let surfaceFiles;
+    try {
+      surfaceFiles = generateFujiJobMakerFiles(fujiJob, controllerCfg);
+    } catch (genErr) {
+      logger.logError('Fuji JobMaker generation failed', genErr, { jobId: job.id });
+      jobService.updateJobLocally(job.id, { _status: 'error', _errorMessage: genErr.message });
+      return { success: false, error: genErr.message };
+    }
+
+    let writeResult;
+    try {
+      writeResult = await fujiJobMakerFileWriter.writeOrderFiles({
+        hotFolderPath:    route.outputPath,
+        imageStagingRoot: route.imageStagingRoot,
+        orderRef:         job.order_number || '',
+        imageFiles,
+        surfaceFiles,
+      });
+    } catch (writeErr) {
+      logger.logError('Fuji JobMaker write failed — staged images may remain', writeErr, {
+        jobId: job.id,
+        controller: route.controllerName,
+      });
+      jobService.updateJobLocally(job.id, { _status: 'error', _errorMessage: writeErr.message });
+      return { success: false, error: writeErr.message };
+    }
+
+    // ── Register submission(s) with the monitor for status tracking ────────
+    // Must run BEFORE the operator could see the .txt go through and possibly
+    // before fs.watch fires — otherwise the monitor might miss the transition.
+    printControllerService.startMonitoring(route.controllerId);
+    const monitor = printControllerService.getMonitor(route.controllerId);
+    if (monitor && monitor.trackSubmission) {
+      for (let i = 0; i < surfaceFiles.length; i++) {
+        monitor.trackSubmission({
+          orderRef: fujiJob.orderRef,
+          surface:  fujiJob.surfaceGroups[i].surface,
+          filename: surfaceFiles[i].filename,
+        });
+      }
+    }
+
+    logger.info('Job sent via Fuji JobMaker (routed)', {
+      jobId:        job.id,
+      controller:   route.controllerName,
+      orderRef:     fujiJob.orderRef,
+      surface,
+      printCode:    route.printCode,
+      files:        writeResult.writtenFiles.map(p => path.basename(p)),
+      stagedImages: writeResult.copiedImages.length,
+    });
+
+    if (route.checkOrderStatus === false) {
+      logger.info('[Fuji JobMaker] checkOrderStatus disabled — marking job completed immediately', { jobId: job.id });
+      await this._markCompleted(job.id);
+    } else {
+      await this._markInProduction(job.id);
+    }
+
+    return {
+      success:    true,
+      method:     'fujijobmaker-routed',
+      sourcePath: jobFolderPath,
+      destPaths:  writeResult.writtenFiles,
+      stagedFolder: writeResult.imageStagingFolder,
     };
   }
 
@@ -1133,6 +1709,18 @@ class PrintService {
   /**
    * File-copy pipeline (existing behaviour)
    */
+  /**
+   * Manual Crop redesign (2026-06-02) helper. Returns true when the
+   * given bare basename matches an operator-discarded image for this
+   * dispatch (set stamped on job._excludedFilenames by the IPC handler).
+   * Used by file-copy paths that don't go through _findJobInManifest.
+   */
+  _isExcludedForDispatch(job, basename) {
+    const excluded = job && job._excludedFilenames;
+    if (!excluded || typeof excluded.size !== 'number' || excluded.size === 0) return false;
+    return excluded.has(basename);
+  }
+
   async _sendViaCopy(job, processFolderPath) {
     if (!processFolderPath) {
       throw new Error('Process folder is not configured. Please set a default folder or add a mapping for "' + (job.process || 'unknown') + '" in Settings > Downloads.');
@@ -1164,10 +1752,13 @@ class PrintService {
       dest: destPath
     });
 
-    // Copy folder recursively
+    // Copy folder recursively. The optional skipBasenames set lets the
+    // operator-discarded filter prune files even though this code path
+    // doesn't go through _findJobInManifest.
     try {
-      await this._copyFolder(sourcePath, destPath);
-      logger.info('Job folder copied to process folder', { jobId, dest: destPath });
+      const excluded = (job && job._excludedFilenames) || null;
+      await this._copyFolder(sourcePath, destPath, excluded);
+      logger.info('Job folder copied to process folder', { jobId, dest: destPath, excludedCount: excluded ? excluded.size : 0 });
     } catch (error) {
       logger.logError('Failed to copy job folder', error, { jobId });
       throw new Error(`Failed to copy job folder: ${error.message}`);
@@ -1216,10 +1807,29 @@ class PrintService {
     const jobId = String(job.id);
     const internalJobId = job.internal_job_id ? String(job.internal_job_id) : null;
 
-    return manifest.jobs.find(j => {
+    const found = manifest.jobs.find(j => {
       const manifestJobId = String(j.jobId);
       return manifestJobId === jobId || (internalJobId && manifestJobId === internalJobId);
     });
+
+    // Manual Crop redesign (2026-06-02). Apply the discarded-image
+    // filter exactly once, at the central manifest-lookup point. The
+    // IPC handler stamps `job._excludedFilenames` (a Set<string> of bare
+    // basenames) as a non-enumerable property before invoking any
+    // dispatch pipeline; every subsequent jobManifest.images.map(...)
+    // sees the filtered list automatically. Property-stamping keeps the
+    // print-service public surface unchanged — no signature edits to
+    // ripple through 10+ dispatch variants.
+    if (!found) return found;
+    const excluded = job && job._excludedFilenames;
+    if (!excluded || typeof excluded.size !== 'number' || excluded.size === 0) return found;
+    return {
+      ...found,
+      images: (found.images || []).filter((img) => {
+        const base = path.basename(img && img.filename ? img.filename : '');
+        return !excluded.has(base);
+      }),
+    };
   }
 
   /**
@@ -1408,16 +2018,27 @@ class PrintService {
   /**
    * Recursively copy a folder
    */
-  async _copyFolder(src, dest) {
+  async _copyFolder(src, dest, excludedBasenames = null) {
     fs.mkdirSync(dest, { recursive: true });
     const entries = fs.readdirSync(src, { withFileTypes: true });
 
     for (const entry of entries) {
+      // Manual Crop redesign (2026-06-02). Skip files whose basename
+      // matches an operator-discarded image. Comparison is at any
+      // recursion depth — discarded files in /working/, /originals/,
+      // and the flat job root all get filtered. Directories themselves
+      // are never matched (they're folder names, not image filenames).
+      if (excludedBasenames
+          && excludedBasenames.size > 0
+          && !entry.isDirectory()
+          && excludedBasenames.has(entry.name)) {
+        continue;
+      }
       const srcPath = path.join(src, entry.name);
       const destPath = path.join(dest, entry.name);
 
       if (entry.isDirectory()) {
-        await this._copyFolder(srcPath, destPath);
+        await this._copyFolder(srcPath, destPath, excludedBasenames);
       } else {
         fs.copyFileSync(srcPath, destPath);
         const stat = fs.statSync(srcPath);

@@ -630,6 +630,12 @@ test('M5b sidecar: Reconcile D adds M5b null defaults to legacy entries without 
   assert.equal(sidecar.images[0].pendingRotation,           null);
   assert.equal(sidecar.images[0].pendingOrientation,        null);
 
+  // Manual Crop redesign (2026-06-02): `discarded` field hydrated to
+  // `false` on legacy entries via Reconcile F. Default is `false` (not
+  // null) because the contract is boolean — the renderer reads it with
+  // strict === true semantics.
+  assert.equal(sidecar.images[0].discarded,                 false);
+
   // Job-level: only batchCropLastAppliedAt survives the redesign.
   // batchCropDefault{Rect,Orientation} are removed from the schema — they
   // are NOT hydrated by Reconcile D, and Reconcile E would drop them from
@@ -1302,4 +1308,155 @@ test('M5c rotation: clamping uses POST-rotation effective dimensions, not source
   const meta = await sharp(path.join(ctx.jobPath, 'working', 'clamp.jpg')).metadata();
   assert.ok(meta.width  > 0 && meta.width  <= 60);
   assert.ok(meta.height > 0 && meta.height <= 100);
+});
+
+test('M6 sidecar: a previously-discarded image round-trips through loadSidecar with discarded:true preserved', async (t) => {
+  // Manual Crop redesign (2026-06-02) regression-pin. The `discarded` field
+  // is operator-driven and persisted to sidecar; loadSidecar must not
+  // clobber it on hydrate. We hand-write a sidecar with one image marked
+  // discarded:true and one fresh entry, then assert both values survive.
+  const dl = await makeTempDir();
+  t.after(() => fs.rm(dl, { recursive: true, force: true }));
+
+  const orderFolderName = 'POS-DISC_orderid';
+  const jobFolderName   = 'POS-DISC_jobid';
+  const jobPath         = path.join(dl, orderFolderName, jobFolderName);
+  await fs.mkdir(path.join(jobPath, 'working'), { recursive: true });
+  // Write two real working files so loadSidecar's filename scan matches
+  // both sidecar entries (otherwise Reconcile A adds duplicates).
+  await writeJpeg(path.join(jobPath, 'working', 'kept.jpg'),      { width: 200, height: 150 });
+  await writeJpeg(path.join(jobPath, 'working', 'discarded.jpg'), { width: 200, height: 150 });
+
+  // Full-shape sidecar with both M5b and M6 fields present. Mirrors what
+  // createImageEntry would produce for a freshly-created entry, just with
+  // the `discarded` field flipped on the second image.
+  const baseFields = {
+    qtyOriginal: 1, qtyCurrent: 1,
+    corrections: { cyan: 0, magenta: 0, yellow: 0 },
+    reprint: false, reprintJobId: null,
+    enhanced: false, enhancementSource: null, enhancedPath: null, enhancedAt: null, enhancementModel: null,
+    integritySuspect: null,
+    aiQuality: {
+      scored: false, score: null, thresholdAtScoreTime: null, passed: true,
+      modelVersion: null, inferenceMs: null, scoredAt: null, error: null,
+      fixupHistory: [], operatorDecision: { kind: 'none', decidedAt: null, note: null },
+    },
+    originalFilename: null, recropPath: null, recropOf: null, recroppedAt: null,
+    artworkFileId: null, artworkSource: null, artworkType: null,
+    productionReady: null, originalFileName: null, copies: null,
+    cropOrientation: null, cropSource: null, cropAppliedAt: null, cropRotation: null,
+    pendingCropRect: null, pendingRotation: null, pendingOrientation: null,
+  };
+  const hand = {
+    jobId: jobFolderName, schemaVersion: 1,
+    createdAt:  '2026-06-02T00:00:00.000Z',
+    modifiedAt: '2026-06-02T00:00:00.000Z',
+    reprintOf:  null,
+    s3ArtworkFileIdsKnown: [],
+    batchCropLastAppliedAt: null,
+    images: [
+      { filename: 'kept.jpg',      ...baseFields, discarded: false },
+      { filename: 'discarded.jpg', ...baseFields, discarded: true  },
+    ],
+  };
+  const sidecarPath = path.join(jobPath, `${jobFolderName}.json`);
+  await fs.writeFile(sidecarPath, JSON.stringify(hand, null, 2), 'utf8');
+  const before = await fs.readFile(sidecarPath, 'utf8');
+
+  const { sidecar } = await sidecarManager.loadSidecar(jobFolderName, jobPath);
+
+  // Both values must survive the load — Reconcile F only adds the field
+  // when absent; existing values must not be overwritten.
+  const kept = sidecar.images.find((i) => i.filename === 'kept.jpg');
+  const disc = sidecar.images.find((i) => i.filename === 'discarded.jpg');
+  assert.equal(kept.discarded, false,
+    'kept.jpg must retain discarded:false from the on-disk sidecar');
+  assert.equal(disc.discarded, true,
+    'discarded.jpg must retain discarded:true — Reconcile F must NOT overwrite an existing value');
+
+  // No spurious save — every field on disk was complete, so Reconcile F
+  // should have been a pure no-op. On-disk bytes unchanged.
+  const after = await fs.readFile(sidecarPath, 'utf8');
+  assert.equal(after, before,
+    'Reconcile F must not save when every entry already has the discarded field present');
+});
+
+test('M5d (2026-06-02): sourceFrom=originals reads /originals/<filename>, not /working/', async (t) => {
+  // Manual Crop redesign regression-pin. When ManualCropMode approves
+  // a re-crop, the source MUST be /originals/<filename> — the pristine
+  // pre-edit pixels — not /working/<filename>, which by then is the
+  // FIRST crop's output. Otherwise re-cropping compounds: the second
+  // rect is applied to the first rect's output instead of to the
+  // pristine source.
+  //
+  // We simulate the post-first-crop on-disk state by writing distinct
+  // solid-colour images: /originals/ = pristine red (what the operator
+  // wants to re-crop), /working/ = blue (the prior crop's output, used
+  // as a sentinel — if it ever ends up in the new crop output, the
+  // sourceFrom plumbing is broken).
+  const dl = await makeTempDir();
+  t.after(() => fs.rm(dl, { recursive: true, force: true }));
+
+  const jobPath = path.join(dl, 'ORD-M5D_x', 'ORD-M5D_y');
+  await fs.mkdir(path.join(jobPath, 'working'),   { recursive: true });
+  await fs.mkdir(path.join(jobPath, 'originals'), { recursive: true });
+
+  // Pristine source — solid red.
+  await writeJpeg(path.join(jobPath, 'originals', 'test.jpg'),
+    { width: 200, height: 150, r: 240, g: 20, b: 20 });
+  // Sentinel — solid blue. Same dimensions so only pixel content disambiguates.
+  await writeJpeg(path.join(jobPath, 'working', 'test.jpg'),
+    { width: 200, height: 150, r: 20, g: 20, b: 240 });
+
+  const sidecarImages = [createImageEntry('test.jpg', 1, null, {
+    artworkSource: 'manual', artworkType: 'optimized',
+    productionReady: true, originalFileName: 'test.jpg', copies: 1,
+  })];
+  // Mark cropApplied to simulate "already approved once" — the
+  // ManualCropMode re-crop scenario this test pins.
+  sidecarImages[0].cropApplied = true;
+  sidecarImages[0].cropRect    = { x: 0, y: 0, w: 200, h: 150 };
+  const sidecar = createSidecar('ORD-M5D_y', sidecarImages);
+  const sidecarPath = path.join(jobPath, 'ORD-M5D_y.json');
+  await fs.writeFile(sidecarPath, JSON.stringify(sidecar, null, 2), 'utf8');
+
+  const result = await _applyCropToSingleImage({
+    jobPath, sidecar, filename: 'test.jpg',
+    cropRect:         { x: 0, y: 0, w: 100, h: 100 },
+    channelMappingId: null,
+    cropSource:       'per-image',
+    cropAppliedAt:    '2026-06-02T00:00:00.000Z',
+    sourceFrom:       'originals',
+    deps:             { logger: silentLogger },
+  });
+  assert.equal(result.success, true,
+    'crop with sourceFrom=originals must succeed when /originals/<filename> exists');
+
+  // Decode the first pixel of the crop output. If sourceFrom='originals'
+  // was honoured, the pixel reflects the pristine red source; if the
+  // primitive read /working/ instead, it would be blue — the destructive
+  // re-crop bug that this test pins against regressions.
+  const { data, info } = await sharp(path.join(jobPath, 'working', 'test.jpg'))
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const [r, g, b] = [data[0], data[1], data[2]];
+  assert.ok(r > 150 && r > b,
+    `crop output must be red-dominant (originals source), got rgb(${r},${g},${b}). `
+    + 'A blue-dominant pixel means the primitive read /working/<filename> instead of '
+    + '/originals/<filename> — the destructive re-crop bug from before sourceFrom landed.');
+  assert.equal(info.channels, 3, 'sanity: output is 3-channel');
+  assert.equal(info.width,    100, 'sanity: crop produced 100px wide output');
+  assert.equal(info.height,   100, 'sanity: crop produced 100px tall output');
+
+  // Sentinel check: /originals/<filename> must NOT have been modified.
+  // The crop primitive only writes /working/<filename>; /originals/ is
+  // sacrosanct by contract.
+  const originalsAfter = await sharp(path.join(jobPath, 'originals', 'test.jpg'))
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const [or, og, ob] = [originalsAfter.data[0], originalsAfter.data[1], originalsAfter.data[2]];
+  assert.ok(or > 150 && or > ob,
+    `originals/<filename> must remain red-dominant after crop, got rgb(${or},${og},${ob}). `
+    + 'A blue-dominant pixel means the primitive wrote to /originals/ — '
+    + 'the contract is read-only on /originals/, write-only to /working/.');
 });
