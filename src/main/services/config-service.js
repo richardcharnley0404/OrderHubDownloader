@@ -1,8 +1,38 @@
 const Store = require('electron-store');
+const path = require('path');
 const crypto = require('crypto');
 
 // Hardcoded OrderHub API base URL (not user-configurable)
 const OH_API_BASE_URL = 'https://nazkcvruighrhpgcarxg.supabase.co/functions/v1/ohd-api';
+
+// ----- Internal helpers (module-level so they're testable in isolation) -----
+
+/**
+ * Generate a stable identifier for a hot folder row. Used when the operator
+ * adds a new row without supplying an id. Uses crypto.randomUUID() when
+ * available (Node 14.17+) and falls back to a hex string.
+ */
+function _genHotFolderId() {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  return crypto.randomBytes(16).toString('hex');
+}
+
+/**
+ * Returns true when `child` is the same as `parent` or sits inside it.
+ * Path comparison is case-insensitive (Windows-friendly) and uses
+ * path.relative so trailing-slash variants don't confuse it.
+ *
+ * Both arguments are expected to be already lowercased by the caller.
+ */
+function _pathContains(parent, child) {
+  if (!parent || !child) return false;
+  if (parent === child) return true;
+  // path.relative('C:/foo', 'C:/foo/bar') = 'bar'  → child is inside parent
+  // path.relative('C:/foo', 'C:/baz')     = '..\\baz' → not inside
+  // path.relative('C:/foo', 'D:/foo')     = 'D:/foo' (with absolute prefix)
+  const rel = path.relative(parent, child);
+  return Boolean(rel) && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
 
 // Define configuration schema with defaults
 const schema = {
@@ -226,6 +256,86 @@ const schema = {
     default: 5,
     minimum: 1,
     maximum: 60
+  },
+  // Order XML Hot Folder (Mode 4)
+  // Watches one or more folders for vendor order XML drops (PhotoFinale today;
+  // ROES / dotphoto via the parser registry later) and submits them to
+  // OrderHub via POST /api-webhook. Each entry in `orderXmlHotFolders` is one
+  // independent watcher with its own format, paths, and websiteCode.
+  orderXmlEnabled: {
+    type: 'boolean',
+    default: false
+  },
+  orderXmlAutoSyncMinutes: {
+    type: 'number',
+    default: 1,
+    minimum: 1,
+    maximum: 60
+  },
+  // Default retry cap shared across all hot folders. Each folder may override
+  // via its own `maxRetries`. Retries apply only to transient (5xx / network)
+  // failures; 4xx errors route straight to failed/.
+  orderXmlMaxRetries: {
+    type: 'number',
+    default: 3,
+    minimum: 1,
+    maximum: 10
+  },
+  // Array of hot folder configs. Schema enforced loosely here (electron-store
+  // can't express the inner shape without a JSON schema for objects); strict
+  // shape validation is done in save().
+  //
+  // Per-entry shape:
+  //   {
+  //     id:              string (uuid, stable identifier),
+  //     label:           string (operator-chosen name, e.g. 'PhotoFinale F-11'),
+  //     enabled:         boolean,
+  //     sourceFormat:    string (parser id from order-xml-parsers registry),
+  //     watchFolder:     string (absolute path to drop folder),
+  //     processedFolder: string (absolute path to root of processed/failed/),
+  //     websiteCode:     string (OrderHub website_code, e.g. 'PPPF'; may be ''),
+  //     maxRetries:      number|null (null = inherit orderXmlMaxRetries)
+  //   }
+  orderXmlHotFolders: {
+    type: 'array',
+    default: []
+  },
+  // Vendor product code → Pixfizz product code mapping, scoped per parser
+  // sourceFormat. OrderHub today accepts any string as `product_code` and
+  // creates a generic line item — without this gate, unmapped PhotoFinale
+  // codes silently end up in OrderHub as orphan items. The watcher loads the
+  // matching slice into a Map and threads it through hotFolderConfig.productMap;
+  // the parser throws UNMAPPED_PRODUCTS for any line item whose vendor code
+  // isn't present, holding the whole order back.
+  //
+  // Shape:
+  //   {
+  //     [sourceFormat]: [
+  //       { photoFinaleCode: string, pixfizzCode: string, label: string }
+  //     ]
+  //   }
+  // Only the photofinale slice is populated today; ROES / dotphoto get their
+  // own keys when those parsers ship. 1:1 (each vendor code resolves to
+  // exactly one Pixfizz product); duplicate vendor codes within a slice are
+  // rejected at save time.
+  orderXmlProductMappings: {
+    type: 'object',
+    default: {}
+  },
+  // Customer directory used by the Order XML pipeline. PhotoFinale's XML carries
+  // a per-tenant RetailerDealerCode but no customer email — without a lookup
+  // table here we'd be submitting the cardholder's name from the XML against
+  // the lab's own customer record on OrderHub. Each record maps a Customer ID
+  // (matched against RetailerDealerCode) to the Customer Name + Email that
+  // should be sent in OrderInput.customer_name / customer_email instead.
+  //
+  // Shape: [{ customerId: string, customerName: string, customerEmail: string }]
+  // Lookup is case-insensitive on customerId. No match → parser throws
+  // CUSTOMER_NOT_FOUND and the watcher routes the order to failed/ so the
+  // operator can add the missing customer and retry.
+  orderXmlCustomers: {
+    type: 'array',
+    default: []
   },
   // Shared settings
   fileStabilityMinutes: {
@@ -529,6 +639,13 @@ class ConfigService {
       fileUploadsStorageFolder: this.store.get('fileUploadsStorageFolder'),
       fileUploadsAutoSyncMinutes: this.store.get('fileUploadsAutoSyncMinutes'),
       fileUploadsWatchguardMinutes: this.store.get('fileUploadsWatchguardMinutes'),
+      // Order XML Hot Folders (Mode 4)
+      orderXmlEnabled: this.store.get('orderXmlEnabled'),
+      orderXmlAutoSyncMinutes: this.store.get('orderXmlAutoSyncMinutes'),
+      orderXmlMaxRetries: this.store.get('orderXmlMaxRetries'),
+      orderXmlHotFolders: this.store.get('orderXmlHotFolders') || [],
+      orderXmlProductMappings: this.store.get('orderXmlProductMappings') || {},
+      orderXmlCustomers: this.store.get('orderXmlCustomers') || [],
       // Shared
       fileStabilityMinutes: this.store.get('fileStabilityMinutes'),
       pollingInterval: this.store.get('pollingInterval'),
@@ -770,6 +887,34 @@ class ConfigService {
     }
     this.store.set('processFolderMappings', cleanMappings);
 
+    // Save Order XML Hot Folder settings (Mode 4)
+    // Validation + sanitisation happens in _sanitiseOrderXmlHotFolders so the
+    // schema stays simple and the rules stay testable in one place.
+    this.store.set('orderXmlEnabled', Boolean(config.orderXmlEnabled));
+    const orderXmlAutoSync = parseInt(config.orderXmlAutoSyncMinutes, 10);
+    if (!isNaN(orderXmlAutoSync) && orderXmlAutoSync >= 1 && orderXmlAutoSync <= 60) {
+      this.store.set('orderXmlAutoSyncMinutes', orderXmlAutoSync);
+    }
+    const orderXmlRetries = parseInt(config.orderXmlMaxRetries, 10);
+    if (!isNaN(orderXmlRetries) && orderXmlRetries >= 1 && orderXmlRetries <= 10) {
+      this.store.set('orderXmlMaxRetries', orderXmlRetries);
+    }
+    if (Array.isArray(config.orderXmlHotFolders)) {
+      const sanitised = this._sanitiseOrderXmlHotFolders(
+        config.orderXmlHotFolders,
+        Boolean(config.orderXmlEnabled)
+      );
+      this.store.set('orderXmlHotFolders', sanitised);
+    }
+    if (config.orderXmlProductMappings && typeof config.orderXmlProductMappings === 'object') {
+      const sanitised = this._sanitiseOrderXmlProductMappings(config.orderXmlProductMappings);
+      this.store.set('orderXmlProductMappings', sanitised);
+    }
+    if (Array.isArray(config.orderXmlCustomers)) {
+      const sanitised = this._sanitiseOrderXmlCustomers(config.orderXmlCustomers);
+      this.store.set('orderXmlCustomers', sanitised);
+    }
+
     // Save AI Enhancement settings
     this.store.set('enhancementProvider', config.enhancementProvider || 'local');
     this.store.set('enhancementDefaultModel', config.enhancementDefaultModel || 'Standard V2');
@@ -925,6 +1070,320 @@ class ConfigService {
       locationId: this.store.get('locationId')
     };
   }
+  // ===========================================================================
+  // Order XML Hot Folders (Mode 4) — helpers
+  // ===========================================================================
+
+  /**
+   * Return only the hot folder configs that are currently enabled. The watcher
+   * uses this to decide which chokidar instances to start. Each entry is a
+   * fully validated, deep-cloned object — safe to mutate in the caller.
+   */
+  getEnabledHotFolders() {
+    if (!this.store.get('orderXmlEnabled')) return [];
+    const all = this.store.get('orderXmlHotFolders') || [];
+    if (!Array.isArray(all)) return [];
+    return all
+      .filter((hf) => hf && typeof hf === 'object' && hf.enabled)
+      .map((hf) => ({ ...hf }));
+  }
+
+  /**
+   * Return all hot folder configs (enabled or not). Used by the settings UI.
+   */
+  getAllHotFolders() {
+    const all = this.store.get('orderXmlHotFolders') || [];
+    return Array.isArray(all) ? all.map((hf) => ({ ...hf })) : [];
+  }
+
+  /**
+   * Return the effective max-retries for a given hot folder, falling back to
+   * the global default when the per-folder override is null/undefined.
+   */
+  getHotFolderMaxRetries(hotFolder) {
+    if (hotFolder && Number.isInteger(hotFolder.maxRetries) &&
+        hotFolder.maxRetries >= 1 && hotFolder.maxRetries <= 10) {
+      return hotFolder.maxRetries;
+    }
+    return this.store.get('orderXmlMaxRetries') || 3;
+  }
+
+  /**
+   * Return the product mapping table for a given parser sourceFormat as a
+   * Map<vendorCode, { pixfizzCode, label }>. Empty Map when nothing is
+   * configured for that format. Used by the watcher to thread the right
+   * slice through into hotFolderConfig.productMap on each parse.
+   *
+   * The map is rebuilt on each call (cheap — typically <200 entries) so
+   * settings changes propagate immediately to the next watcher tick.
+   */
+  getProductMappingsFor(sourceFormat) {
+    const all = this.store.get('orderXmlProductMappings') || {};
+    const slice = (sourceFormat && all[sourceFormat]) || [];
+    if (!Array.isArray(slice)) return new Map();
+    const out = new Map();
+    for (const row of slice) {
+      if (!row || typeof row !== 'object') continue;
+      const code = String(row.photoFinaleCode || '').trim();
+      const px   = String(row.pixfizzCode     || '').trim();
+      const lbl  = String(row.label           || '').trim();
+      if (!code || !px) continue;
+      out.set(code, { pixfizzCode: px, label: lbl || px });
+    }
+    return out;
+  }
+
+  /**
+   * Return all configured product mappings (every sourceFormat's slice).
+   * Used by the settings UI list editor.
+   */
+  getAllProductMappings() {
+    const all = this.store.get('orderXmlProductMappings') || {};
+    return all && typeof all === 'object' ? { ...all } : {};
+  }
+
+  /**
+   * Return the customer directory as a Map<lowercaseCustomerId, { customerId,
+   * customerName, customerEmail }>. Empty Map when nothing is configured. Used
+   * by the watcher to thread the lookup table through into hotFolderConfig so
+   * the PhotoFinale parser can resolve RetailerDealerCode → customer.
+   *
+   * Lookup is case-insensitive — operators paste codes from many sources and
+   * "9052" vs "9052 " vs " 9052" should all hit the same record. We store the
+   * trimmed value and key the Map by its lowercase form; the resolved value
+   * preserves the original casing so logs / errors stay readable.
+   */
+  getCustomerMap() {
+    const list = this.store.get('orderXmlCustomers') || [];
+    const out = new Map();
+    if (!Array.isArray(list)) return out;
+    for (const row of list) {
+      if (!row || typeof row !== 'object') continue;
+      const id    = String(row.customerId    || '').trim();
+      const name  = String(row.customerName  || '').trim();
+      const email = String(row.customerEmail || '').trim();
+      if (!id) continue;
+      out.set(id.toLowerCase(), { customerId: id, customerName: name, customerEmail: email });
+    }
+    return out;
+  }
+
+  /**
+   * Return all configured customer records (raw array). Used by the settings
+   * UI list editor.
+   */
+  getAllCustomers() {
+    const list = this.store.get('orderXmlCustomers') || [];
+    return Array.isArray(list) ? list.map((r) => ({ ...r })) : [];
+  }
+
+  /**
+   * Sanitise + validate the hot folder array prior to writing it to the store.
+   *
+   * Rules (only enforced for ENABLED entries — disabled rows are kept for the
+   * operator's convenience but don't have to be valid yet):
+   *   - id must be a non-empty string (auto-generated if missing).
+   *   - label must be non-empty.
+   *   - sourceFormat must be a registered parser id.
+   *   - watchFolder and processedFolder must be non-empty.
+   *   - watchFolder must not equal processedFolder, and one must not be
+   *     contained inside the other (would create a feedback loop).
+   *   - No two enabled rows can share the same watchFolder.
+   *
+   * @param {object[]} rows
+   * @param {boolean}  modeEnabled - whether the master orderXmlEnabled toggle
+   *   is on. When off, the rules above are NOT enforced — operator can save
+   *   half-configured rows while drafting.
+   * @returns {object[]} sanitised rows
+   */
+  _sanitiseOrderXmlHotFolders(rows, modeEnabled) {
+    // Lazy require to avoid loading the parser registry at app startup if
+    // Mode 4 is unused — keeps cold-start cheap.
+    const parserRegistry = require('./order-xml-parsers');
+
+    const seenWatchFolders = new Map();
+    const result = [];
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      if (!row || typeof row !== 'object') continue;
+
+      const enabled = Boolean(row.enabled);
+      const id     = String(row.id || '').trim() || _genHotFolderId();
+      const label  = String(row.label || '').trim();
+      const sourceFormat    = String(row.sourceFormat || '').trim();
+      const watchFolder     = String(row.watchFolder || '').trim();
+      const processedFolder = String(row.processedFolder || '').trim();
+      const websiteCode     = String(row.websiteCode || '').trim();
+
+      let maxRetries = null;
+      if (row.maxRetries !== null && row.maxRetries !== undefined && row.maxRetries !== '') {
+        const n = parseInt(row.maxRetries, 10);
+        if (Number.isInteger(n) && n >= 1 && n <= 10) maxRetries = n;
+      }
+
+      if (!enabled || !modeEnabled) {
+        result.push({
+          id, label, enabled, sourceFormat, watchFolder, processedFolder,
+          websiteCode, maxRetries,
+        });
+        continue;
+      }
+
+      const where = label ? `"${label}"` : `Hot folder #${i + 1}`;
+
+      if (!label) {
+        throw new Error(`Order XML hot folder #${i + 1} requires a label`);
+      }
+      if (!sourceFormat) {
+        throw new Error(`${where}: source format is required`);
+      }
+      if (!parserRegistry.has(sourceFormat)) {
+        const available = parserRegistry.list().map((p) => p.id).join(', ');
+        throw new Error(
+          `${where}: unknown source format "${sourceFormat}" (available: ${available})`
+        );
+      }
+      if (!watchFolder) {
+        throw new Error(`${where}: watch folder is required`);
+      }
+      if (!processedFolder) {
+        throw new Error(`${where}: processed folder is required`);
+      }
+
+      const watchLower     = watchFolder.toLowerCase();
+      const processedLower = processedFolder.toLowerCase();
+
+      if (watchLower === processedLower) {
+        throw new Error(`${where}: watch folder and processed folder must be different`);
+      }
+      if (_pathContains(processedLower, watchLower) || _pathContains(watchLower, processedLower)) {
+        throw new Error(
+          `${where}: watch folder and processed folder must not be nested inside each other`
+        );
+      }
+
+      if (seenWatchFolders.has(watchLower)) {
+        const otherLabel = seenWatchFolders.get(watchLower);
+        throw new Error(
+          `${where}: watch folder "${watchFolder}" is already used by "${otherLabel}"`
+        );
+      }
+      seenWatchFolders.set(watchLower, label);
+
+      result.push({
+        id, label, enabled, sourceFormat, watchFolder, processedFolder,
+        websiteCode, maxRetries,
+      });
+    }
+
+    return result;
+  }
+
+  /**
+   * Sanitise + validate the per-format product-mappings object before write.
+   *
+   * Rules:
+   *   - Top-level keys must be registered parser ids (otherwise dropped).
+   *   - Each entry { photoFinaleCode, pixfizzCode, label } is trimmed.
+   *   - Rows missing photoFinaleCode OR pixfizzCode are silently dropped.
+   *   - Within a single sourceFormat slice, duplicate photoFinaleCode values
+   *     are rejected with a useful error so the operator can see which row
+   *     conflicts.
+   *   - label defaults to pixfizzCode if blank.
+   */
+  _sanitiseOrderXmlProductMappings(mappings) {
+    const parserRegistry = require('./order-xml-parsers');
+    const out = {};
+
+    for (const [format, rows] of Object.entries(mappings || {})) {
+      if (!parserRegistry.has(format)) continue;
+      if (!Array.isArray(rows)) continue;
+
+      const seenCodes = new Map();
+      const cleaned = [];
+
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        if (!row || typeof row !== 'object') continue;
+        const photoFinaleCode = String(row.photoFinaleCode || '').trim();
+        const pixfizzCode     = String(row.pixfizzCode     || '').trim();
+        const label           = String(row.label           || '').trim();
+        if (!photoFinaleCode || !pixfizzCode) continue;
+
+        if (seenCodes.has(photoFinaleCode)) {
+          throw new Error(
+            `Order XML product mapping for "${format}": ` +
+            `vendor code "${photoFinaleCode}" appears in row ${seenCodes.get(photoFinaleCode) + 1} and row ${i + 1}. Each vendor code must map to exactly one Pixfizz product.`
+          );
+        }
+        seenCodes.set(photoFinaleCode, i);
+
+        cleaned.push({
+          photoFinaleCode,
+          pixfizzCode,
+          label: label || pixfizzCode,
+        });
+      }
+
+      out[format] = cleaned;
+    }
+
+    return out;
+  }
+
+  /**
+   * Sanitise + validate the customer directory before write.
+   *
+   * Rules:
+   *   - customerId, customerName, customerEmail are all required (rows missing
+   *     any of the three are dropped silently — keeps the renderer's "blank
+   *     row" Add affordance from blowing up the save).
+   *   - All three fields are trimmed.
+   *   - customerEmail must contain an "@" with non-empty local + domain parts;
+   *     otherwise the row is rejected with a useful error.
+   *   - Duplicate customerId (case-insensitive) is rejected with a useful
+   *     error citing both row positions — operators need to know which to fix.
+   */
+  _sanitiseOrderXmlCustomers(rows) {
+    const seenIds = new Map();
+    const cleaned = [];
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      if (!row || typeof row !== 'object') continue;
+      const customerId    = String(row.customerId    || '').trim();
+      const customerName  = String(row.customerName  || '').trim();
+      const customerEmail = String(row.customerEmail || '').trim();
+
+      if (!customerId && !customerName && !customerEmail) continue;
+      if (!customerId || !customerName || !customerEmail) {
+        throw new Error(
+          `Order XML customer row ${i + 1}: Customer ID, Name and Email are all required`
+        );
+      }
+
+      const at = customerEmail.indexOf('@');
+      if (at <= 0 || at === customerEmail.length - 1 || customerEmail.indexOf('.', at) === -1) {
+        throw new Error(
+          `Order XML customer row ${i + 1}: "${customerEmail}" is not a valid email address`
+        );
+      }
+
+      const key = customerId.toLowerCase();
+      if (seenIds.has(key)) {
+        throw new Error(
+          `Order XML customer "${customerId}" appears in row ${seenIds.get(key) + 1} and row ${i + 1}. Each Customer ID must be unique.`
+        );
+      }
+      seenIds.set(key, i);
+
+      cleaned.push({ customerId, customerName, customerEmail });
+    }
+
+    return cleaned;
+  }
+
 }
 
 module.exports = new ConfigService();

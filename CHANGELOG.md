@@ -357,6 +357,31 @@ Customer Originals plumbing). Deferred to a future milestone.
 
 ## v1.6.0 - 2026-05-13
 
+### Added — Order XML Hot Folder (Mode 4)
+
+New ingestion path that watches local folders for vendor order XML drops and
+submits them to OrderHub via POST /api-webhook. Two formats ship: PhotoFinale
+(Trevoli OrderDataSet) and ROES (Pixfizz XML). The parser layer is a registry,
+so future formats are a one-file change.
+
+- **PhotoFinale parser** — maps Trevoli OrderDataSet → OrderHub. Composite
+  order_number `XML-<idOrder>-<ExternalId>`. Rejects orders referencing
+  PhotoFinale-deleted products with a clear "Re-issue in PhotoFinale" message.
+- **ROES parser** — maps Pixfizz XML → OrderHub. Composite order_number
+  `XML-<idOrder>`. Sums `Quantity × UnitPrice` to `total_amount`. Drives
+  `paid` from `<PaymentStatus>`.
+- **Product Mappings table** — per source format. Operators map vendor codes
+  to Pixfizz product codes; OrderHub receives the Pixfizz code + label instead
+  of the raw vendor SKU. Failed orders get a one-click "Add Mapping" action.
+- **Auto-confirm** — successful submissions automatically advance from
+  `pending` to `confirmed` via `/update-order-status`.
+- **Order XML panel** — in-app history of every ingestion (last 30 days),
+  with filter, search, retry-failed, and open-folder actions.
+- **Multi-folder watcher** — each hot folder runs an independent chokidar
+  instance with its own retry queue and 1-minute polling tick.
+
+See `docs/order-xml-hotfolder.md` for the operator-facing reference.
+
 ## v1.5.0 - 2026-05-04
 
 ### Added — AI Fix-up Service (auto-enhancement on quality-gate failure)

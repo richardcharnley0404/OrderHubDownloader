@@ -28,6 +28,7 @@
     <nav class="tab-bar">
       <button class="tab active" data-tab="jobs">Jobs</button>
       <button class="tab" data-tab="film">Film Review</button>
+      <button class="tab" data-tab="orderxml">Order XML</button>
       <button class="tab" data-tab="settings">Settings</button>
       <button class="tab" data-tab="activity">Activity Log</button>
     </nav>
@@ -122,6 +123,60 @@
         <div id="film-review-root" class="film-review-root"></div>
       </div>
 
+      <!-- ═══ ORDER XML TAB ═══ -->
+      <!--
+        Plain HTML/JS panel (not a React bundle) — mirrors the Jobs tab
+        pattern so it shares the same toolbar/table styling and rebuild flow.
+        Wired by renderer.js: loadOrderXmlPanel() / renderOrderXmlPanel().
+      -->
+      <div class="tab-panel" id="panel-orderxml">
+        <div class="jobs-toolbar">
+          <div class="jobs-filter-bar" id="orderXmlFilterBar">
+            <button type="button" class="jobs-filter active" data-orderxml-filter="all">All</button>
+            <button type="button" class="jobs-filter"        data-orderxml-filter="submitted">Submitted</button>
+            <button type="button" class="jobs-filter"        data-orderxml-filter="duplicate">Duplicates</button>
+            <button type="button" class="jobs-filter"        data-orderxml-filter="failed">Failed</button>
+          </div>
+          <div class="jobs-toolbar-right">
+            <select id="orderXmlHotFolderFilter" class="jobs-date-range" title="Filter by hot folder">
+              <option value="">All hot folders</option>
+              <!-- Populated by renderer.js -->
+            </select>
+            <input type="text" id="orderXmlSearch" class="jobs-search" placeholder="Search by customer, order #, file...">
+            <button type="button" id="orderXmlRefreshBtn" class="btn-secondary">Refresh</button>
+            <button type="button" id="orderXmlClearBtn"   class="btn-secondary btn-danger-text" title="Clear all ingestion records">Clear</button>
+          </div>
+        </div>
+
+        <div class="jobs-table-wrap">
+          <table class="jobs-table" id="orderXmlTable">
+            <thead>
+              <tr>
+                <th class="sortable" data-orderxml-sort="status">Status</th>
+                <th class="sortable" data-orderxml-sort="ingestedAt">Time</th>
+                <th>Hot Folder</th>
+                <th class="sortable" data-orderxml-sort="filename">Filename</th>
+                <th>Order #</th>
+                <th>Customer</th>
+                <th class="sortable" data-orderxml-sort="total">Total</th>
+                <th>Products</th>
+                <th>Notes</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="orderXmlTableBody">
+              <!-- Populated by renderer.js -->
+            </tbody>
+          </table>
+        </div>
+
+        <div id="orderXmlEmptyState" class="jobs-empty-state">
+          <div class="empty-icon">📥</div>
+          <p class="empty-title">No XML ingestions yet</p>
+          <p class="empty-desc">Configure a hot folder under Settings → Order XML, then drop a vendor order XML in. Successful submissions will appear here.</p>
+        </div>
+      </div>
+
       <!-- ═══ SETTINGS TAB ═══ -->
       <div class="tab-panel" id="panel-settings">
         <form id="settingsForm">
@@ -132,6 +187,7 @@
             <button type="button" class="settings-subtab" data-subtab="downloads">Downloads</button>
             <button type="button" class="settings-subtab" data-subtab="filmscans">Film Scans</button>
             <button type="button" class="settings-subtab" data-subtab="fileuploads">File Uploads</button>
+            <button type="button" class="settings-subtab" data-subtab="orderxml">Order XML</button>
             <button type="button" class="settings-subtab" data-subtab="general">General</button>
             <!-- Print Controllers (legacy) tab hidden — code retained for Darkroom Pro integration reference -->
             <button type="button" class="settings-subtab" data-subtab="routing">Routing</button>
@@ -499,6 +555,107 @@
                 <label>Last Check</label>
                 <small id="fileUploadsLastCheck" class="field-hint" style="margin-top: 0;">Never</small>
               </div>
+            </fieldset>
+          </div>
+
+          <!-- Sub-tab: Order XML Hot Folders (Mode 4) -->
+          <!--
+            Mirrors the orderControllers list-editor UX: each hot folder is a
+            card with always-visible fields. Add Hot Folder appends a new card.
+            Remove drops one. The whole array round-trips through the global
+            settings save (config-service._sanitiseOrderXmlHotFolders enforces
+            integrity rules at save time).
+          -->
+          <div class="settings-subtab-panel" id="subtab-orderxml">
+            <fieldset class="panel-section">
+              <legend>Order XML Hot Folders (Mode 4)</legend>
+              <p class="section-desc">Watch one or more folders for vendor order XML drops (PhotoFinale today; ROES / dotphoto via the parser registry later) and submit them to OrderHub.</p>
+
+              <div class="form-group checkbox-group">
+                <label>
+                  <input type="checkbox" id="orderXmlEnabled" name="orderXmlEnabled">
+                  <span>Enable Order XML Hot Folders</span>
+                </label>
+              </div>
+
+              <div class="form-row">
+                <div class="form-group form-group-grow">
+                  <label for="orderXmlAutoSyncMinutes">Sync Timer (minutes)</label>
+                  <input type="number" id="orderXmlAutoSyncMinutes" name="orderXmlAutoSyncMinutes"
+                    value="1" min="1" max="60" style="width: 80px;">
+                  <small class="field-hint">How often to drain submit-retry queues. File arrivals are detected immediately.</small>
+                </div>
+                <div class="form-group form-group-grow">
+                  <label for="orderXmlMaxRetries">Default Max Retries</label>
+                  <input type="number" id="orderXmlMaxRetries" name="orderXmlMaxRetries"
+                    value="3" min="1" max="10" style="width: 80px;">
+                  <small class="field-hint">Retry attempts for transient (5xx / network) failures before moving to <code>failed/</code>.</small>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label>Last Check</label>
+                <small id="orderXmlLastCheck" class="field-hint" style="margin-top: 0;">Never</small>
+              </div>
+            </fieldset>
+
+            <fieldset class="panel-section">
+              <legend>Hot Folders</legend>
+              <p class="section-desc">Each hot folder watches a single drop directory for one XML format. Multiple folders run independently.</p>
+
+              <div id="orderXmlHotFoldersList">
+                <!-- Cards rendered by renderer.js (renderOrderXmlHotFolders) -->
+              </div>
+
+              <button type="button" id="addOrderXmlHotFolderBtn" class="btn-secondary btn-add-mapping">+ Add Hot Folder</button>
+            </fieldset>
+
+            <!--
+              Product Mappings — chunk 7d. One section per registered parser.
+              Each row maps a vendor product code to a Pixfizz product code +
+              human-readable label. Parser enforces UNMAPPED_PRODUCTS, so this
+              table is what unblocks any held order.
+            -->
+            <fieldset class="panel-section" id="orderXmlProductMappingsSection">
+              <legend>Product Mappings</legend>
+              <p class="section-desc">
+                OrderHub accepts any string as <code>product_code</code> and creates a generic line item — without a mapping, vendor codes flow through unlinked from real Pixfizz products. Add one row per vendor product. Orders containing unmapped codes are held in <code>failed/</code> with a "Add Mapping" action on the panel.
+              </p>
+
+              <div id="orderXmlProductMappingsHost">
+                <!-- One sub-section per parser format, rendered by renderer.js
+                     (renderOrderXmlProductMappings). Each contains a simple
+                     three-column editable table + an Add Mapping button. -->
+              </div>
+            </fieldset>
+
+            <!--
+              Customers — added 2026-05-11. Maps PhotoFinale's RetailerDealerCode
+              to the customer record we want OrderHub to see (Customer Name +
+              Email). Without a match the order is held in failed/ with a
+              CUSTOMER_NOT_FOUND error so the operator can add the missing
+              record and retry.
+            -->
+            <fieldset class="panel-section" id="orderXmlCustomersSection">
+              <legend>Customers</legend>
+              <p class="section-desc">
+                PhotoFinale orders carry a <code>&lt;RetailerDealerCode&gt;</code> that identifies the retailer placing the order. Add one record per retailer here: the matching record's Customer Name + Email replace the cardholder details in OrderHub. Orders with no matching record are held in <code>failed/</code>.
+              </p>
+
+              <table class="orderxml-mappings-table" id="orderXmlCustomersTable">
+                <thead>
+                  <tr>
+                    <th>Customer ID (matches <code>RetailerDealerCode</code>)</th>
+                    <th>Customer Name</th>
+                    <th>Customer Email</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="orderXmlCustomersBody">
+                  <!-- Rows rendered by renderer.js (renderOrderXmlCustomers) -->
+                </tbody>
+              </table>
+              <button type="button" id="orderXmlAddCustomerBtn" class="btn-secondary btn-add-mapping">+ Add Customer</button>
             </fieldset>
           </div>
 
@@ -884,6 +1041,7 @@
           <option value="pdf_copy">PDF Copy</option>
           <option value="darkroompro">Darkroom Pro</option>
           <option value="frontline">Frontline</option>
+          <option value="fujijobmaker">Fuji JobMaker</option>
         </select>
       </div>
 
@@ -904,6 +1062,53 @@
         <label for="ocBackPrint2">Back Print 2 Template</label>
         <input type="text" id="ocBackPrint2" placeholder="{jobId}  {filename}" style="width:100%;">
         <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Tokens: <code>{customerName}</code> <code>{jobId}</code> <code>{orderNumber}</code> <code>{jobName}</code> <code>{filename}</code></small>
+      </div>
+
+      <!-- Fuji JobMaker-specific controller fields -->
+      <div class="form-group" id="ocImageStagingRootGroup" style="display:none">
+        <label for="ocImageStagingRoot">Image Staging Root</label>
+        <div class="input-with-button">
+          <input type="text" id="ocImageStagingRoot" placeholder="e.g. \\MASTER\Pixfizz\Artwork\" readonly>
+          <button type="button" id="ocImageStagingRootBrowseBtn" class="btn-browse">Browse...</button>
+        </div>
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Root folder where OHD stages per-order subfolders containing the print images. Frontier reads <code>ImageFile=</code> from this path.</small>
+      </div>
+
+      <div class="form-group" id="ocPrinterNameGroup" style="display:none">
+        <label for="ocPrinterName">Printer Name <span style="font-weight:normal;color:#888">(optional)</span></label>
+        <input type="text" id="ocPrinterName" placeholder="e.g. DL650-A1" style="width:200px;">
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Frontier Panda logical printer name. Emitted as <code>Printer=</code>. Leave blank to let Frontier route.</small>
+      </div>
+
+      <div class="form-group" id="ocAutoCorrectGroup" style="display:none">
+        <label for="ocAutoCorrect">Auto Correct</label>
+        <select id="ocAutoCorrect" style="width:200px;">
+          <option value="">Default (use printer setting)</option>
+          <option value="on">On</option>
+          <option value="off">Off</option>
+        </select>
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Emitted as <code>AutoCorrect=1</code> / <code>AutoCorrect=0</code>, or the field is omitted when Default is selected.</small>
+      </div>
+
+      <div class="form-group" id="ocBackprintModeGroup" style="display:none">
+        <label for="ocBackprintMode">Back Print Mode</label>
+        <select id="ocBackprintMode" style="width:200px;">
+          <option value="none">None</option>
+          <option value="text">Text</option>
+        </select>
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Image-mode back prints are not enabled in v0 — see <code>docs/print-controllers/FUJI-JOBMAKER-FORMAT.md</code>.</small>
+      </div>
+
+      <div class="form-group" id="ocBackprintTemplateGroup" style="display:none">
+        <label for="ocBackprintTemplate">Back Print Template</label>
+        <input type="text" id="ocBackprintTemplate" placeholder="{firstName}/{filename}/{date}" style="width:100%;">
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Tokens: <code>{customerName}</code> <code>{firstName}</code> <code>{lastName}</code> <code>{orderNumber}</code> <code>{jobName}</code> <code>{jobId}</code> <code>{filename}</code> <code>{date}</code>. Resolved per image; sanitised and truncated to 40 chars by Frontier's <code>BackPrint=</code> field.</small>
+      </div>
+
+      <div class="form-group" id="ocFailureTimeoutMsGroup" style="display:none">
+        <label for="ocFailureTimeoutMinutes">Failure Timeout <span style="font-weight:normal;color:#888">(minutes)</span></label>
+        <input type="number" id="ocFailureTimeoutMinutes" placeholder="30" min="1" max="1440" style="width:120px;">
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">If a <code>.txt</code> still sits in the hot folder after this many minutes, OHD flags it as stuck (Frontier gives no in-band failure signal). Default 30 min. Min 1, max 1440 (24 h).</small>
       </div>
 
       <div class="form-group">
@@ -995,6 +1200,13 @@
         </label>
       </div>
 
+      <div class="form-group" id="ocIncludeCustomerNameGroup">
+        <label class="modal-checkbox">
+          <input type="checkbox" id="ocIncludeCustomerName" checked>
+          <span>Include customer surname in folder name — Inserts the customer's surname between the job number and product (e.g. <code>oPXDEMO-DR2PE0-1_Charnley_4x6 Photo Print</code>). Falls back to the full name when no surname can be parsed.</span>
+        </label>
+      </div>
+
       <!-- PDF Pipeline Builder (pdf_copy controllers only) -->
       <div class="form-group" id="ocPipelineGroup" style="display:none">
         <label style="font-weight:600;margin-bottom:8px;display:block">PDF Pipeline</label>
@@ -1076,6 +1288,25 @@
         <label for="cmSortString">Sort String <span style="font-weight:normal;color:#888">(optional)</span></label>
         <input type="text" id="cmSortString" placeholder='e.g. 4x6    3 Day' style="width:100%;">
         <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Written into the &lt;order sort="…"&gt; attribute. Describes the product and service level.</small>
+      </div>
+
+      <!-- Fuji JobMaker-specific channel mapping fields -->
+      <div class="form-group" id="cmPrintCodeGroup" style="display:none">
+        <label for="cmPrintCode">Print Code</label>
+        <input type="text" id="cmPrintCode" placeholder="e.g. 3.5x5" style="width:200px;">
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Frontier Quick Print code. Must match an entry on the IC's Quick Print list exactly. Emitted as <code>PrintCode=</code>.</small>
+      </div>
+
+      <div class="form-group" id="cmSurfaceGroup" style="display:none">
+        <label for="cmSurface">Surface</label>
+        <input type="text" id="cmSurface" placeholder="e.g. Lustre" style="width:200px;">
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Frontier paper surface name. Must match a value in <code>paperinfo.ini</code> exactly (case-sensitive). Also the per-file grouping key — emitted as <code>Surface=</code>.</small>
+      </div>
+
+      <div class="form-group" id="cmSurfaceCodeGroup" style="display:none">
+        <label for="cmSurfaceCode">Surface Code <span style="font-weight:normal;color:#888">(optional)</span></label>
+        <input type="text" id="cmSurfaceCode" placeholder="e.g. L" style="width:80px;" maxlength="4">
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Short prefix used in the per-file <code>Order_ID</code> (e.g. <code>L-BALLY-Q7F39E</code>). Defaults to the first letter of Surface if blank.</small>
       </div>
 
       <div class="pm-modal-footer">
@@ -1184,7 +1415,6 @@
       </div>
 
       <div class="form-group checkbox-group" id="assignSkipAutoPrintGroup">
-        <label for="assignSkipAutoPrint">
           <input type="checkbox" id="assignSkipAutoPrint">
           Skip Auto Print
         </label>
@@ -1222,6 +1452,90 @@
       <div class="pm-modal-footer">
         <button type="button" id="assignChannelCancelBtn" class="btn-secondary">Cancel</button>
         <button type="button" id="assignChannelSaveBtn" class="btn-primary">Save &amp; Assign</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ Backup Restore Modal ═══ -->
+  <div id="backupRestoreModal" class="pm-modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="backupRestoreModalTitle">
+    <div class="pm-modal" style="width:560px;">
+      <button type="button" class="pm-modal-close" aria-label="Close" id="backupRestoreCloseBtn">&times;</button>
+      <h3 id="backupRestoreModalTitle">Restore from Backup</h3>
+
+      <!-- View 1: file list -->
+      <div id="backupRestoreList">
+        <p class="section-desc" id="backupRestoreListIntro" style="margin-top:0;">
+          Pick a backup to preview before restoring.
+        </p>
+        <div id="backupRestoreListItems" class="backup-list">
+          <div class="backup-list-empty">Loading&hellip;</div>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;gap:8px;flex-wrap:wrap;">
+          <a href="#" id="backupRestoreSwitchHostLink" class="backup-link">Browse backups from other machines</a>
+          <button type="button" id="backupRestoreBrowseFileBtn" class="btn-secondary">Browse to file&hellip;</button>
+        </div>
+      </div>
+
+      <!-- View 2: preview -->
+      <div id="backupRestorePreview" class="hidden">
+        <div class="form-group">
+          <div class="backup-preview-summary" id="backupPreviewSummary">—</div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">You will need to re-enter these after restore:</label>
+          <ul id="backupPreviewRedacted" class="backup-preview-redacted"></ul>
+        </div>
+
+        <div id="backupPreviewCustomerWarning" class="backup-preview-warning hidden">
+          The customer directory was excluded from this backup &mdash; you will
+          need to rebuild it manually after restore.
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Sections to restore</label>
+          <label class="modal-checkbox"><input type="checkbox" id="backupSel_config" checked> Connection / FTP / Mode settings</label>
+          <label class="modal-checkbox"><input type="checkbox" id="backupSel_routing" checked> Routing (controllers, channel mappings, exceptions)</label>
+          <label class="modal-checkbox"><input type="checkbox" id="backupSel_printControllers" checked> Print controllers (legacy / Darkroom Pro)</label>
+          <label class="modal-checkbox"><input type="checkbox" id="backupSel_appPrefs" checked> App preferences (theme)</label>
+          <label class="modal-checkbox"><input type="checkbox" id="backupSel_filmReviewPrefs" checked> Film Review preferences</label>
+        </div>
+
+        <div class="pm-modal-footer">
+          <button type="button" id="backupPreviewBackBtn" class="btn-secondary">Back</button>
+          <button type="button" id="backupPreviewConfirmBtn" class="btn-primary">Restore</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ Backup Collision Modal (hostname conflict from a different machineId) ═══ -->
+  <div id="backupCollisionModal" class="pm-modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="backupCollisionModalTitle">
+    <div class="pm-modal">
+      <h3 id="backupCollisionModalTitle">Another PC is using this folder</h3>
+      <p class="section-desc" id="backupCollisionMessage">
+        The selected backup folder already contains backups from another PC
+        with the same hostname.
+      </p>
+      <div class="pm-modal-footer" style="flex-direction:column;align-items:stretch;gap:8px;">
+        <button type="button" id="backupCollisionTakeoverBtn" class="btn-danger">Take over this folder</button>
+        <button type="button" id="backupCollisionPickOtherBtn" class="btn-secondary">Choose a different folder</button>
+        <button type="button" id="backupCollisionCancelBtn" class="btn-secondary">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ Backup Relaunch Modal ═══ -->
+  <div id="backupRelaunchModal" class="pm-modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="backupRelaunchModalTitle">
+    <div class="pm-modal">
+      <h3 id="backupRelaunchModalTitle">Restore complete</h3>
+      <p class="section-desc" id="backupRelaunchSummary">
+        OHD needs to restart to apply the restored settings.
+      </p>
+      <div id="backupRelaunchNotes" class="backup-relaunch-notes"></div>
+      <div class="pm-modal-footer">
+        <button type="button" id="backupRelaunchLaterBtn" class="btn-secondary">Restart later</button>
+        <button type="button" id="backupRelaunchNowBtn" class="btn-primary">Restart now</button>
       </div>
     </div>
   </div>

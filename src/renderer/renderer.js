@@ -1690,6 +1690,32 @@ function populateForm(config) {
   document.getElementById('fileUploadsAutoSyncMinutes').value = config.fileUploadsAutoSyncMinutes || 5;
   document.getElementById('fileUploadsWatchguardMinutes').value = config.fileUploadsWatchguardMinutes || 5;
 
+  // Order XML Hot Folders (Mode 4)
+  const orderXmlEn = document.getElementById('orderXmlEnabled');
+  if (orderXmlEn) orderXmlEn.checked = config.orderXmlEnabled || false;
+  const orderXmlSync = document.getElementById('orderXmlAutoSyncMinutes');
+  if (orderXmlSync) orderXmlSync.value = config.orderXmlAutoSyncMinutes || 1;
+  const orderXmlRetries = document.getElementById('orderXmlMaxRetries');
+  if (orderXmlRetries) orderXmlRetries.value = config.orderXmlMaxRetries || 3;
+  cachedOrderXmlHotFolders = Array.isArray(config.orderXmlHotFolders)
+    ? config.orderXmlHotFolders.map((hf) => ({ ...hf }))
+    : [];
+  cachedOrderXmlProductMappings = (config.orderXmlProductMappings && typeof config.orderXmlProductMappings === 'object')
+    ? Object.fromEntries(
+        Object.entries(config.orderXmlProductMappings).map(([k, v]) =>
+          [k, Array.isArray(v) ? v.map((r) => ({ ...r })) : []]
+        )
+      )
+    : {};
+  cachedOrderXmlCustomers = Array.isArray(config.orderXmlCustomers)
+    ? config.orderXmlCustomers.map((c) => ({ ...c }))
+    : [];
+  loadOrderXmlParserFormats().then(() => {
+    renderOrderXmlHotFolders(cachedOrderXmlHotFolders);
+    renderOrderXmlProductMappings();
+    renderOrderXmlCustomers();
+  });
+
   // Shared
   document.getElementById('pollingInterval').value = config.pollingInterval || 60;
 
@@ -1775,6 +1801,15 @@ function getFormData() {
     fileUploadsStorageFolder: document.getElementById('fileUploadsStorageFolder').value.trim(),
     fileUploadsAutoSyncMinutes: parseInt(document.getElementById('fileUploadsAutoSyncMinutes').value, 10) || 5,
     fileUploadsWatchguardMinutes: parseInt(document.getElementById('fileUploadsWatchguardMinutes').value, 10) || 5,
+    // Order XML Hot Folders (Mode 4) — config-service._sanitiseOrderXmlHotFolders
+    // does the integrity validation (no two enabled rows share a watch folder,
+    // unknown sourceFormat, etc.) at save-time and throws a useful error.
+    orderXmlEnabled: document.getElementById('orderXmlEnabled')?.checked || false,
+    orderXmlAutoSyncMinutes: parseInt(document.getElementById('orderXmlAutoSyncMinutes')?.value, 10) || 1,
+    orderXmlMaxRetries: parseInt(document.getElementById('orderXmlMaxRetries')?.value, 10) || 3,
+    orderXmlHotFolders: readOrderXmlHotFoldersFromUI(),
+    orderXmlProductMappings: readOrderXmlProductMappingsFromUI(),
+    orderXmlCustomers: readOrderXmlCustomersFromUI(),
     // Shared
     pollingInterval: parseInt(document.getElementById('pollingInterval').value, 10) || 60,
     // Process folder
@@ -1795,6 +1830,403 @@ function getFormData() {
     } : {}),
   };
 }
+
+// ===========================================================================
+// Order XML Hot Folders (Mode 4) — settings list editor
+// ===========================================================================
+// UX: each hot folder is an always-editable card. Add appends a fresh card
+// with a generated id; Remove drops one. Save flows through the global
+// settings save — config-service.save() validates the array and throws on
+// integrity violations (duplicate watch folders, unknown source format, etc.).
+
+let cachedOrderXmlHotFolders = [];
+let cachedOrderXmlParserFormats = [
+  // Fallback if the IPC fetch fails — keeps the dropdown usable so the UI
+  // doesn't crash. The real list comes from order-xml-parsers/index.js.
+  { id: 'photofinale', label: 'PhotoFinale (Trevoli OrderDataSet)' },
+];
+
+async function loadOrderXmlParserFormats() {
+  try {
+    const res = await window.electronAPI.orderXmlListParserFormats();
+    if (res && res.ok && Array.isArray(res.formats) && res.formats.length > 0) {
+      cachedOrderXmlParserFormats = res.formats;
+    }
+  } catch (_) { /* stay on fallback */ }
+}
+
+function renderOrderXmlHotFolders(rows) {
+  const list = document.getElementById('orderXmlHotFoldersList');
+  if (!list) return;
+  list.innerHTML = '';
+  if (!rows || rows.length === 0) {
+    list.innerHTML = '<p class="routing-empty">No hot folders configured yet. Click "+ Add Hot Folder" to add one.</p>';
+    return;
+  }
+  rows.forEach((row, idx) => list.appendChild(buildOrderXmlHotFolderCard(row, idx)));
+}
+
+function buildOrderXmlHotFolderCard(row, idx) {
+  const card = document.createElement('div');
+  card.className = 'routing-card orderxml-card';
+  card.dataset.idx = String(idx);
+  if (row.id) card.dataset.id = row.id;
+
+  const formatOptions = cachedOrderXmlParserFormats.map((f) => `
+    <option value="${escapeHtml(f.id)}" ${f.id === row.sourceFormat ? 'selected' : ''}>${escapeHtml(f.label)}</option>
+  `).join('');
+
+  card.innerHTML = `
+    <div class="routing-card-header orderxml-card-header-bar">
+      <span class="routing-card-name">Hot Folder</span>
+      <label class="orderxml-enabled-toggle" title="Enable this hot folder">
+        <input type="checkbox" class="orderxml-enabled" ${row.enabled ? 'checked' : ''}>
+        <span>Enabled</span>
+      </label>
+      <div class="routing-card-actions">
+        <button type="button" class="btn-secondary btn-sm btn-danger-text orderxml-remove">Remove</button>
+      </div>
+    </div>
+    <div class="routing-card-body">
+      <div class="form-group">
+        <label>Name</label>
+        <input type="text" class="orderxml-label" placeholder="e.g. PhotoFinale F-11"
+               value="${escapeHtml(row.label || '')}">
+      </div>
+      <div class="form-row">
+        <div class="form-group form-group-grow">
+          <label>Source format</label>
+          <select class="orderxml-format">${formatOptions}</select>
+        </div>
+        <div class="form-group form-group-grow">
+          <label>Website code</label>
+          <input type="text" class="orderxml-website" placeholder="e.g. PPPF"
+                 value="${escapeHtml(row.websiteCode || '')}">
+        </div>
+        <div class="form-group" style="width: 130px;">
+          <label>Max retries</label>
+          <input type="number" class="orderxml-retries" min="1" max="10"
+                 placeholder="(default)"
+                 value="${row.maxRetries != null && row.maxRetries !== '' ? String(row.maxRetries) : ''}">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Watch folder</label>
+        <div class="input-with-button">
+          <input type="text" class="orderxml-watch" readonly
+                 placeholder="C:\\PhotoFinale\\Drop"
+                 value="${escapeHtml(row.watchFolder || '')}">
+          <button type="button" class="btn-browse orderxml-watch-browse">Browse...</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Processed folder</label>
+        <small class="field-hint" style="margin-top: 0;">Successful submissions land in <code>&lt;processed&gt;/&lt;MMDDYYYY&gt;/</code>; failures land in <code>&lt;processed&gt;/failed/&lt;MMDDYYYY&gt;/</code>.</small>
+        <div class="input-with-button">
+          <input type="text" class="orderxml-processed" readonly
+                 placeholder="C:\\PhotoFinale\\Processed"
+                 value="${escapeHtml(row.processedFolder || '')}">
+          <button type="button" class="btn-browse orderxml-processed-browse">Browse...</button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  // Wire actions
+  card.querySelector('.orderxml-remove').addEventListener('click', () => {
+    const i = parseInt(card.dataset.idx, 10);
+    if (Number.isFinite(i)) {
+      // Re-read from UI first so any unsaved typing isn't lost on the rows
+      // surrounding the deleted one.
+      cachedOrderXmlHotFolders = readOrderXmlHotFoldersFromUI();
+      cachedOrderXmlHotFolders.splice(i, 1);
+      renderOrderXmlHotFolders(cachedOrderXmlHotFolders);
+    }
+  });
+  card.querySelector('.orderxml-watch-browse').addEventListener('click', async () => {
+    const dir = await window.electronAPI.selectDirectory();
+    if (dir) card.querySelector('.orderxml-watch').value = dir;
+  });
+  card.querySelector('.orderxml-processed-browse').addEventListener('click', async () => {
+    const dir = await window.electronAPI.selectDirectory();
+    if (dir) card.querySelector('.orderxml-processed').value = dir;
+  });
+
+  return card;
+}
+
+/**
+ * Snapshot the current state of every hot folder card. Called by getFormData()
+ * at save time and by the Remove handler so we don't lose edits to surrounding
+ * rows when one is removed.
+ */
+function readOrderXmlHotFoldersFromUI() {
+  const list = document.getElementById('orderXmlHotFoldersList');
+  if (!list) return cachedOrderXmlHotFolders;
+  const cards = [...list.querySelectorAll('.orderxml-card')];
+  return cards.map((card) => {
+    const retriesRaw = card.querySelector('.orderxml-retries').value.trim();
+    return {
+      id:              card.dataset.id || '', // empty → config-service generates one
+      label:           card.querySelector('.orderxml-label').value.trim(),
+      enabled:         card.querySelector('.orderxml-enabled').checked,
+      sourceFormat:    card.querySelector('.orderxml-format').value,
+      watchFolder:     card.querySelector('.orderxml-watch').value.trim(),
+      processedFolder: card.querySelector('.orderxml-processed').value.trim(),
+      websiteCode:     card.querySelector('.orderxml-website').value.trim(),
+      maxRetries:      retriesRaw === '' ? null : parseInt(retriesRaw, 10),
+    };
+  });
+}
+
+// Add Hot Folder button — only wires up if the element exists (i.e. when the
+// settings panel HTML has been rendered, not on every renderer.js load order).
+(function wireAddOrderXmlHotFolderButton() {
+  const btn = document.getElementById('addOrderXmlHotFolderBtn');
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    cachedOrderXmlHotFolders = readOrderXmlHotFoldersFromUI();
+    cachedOrderXmlHotFolders.push({
+      id:              '',
+      label:           '',
+      enabled:         true,
+      sourceFormat:    cachedOrderXmlParserFormats[0]?.id || 'photofinale',
+      watchFolder:     '',
+      processedFolder: '',
+      websiteCode:     '',
+      maxRetries:      null,
+    });
+    renderOrderXmlHotFolders(cachedOrderXmlHotFolders);
+  });
+})();
+
+(function wireAddOrderXmlCustomerButton() {
+  const btn = document.getElementById('orderXmlAddCustomerBtn');
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    cachedOrderXmlCustomers = readOrderXmlCustomersFromUI();
+    cachedOrderXmlCustomers.push({ customerId: '', customerName: '', customerEmail: '' });
+    renderOrderXmlCustomers();
+    // Focus the new row's first input for fast typing.
+    const tbody = document.getElementById('orderXmlCustomersBody');
+    const inputs = tbody ? tbody.querySelectorAll('.orderxml-customer-id') : [];
+    if (inputs.length > 0) inputs[inputs.length - 1].focus();
+  });
+})();
+
+// ===========================================================================
+// Order XML Product Mappings (Mode 4 — chunk 7d) — vendor → Pixfizz table
+// ===========================================================================
+// Per-format editable list. Round-trips through the global settings save;
+// validation (1:1 enforcement) lives server-side in
+// config-service._sanitiseOrderXmlProductMappings, which throws a useful
+// error message that surfaces via the existing settings status banner.
+
+let cachedOrderXmlProductMappings = {}; // { [sourceFormat]: [{ photoFinaleCode, pixfizzCode, label }] }
+
+/**
+ * Render every format slice of the mappings table. Called from populateForm()
+ * after parser formats are loaded (so we can show empty sections for parser
+ * ids the operator hasn't touched yet).
+ */
+function renderOrderXmlProductMappings() {
+  const host = document.getElementById('orderXmlProductMappingsHost');
+  if (!host) return;
+  host.innerHTML = '';
+
+  // Ensure every registered parser has a slice rendered, even if empty —
+  // gives the operator somewhere obvious to add their first mapping.
+  for (const fmt of cachedOrderXmlParserFormats) {
+    const rows = Array.isArray(cachedOrderXmlProductMappings[fmt.id])
+      ? cachedOrderXmlProductMappings[fmt.id]
+      : [];
+    host.appendChild(buildOrderXmlMappingsSection(fmt, rows));
+  }
+}
+
+function buildOrderXmlMappingsSection(format, rows) {
+  const section = document.createElement('div');
+  section.className = 'orderxml-mappings-section';
+  section.dataset.sourceFormat = format.id;
+
+  section.innerHTML = `
+    <h4 class="orderxml-mappings-heading">${escapeHtml(format.label)}</h4>
+    <table class="orderxml-mappings-table">
+      <thead>
+        <tr>
+          <th>Vendor Code (PhotoFinale <code>idSourceProduct</code>)</th>
+          <th>Pixfizz Code</th>
+          <th>Label (used as <code>product_name</code>)</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody class="orderxml-mappings-body"></tbody>
+    </table>
+    <button type="button" class="btn-secondary btn-add-mapping orderxml-mapping-add">+ Add Mapping</button>
+  `;
+
+  const tbody = section.querySelector('.orderxml-mappings-body');
+  if (rows.length === 0) {
+    tbody.innerHTML = '<tr class="orderxml-mappings-empty"><td colspan="4">No mappings yet. Click "+ Add Mapping" to add one.</td></tr>';
+  } else {
+    rows.forEach((row) => tbody.appendChild(buildOrderXmlMappingRow(format.id, row)));
+  }
+
+  section.querySelector('.orderxml-mapping-add').addEventListener('click', () => {
+    cachedOrderXmlProductMappings = readOrderXmlProductMappingsFromUI();
+    if (!Array.isArray(cachedOrderXmlProductMappings[format.id])) {
+      cachedOrderXmlProductMappings[format.id] = [];
+    }
+    cachedOrderXmlProductMappings[format.id].push({ photoFinaleCode: '', pixfizzCode: '', label: '' });
+    renderOrderXmlProductMappings();
+    // Focus the new row's first input for fast typing.
+    const newSection = document.querySelector(`.orderxml-mappings-section[data-source-format="${format.id}"]`);
+    const inputs = newSection ? newSection.querySelectorAll('.orderxml-mapping-pf') : [];
+    if (inputs.length > 0) inputs[inputs.length - 1].focus();
+  });
+
+  return section;
+}
+
+function buildOrderXmlMappingRow(formatId, row) {
+  const tr = document.createElement('tr');
+  tr.className = 'orderxml-mapping-row';
+  tr.innerHTML = `
+    <td><input type="text" class="orderxml-mapping-pf"     placeholder="e.g. 1082252"    value="${escapeHtml(row.photoFinaleCode || '')}"></td>
+    <td><input type="text" class="orderxml-mapping-pixfizz" placeholder="e.g. PX-5X7"    value="${escapeHtml(row.pixfizzCode     || '')}"></td>
+    <td><input type="text" class="orderxml-mapping-label"   placeholder="e.g. 5x7 Print" value="${escapeHtml(row.label           || '')}"></td>
+    <td><button type="button" class="btn-secondary btn-sm btn-danger-text orderxml-mapping-remove">Remove</button></td>
+  `;
+  tr.querySelector('.orderxml-mapping-remove').addEventListener('click', () => {
+    cachedOrderXmlProductMappings = readOrderXmlProductMappingsFromUI();
+    const slice = cachedOrderXmlProductMappings[formatId] || [];
+    const section = tr.closest('.orderxml-mappings-section');
+    const tbody = section.querySelector('.orderxml-mappings-body');
+    const idx = [...tbody.querySelectorAll('.orderxml-mapping-row')].indexOf(tr);
+    if (idx >= 0 && idx < slice.length) {
+      slice.splice(idx, 1);
+      cachedOrderXmlProductMappings[formatId] = slice;
+      renderOrderXmlProductMappings();
+    }
+  });
+  return tr;
+}
+
+/**
+ * Snapshot every section's rows back into the cached object. Called by
+ * getFormData() at save time and by Add/Remove handlers so unsaved typing
+ * isn't lost when the table re-renders.
+ */
+function readOrderXmlProductMappingsFromUI() {
+  const host = document.getElementById('orderXmlProductMappingsHost');
+  if (!host) return cachedOrderXmlProductMappings;
+  const out = {};
+  host.querySelectorAll('.orderxml-mappings-section').forEach((section) => {
+    const formatId = section.dataset.sourceFormat;
+    const rows = [...section.querySelectorAll('.orderxml-mapping-row')].map((tr) => ({
+      photoFinaleCode: tr.querySelector('.orderxml-mapping-pf').value.trim(),
+      pixfizzCode:     tr.querySelector('.orderxml-mapping-pixfizz').value.trim(),
+      label:           tr.querySelector('.orderxml-mapping-label').value.trim(),
+    }));
+    out[formatId] = rows;
+  });
+  return out;
+}
+
+/**
+ * Append draft rows for a list of unmapped vendor codes and scroll the
+ * section into view. Used by the panel's "Add Mapping" affordance (chunk 7e).
+ */
+// ===========================================================================
+// Order XML Customers (Mode 4) — RetailerDealerCode → name/email directory
+// ===========================================================================
+// Mirrors the product-mapping pattern: render → snapshot-on-mutate → save via
+// the global settings round-trip. Validation (required fields, unique ids,
+// email shape) is enforced server-side in
+// config-service._sanitiseOrderXmlCustomers so the operator gets a single
+// consistent error path via the settings status banner.
+
+let cachedOrderXmlCustomers = []; // [{ customerId, customerName, customerEmail }]
+
+function renderOrderXmlCustomers() {
+  const tbody = document.getElementById('orderXmlCustomersBody');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+  if (cachedOrderXmlCustomers.length === 0) {
+    tbody.innerHTML =
+      '<tr class="orderxml-mappings-empty"><td colspan="4">No customers yet. Click "+ Add Customer" to add one.</td></tr>';
+    return;
+  }
+  cachedOrderXmlCustomers.forEach((row) => tbody.appendChild(buildOrderXmlCustomerRow(row)));
+}
+
+function buildOrderXmlCustomerRow(row) {
+  const tr = document.createElement('tr');
+  tr.className = 'orderxml-customer-row';
+  tr.innerHTML = `
+    <td><input type="text"  class="orderxml-customer-id"    placeholder="e.g. 9052"               value="${escapeHtml(row.customerId    || '')}"></td>
+    <td><input type="text"  class="orderxml-customer-name"  placeholder="e.g. F-11 Photographic"  value="${escapeHtml(row.customerName  || '')}"></td>
+    <td><input type="email" class="orderxml-customer-email" placeholder="e.g. orders@f-11.com"    value="${escapeHtml(row.customerEmail || '')}"></td>
+    <td><button type="button" class="btn-secondary btn-sm btn-danger-text orderxml-customer-remove">Remove</button></td>
+  `;
+  tr.querySelector('.orderxml-customer-remove').addEventListener('click', () => {
+    cachedOrderXmlCustomers = readOrderXmlCustomersFromUI();
+    const tbody = document.getElementById('orderXmlCustomersBody');
+    const idx = [...tbody.querySelectorAll('.orderxml-customer-row')].indexOf(tr);
+    if (idx >= 0 && idx < cachedOrderXmlCustomers.length) {
+      cachedOrderXmlCustomers.splice(idx, 1);
+      renderOrderXmlCustomers();
+    }
+  });
+  return tr;
+}
+
+function readOrderXmlCustomersFromUI() {
+  const tbody = document.getElementById('orderXmlCustomersBody');
+  if (!tbody) return cachedOrderXmlCustomers;
+  return [...tbody.querySelectorAll('.orderxml-customer-row')].map((tr) => ({
+    customerId:    tr.querySelector('.orderxml-customer-id').value.trim(),
+    customerName:  tr.querySelector('.orderxml-customer-name').value.trim(),
+    customerEmail: tr.querySelector('.orderxml-customer-email').value.trim(),
+  }));
+}
+
+// Append a draft row for a known-missing RetailerDealerCode and scroll into
+// view. Used by the panel's "Add Customer" affordance when a CUSTOMER_NOT_FOUND
+// failure surfaces.
+function seedOrderXmlCustomerDraft(retailerCode) {
+  cachedOrderXmlCustomers = readOrderXmlCustomersFromUI();
+  const code = String(retailerCode || '').trim();
+  const exists = cachedOrderXmlCustomers.some((r) => r.customerId.toLowerCase() === code.toLowerCase());
+  if (!exists) {
+    cachedOrderXmlCustomers.push({ customerId: code, customerName: '', customerEmail: '' });
+  }
+  renderOrderXmlCustomers();
+  const section = document.getElementById('orderXmlCustomersSection');
+  if (section) section.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+// ===========================================================================
+
+function seedOrderXmlMappingDrafts(formatId, vendorCodes) {
+  if (!Array.isArray(vendorCodes) || vendorCodes.length === 0) return;
+  cachedOrderXmlProductMappings = readOrderXmlProductMappingsFromUI();
+  if (!Array.isArray(cachedOrderXmlProductMappings[formatId])) {
+    cachedOrderXmlProductMappings[formatId] = [];
+  }
+  for (const code of vendorCodes) {
+    // Don't add duplicates if the operator already has the row in flight.
+    const exists = cachedOrderXmlProductMappings[formatId].some((r) => r.photoFinaleCode === code);
+    if (!exists) {
+      cachedOrderXmlProductMappings[formatId].push({ photoFinaleCode: String(code), pixfizzCode: '', label: '' });
+    }
+  }
+  renderOrderXmlProductMappings();
+  const section = document.querySelector(`.orderxml-mappings-section[data-source-format="${formatId}"]`);
+  if (section) section.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+// ===========================================================================
 
 // Show status message (Settings tab only)
 function showStatus(message, type = 'info') {
@@ -2409,6 +2841,12 @@ document.querySelectorAll('.tab-bar .tab').forEach(tab => {
     if (tab.dataset.tab === 'activity') {
       loadActivityLog();
     }
+    if (tab.dataset.tab === 'orderxml') {
+      loadOrderXmlPanel();
+      startOrderXmlAutoRefresh();
+    } else {
+      stopOrderXmlAutoRefresh();
+    }
   });
 });
 
@@ -2510,6 +2948,9 @@ async function updateLastCheckTimes() {
 
     const fileEl = document.getElementById('fileUploadsLastCheck');
     if (fileEl) fileEl.textContent = formatCheckTime(status.lastFileUploadsCheck);
+
+    const orderXmlEl = document.getElementById('orderXmlLastCheck');
+    if (orderXmlEl) orderXmlEl.textContent = formatCheckTime(status.lastOrderXmlCheck);
   } catch (e) {
     // Silently ignore — status endpoint may not be ready yet
   }
@@ -2660,13 +3101,21 @@ function addControllerCard(controller = null) {
     </div>
   `;
 
-  // Auto Correct + Active row
+  // Auto Correct + Active row. The customer-surname flag defaults ON for new
+  // controllers and for legacy controllers that pre-date the field.
+  const includeCustomerChecked = controller ? (controller.includeCustomerInFolder !== false) : true;
   const row4 = document.createElement('div');
   row4.innerHTML = `
     <div class="form-group checkbox-group ctrl-dpof-only">
       <label>
         <input type="checkbox" class="ctrl-auto-correct" ${controller && controller.autoCorrect ? 'checked' : ''}>
         <span>Auto Correct</span>
+      </label>
+    </div>
+    <div class="form-group checkbox-group ctrl-dpof-only">
+      <label>
+        <input type="checkbox" class="ctrl-include-customer-name" ${includeCustomerChecked ? 'checked' : ''}>
+        <span>Include customer surname in folder name</span>
       </label>
     </div>
     <div class="form-group checkbox-group">
@@ -2909,6 +3358,7 @@ function addControllerCard(controller = null) {
       vendorName: isDP ? '' : body.querySelector('.ctrl-vendor-name').value.trim(),
       vendorAttribute: isDP ? '' : body.querySelector('.ctrl-vendor-attr').value.trim(),
       autoCorrect: isDP ? false : body.querySelector('.ctrl-auto-correct').checked,
+      includeCustomerInFolder: isDP ? undefined : body.querySelector('.ctrl-include-customer-name').checked,
       // Darkroom Pro-specific
       processedFolderName: isDP ? (body.querySelector('.ctrl-processed-folder').value.trim() || 'processed') : undefined,
       indexPrint: isDP ? body.querySelector('.ctrl-index-print').checked : undefined,
@@ -3284,6 +3734,7 @@ function getControllerTypeLabel(type) {
     case 'pdf_copy':    return 'PDF Copy';
     case 'darkroompro': return 'Darkroom Pro';
     case 'frontline':   return 'Frontline';
+    case 'fujijobmaker': return 'Fuji JobMaker';
     default:            return (type || 'noritsu').toUpperCase();
   }
 }
@@ -3564,6 +4015,7 @@ function readMediaTranslations() {
 
 function updateOcTypeFields() {
   const type = document.getElementById('ocType').value;
+  const isFuji = type === 'fujijobmaker';
   document.getElementById('ocProcessedFolderGroup').style.display    = type === 'darkroompro' ? '' : 'none';
   document.getElementById('ocArtworkRootPathGroup').style.display     = type === 'darkroompro' ? '' : 'none';
   document.getElementById('ocOrderLastNameFormatGroup').style.display  = type === 'darkroompro' ? '' : 'none';
@@ -3573,10 +4025,21 @@ function updateOcTypeFields() {
   document.getElementById('ocBannerSheetGroup').style.display        = (type === 'noritsu' || type === 'epson' || type === 'dpof' || type === 'pdf_copy') ? '' : 'none';
   document.getElementById('ocPipelineGroup').style.display           = type === 'pdf_copy'     ? '' : 'none';
   document.getElementById('ocCheckOrderStatusGroup').style.display   = (type === 'noritsu' || type === 'epson' || type === 'dpof' || type === 'darkroompro') ? '' : 'none';
+  document.getElementById('ocIncludeCustomerNameGroup').style.display = (type === 'noritsu' || type === 'epson' || type === 'dpof') ? '' : 'none';
   // Frontline-specific fields
   document.getElementById('ocDeviceGroup').style.display     = type === 'frontline' ? '' : 'none';
   document.getElementById('ocBackPrint1Group').style.display = type === 'frontline' ? '' : 'none';
   document.getElementById('ocBackPrint2Group').style.display = type === 'frontline' ? '' : 'none';
+  // Fuji JobMaker-specific fields
+  document.getElementById('ocImageStagingRootGroup').style.display  = isFuji ? '' : 'none';
+  document.getElementById('ocPrinterNameGroup').style.display       = isFuji ? '' : 'none';
+  document.getElementById('ocAutoCorrectGroup').style.display       = isFuji ? '' : 'none';
+  document.getElementById('ocBackprintModeGroup').style.display     = isFuji ? '' : 'none';
+  document.getElementById('ocFailureTimeoutMsGroup').style.display  = isFuji ? '' : 'none';
+  // Back-print template only when mode === 'text'
+  const backprintMode = document.getElementById('ocBackprintMode').value;
+  document.getElementById('ocBackprintTemplateGroup').style.display =
+    (isFuji && backprintMode === 'text') ? '' : 'none';
 }
 
 function openOrderControllerModal(ctrl = null) {
@@ -3609,9 +4072,28 @@ function openOrderControllerModal(ctrl = null) {
   document.getElementById('ocDevice').value     = ctrl ? (ctrl.device     || 'Pixfizz')                   : 'Pixfizz';
   document.getElementById('ocBackPrint1').value = ctrl ? (ctrl.backPrint1 || '{jobName}  {customerName}') : '{jobName}  {customerName}';
   document.getElementById('ocBackPrint2').value = ctrl ? (ctrl.backPrint2 || '{jobId}  {filename}')       : '{jobId}  {filename}';
+  // Fuji JobMaker fields — autoCorrect is null/true/false on the record; map to '' | 'on' | 'off'
+  document.getElementById('ocImageStagingRoot').value = ctrl ? (ctrl.imageStagingRoot || '') : '';
+  document.getElementById('ocPrinterName').value      = ctrl ? (ctrl.printerName      || '') : '';
+  const fujiAutoCorrect = ctrl && ctrl.type === 'fujijobmaker' ? ctrl.autoCorrect : null;
+  document.getElementById('ocAutoCorrect').value      =
+    fujiAutoCorrect === true ? 'on' : fujiAutoCorrect === false ? 'off' : '';
+  document.getElementById('ocBackprintMode').value    = ctrl && ctrl.type === 'fujijobmaker'
+    ? (ctrl.backprintMode || 'none')
+    : 'none';
+  document.getElementById('ocBackprintTemplate').value = ctrl && ctrl.type === 'fujijobmaker'
+    ? (ctrl.backprintTemplate || '{firstName}/{filename}/{date}')
+    : '{firstName}/{filename}/{date}';
+  // Stored in ms; display in minutes. Default 30.
+  const failureTimeoutMs = ctrl && ctrl.type === 'fujijobmaker' && Number.isFinite(ctrl.failureTimeoutMs)
+    ? ctrl.failureTimeoutMs
+    : 30 * 60 * 1000;
+  document.getElementById('ocFailureTimeoutMinutes').value = Math.round(failureTimeoutMs / 60000);
   document.getElementById('ocAutoPrint').checked        = ctrl ? !!ctrl.autoprint                      : false;
   document.getElementById('ocBannerSheet').checked      = ctrl ? !!ctrl.bannerSheet                    : false;
   document.getElementById('ocCheckOrderStatus').checked = ctrl ? (ctrl.checkOrderStatus === true)      : false;
+  // Default ON for new controllers and for legacy controllers missing the field.
+  document.getElementById('ocIncludeCustomerName').checked = ctrl ? (ctrl.includeCustomerInFolder !== false) : true;
   // Load pipeline steps
   pipelineSteps = (ctrl && ctrl.pdfPipeline && ctrl.pdfPipeline.steps) ? JSON.parse(JSON.stringify(ctrl.pdfPipeline.steps)) : [];
   renderPipelineSteps();
@@ -3985,6 +4467,15 @@ document.getElementById('ocArtworkRootPathBrowseBtn').addEventListener('click', 
   if (dir) document.getElementById('ocArtworkRootPath').value = dir;
 });
 
+document.getElementById('ocImageStagingRootBrowseBtn').addEventListener('click', async () => {
+  const dir = await window.electronAPI.selectDirectory();
+  if (dir) document.getElementById('ocImageStagingRoot').value = dir;
+});
+
+// Re-run the type-fields toggle when back-print mode changes so the template
+// input appears only in text mode.
+document.getElementById('ocBackprintMode').addEventListener('change', updateOcTypeFields);
+
 document.getElementById('ocAddSizeTranslationBtn').addEventListener('click', () => {
   addSizeTranslationRow(document.getElementById('ocSizeTranslationsList'));
 });
@@ -4019,6 +4510,9 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
   };
   if (type === 'dpof' || type === 'pdf_copy') {
     controller.bannerSheet = document.getElementById('ocBannerSheet').checked;
+  }
+  if (type === 'noritsu' || type === 'epson' || type === 'dpof') {
+    controller.includeCustomerInFolder = document.getElementById('ocIncludeCustomerName').checked;
   }
   if (type === 'pdf_copy' && pipelineSteps.length > 0) {
     controller.pdfPipeline = { steps: JSON.parse(JSON.stringify(pipelineSteps)) };
@@ -4055,6 +4549,34 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
     controller.device     = document.getElementById('ocDevice').value.trim()     || 'Pixfizz';
     controller.backPrint1 = document.getElementById('ocBackPrint1').value.trim() || '{jobName}  {customerName}';
     controller.backPrint2 = document.getElementById('ocBackPrint2').value.trim() || '{jobId}  {filename}';
+  }
+  if (type === 'fujijobmaker') {
+    const imageStagingRoot = document.getElementById('ocImageStagingRoot').value.trim();
+    const printerName      = document.getElementById('ocPrinterName').value.trim();
+    const autoCorrectRaw   = document.getElementById('ocAutoCorrect').value;
+    const backprintMode    = document.getElementById('ocBackprintMode').value || 'none';
+    const backprintTemplate = document.getElementById('ocBackprintTemplate').value.trim();
+    const failureTimeoutMin = parseInt(document.getElementById('ocFailureTimeoutMinutes').value, 10);
+
+    // Renderer-side guards mirror the required-field checks in
+    // validateControllerConfig (src/main/services/fuji-jobmaker-config.js).
+    // The validator runs again at the IPC boundary so a bad payload can't
+    // slip past, but surfacing errors before IPC keeps the UX snappy.
+    if (!imageStagingRoot)         { alert('Image Staging Root is required for Fuji JobMaker controllers.'); return; }
+    if (backprintMode === 'text' && !backprintTemplate) {
+      alert('Back Print Template is required when Back Print Mode is "Text".'); return;
+    }
+    if (!Number.isFinite(failureTimeoutMin) || failureTimeoutMin < 1 || failureTimeoutMin > 1440) {
+      alert('Failure Timeout must be between 1 and 1440 minutes.'); return;
+    }
+
+    controller.hotFolderPath     = outputPath; // The Output Path field IS the Frontier hot folder for Fuji.
+    controller.imageStagingRoot  = imageStagingRoot;
+    controller.printerName       = printerName;
+    controller.autoCorrect       = autoCorrectRaw === 'on' ? true : autoCorrectRaw === 'off' ? false : null;
+    controller.backprintMode     = backprintMode;
+    controller.backprintTemplate = backprintTemplate;
+    controller.failureTimeoutMs  = failureTimeoutMin * 60 * 1000;
   }
   try {
     const result = await window.electronAPI.saveOrderController(controller);
@@ -4330,6 +4852,10 @@ function openChannelMappingModal(mapping = null, controllers = null) {
   // Frontline fields
   document.getElementById('cmBatchCode').value        = mapping ? (mapping.batchCode  || '') : '';
   document.getElementById('cmSortString').value       = mapping ? (mapping.sortString || '') : '';
+  // Fuji JobMaker fields
+  document.getElementById('cmPrintCode').value        = mapping ? (mapping.printCode   || '') : '';
+  document.getElementById('cmSurface').value          = mapping ? (mapping.surface     || '') : '';
+  document.getElementById('cmSurfaceCode').value      = mapping ? (mapping.surfaceCode || '') : '';
 
   const optsList = document.getElementById('cmOptionsList');
   optsList.innerHTML = '';
@@ -4347,14 +4873,19 @@ function openChannelMappingModal(mapping = null, controllers = null) {
 
 function _updateCmFields(controllerId, ctrlList) {
   const ctrl       = (ctrlList || cachedOrderControllers).find(c => c.id === controllerId);
-  const isFrontline = ctrl && ctrl.type === 'frontline';
+  const isFrontline   = ctrl && ctrl.type === 'frontline';
   const isDarkroomPro = ctrl && ctrl.type === 'darkroompro';
+  const isFuji        = ctrl && ctrl.type === 'fujijobmaker';
 
-  document.getElementById('cmChannelNumberGroup').style.display  = (!isFrontline && !isDarkroomPro) ? '' : 'none';
-  document.getElementById('cmSkipAutoPrintGroup').style.display  = !isFrontline ? '' : 'none';
-  document.getElementById('cmPrintSizeCodeGroup').style.display  = (!isFrontline && !isDarkroomPro) ? '' : 'none';
+  document.getElementById('cmChannelNumberGroup').style.display  = (!isFrontline && !isDarkroomPro && !isFuji) ? '' : 'none';
+  document.getElementById('cmSkipAutoPrintGroup').style.display  = (!isFrontline && !isFuji) ? '' : 'none';
+  document.getElementById('cmPrintSizeCodeGroup').style.display  = (!isFrontline && !isDarkroomPro && !isFuji) ? '' : 'none';
   document.getElementById('cmBatchCodeGroup').style.display      = isFrontline ? '' : 'none';
   document.getElementById('cmSortStringGroup').style.display     = isFrontline ? '' : 'none';
+  // Fuji JobMaker-specific
+  document.getElementById('cmPrintCodeGroup').style.display      = isFuji ? '' : 'none';
+  document.getElementById('cmSurfaceGroup').style.display        = isFuji ? '' : 'none';
+  document.getElementById('cmSurfaceCodeGroup').style.display    = isFuji ? '' : 'none';
 }
 
 function addChannelMappingOptionRow(container, name = '', value = '') {
@@ -4389,6 +4920,9 @@ document.getElementById('cmSaveBtn').addEventListener('click', async () => {
   const printSizeCode  = document.getElementById('cmPrintSizeCode').value.trim();
   const batchCode      = document.getElementById('cmBatchCode').value.trim();
   const sortString     = document.getElementById('cmSortString').value.trim();
+  const printCode      = document.getElementById('cmPrintCode').value.trim();
+  const surface        = document.getElementById('cmSurface').value.trim();
+  const surfaceCode    = document.getElementById('cmSurfaceCode').value.trim();
 
   if (!controllerId)                         { alert('Please select a controller.');                  return; }
   if (!productCode)                          { alert('Product code is required.');                    return; }
@@ -4396,8 +4930,12 @@ document.getElementById('cmSaveBtn').addEventListener('click', async () => {
   const selectedController = cachedOrderControllers.find(c => c.id === controllerId);
   const isFrontlineCtrl    = selectedController?.type === 'frontline';
   const isDarkroomProCtrl  = selectedController?.type === 'darkroompro';
+  const isFujiCtrl         = selectedController?.type === 'fujijobmaker';
 
-  if (isFrontlineCtrl) {
+  if (isFujiCtrl) {
+    if (!printCode) { alert('Print Code is required for Fuji JobMaker mappings.'); return; }
+    if (!surface)   { alert('Surface is required for Fuji JobMaker mappings.');    return; }
+  } else if (isFrontlineCtrl) {
     if (!batchCode) { alert('Batch code is required for Frontline controllers.'); return; }
   } else if (!isDarkroomProCtrl) {
     if (isNaN(channelNumber) || channelNumber < 1) { alert('Channel number must be a positive integer.'); return; }
@@ -4413,17 +4951,30 @@ document.getElementById('cmSaveBtn').addEventListener('click', async () => {
   const skipAutoPrint = document.getElementById('cmSkipAutoPrint').checked;
   const editingId = modal.dataset.editingId;
   try {
-    await window.electronAPI.saveChannelMapping({
+    const payload = {
       id: editingId || crypto.randomUUID(),
       controllerId,
       productCode,
       options,
-      channelNumber:  isFrontlineCtrl ? null : channelNumber,
-      printSizeCode:  isFrontlineCtrl ? ''   : (printSizeCode || ''),
+      channelNumber:  (isFrontlineCtrl || isFujiCtrl) ? null : channelNumber,
+      printSizeCode:  (isFrontlineCtrl || isFujiCtrl) ? ''   : (printSizeCode || ''),
       batchCode:      isFrontlineCtrl ? batchCode  : '',
       sortString:     isFrontlineCtrl ? sortString : '',
-      skipAutoPrint:  isFrontlineCtrl ? false : skipAutoPrint,
-    });
+      skipAutoPrint:  (isFrontlineCtrl || isFujiCtrl) ? false : skipAutoPrint,
+    };
+    if (isFujiCtrl) {
+      payload.printCode   = printCode;
+      payload.surface     = surface;
+      payload.surfaceCode = surfaceCode;
+    }
+    const result = await window.electronAPI.saveChannelMapping(payload);
+    // Surface validator failures from the IPC handler (e.g. Fuji
+    // validateProductMappingConfig). Keep the modal open so the operator
+    // can fix the inputs in place — mirrors the controller-save pattern.
+    if (result && result.success === false) {
+      showToast('Error saving channel mapping: ' + (result.error || 'Save failed'), 'error', 8000);
+      return;
+    }
     modal.classList.add('hidden');
     await loadChannelMappings();
   } catch (err) {
@@ -4590,7 +5141,6 @@ document.getElementById('csvImportDoBtn').addEventListener('click', async () => 
 
   let imported = 0;
   const importErrors = [];
-
   for (const row of rows) {
     try {
       const key = `${controllerId}\0${row.productCode}\0${optionsKey(row.options)}`;
@@ -4823,6 +5373,314 @@ document.getElementById('excSaveBtn').addEventListener('click', async () => {
     showToast('Error saving exception: ' + err.message, 'error');
   }
 });
+
+// ===========================================================================
+// Order XML Panel (Mode 4) — operator-facing ingestion history
+// ===========================================================================
+// Plain HTML/JS panel mirroring the Jobs tab (no React bundle needed). All
+// data flows through window.electronAPI.orderXml* — IPC handlers in
+// src/main/ipc-handlers.js + helpers in services/order-xml-ipc-helpers.js.
+
+const orderXmlState = {
+  records:        [],        // last response from orderXml:listRecords
+  hotFolders:     [],        // for the Hot Folder filter dropdown
+  filter:         'all',     // 'all' | 'submitted' | 'duplicate' | 'failed'
+  hotFolderId:    '',        // '' = all
+  search:         '',
+  sort:           { col: 'ingestedAt', dir: 'desc' },
+  refreshTimer:   null,
+};
+
+async function loadOrderXmlPanel() {
+  try {
+    // Pull records and hot folders in parallel — neither depends on the other.
+    const [recordsRes, hotFoldersRes] = await Promise.all([
+      window.electronAPI.orderXmlListRecords({}),
+      window.electronAPI.orderXmlGetHotFolders(),
+    ]);
+    if (recordsRes && recordsRes.ok) {
+      orderXmlState.records = Array.isArray(recordsRes.records) ? recordsRes.records : [];
+    }
+    if (hotFoldersRes && hotFoldersRes.ok) {
+      orderXmlState.hotFolders = Array.isArray(hotFoldersRes.hotFolders) ? hotFoldersRes.hotFolders : [];
+      populateOrderXmlHotFolderFilter();
+    }
+    renderOrderXmlPanel();
+  } catch (err) {
+    console.error('[orderxml] loadOrderXmlPanel error', err);
+  }
+}
+
+function populateOrderXmlHotFolderFilter() {
+  const sel = document.getElementById('orderXmlHotFolderFilter');
+  if (!sel) return;
+  const previous = sel.value;
+  // Rebuild while preserving the current selection.
+  sel.innerHTML = '<option value="">All hot folders</option>' +
+    orderXmlState.hotFolders.map((hf) =>
+      `<option value="${escapeHtml(hf.id)}">${escapeHtml(hf.label || '(unnamed)')}</option>`
+    ).join('');
+  // If the previously-selected folder still exists, keep it selected.
+  if (previous && orderXmlState.hotFolders.some((hf) => hf.id === previous)) {
+    sel.value = previous;
+  }
+}
+
+function renderOrderXmlPanel() {
+  const tbody = document.getElementById('orderXmlTableBody');
+  const empty = document.getElementById('orderXmlEmptyState');
+  const table = document.getElementById('orderXmlTable');
+  if (!tbody || !empty || !table) return;
+
+  // 1. Filter
+  let rows = orderXmlState.records;
+  if (orderXmlState.filter !== 'all') {
+    rows = rows.filter((r) => r.status === orderXmlState.filter);
+  }
+  if (orderXmlState.hotFolderId) {
+    rows = rows.filter((r) => r.hotFolderId === orderXmlState.hotFolderId);
+  }
+  const q = orderXmlState.search.trim().toLowerCase();
+  if (q) {
+    rows = rows.filter((r) =>
+      String(r.customer       || '').toLowerCase().includes(q) ||
+      String(r.customerEmail  || '').toLowerCase().includes(q) ||
+      String(r.externalId     || '').toLowerCase().includes(q) ||
+      String(r.filename       || '').toLowerCase().includes(q)
+    );
+  }
+
+  // 2. Sort
+  const { col, dir } = orderXmlState.sort;
+  const mul = dir === 'asc' ? 1 : -1;
+  rows = [...rows].sort((a, b) => {
+    let va = a[col], vb = b[col];
+    if (col === 'total') { va = Number(va) || 0; vb = Number(vb) || 0; }
+    if (va === vb) return 0;
+    if (va == null) return 1;
+    if (vb == null) return -1;
+    return va > vb ? mul : -mul;
+  });
+
+  // 3. Render
+  tbody.innerHTML = '';
+  if (rows.length === 0) {
+    empty.style.display = '';
+    table.style.display = 'none';
+    return;
+  }
+  empty.style.display = 'none';
+  table.style.display = '';
+  rows.forEach((r) => tbody.appendChild(buildOrderXmlRow(r)));
+}
+
+function buildOrderXmlRow(r) {
+  const tr = document.createElement('tr');
+  tr.dataset.id = r.id || '';
+
+  const total    = (r.total != null && r.total !== '')
+    ? `$${Number(r.total).toFixed(2)}`
+    : '';
+  const time     = formatOrderXmlTime(r.ingestedAt);
+  const products = truncate(String(r.productSummary || ''), 60);
+  const errMsg   = r.errorMessage ? truncate(String(r.errorMessage), 80) : '';
+
+  tr.innerHTML = `
+    <td><span class="orderxml-status-badge orderxml-status-${escapeHtml(r.status || '')}">${escapeHtml(r.status || '')}</span></td>
+    <td>${escapeHtml(time)}</td>
+    <td>${escapeHtml(r.hotFolderLabel || '')}</td>
+    <td><code class="orderxml-filename">${escapeHtml(r.filename || '')}</code></td>
+    <td>${escapeHtml(r.externalId || '')}</td>
+    <td>${escapeHtml(r.customer || '')}</td>
+    <td class="orderxml-total">${total}</td>
+    <td title="${escapeHtml(r.productSummary || '')}">${escapeHtml(products)}</td>
+    <td class="orderxml-notes" title="${escapeHtml(r.errorMessage || '')}">${escapeHtml(errMsg)}</td>
+    <td class="orderxml-actions"></td>
+  `;
+
+  const actions = tr.querySelector('.orderxml-actions');
+
+  if (r.externalId) {
+    actions.appendChild(makeOrderXmlActionBtn('Copy #', async () => {
+      try {
+        await navigator.clipboard.writeText(String(r.externalId));
+        showToast(`Copied ${r.externalId}`, 'success', 1500);
+      } catch (_) { showToast('Copy failed', 'error'); }
+    }));
+  }
+
+  if (r.status === 'failed') {
+    // UNMAPPED_PRODUCTS rows get a one-click jump to Settings → Order XML →
+    // Product Mappings with draft rows pre-filled for the offending vendor
+    // codes. The operator types Pixfizz code + label, saves, then clicks
+    // Retry on this row to re-run the pipeline.
+    if (r.errorCode === 'UNMAPPED_PRODUCTS' && r.sourceFormat) {
+      const codes = (r.errorDetails && Array.isArray(r.errorDetails.unmappedCodes))
+        ? r.errorDetails.unmappedCodes
+        : extractUnmappedCodesFromMessage(r.errorMessage);
+      if (codes.length > 0) {
+        actions.appendChild(makeOrderXmlActionBtn('Add Mapping', () => {
+          // Switch to Settings → Order XML sub-tab.
+          const settingsTab = document.querySelector('.tab[data-tab="settings"]');
+          if (settingsTab) settingsTab.click();
+          const orderXmlSubtab = document.querySelector('.settings-subtab[data-subtab="orderxml"]');
+          if (orderXmlSubtab) orderXmlSubtab.click();
+          // Seed draft rows for the unmapped codes.
+          seedOrderXmlMappingDrafts(r.sourceFormat, codes);
+          showToast(`Draft rows added for ${codes.length} unmapped product(s) — fill in Pixfizz codes and Save Settings`, 'info', 8000);
+        }));
+      }
+    }
+
+    // CUSTOMER_NOT_FOUND rows get a one-click jump to Settings → Order XML →
+    // Customers with a draft row pre-filled for the unresolved RetailerDealerCode.
+    if (r.errorCode === 'CUSTOMER_NOT_FOUND') {
+      const code = r.errorDetails && r.errorDetails.retailerCode;
+      if (code) {
+        actions.appendChild(makeOrderXmlActionBtn('Add Customer', () => {
+          const settingsTab = document.querySelector('.tab[data-tab="settings"]');
+          if (settingsTab) settingsTab.click();
+          const orderXmlSubtab = document.querySelector('.settings-subtab[data-subtab="orderxml"]');
+          if (orderXmlSubtab) orderXmlSubtab.click();
+          seedOrderXmlCustomerDraft(code);
+          showToast(`Draft row added for Customer ID "${code}" — fill in Name + Email and Save Settings`, 'info', 8000);
+        }));
+      }
+    }
+
+    actions.appendChild(makeOrderXmlActionBtn('Retry', async () => {
+      const res = await window.electronAPI.orderXmlRetryFailed(r.id);
+      if (res && res.ok) {
+        showToast(`Retry queued: ${r.filename}`, 'success');
+        loadOrderXmlPanel();
+      } else {
+        showToast('Retry failed: ' + (res && res.error ? res.error : 'unknown'), 'error');
+      }
+    }));
+  }
+
+  if (r.hotFolderId) {
+    const which = r.status === 'failed' ? 'failed' : 'processed';
+    const label = r.status === 'failed' ? 'Failed Folder' : 'Processed Folder';
+    actions.appendChild(makeOrderXmlActionBtn(label, async () => {
+      const res = await window.electronAPI.orderXmlOpenFolder(r.hotFolderId, which);
+      if (res && !res.ok) showToast('Open folder failed: ' + (res.error || 'unknown'), 'error');
+    }));
+  }
+
+  return tr;
+}
+
+/**
+ * Defensive fallback for older ingestion records that predate the
+ * `errorDetails` field. Extracts the codes from the trailing
+ * "...mapping: 1082252, 1082312" portion of the stored errorMessage.
+ */
+function extractUnmappedCodesFromMessage(msg) {
+  if (typeof msg !== 'string') return [];
+  const m = msg.match(/mapping:\s*(.+)$/i);
+  if (!m) return [];
+  return m[1].split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+function makeOrderXmlActionBtn(label, onClick) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'btn-secondary btn-sm';
+  b.textContent = label;
+  b.addEventListener('click', onClick);
+  return b;
+}
+
+function formatOrderXmlTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  // "May 8, 12:34:56" — short for the table column.
+  const date = d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' });
+  const time = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  return `${date} ${time}`;
+}
+
+function truncate(str, max) {
+  if (str.length <= max) return str;
+  return str.slice(0, max - 1) + '…';
+}
+
+// Auto-refresh while the panel is visible. Stops when the user navigates away
+// to avoid hammering the IPC layer for nothing.
+function startOrderXmlAutoRefresh() {
+  if (orderXmlState.refreshTimer) return;
+  orderXmlState.refreshTimer = setInterval(loadOrderXmlPanel, 5000);
+}
+function stopOrderXmlAutoRefresh() {
+  if (orderXmlState.refreshTimer) {
+    clearInterval(orderXmlState.refreshTimer);
+    orderXmlState.refreshTimer = null;
+  }
+}
+
+// ── Wire toolbar (run once at module load; elements may not exist on
+// renderer.js boot for users who haven't enabled Mode 4 yet, so guard each.) ─
+(function wireOrderXmlPanel() {
+  const filterBar = document.getElementById('orderXmlFilterBar');
+  if (filterBar) {
+    filterBar.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-orderxml-filter]');
+      if (!btn) return;
+      filterBar.querySelectorAll('.jobs-filter').forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+      orderXmlState.filter = btn.dataset.orderxmlFilter;
+      renderOrderXmlPanel();
+    });
+  }
+
+  const hfFilter = document.getElementById('orderXmlHotFolderFilter');
+  if (hfFilter) {
+    hfFilter.addEventListener('change', () => {
+      orderXmlState.hotFolderId = hfFilter.value;
+      renderOrderXmlPanel();
+    });
+  }
+
+  const search = document.getElementById('orderXmlSearch');
+  if (search) {
+    search.addEventListener('input', () => {
+      orderXmlState.search = search.value;
+      renderOrderXmlPanel();
+    });
+  }
+
+  const refreshBtn = document.getElementById('orderXmlRefreshBtn');
+  if (refreshBtn) refreshBtn.addEventListener('click', loadOrderXmlPanel);
+
+  const clearBtn = document.getElementById('orderXmlClearBtn');
+  if (clearBtn) {
+    clearBtn.addEventListener('click', async () => {
+      if (!confirm('Clear all Order XML ingestion records?\n\nThis only clears the in-app history — files in the processed/ and failed/ folders are not touched.')) return;
+      const res = await window.electronAPI.orderXmlClear();
+      if (res && res.ok) {
+        showToast('Ingestion records cleared', 'success');
+        loadOrderXmlPanel();
+      } else {
+        showToast('Clear failed: ' + (res && res.error ? res.error : 'unknown'), 'error');
+      }
+    });
+  }
+
+  // Sortable column headers
+  document.querySelectorAll('#orderXmlTable th[data-orderxml-sort]').forEach((th) => {
+    th.addEventListener('click', () => {
+      const col = th.dataset.orderxmlSort;
+      if (orderXmlState.sort.col === col) {
+        orderXmlState.sort.dir = orderXmlState.sort.dir === 'asc' ? 'desc' : 'asc';
+      } else {
+        orderXmlState.sort = { col, dir: 'desc' };
+      }
+      renderOrderXmlPanel();
+    });
+  });
+})();
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Backup & Restore (Settings → Backup subtab + Restore modal)

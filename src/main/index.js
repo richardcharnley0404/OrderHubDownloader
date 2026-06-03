@@ -73,7 +73,7 @@ if (!gotTheLock) {
     // Start polling if any mode is configured and enabled
     const config = configService.getAll();
     const anyModeEnabled = (config.pollingEnabled && configService.isConfigured()) ||
-      config.filmScansEnabled || config.fileUploadsEnabled;
+      config.filmScansEnabled || config.fileUploadsEnabled || config.orderXmlEnabled;
     if (anyModeEnabled) {
       logger.info('Auto-starting polling service');
       try {

@@ -30,8 +30,21 @@ class PollingService {
     // Independent File Uploads timer
     this.fileUploadsIntervalId = null;
     this.lastFileUploadsCheckTime = null;
+    // Independent Order XML timer (Mode 4)
+    this.orderXmlIntervalId = null;
+    this.lastOrderXmlCheckTime = null;
     // Hot folder monitors (controllerId -> FolderMonitor)
     this.folderMonitors = new Map();
+  }
+
+  /**
+   * Get Order XML auto-sync interval from config (in milliseconds).
+   * The chokidar watchers fire on file events; this timer's job is just to
+   * drain the submit-retry queue and prune the ingestion store.
+   */
+  getOrderXmlInterval() {
+    const minutes = configService.get('orderXmlAutoSyncMinutes') || 1;
+    return minutes * 60 * 1000;
   }
 
   /**
@@ -68,7 +81,8 @@ class PollingService {
     }
 
     const config = configService.getAll();
-    const anyModeEnabled = config.pollingEnabled || config.filmScansEnabled || config.fileUploadsEnabled;
+    const anyModeEnabled = config.pollingEnabled || config.filmScansEnabled ||
+                           config.fileUploadsEnabled || config.orderXmlEnabled;
 
     if (!anyModeEnabled) {
       logger.logError('Cannot start polling: no modes enabled');
@@ -101,6 +115,11 @@ class PollingService {
       this._startFileUploadsTimer();
     }
 
+    // Order XML hot folders: independent timer + chokidar watchers
+    if (config.orderXmlEnabled) {
+      this._startOrderXmlTimer();
+    }
+
     // Hot folder monitors for print controllers
     this._startFolderMonitors();
   }
@@ -123,6 +142,7 @@ class PollingService {
 
     this._stopFilmScansTimer();
     this._stopFileUploadsTimer();
+    this._stopOrderXmlTimer();
     this._stopFolderMonitors();
 
     this.isPolling = false;
@@ -371,6 +391,80 @@ class PollingService {
     }
   }
 
+  // ── Order XML hot folders independent timer (Mode 4) ──────
+
+  /**
+   * The chokidar watchers in OrderXmlWatchService handle file-arrival events
+   * directly; this timer's job is to drain the submit-retry queue (transient
+   * 5xx / network failures) and to prune the ingestion store. Cadence is
+   * controlled by orderXmlAutoSyncMinutes (default 1 min).
+   *
+   * Lazy-required so the service file isn't loaded at app startup unless the
+   * mode is actually enabled — keeps cold-start cheap.
+   */
+  _startOrderXmlTimer() {
+    this._stopOrderXmlTimer();
+
+    // Lazy-load so test environments and Mode-4-disabled installs don't pay
+    // the chokidar require cost.
+    const { getOrderXmlWatchService } = require('./order-xml-watch-service');
+    const ingestionStore = require('./order-xml-ingestion-store').getDefaultInstance();
+    const watcher = getOrderXmlWatchService();
+    watcher.start();
+
+    this._runOrderXml(); // initial drain
+
+    const interval = this.getOrderXmlInterval();
+    this.orderXmlIntervalId = setInterval(() => {
+      this._runOrderXml();
+    }, interval);
+
+    logger.info('Order XML timer started', {
+      interval: `${interval / 60000} minutes`,
+      hotFolders: configService.getEnabledHotFolders().length
+    });
+
+    // Held for the stop() path so we can call ingestionStore.prune() and
+    // watcher.stop() without re-requiring.
+    this._orderXmlWatcher = watcher;
+    this._orderXmlIngestionStore = ingestionStore;
+  }
+
+  _stopOrderXmlTimer() {
+    if (this.orderXmlIntervalId) {
+      clearInterval(this.orderXmlIntervalId);
+      this.orderXmlIntervalId = null;
+    }
+    if (this._orderXmlWatcher) {
+      // Fire-and-forget: stop() is async but we don't want to block app shutdown.
+      this._orderXmlWatcher.stop().catch((err) => {
+        logger.logWarning('Order XML watcher stop error', { error: err && err.message });
+      });
+      this._orderXmlWatcher = null;
+    }
+    this._orderXmlIngestionStore = null;
+  }
+
+  async _runOrderXml() {
+    this.lastOrderXmlCheckTime = Date.now();
+    if (!this._orderXmlWatcher) return;
+    try {
+      // Settings may have changed since the last tick (operator added/removed
+      // a hot folder via the panel). Reconcile picks that up cheaply.
+      await this._orderXmlWatcher.reconcile();
+      await this._orderXmlWatcher.processAll();
+      // Bound the ingestion store: drop anything older than retentionDays.
+      if (this._orderXmlIngestionStore) {
+        const removed = this._orderXmlIngestionStore.prune();
+        if (removed > 0) {
+          logger.info(`Order XML: pruned ${removed} record(s) past retention`);
+        }
+      }
+    } catch (error) {
+      logger.logError('Order XML: tick error', error);
+    }
+  }
+
   // ── Callbacks ─────────────────────────────────────────────
 
   /**
@@ -410,6 +504,7 @@ class PollingService {
       lastCheck: this.lastCheckTime,
       lastFilmScansCheck: this.lastFilmScansCheckTime,
       lastFileUploadsCheck: this.lastFileUploadsCheckTime,
+      lastOrderXmlCheck: this.lastOrderXmlCheckTime,
       lastSummary: this.lastSummary,
       lastFolderWatchSummary: this.lastFolderWatchSummary,
       lastJobPollSummary: this.lastJobPollSummary,
@@ -456,7 +551,6 @@ class PollingService {
           logger.logWarning('Hot folder monitor skipped — no output path configured', { controller: c.name, id: c.id });
         }
       }
-
       // 2. Old printControllerStore — Darkroom Pro entries (and any not yet migrated)
       const legacyControllers = printControllerStore.getAllControllers();
       for (const c of legacyControllers) {
@@ -558,6 +652,7 @@ class PollingService {
         _dpofFailed: true,
         _dpofFailedAt: timestamp.toISOString()
       });
+      logger.logWarning('Job DPOF rejected by printer', { jobId: job.id, orderNumber });
       logger.logWarning('Job DPOF rejected by printer', { jobId: job.id, orderNumber });
     }
 

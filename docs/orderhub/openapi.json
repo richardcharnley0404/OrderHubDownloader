@@ -1,0 +1,586 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "OrderHub API",
+    "version": "1.0.0",
+    "description": "The OrderHub API allows external organizations to programmatically submit print orders, retrieve pending jobs, and update job statuses. All endpoints accept and return JSON.\n\n## Authentication\n\nAPI keys are generated in Settings → API Integration within OrderHub. Each key is scoped to an organization.\n\nYou can authenticate using one of three methods:\n1. **X-API-Key header** (recommended): Pass `X-API-Key: your_api_key` as a request header\n2. **Payload field**: For POST /api-webhook, include the API key as the `organization_id` field in the order object\n3. **Query parameter**: Append `?api_key=your_api_key` to the URL\n\n## Rate Limits\n\nNo rate limits are currently enforced, but please be reasonable with polling frequency (e.g. every 30-60 seconds for GET /get-new-jobs)."
+  },
+  "servers": [
+    {
+      "url": "https://nazkcvruighrhpgcarxg.supabase.co/functions/v1",
+      "description": "Production"
+    }
+  ],
+  "security": [
+    { "ApiKeyHeader": [] }
+  ],
+  "paths": {
+    "/api-webhook": {
+      "post": {
+        "operationId": "submitOrder",
+        "summary": "Submit Order",
+        "description": "Submits a new order with one or more jobs (line items). Artwork URLs are downloaded and processed automatically. The API key can be provided via X-API-Key header OR as the organization_id field inside the order object.",
+        "security": [
+          { "ApiKeyHeader": [] },
+          {}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SubmitOrderRequest" },
+              "example": {
+                "order": {
+                  "organization_id": "YOUR_API_KEY",
+                  "order_number": "ORD-001",
+                  "customer_name": "John Doe",
+                  "customer_email": "john@example.com",
+                  "customer_phone": "555-1234",
+                  "total_amount": 49.99,
+                  "shipping_street": "123 Main St",
+                  "shipping_city": "Springfield",
+                  "shipping_state": "IL",
+                  "shipping_zipcode": "62704",
+                  "shipping_country": "US"
+                },
+                "jobs": [
+                  {
+                    "job_id": "JOB-001",
+                    "product_name": "Canvas Print 16x20",
+                    "quantity": 1,
+                    "product_code": "CANVAS-1620",
+                    "artwork_url": "https://example.com/artwork.jpg",
+                    "options": [
+                      { "key": "Finish", "value": "Matte" },
+                      { "key": "Frame", "value": "Black" }
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Order created successfully",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SubmitOrderResponse" },
+                "example": {
+                  "success": true,
+                  "order_id": "550e8400-e29b-41d4-a716-446655440000",
+                  "order_number": "ORD-001",
+                  "jobs_created": 1,
+                  "job_ids": ["550e8400-e29b-41d4-a716-446655440001"]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error — missing or invalid fields",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ValidationError" },
+                "example": {
+                  "success": false,
+                  "error": "Validation failed",
+                  "validation_errors": [
+                    { "field": "customer_email", "message": "Invalid email format", "received": "not-an-email" }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": {
+            "description": "Duplicate order number",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/DuplicateOrderError" },
+                "example": {
+                  "success": false,
+                  "error": "Duplicate order",
+                  "message": "An order with number ORD-001 already exists",
+                  "existing_order_id": "550e8400-e29b-41d4-a716-446655440000"
+                }
+              }
+            }
+          },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      }
+    },
+    "/get-new-jobs": {
+      "get": {
+        "operationId": "getNewJobs",
+        "summary": "Get New Jobs",
+        "description": "Returns all jobs with status \"New\" for your organization. Useful for polling workflows where your system picks up new work. Pass your API key via X-API-Key header or api_key query parameter.",
+        "parameters": [
+          {
+            "name": "api_key",
+            "in": "query",
+            "required": false,
+            "description": "API key (alternative to X-API-Key header)",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of new jobs",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/GetNewJobsResponse" },
+                "example": {
+                  "success": true,
+                  "timestamp": "2025-01-15T10:30:00.000Z",
+                  "total_jobs": 1,
+                  "jobs": [
+                    {
+                      "id": "550e8400-e29b-41d4-a716-446655440001",
+                      "job_number": "J-1001",
+                      "product_name": "Canvas Print 16x20",
+                      "product_code": "CANVAS-1620",
+                      "quantity": 1,
+                      "status": "New",
+                      "category": "Canvas",
+                      "due_date": "2025-01-20",
+                      "created_at": "2025-01-15T10:00:00.000Z",
+                      "artwork_url": "https://example.com/artwork.jpg",
+                      "production_notes": null,
+                      "notes": null,
+                      "options": [
+                        { "key": "Finish", "value": "Matte" }
+                      ],
+                      "order": {
+                        "id": "550e8400-e29b-41d4-a716-446655440000",
+                        "order_number": "ORD-001",
+                        "customer_name": "John Doe",
+                        "customer_email": "john@example.com",
+                        "customer_phone": "555-1234",
+                        "total_amount": 49.99,
+                        "status": "new",
+                        "shipping_street": "123 Main St",
+                        "shipping_city": "Springfield",
+                        "shipping_state": "IL",
+                        "shipping_zipcode": "62704",
+                        "store_identifier": null
+                      },
+                      "artwork_files": []
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      }
+    },
+    "/update-job-status": {
+      "post": {
+        "operationId": "updateJobStatus",
+        "summary": "Update Job Status",
+        "description": "Updates the status of a specific job. When all jobs on an order reach \"completed\", the order automatically advances to \"ready\". Core statuses are: New, in_production, completed. Organizations may also define custom statuses.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/UpdateJobStatusRequest" },
+              "example": {
+                "job_id": "550e8400-e29b-41d4-a716-446655440001",
+                "status": "in_production",
+                "production_notes": "Started printing"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Job status updated successfully",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/UpdateJobStatusResponse" },
+                "example": {
+                  "success": true,
+                  "job_id": "550e8400-e29b-41d4-a716-446655440001",
+                  "old_status": "New",
+                  "new_status": "in_production",
+                  "updated_at": "2025-01-15T10:35:00.000Z"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid status or missing fields",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": {
+                  "error": "Invalid status. Must be one of: New, in_production, completed"
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": {
+            "description": "API key is inactive",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": { "error": "API integration is inactive" }
+              }
+            }
+          },
+          "404": {
+            "description": "Job not found or access denied",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": { "error": "Job not found or access denied" }
+              }
+            }
+          },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      }
+    },
+    "/update-order-status": {
+      "post": {
+        "operationId": "updateOrderStatus",
+        "summary": "Update Order Status",
+        "description": "Updates the status of a specific order. When an order moves to 'ready', 'shipped', or 'completed', all associated jobs are automatically marked as completed. Pixfizz notifications are NOT triggered by this endpoint.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/UpdateOrderStatusRequest" },
+              "example": {
+                "order_id": "550e8400-e29b-41d4-a716-446655440000",
+                "status": "in_production"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Order status updated successfully",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/UpdateOrderStatusResponse" },
+                "example": {
+                  "success": true,
+                  "order_id": "550e8400-e29b-41d4-a716-446655440000",
+                  "old_status": "pending",
+                  "new_status": "in_production",
+                  "updated_at": "2025-01-15T10:35:00.000Z"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid status or missing fields",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": {
+                  "error": "Invalid status. Must be one of: pending, confirmed, in_production, ready, shipped, completed, cancelled"
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": {
+            "description": "API key is inactive",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": { "error": "API integration is inactive" }
+              }
+            }
+          },
+          "404": {
+            "description": "Order not found or access denied",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": { "error": "Order not found or access denied" }
+              }
+            }
+          },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ApiKeyHeader": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "description": "API key generated in Settings → API Integration within OrderHub"
+      }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "Missing or invalid API key",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" },
+            "example": { "error": "Invalid API key" }
+          }
+        }
+      },
+      "ServerError": {
+        "description": "Unexpected internal error",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" },
+            "example": { "error": "Internal server error", "details": "..." }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "SubmitOrderRequest": {
+        "type": "object",
+        "required": ["order", "jobs"],
+        "properties": {
+          "order": { "$ref": "#/components/schemas/OrderInput" },
+          "jobs": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/JobInput" },
+            "minItems": 1,
+            "description": "One or more jobs (line items) for this order"
+          }
+        }
+      },
+      "OrderInput": {
+        "type": "object",
+        "required": ["organization_id", "order_number", "customer_name", "customer_email"],
+        "properties": {
+          "organization_id": { "type": "string", "description": "Your API key (acts as authentication when not using X-API-Key header)" },
+          "order_number": { "type": "string", "description": "Unique order identifier from your system" },
+          "customer_name": { "type": "string", "description": "Full name of the customer" },
+          "customer_email": { "type": "string", "format": "email", "description": "Valid email address" },
+          "customer_phone": { "type": "string", "description": "Customer phone number" },
+          "total_amount": { "type": "number", "description": "Order total amount" },
+          "total_tax": { "type": "number", "description": "Tax amount" },
+          "total_shipping": { "type": "number", "description": "Shipping cost" },
+          "total_discount": { "type": "number", "description": "Discount applied" },
+          "payment_gateway": { "type": "string", "description": "Payment method used (e.g. Stripe, PayPal)" },
+          "payment_reference": { "type": "string", "description": "Payment transaction reference" },
+          "paid": { "type": "boolean", "description": "Whether the order has been paid" },
+          "notes": { "type": "string", "description": "Order-level notes" },
+          "external_order_id": { "type": "string", "description": "ID from the originating platform" },
+          "external_source": { "type": "string", "description": "Source platform name (e.g. Shopify)" },
+          "shipping_method": { "type": "string", "description": "Shipping method name" },
+          "shipping_street": { "type": "string", "description": "Street address line 1" },
+          "shipping_street2": { "type": "string", "description": "Street address line 2" },
+          "shipping_city": { "type": "string", "description": "City" },
+          "shipping_state": { "type": "string", "description": "State / Province" },
+          "shipping_zipcode": { "type": "string", "description": "Postal / ZIP code" },
+          "shipping_country": { "type": "string", "description": "Country code (e.g. US, CA)" },
+          "shipping_company": { "type": "string", "description": "Company name for shipping" },
+          "pickup_location_id": { "type": "string", "format": "uuid", "description": "UUID of a store location for pickup orders" },
+          "website_code": { "type": "string", "description": "Pixfizz website code (e.g. PPPF)" }
+        }
+      },
+      "JobInput": {
+        "type": "object",
+        "required": ["job_id", "product_name", "quantity"],
+        "properties": {
+          "job_id": { "type": "string", "description": "Unique job/line-item identifier from your system" },
+          "product_name": { "type": "string", "description": "Display name of the product" },
+          "quantity": { "type": "integer", "minimum": 1, "description": "Number of units" },
+          "product_code": { "type": "string", "description": "SKU or product code for category matching" },
+          "artwork_url": { "type": "string", "format": "uri", "description": "URL to download the artwork file" },
+          "artwork_on_file": { "type": "boolean", "description": "Indicates artwork is already on file" },
+          "notes": { "type": "string", "description": "Production notes for this job" },
+          "options": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/JobOption" },
+            "description": "Array of key/value objects for product options"
+          },
+          "external_line_item_id": { "type": "string", "description": "External line-item ID for linking" }
+        }
+      },
+      "JobOption": {
+        "type": "object",
+        "required": ["key", "value"],
+        "properties": {
+          "key": { "type": "string", "description": "Option name (e.g. Finish, Size)" },
+          "value": { "type": "string", "description": "Option value (e.g. Matte, 16x20)" }
+        }
+      },
+      "SubmitOrderResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "example": true },
+          "order_id": { "type": "string", "format": "uuid", "description": "UUID of the created order" },
+          "order_number": { "type": "string", "description": "The order number submitted" },
+          "jobs_created": { "type": "integer", "description": "Number of jobs created" },
+          "job_ids": {
+            "type": "array",
+            "items": { "type": "string", "format": "uuid" },
+            "description": "UUIDs of created jobs"
+          }
+        }
+      },
+      "GetNewJobsResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "example": true },
+          "timestamp": { "type": "string", "format": "date-time", "description": "Server timestamp of the response" },
+          "total_jobs": { "type": "integer", "description": "Number of jobs returned" },
+          "jobs": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/JobDetail" }
+          }
+        }
+      },
+      "JobDetail": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "job_number": { "type": "string" },
+          "product_name": { "type": "string" },
+          "product_code": { "type": "string", "nullable": true },
+          "quantity": { "type": "integer" },
+          "status": { "type": "string" },
+          "category": { "type": "string", "nullable": true },
+          "due_date": { "type": "string", "format": "date", "nullable": true },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" },
+          "artwork_url": { "type": "string", "nullable": true },
+          "artwork_on_file": { "type": "boolean", "nullable": true },
+          "production_notes": { "type": "string", "nullable": true },
+          "notes": { "type": "string", "nullable": true },
+          "options": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/JobOption" },
+            "nullable": true
+          },
+          "order": { "$ref": "#/components/schemas/OrderSummary" },
+          "artwork_files": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/ArtworkFile" }
+          }
+        }
+      },
+      "OrderSummary": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "order_number": { "type": "string" },
+          "customer_name": { "type": "string" },
+          "customer_email": { "type": "string" },
+          "customer_phone": { "type": "string", "nullable": true },
+          "total_amount": { "type": "number", "nullable": true },
+          "status": { "type": "string" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "shipping_address": { "type": "string", "nullable": true },
+          "shipping_street": { "type": "string", "nullable": true },
+          "shipping_city": { "type": "string", "nullable": true },
+          "shipping_state": { "type": "string", "nullable": true },
+          "shipping_zipcode": { "type": "string", "nullable": true },
+          "store_identifier": { "type": "string", "nullable": true }
+        }
+      },
+      "ArtworkFile": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "artwork_type": { "type": "string" },
+          "file_name": { "type": "string" },
+          "file_path": { "type": "string" },
+          "file_url": { "type": "string" },
+          "file_size": { "type": "integer", "nullable": true },
+          "mime_type": { "type": "string", "nullable": true },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "UpdateJobStatusRequest": {
+        "type": "object",
+        "required": ["job_id", "status"],
+        "properties": {
+          "job_id": { "type": "string", "format": "uuid", "description": "UUID of the job to update" },
+          "status": {
+            "type": "string",
+            "description": "New status. Core values: New, in_production, completed. Organizations may also define custom statuses.",
+            "enum": ["New", "in_production", "completed"]
+          },
+          "production_notes": { "type": "string", "maxLength": 5000, "description": "Optional production notes" }
+        }
+      },
+      "UpdateJobStatusResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "example": true },
+          "job_id": { "type": "string", "format": "uuid" },
+          "old_status": { "type": "string", "description": "Previous status" },
+          "new_status": { "type": "string", "description": "Updated status" },
+          "updated_at": { "type": "string", "format": "date-time" },
+          "completed_at": { "type": "string", "format": "date-time", "description": "Set when status is completed" }
+        }
+      },
+      "UpdateOrderStatusRequest": {
+        "type": "object",
+        "required": ["order_id", "status"],
+        "properties": {
+          "order_id": { "type": "string", "format": "uuid", "description": "UUID of the order to update" },
+          "status": {
+            "type": "string",
+            "description": "New order status",
+            "enum": ["pending", "confirmed", "in_production", "ready", "shipped", "completed", "cancelled"]
+          }
+        }
+      },
+      "UpdateOrderStatusResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "example": true },
+          "order_id": { "type": "string", "format": "uuid" },
+          "old_status": { "type": "string", "description": "Previous status" },
+          "new_status": { "type": "string", "description": "Updated status" },
+          "updated_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": { "type": "string", "description": "Error message" },
+          "details": { "type": "string", "description": "Additional error details" }
+        }
+      },
+      "ValidationError": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "example": false },
+          "error": { "type": "string" },
+          "validation_errors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "field": { "type": "string" },
+                "message": { "type": "string" },
+                "received": { "type": "string" }
+              }
+            }
+          }
+        }
+      },
+      "DuplicateOrderError": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "example": false },
+          "error": { "type": "string" },
+          "message": { "type": "string" },
+          "existing_order_id": { "type": "string", "format": "uuid" }
+        }
+      }
+    }
+  }
+}

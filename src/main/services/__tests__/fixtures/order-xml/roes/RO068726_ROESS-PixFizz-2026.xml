@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OrderDataSet xmlns="http://www.trevoli.com/OrderDataSet.xsd">
+<OrderLineItem>
+    <idOrderLineItem>1.0</idOrderLineItem>
+    <idProduct>SP0507</idProduct>
+    <Quantity>5.0</Quantity>
+    <UnitPrice>0.60</UnitPrice>
+</OrderLineItem>
+<OrderLineItem>
+    <idOrderLineItem>2.0</idOrderLineItem>
+    <idProduct>SP0405</idProduct>
+    <Quantity>4.0</Quantity>
+    <UnitPrice>0.29</UnitPrice>
+</OrderLineItem>
+<OrderLineItem>
+    <idOrderLineItem>3.0</idOrderLineItem>
+    <idProduct>SP0710</idProduct>
+    <Quantity>7.0</Quantity>
+    <UnitPrice>0.95</UnitPrice>
+</OrderLineItem>
+<OrderLineItem>
+    <idOrderLineItem>4.0</idOrderLineItem>
+    <idProduct>SP0406</idProduct>
+    <Quantity>6.0</Quantity>
+    <UnitPrice>0.32</UnitPrice>
+</OrderLineItem>
+<OrderLineItem>
+    <idOrderLineItem>5.0</idOrderLineItem>
+    <idProduct>SP0810</idProduct>
+    <Quantity>2.0</Quantity>
+    <UnitPrice>0.95</UnitPrice>
+</OrderLineItem>
+<OrderLineItem>
+    <idOrderLineItem>6.0</idOrderLineItem>
+    <idProduct>SP0305</idProduct>
+    <Quantity>3.0</Quantity>
+    <UnitPrice>0.29</UnitPrice>
+</OrderLineItem>
+<Order>
+    <idOrder>RO068726</idOrder>
+    <SpecialInstructions></SpecialInstructions>
+    <ShipToFirstName></ShipToFirstName>
+    <ShipToLastName></ShipToLastName>
+    <ShipToAddress></ShipToAddress>
+    <ShipToCity></ShipToCity>
+    <ShipToState></ShipToState>
+    <ShipToZip></ShipToZip>
+    <ShipToCountry></ShipToCountry>
+    <ShipToPhone></ShipToPhone>
+    <ShipToCompany></ShipToCompany>
+    <ShipToEmail></ShipToEmail>
+    <BillToFirstName>Julie Metcalfe</BillToFirstName>
+    <BillToLastName></BillToLastName>
+    <BillToCompany />
+    <BillToAddress></BillToAddress>
+    <BillToCity>Bardstown</BillToCity>
+    <BillToState>KY</BillToState>
+    <BillToZip>40004</BillToZip>
+    <BillToCountry></BillToCountry>
+    <BillToPhone>502-507-1416</BillToPhone>
+    <BillToEmail>juliemetcalfe27@gmail.com</BillToEmail>
+    <PaymentMethod></PaymentMethod>
+    <PaymentStatus>Paid</PaymentStatus>
+  </Order>
+</OrderDataSet>
