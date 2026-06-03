@@ -42,6 +42,11 @@ let __dispatchBehavior = null;   // 'throw' | 'success-false' | 'success' | 'fol
 let __dispatchError = null;      // err to throw, or string for result.error
 let __updateCalls = [];
 let __dispatchCalls = [];        // call log for sendViaDPOFRouted — dispatched-or-skipped assertions
+// Fix 1 (2026-05-24) state — exercises the M2 hold + AI Quality interaction.
+let __aiQualityEnabled = false;
+let __scoreJobCalls = [];        // call log for aiJobQualityOrchestrator.scoreJob
+let __scoreJobResult = { ok: true, held: false };
+let __checkLocalFilesResult = { found: false };
 
 function resetState() {
   __jobs = [];
@@ -51,6 +56,10 @@ function resetState() {
   __dispatchError = null;
   __updateCalls = [];
   __dispatchCalls = [];
+  __aiQualityEnabled = false;
+  __scoreJobCalls = [];
+  __scoreJobResult = { ok: true, held: false };
+  __checkLocalFilesResult = { found: false };
 }
 
 // ----- Stubs registered into require.cache -----
@@ -83,7 +92,7 @@ const fakeRoutingService = {
 
 const fakeConfigService = {
   get: (key) => {
-    if (key === 'aiQualityEnabled') return false;
+    if (key === 'aiQualityEnabled') return __aiQualityEnabled;
     if (key === 'jobDateRange')     return 365;
     return undefined;
   },
@@ -129,8 +138,11 @@ stubInCache(path.join(SVC,  'process-folder-service.js'),            {});
 stubInCache(path.join(SVC,  'frame-metadata-store.js'),              {});
 stubInCache(path.join(SVC,  'film-review-prefs-store.js'),           {});
 stubInCache(path.join(SVC,  'folder-watch-service.js'),              {});
-stubInCache(path.join(SVC,  'job-download-service.js'),              { checkLocalFiles: () => ({ found: false }) });
-stubInCache(path.join(SVC,  'ai-job-quality-orchestrator.js'),       { scoreJob: async () => ({ ok: true, held: false }) });
+stubInCache(path.join(SVC,  'job-download-service.js'),              { checkLocalFiles: () => __checkLocalFilesResult });
+stubInCache(path.join(SVC,  'ai-job-quality-orchestrator.js'),       { scoreJob: async (jobId, jobPath) => {
+  __scoreJobCalls.push({ jobId, jobPath });
+  return __scoreJobResult;
+} });
 stubInCache(path.join(SVC,  'ai-quality-store.js'),                  { getJobQuality: async () => [], deriveHeld: () => false });
 stubInCache(path.join(MAIN, 'updater.js'),                           { setMainWindow: () => {}, startUpdateSchedule: () => {} });
 
@@ -465,4 +477,96 @@ test('channel-number gate: frontline with channelNumber=null dispatches (no chan
   // channelNumber=null in routing-service.js:277. Pinning down so the
   // explicit-DPOF-enumeration gate can\'t regress for any non-DPOF type.
   assert.equal(await dispatchReached('frontline', null), true);
+});
+
+
+// ─────────────────────────────────────────────────────────────────────────
+// M2 hold gate × AI Quality Gate interaction (Fix 1, 2026-05-24)
+//
+// Regression: an earlier placement of the M2 manual-review hold ahead of
+// the AI Quality block in runAutoPrint short-circuited `scoreJob()` for
+// every held job. Result: `sidecar.aiQuality.scored` stayed false →
+// renderer thumbnail chip showed "AI scoring…" indefinitely for all
+// manual-source / not-finalised jobs (POS-EFZ9UK-1, PXDEMO-AUXZWJ-1).
+//
+// Post-fix, the M2 gate runs AFTER scoring, so the sidecar gets populated
+// for held jobs (chips render), but dispatch is still skipped on the hold
+// reason. This test pins both invariants down.
+// ─────────────────────────────────────────────────────────────────────────
+
+test('Fix 1: held manual-source job still gets AI-scored, but dispatch is skipped', async () => {
+  resetState();
+  __aiQualityEnabled = true;
+  __checkLocalFilesResult = { found: true, localPath: '/tmp/manual-job-path' };
+  __scoreJobResult = { ok: true, held: false }; // scoring itself doesn't hold
+  __jobs = [makeJob({
+    // Manual-source → M2 hold gate fires (rule in src/shared/holdForReview.js).
+    artwork_source: 'manual',
+    artwork_files: [{ id: 'f1', source: 'manual', production_ready: true }],
+  })];
+  __controllers = [{ id: 'CTRL-1', autoprint: true, type: 'noritsu' }];
+  __routeForJob = makeDpofRoute();
+  __dispatchBehavior = 'success';
+
+  await _runAutoPrint();
+
+  assert.equal(__scoreJobCalls.length, 1,
+    'scoreJob MUST run on the manual-source job — held jobs still need per-image scoring '
+    + 'so the renderer chip / Review tab can populate. Pre-fix this was zero.');
+  assert.equal(__dispatchCalls.length, 0,
+    'M2 hold still skips DPOF dispatch — the gate continues to prevent auto-print '
+    + 'of unreviewed manual artwork after scoring completes.');
+});
+
+
+test('Fix 1 (post hold-rule narrowing 2026-05-24): Pixfizz job with all files production_ready=false is scored AND dispatched', async () => {
+  // The PXDEMO-AUXZWJ-1 case after the hold-rule narrowing:
+  // artwork_source: 'pixfizz' with every artwork_file at
+  // production_ready: false is NOT held — OrderHub returns that as a
+  // default state on Pixfizz-source files. Auto-print proceeds.
+  //
+  // This test preserves the AI-scoring regression coverage of the
+  // previous "held not-finalised Pixfizz" test (scoreJob must reach
+  // these jobs) but flips the dispatch expectation: dispatch DOES
+  // happen because the M2 hold gate no longer fires on production_ready.
+  resetState();
+  __aiQualityEnabled = true;
+  __checkLocalFilesResult = { found: true, localPath: '/tmp/pixfizz-not-finalised' };
+  __scoreJobResult = { ok: true, held: false };
+  __jobs = [makeJob({
+    artwork_source: 'pixfizz',
+    artwork_files: [{ id: 'f1', source: 'pixfizz', production_ready: false, artwork_type: 'pages' }],
+  })];
+  __controllers = [{ id: 'CTRL-1', autoprint: true, type: 'noritsu' }];
+  __routeForJob = makeDpofRoute();
+  __dispatchBehavior = 'success';
+
+  await _runAutoPrint();
+
+  assert.equal(__scoreJobCalls.length, 1,
+    'scoreJob must run on Pixfizz jobs with production_ready: false — they are no longer held, but scoring is a per-image quality signal regardless.');
+  assert.equal(__dispatchCalls.length, 1,
+    'Pixfizz job with all files production_ready: false MUST dispatch — that flag is a default API state, not a hold reason.');
+});
+
+
+test('Fix 1: unheld pixfizz job gets scored AND dispatched (regression guard the other way)', async () => {
+  // Make sure the re-ordering didn't break the happy path: a fully
+  // production_ready Pixfizz job should still get scored AND dispatched.
+  resetState();
+  __aiQualityEnabled = true;
+  __checkLocalFilesResult = { found: true, localPath: '/tmp/pixfizz-ready' };
+  __scoreJobResult = { ok: true, held: false };
+  __jobs = [makeJob({
+    artwork_source: 'pixfizz',
+    artwork_files: [{ id: 'f1', source: 'pixfizz', production_ready: true, artwork_type: 'pages' }],
+  })];
+  __controllers = [{ id: 'CTRL-1', autoprint: true, type: 'noritsu' }];
+  __routeForJob = makeDpofRoute();
+  __dispatchBehavior = 'success';
+
+  await _runAutoPrint();
+
+  assert.equal(__scoreJobCalls.length, 1, 'happy-path job scored');
+  assert.equal(__dispatchCalls.length, 1, 'happy-path job dispatched');
 });

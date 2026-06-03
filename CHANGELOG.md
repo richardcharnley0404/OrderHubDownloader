@@ -81,6 +81,282 @@ verification pending against a live manual job.
 
 Verified the existing `ohd:job:crop-image` handler against the brief's M5a four-point contract for manual-source files. All four functional outcomes hold without source changes: cropped pixels at `working/<filename>` with matching dimensions; raw upload at the flat job folder root byte-identical before/after; sidecar gains `cropApplied + croppedPath + cropRect + channelMappingId` (and `filename` stays the original basename — load-bearing for `originalsManager.resetImage`, AI scoring's `_scanJobImages`, and reprint manager); dispatch substitution via `print-service._getEnhancedPathMap` sends the cropped path. Two new test files lock the contract: `manualCrop.test.js` (5 tests against the handler) and `manualCrop.dispatch.test.js` (6 tests against `_getEnhancedPathMap`). Brief updated with a "Brief vs. as-built" section under M5a and the M5b/M5c schema rewritten as flat sibling fields (`cropOrientation`, `cropSource`, `cropAppliedAt`, `cropRotation`, `batchCropDefaultRect`, etc.) — no nested `crop: {...}` / `batchCrop: {...}` wrappers, so M5b doesn't build a parallel structure and no on-disk sidecar migration is needed.
 
+### Fixed — M3 quantity math: file.copies is authoritative, job.quantity is informational (2026-05-25)
+
+`qtyOriginal` now equals `file.copies` (default 1 when missing / zero /
+NaN) — no multiplication by `job.quantity`. Lovable's original spec
+(`job.quantity × file.copies`) was empirically wrong: live testing
+against POS-539M6D (`job.quantity=5`, three files with `copies=1+1+3`
+summing to 5; customer ordered 5 total prints) showed the spec
+inflated `qtyOriginal` 5× across the order (25 instead of 5). In
+practice `file.copies` IS the per-file print count for the whole
+order; `job.quantity` is the expected total (sum-of-copies should
+match it, loose contract — not asserted) and is informational only,
+not a multiplier. Existing sidecars are not migrated (no-migration
+contract from M3) — operator-affected jobs may need manual sidecar
+edits, or dismiss-and-re-flow, for accurate Total Prints display.
+
+### Added — S3 Artwork Channel (M1 + M2)
+
+Second ingestion channel for jobs whose artwork arrives via the OrderHub API
+(`/ohd-api/pending-jobs`'s `artwork_files[]`), sitting alongside the existing
+Pixfizz FTP pull. FTP is **not** retired — the two channels are permanent and
+parallel, and can co-exist on the same job (operator-uploaded replacement
+files on Pixfizz jobs). See `OHD_S3ArtworkChannel_ClaudeCode_Brief.md`.
+
+- **M1 — S3 downloader + canonical disk layout** (`s3-artwork-downloader.js`):
+  per-job, idempotent download of `artwork_files[]` over native `https`,
+  bounded at 4-parallel, `.tmp`-then-rename atomic writes, orphan-`.tmp`
+  sweep on every call. Diffs against the sidecar's job-level
+  `s3ArtworkFileIdsKnown` array so re-polls don't re-download. Sidecar
+  filename follows the codebase-wide `${order_number}_${job_id}.json`
+  convention; reads existing or builds in-memory and persists only after a
+  download succeeds, so the polling loop's `checkLocalFiles` never sees a
+  bait sidecar and never fires `markReceived` on a folder with zero
+  artwork. 4xx response bodies (S3 / Supabase XML or JSON error envelopes
+  like `AccessDenied`, `RequestExpired`, signature mismatches) are
+  captured up to ~500 bytes and surfaced as a `[s3-artwork] 4xx response
+  body` WARN line, keyed by id never URL.
+- **Sidecar schema** (`jobSchema.js`, `sidecarManager.js`): per-image
+  entries gain `artworkFileId`, `artworkSource`, `artworkType`,
+  `productionReady`, `originalFileName` (null defaults for FTP-delivered
+  entries); job-level gains `s3ArtworkFileIdsKnown[]`. Legacy sidecars are
+  hydrated to defaults on read (in memory only — no spurious disk write).
+- **M2 — Per-job auto-print hold + UI chip** (`shared/holdForReview.js`,
+  `job-service.js`, `ipc-handlers.js`, renderer): jobs with manual
+  artwork or non-finalised files are skipped by the **auto-print**
+  dispatcher; operator Send-to-Print remains unaffected. Yellow "Manual —
+  review required" chip on the job-list row with a tooltip listing every
+  reason that triggered the hold (`manual-source`, `manual-file`,
+  `not-finalised`). Per-file `Manual`/`Pixfizz` tag in the Job Review
+  thumbnail grid — only on the file(s) whose source differs from the
+  job-level source, so uniform-source jobs stay uncluttered.
+- **Order-level manifest write** (`s3-artwork-downloader.js`): the M1
+  downloader now writes `{order_number}.json` at the order-folder root
+  (byte-shape parity with Pixfizz's FTP-delivered manifest), so the
+  print-service dispatch pipeline can read which files belong to which
+  job. Without this, S3-delivered jobs threw "Order manifest not found"
+  on dispatch. Idempotent + multi-job-merge-aware. One-shot recovery
+  script `scripts/rebuild-missing-manifests.js` retroactively writes the
+  manifest for existing job folders that pre-date the fix.
+
+**Known caveat — size field:** the M1 manifest leaves
+`jobs[].images[].size` as `null` because OrderHub's `/pending-jobs`
+doesn't expose a print-size string and we declined to derive it from
+`product_code` or `job.options`. **S3-delivered manual jobs routed
+through DPOF or Darkroom Pro controllers will throw a "size is missing
+on one or more images" error until OrderHub exposes a `print_size`
+field**; `folder_copy` controllers (which ignore size) dispatch cleanly.
+
+### Fixed — M2 hold-rule narrowing (2026-05-24)
+
+The M2 auto-print hold gate (`src/shared/holdForReview.js`) previously
+fired on any `artwork_files[i].production_ready === false`. In practice
+OrderHub returns `production_ready: false` as a **default state** on
+Pixfizz-source files (artwork_type `pages` / `text` etc.), so every
+Pixfizz order in the queue surfaced a spurious "MANUAL — REVIEW
+REQUIRED" chip and was held from auto-print. Field evidence:
+PXDEMO-YUED5N-1, PXDEMO-6M49PK-1, PXDEMO-AUXZWJ-1.
+
+The clause was redundant — the scenario it was meant to catch (operator
+started a manual replacement upload not yet finalised) is already
+covered by the `manual-file` reason. The clause is removed; hold now
+fires solely on manual *source* (job-level or per-file). The
+`production_ready` field is **not** removed from the data model —
+sidecars still persist it per image (M1), and M3 will surface "Not
+finalised" as a per-file display chip in Job Review, not as an
+auto-print hold reason.
+
+### Fixed — AI scoring "stuck" on M2-held jobs (2026-05-24)
+
+The M2 hold gate was originally placed BEFORE the AI Quality block in
+`runAutoPrint`, so held jobs short-circuited before `scoreJob` ran. The
+renderer chip stayed on "AI scoring…" indefinitely because
+`sidecar.aiQuality.scored` never flipped to `true`. Moved the hold check
+to AFTER the AI Quality block: scoring runs for every job that has files
+on disk, dispatch is still skipped on the hold reason.
+
+### Fixed — `_upsertOrderManifest` overwriting FTP-delivered manifests (2026-05-24)
+
+When a Pixfizz job's `/pending-jobs` response includes a non-empty
+`artwork_files[]`, the M1 downloader engages and (post-M2.1) calls
+`_upsertOrderManifest` — which previously wholesale-replaced the
+existing FTP-delivered job entry with a sidecar-derived reconstruction
+(`size: null`, image list scoped to the S3 sidecar). On PXDEMO-AUXZWJ
+this would have destroyed the 40-image / `size: "4x6"` manifest the
+moment OHD restarted. The helper now sniffs the existing entry's shape:
+if any image has a non-null `size`, the entry is treated as
+FTP-authoritative and preserved verbatim. OHD-written entries (all
+sizes null) continue to update normally so file additions between
+polls reach the manifest. Heuristic limitation: collapses if OrderHub
+later populates `print_size` for OHD writes — switch to a `__writer`
+marker or merge-by-image strategy at that point.
+
+### Added — M3 (quantity math + production_ready display chip)
+
+- **Quantity math** (`src/main/services/s3-artwork-downloader.js`,
+  `src/shared/jobSchema.js`): on first import of an S3-delivered file,
+  `qtyOriginal = job.quantity × file.copies` (each factor defaults to
+  `1` when missing / non-positive, so a malformed API payload degrades
+  to "single copy" rather than NaN). The API's `copies` value is
+  persisted per-image so the renderer can show a "×N copies" chip
+  alongside the filename. FTP-delivered entries keep today's
+  `qtyOriginal = job.quantity` behaviour (copies implied as 1) — the
+  copies math fires only through the S3 entry-creation path.
+- **"Not finalised" display chip**
+  (`src/renderer/views/JobReview/ThumbnailCard.jsx`,
+  `src/renderer/job-review.css`): per-file amber chip on the filename
+  strip below the thumbnail when `productionReady === false`. Renders
+  alongside the M2 source tag (max 3 chips per row: source / "Not
+  finalised" / "×N copies"). Informational only — the auto-print hold
+  rule no longer cares about `production_ready` (see the 2026-05-24
+  hold-rule narrowing fix above). `productionReady === null` (legacy /
+  FTP-delivered entries) and `=== true` both suppress.
+- **Job-level "Qty: N" chip**
+  (`src/renderer/views/JobReview/index.jsx`): small neutral chip in the
+  drawer top-bar meta block. Distinct from the existing per-card
+  top-right `×{qty}` operator-mod indicator — this is the
+  job-wide fan-out multiplier, not a per-file override.
+
+**No migration of existing sidecars.** The quantity math runs only
+inside `_buildImageEntry`, which is invoked exclusively on FIRST import
+of a file (the call site is gated by the `s3ArtworkFileIdsKnown`
+diff). On re-poll, known file ids skip `_buildImageEntry` entirely, so
+every pre-M3 entry (POS-EFZ9UK, PXDEMO-AUXZWJ, every job downloaded
+between M1 and M3) keeps its existing `qtyOriginal`. A no-migration
+guard test in `s3-artwork-downloader.test.js` pins the contract: a
+future refactor that re-introduces silent migration would fail it with
+the message "existing entry recomputed despite known id in
+`s3ArtworkFileIdsKnown`". Schema-level hydration (`sidecarManager.js`
+Reconcile C) adds the new `copies` key in-memory only — never touches
+disk — preserving the same "no spurious save" contract that governs
+the M1 S3 fields.
+
+### Fixed — M3 "Not finalised" chip narrowed to manual-source files (2026-05-24)
+
+Tightened the M3 "Not finalised" chip in `ThumbnailCard.jsx` to fire only
+when `artworkSource === 'manual' && productionReady === false`.
+Pixfizz-source files (and legacy/null-source files) with
+`production_ready: false` no longer show the chip — `production_ready: false`
+is OrderHub's default state for non-manual file types (e.g.
+book-thumbnails on a photo book order) where there's no operator
+finalisation workflow, so the chip carried no actionable meaning there.
+Mirrors the same logic as the M2 hold-rule narrowing — both warning
+surfaces now agree that `production_ready` is a manual-source concept.
+
+### Fixed — S3 downloader filters `artwork_files[]` to manual source (2026-05-24)
+
+The S3 downloader now skips any `artwork_files[i]` entry whose
+`source !== 'manual'`. For Pixfizz orders the real print artwork arrives
+via FTP; anything else that appears in `artwork_files[]` is reference /
+preview material (e.g. `book-56931977-thumbnails` on a Pixfizz photo
+book, served from `/v1/pages/…?height=400`) that we should never have
+been downloading. Surfaced by PXDEMO-YUED5N-1 where the
+book-thumbnails file appeared as image 1 of 41 in the Job Review queue
+and inflated Total Prints from 40 to 80.
+
+This is the **third manifestation of the same source-based gating
+pattern** in M2 / M3:
+1. M2 hold-rule narrowing — hold fires on manual source only;
+   `production_ready: false` on Pixfizz-source files is the API's
+   default state, not a hold reason.
+2. M3 chip narrowing — the "Not finalised" chip fires only when
+   `artworkSource === 'manual'`.
+3. **(this fix)** The downloader follows the same rule. All three
+   surfaces — hold gate, display chip, ingest — now agree:
+   `production_ready` and pixfizz-source are not operator-actionable on
+   the S3 channel.
+
+Logged as `[s3-artwork] skipped non-manual file` with file id /
+file_name / source / artwork_type for audit. Existing sidecar entries
+created before this filter shipped are NOT auto-cleaned (the same
+no-migration contract as M3). To remove a stale entry on a previously-
+affected job, dismiss the order from the queue and re-flow it, or
+manually edit the sidecar to drop the entry — operator action, not
+automatic.
+
+### Added — M4 (`artwork_type: 'original'` → Customer Originals plumbing) (2026-05-25)
+
+Customer Originals Phase 1+2 UI automatically activates for S3-delivered
+manual jobs that include `artwork_type: 'original'` files alongside an
+optimized/manipulated sibling.
+
+- **Sub-folder routing** (`src/main/services/s3-artwork-downloader.js`):
+  `artwork_files[]` entries with `artwork_type === 'original'` now land
+  under `{jobPath}/original-files/` instead of the flat job folder — the
+  same path Pixfizz Customer Originals Phase 1+2 already reads via the
+  manifest's lowercase-N `originalFilename` field. Only the literal
+  string `'original'` triggers the route; unknown `artwork_type` values
+  (`'pages'`, `'text'`, …) keep landing flat. The subfolder is lazy-
+  created on first need, so manual jobs with only optimized/manipulated
+  files don't clutter disk with an empty subfolder. Orphan `.tmp` sweep
+  extends to `original-files/` too. Originals are NOT added to
+  `sidecar.images[]` (no entry, no manifest row) — Customer Originals
+  references them only via a sibling's `originalFilename`, matching the
+  Pixfizz FTP convention so `_scanJobImages`, AI scoring, and the print
+  dispatcher all stay scoped to printable JPEGs. The id IS tracked in
+  `s3ArtworkFileIdsKnown` so re-polls don't re-download.
+- **Conservative single-sibling back-fill**: after every poll, each
+  completed original (fresh-downloaded OR self-healed from disk) is
+  matched against `sidecar.images[]` + the entries built this poll. A
+  candidate is a non-original entry whose API `originalFileName`
+  (capital F-N) matches the original's `file_name` AND whose lowercase-N
+  `originalFilename` is still empty. **Exactly one** match → sibling's
+  `originalFilename` is back-filled to
+  `{jobFolderName}/original-files/{diskName}` (manifest-relative
+  verbatim). **0 or 2+ matches** → silent degrade, no back-fill (file
+  preserved on disk; Customer Originals UI simply doesn't activate for
+  that entry). First-write-wins on `originalFilename`: a value already
+  set by a prior poll OR an FTP manifest's first load is never
+  clobbered.
+- **Manifest pass-through** (no change required): `_upsertOrderManifest`
+  already serialises `img.originalFilename || null` per row, so once the
+  sibling is back-filled in-memory, the order-level
+  `{order_number}.json` carries the manifest-relative path verbatim.
+  `_buildManifestImageMetaMap` in `ipc-handlers.js` picks it up on the
+  next `ohd:job:load` and surfaces it to the renderer — Customer
+  Originals Phase 1+2 (thumbnail, "Open original", "Show in folder",
+  Phase 2 source-toggle re-crop) lights up with zero renderer changes.
+
+**Casing trap.** `originalFileName` (capital F-N, S3-channel field, API's
+`file_name` verbatim) and `originalFilename` (lowercase n, Customer
+Originals field, manifest-relative path) are unrelated concepts that
+differ only by capitalisation. The back-fill MATCHES on the capital-N
+field, WRITES to the lowercase-n field. Documented in
+`s3-artwork-downloader.js` and locked by the "collision-renamed sibling
+— back-fill still matches via originalFileName" test, which would fail
+if the casing was ever mixed up.
+
+**Known limitation — late-arriving siblings.** When an original arrives
+in poll N but its optimized counterpart doesn't appear until poll N+1,
+the back-fill misses (the original is already in `s3ArtworkFileIdsKnown`
+and isn't revisited). The sibling's `originalFilename` stays null; the
+file is still on disk and visible via Explorer, just no Customer
+Originals thumbnail. Conservative-by-design — solving this would
+require a `s3OriginalsKnown[{id, diskName}]` job-level array; deferred
+until field evidence shows it's worth the schema bump.
+
+### Fixed — Job Review grid columns no longer stretch on long filenames (2026-05-24)
+
+`src/renderer/job-review.css` — `.jr-grid-scroll`'s
+`grid-template-columns` changed from `repeat(3, 1fr)` to
+`repeat(3, minmax(0, 1fr))`. Grid items default to `min-width: auto`,
+which makes columns grow to fit their content's intrinsic minimum size.
+After M2 added the filename label strip below the canvas, long
+filenames (~55 chars on Pixfizz page files) forced the columns wider
+than 1fr. The card stretched with them but the canvas stayed locked at
+its fixed `width="128"` backing-store attribute — producing the
+"small image on the left, huge empty whitespace on the right" symptom.
+`minmax(0, 1fr)` sets the column minimum to 0 explicitly, so filename
+text ellipsis-truncates (already configured on `.jr-card__filename`)
+instead of pushing the column wider. Net effect: the canvas fills the
+card again as it did pre-M2.
+
+Out of scope for this release: M4 (`artwork_type: 'original'` →
+Customer Originals plumbing). Deferred to a future milestone.
+
+## v1.6.0 - 2026-05-13
+
 ## v1.5.0 - 2026-05-04
 
 ### Added — AI Fix-up Service (auto-enhancement on quality-gate failure)

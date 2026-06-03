@@ -3,10 +3,16 @@ const ftpService = require('./ftp-service');
 const folderWatchService = require('./folder-watch-service');
 const jobService = require('./job-service');
 const jobDownloadService = require('./job-download-service');
+const { createS3ArtworkDownloader } = require('./s3-artwork-downloader');
 const { printControllerStore } = require('./print-controller-store');
 const routingService = require('./routing-service');
 const { FolderMonitor } = require('./folder-monitor');
 const logger = require('./logger');
+
+// S3 artwork downloader — singleton, sibling of the FTP channel.
+// M1 (2026-05-24); subsequent milestones extend the per-job hold gate
+// + quantity math + Customer Originals plumbing.
+const s3ArtworkDownloader = createS3ArtworkDownloader();
 
 class PollingService {
   constructor() {
@@ -184,6 +190,31 @@ class PollingService {
         receivedCount: 0,
         failedCount: 0
       };
+
+      // S3 artwork channel (M1, 2026-05-24): download artwork for any
+      // pending job with non-empty artwork_files[] BEFORE the
+      // checkLocalFiles loop runs. Jobs with empty artwork_files[] are a
+      // no-op; FTP-delivered jobs continue through the parallel FTP path
+      // (scanFtp) unchanged. Errors here MUST NOT bail the poll cycle —
+      // per-file failures land in the downloader's failed[] array, and the
+      // next poll retries any file whose id isn't yet in the sidecar's
+      // s3ArtworkFileIdsKnown. Serialised across jobs by design (V1);
+      // each job runs up to 4 downloads in parallel internally.
+      const downloadDirectory = configService.get('downloadDirectory');
+      if (downloadDirectory) {
+        for (const job of pendingJobs) {
+          if (Array.isArray(job.artwork_files) && job.artwork_files.length > 0) {
+            try {
+              await s3ArtworkDownloader.downloadJobArtwork(job, downloadDirectory);
+            } catch (err) {
+              // downloadJobArtwork never throws by contract, but defence-
+              // in-depth: catch + log so a bug here can't take down the
+              // poll cycle. checkLocalFiles will still run for the rest.
+              logger.logError('[s3-artwork] downloadJobArtwork threw', err, { jobId: job.id });
+            }
+          }
+        }
+      }
 
       // For each pending job, check if files exist locally
       for (const job of pendingJobs) {

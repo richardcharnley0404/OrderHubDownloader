@@ -3,6 +3,7 @@ const http = require('http');
 const Store = require('electron-store');
 const configService = require('./config-service');
 const logger = require('./logger');
+const { computeHoldForReview, formatHoldReasons } = require('../../shared/holdForReview');
 
 const jobStore = new Store({
   name: 'jobs-cache',
@@ -113,7 +114,7 @@ class JobService {
    * Map API job response to internal format
    */
   _mapApiJob(apiJob) {
-    return {
+    const job = {
       // IDs
       id: apiJob.job_id,
       order_id: apiJob.order_id,
@@ -144,10 +145,37 @@ class JobService {
       is_rush: Boolean(apiJob.is_rush),
       production_notes: apiJob.production_notes || '',
       artwork_files: apiJob.artwork_files || [],
+      // S3 artwork channel (M1, 2026-05-24). null is the no-op-safe default
+      // for legacy responses that don't include the field. 'none' should
+      // never appear in practice — OrderHub filters those server-side —
+      // but if it does the s3-artwork-downloader logs a contract-drift
+      // warning rather than asserting here (the mapper stays pure).
+      artwork_source: apiJob.artwork_source || null,
       locations: apiJob.locations || [],
 
       // OHD-managed status (not from API)
       _status: 'pending'
+    };
+
+    // S3 Artwork Channel M2 (2026-05-24): derive the per-job hold-for-review
+    // flag from the API fields above. Recomputed every poll (the inputs —
+    // artwork_source, artwork_files[].source, artwork_files[].production_ready
+    // — can change between polls as files are uploaded or finalised), so we
+    // intentionally do NOT cache on the persistent sidecar. The auto-print
+    // dispatcher (ipc-handlers.runAutoPrint) reads `_holdForReview` to skip
+    // held jobs; the renderer reads `_holdReasons` for the chip tooltip.
+    // Operator-initiated Send-to-Print is unaffected by this gate.
+    //
+    // `_holdReasonsText` is the pre-formatted, operator-readable tooltip
+    // string (semicolon-joined) — derived here so the vanilla renderer.js
+    // (no module system → can't import from shared/) doesn't have to
+    // duplicate the text mapping. The React Job Review panel could also
+    // use the raw `_holdReasons` array.
+    const hold = computeHoldForReview(job);
+    return {
+      ...job,
+      ...hold,
+      _holdReasonsText: formatHoldReasons(hold._holdReasons),
     };
   }
 
@@ -188,10 +216,21 @@ class JobService {
     });
 
     // Keep locally-tracked jobs that are no longer returned by API
-    // (e.g. received/in_production jobs that OH no longer lists as pending)
+    // (e.g. received/in_production jobs that OH no longer lists as pending).
+    //
+    // M2 (2026-05-24): for these kept-local jobs we ALSO re-derive
+    // `_holdForReview` from the cached artwork_source / artwork_files,
+    // because pre-M2 cache entries lack the field entirely. Without this
+    // the auto-print hold gate sees `undefined` on legacy-cached manual
+    // jobs and dispatches them. Cheap + idempotent (pure function).
     for (const existing of this.jobs) {
       if (!newJobIds.has(existing.id) && existing._status && existing._status !== 'pending') {
-        merged.push(existing);
+        const hold = computeHoldForReview(existing);
+        merged.push({
+          ...existing,
+          ...hold,
+          _holdReasonsText: formatHoldReasons(hold._holdReasons),
+        });
       }
     }
 
@@ -437,6 +476,17 @@ class JobService {
             if (TERMINAL_OH_STATUSES.includes(ohStatus)) {
               return { jobId: job.id, terminal: true, ohStatus };
             }
+          } else if (response.statusCode === 400) {
+            // 400 = OrderHub rejects this job id outright (unknown / malformed).
+            // Unlike a 5xx or auth failure it will never resolve on retry, so
+            // mark the job _status:'error' locally — that drops it out of the
+            // ACTIVE_LOCAL_STATUSES filter, stops the every-poll retry loop,
+            // and surfaces it in the UI with a reason instead of failing
+            // silently in the log forever.
+            return {
+              jobId: job.id, terminal: false, badRequest: true,
+              statusCode: response.statusCode,
+            };
           } else {
             logger.logWarning('[sync] Failed to fetch job status from OH', {
               jobId: job.id, statusCode: response.statusCode,
@@ -454,6 +504,12 @@ class JobService {
           this.updateJobLocally(r.jobId, { _status: 'completed' });
           logger.info(`[sync] Job ${r.jobId} auto-completed from OH status`, { ohStatus: r.ohStatus });
           autoCompleted++;
+        } else if (r.badRequest) {
+          this.updateJobLocally(r.jobId, {
+            _status: 'error',
+            _errorMessage: `OrderHub no longer recognizes this job (HTTP ${r.statusCode} on status sync) — it may have been deleted upstream.`,
+          });
+          logger.logWarning(`[sync] Job ${r.jobId} marked error — OH returned ${r.statusCode} on status sync`);
         }
       }
     }
