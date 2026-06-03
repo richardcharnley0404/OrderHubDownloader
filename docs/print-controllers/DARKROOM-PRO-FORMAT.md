@@ -66,6 +66,41 @@ Order1000.TXT
 
 ---
 
+## Emit Structure (current OHD implementation)
+
+The OHD emitter (`darkroom-pro-output.js`) writes **one complete block per image** rather than relying on Darkroom Pro's sticky-field inheritance described later in this document. Every image gets its own `Qty/Size/Media/Date/Orderid` (+ optional configurable photo lines) + `Filepath=`. Repetition is intentional: it removes any ambiguity about which `Qty` applies to which image and lets per-image variability (e.g. different qty per photo) work cleanly without sticky semantics.
+
+Example (two images with different qty):
+
+```
+OrderFirstName=Richard
+OrderLastName=PXDEMO-091YEC - Charnley
+OrderEmail=richard_charnley@pixfizz.com
+ExtOrderNum=PXDEMO-091YEC-1
+
+Qty=2
+Size=4x6
+Media=Luster
+Date= April 30, 2026
+Orderid=PXDEMO-091YEC-1
+Photo.First Name=...IMG-20240602-WA0013.jpg...
+Photo.Last Name=Charnley
+Filepath=C:\...\IMG-20240602-WA0013.jpg_Q2_pages1.jpeg
+
+Qty=3
+Size=4x6
+Media=Luster
+Date= April 30, 2026
+Orderid=PXDEMO-091YEC-1
+Photo.First Name=...IMG_20251208_152546_HDR.jpg...
+Photo.Last Name=Charnley
+Filepath=C:\...\IMG_20251208_152546_HDR.jpg_Q3_pages2.jpeg
+```
+
+The sections below describe the underlying spec (sticky fields, header shape) — but be aware that the OHD emitter has chosen non-sticky per-image blocks for safety.
+
+---
+
 ## Order Header Fields
 
 These fields appear **once**, at the top of the file, before any image line items.
@@ -74,6 +109,7 @@ These fields appear **once**, at the top of the file, before any image line item
 OrderFirstName=Johnny
 OrderLastName=Appleseed
 OrderEmail=Johnny@appleseed.com
+ExtOrderNum=PXDEMO-D4LNF6-1
 ExtCabin=123
 ExtFolio=111111
 ```
@@ -83,6 +119,7 @@ ExtFolio=111111
 | `OrderFirstName` | `Johnny` | `job.customer_name` (split) | Customer first name |
 | `OrderLastName` | `Appleseed` | `job.customer_name` (split) | Customer last name |
 | `OrderEmail` | `Johnny@appleseed.com` | `job.customer_email` | Customer email address |
+| `ExtOrderNum` | `PXDEMO-D4LNF6-1` | `job.outputFilenameStem` (= `job_name`, fallback `order_number`) | Per-job identifier — uses the same stem as the `.txt` filename so the value inside the file matches the filename and uniquely identifies the job within a multi-job order. **Not** the order-level `order_number` alone. |
 | `Ext*` fields | `ExtCabin=123` | Job options / custom fields | Extension fields — arbitrary key/value pairs prefixed with `Ext`. Used for cruise ship cabins, folio numbers, student IDs etc. These appear on the index print and can be printed on borders. |
 
 > **OHD mapping note**: `OrderFirstName`/`OrderLastName` should be split from `job.customer_name` on the first space. If no space is present, put the whole value in `OrderFirstName` and leave `OrderLastName` empty (or omit it). `Ext*` fields map from the job's custom option fields — these will need to be configurable per controller in OHD settings.
@@ -143,6 +180,52 @@ Filepath=\\imageserver\folder1\folder2\img_0003.jpg
 | `Template` | `X:\Templates\Borders\sports\golf_8x10.crd` | **Job option** (e.g. "Border" option) mapped via channel config | Optional | Absolute Windows path to a `.crd` border/template file. **Driven by an OrderHub job option** (e.g. a "Border" or "Template" product option chosen at order time) — not purely from channel config. The channel config may store the template path or a directory to resolve from. Omit entirely for plain prints. Can coexist with `Media=`. |
 | `Tmp.Name` | `Megan Brown` | `job.customer_name` | Required when `Template=` is present | Customer name to be printed within the border/template. Always written alongside `Template=`. Omit when no template is in use. |
 | `Filepath` | `\\server\share\img.jpg` | Constructed from download dir | Yes | **Absolute** Windows path (local or UNC) to the source image. Each `Filepath=` line marks the start of a new image using all currently active field values. |
+
+---
+
+## Configurable Photo Lines (OHD)
+
+OHD lets the operator configure up to **two** additional key/value lines per image, inserted between `Orderid=` and `Filepath=` in every per-image block. The typical use case is back-print metadata (text printed on the reverse of the photo), which Darkroom Pro reads from vendor-specific field names that vary per installation.
+
+### Configuration
+
+Photo Lines are stored on the Darkroom Pro controller as `controller.photoLines` — an array of `{ darkroomField, ohdTemplate }` entries. Both sides are operator-supplied:
+
+| Field | Example | Notes |
+|-------|---------|-------|
+| `darkroomField` | `Photo.First Name` | The literal Darkroom Pro field name (left of `=`). Free text — must match the vendor's expected field names exactly. |
+| `ohdTemplate` | `{filename}` or `{lastName}-{filename}` | OHD template string (right of `=`). Tokens listed below are substituted per image. Plain text without tokens is also valid. |
+
+### Available tokens
+
+Tokens are case-sensitive and resolved per image via the shared `template-tokens.js` helper (the same resolver Frontline back-prints use):
+
+| Token | Source | Example value |
+|-------|--------|---------------|
+| `{customerName}` | Full customer name | `Richard Charnley` |
+| `{firstName}` | First word of customer name | `Richard` |
+| `{lastName}` | Everything after the first space | `Charnley` |
+| `{jobId}` | OrderHub job ID | `38414838` |
+| `{orderNumber}` | Order number | `PXDEMO-091YEC` |
+| `{jobName}` | Job name (falls back to `{orderNumber}`) | `PXDEMO-091YEC-1` |
+| `{filename}` | Per-image filename including extension | `PXDEMO-091YEC_..._pages1.jpeg` |
+
+Missing/empty values resolve to an empty string rather than throwing — this avoids blocking a job over an optional template token.
+
+### Default seed for new controllers
+
+When the Add Controller modal opens with no existing photoLines, two rows are pre-seeded so existing Darkroom Pro setups keep working out of the box:
+
+```
+Photo.First Name = {filename}
+Photo.Last Name  = {lastName}
+```
+
+These match the legacy hard-coded format the emitter previously emitted. Operators can edit, remove, or replace either row.
+
+### Where they appear in the file
+
+Inserted between `Orderid=` and `Filepath=` in **every** per-image block (see the example in the [Emit Structure](#emit-structure-current-ohd-implementation) section above). Empty `darkroomField` entries are dropped silently at emit time; entries with an empty `ohdTemplate` produce a line with an empty value (e.g. `Photo.First Name=`), which is treated as a deliberate caller choice.
 
 ---
 
@@ -284,6 +367,7 @@ In addition to standard controller fields, Darkroom Pro controllers have:
 | `processedFolderName` | `processed` | Name of the subfolder Darkroom Pro moves accepted `.TXT` files into (confirm from DP installation) |
 | `templateMappings` | `[...]` | Array of `{ optionName, optionValue, templatePath }` objects — maps OH job option values to `.crd` file paths |
 | `extFieldMappings` | `[...]` | Array of `{ sourceField, extKeyName }` objects — maps OH option/custom field names to `Ext*` key names |
+| `photoLines` | `[...]` | Array of `{ darkroomField, ohdTemplate }` objects (max 2). See [Configurable Photo Lines](#configurable-photo-lines-ohd) above. |
 
 ### templateMappings schema
 

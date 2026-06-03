@@ -26,11 +26,18 @@ const PREFIXES = ['p', 'o', 'q', 'e'];
  * @param {object} job          - Job object (needs job_name, product, options)
  * @param {string} destBasePath - Hot folder / output base path for the controller
  * @param {string|null} reprintSuffix - e.g. 'r1', or null for a normal job
+ * @param {object}      [nameOpts]    - Forwarded to buildFolderName
+ *   - includeCustomerName: boolean (default false)
+ *   - customerName: string (default job.customer_name)
  * @returns {Promise<{ prefix: string, folderName: string, folderPath: string }|null>}
  *          Returns null if no matching folder is found (job not yet sent).
  */
-async function getJobOutputStatus(job, destBasePath, reprintSuffix = null) {
-  const baseName = buildFolderName('', job, reprintSuffix); // no prefix
+async function getJobOutputStatus(job, destBasePath, reprintSuffix = null, nameOpts = {}) {
+  const resolvedOpts = {
+    includeCustomerName: !!nameOpts.includeCustomerName,
+    customerName: nameOpts.customerName != null ? nameOpts.customerName : (job.customer_name || ''),
+  };
+  const baseName = buildFolderName('', job, reprintSuffix, resolvedOpts); // no prefix
 
   for (const prefix of PREFIXES) {
     const folderName = `${prefix}${baseName}`;

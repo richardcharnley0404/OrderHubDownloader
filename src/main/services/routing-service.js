@@ -129,6 +129,9 @@ function resolveRoute(job) {
           bannerSheet:      overrideCtrl.bannerSheet      || false,
           skipAutoPrint:    overrideMapping.skipAutoPrint || false,
           checkOrderStatus: overrideCtrl.checkOrderStatus !== false,
+          // DPOF folder-name option — default on for back-compat with controllers
+          // that pre-date this field.
+          includeCustomerInFolder: overrideCtrl.includeCustomerInFolder !== false,
         };
       }
     }
@@ -382,6 +385,9 @@ function resolveRoute(job) {
     bannerSheet:      controller.bannerSheet || false,
     skipAutoPrint:    channelMapping.skipAutoPrint || false,
     checkOrderStatus: controller.checkOrderStatus !== false,
+    // DPOF folder-name option — default on for back-compat with controllers
+    // that pre-date this field.
+    includeCustomerInFolder: controller.includeCustomerInFolder !== false,
   };
 }
 

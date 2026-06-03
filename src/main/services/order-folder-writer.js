@@ -31,12 +31,19 @@ class OrderFolderWriter {
    * @param {string}      dpofContent    - Generated DPOF content (written to MISC/AUTPRINT.MRK)
    * @param {Array}       imageFiles     - Array of { sourcePath: string, filename: string }
    * @param {string|null} reprintSuffix  - e.g. 'r1', 'r2', or null for a normal job
+   * @param {object}      [nameOpts]     - Forwarded to buildFolderName
+   *   - includeCustomerName: boolean (default false)
+   *   - customerName: string (default job.customer_name)
    * @returns {Promise<{ folderPath: string, folderName: string }>}
    * @throws  On any I/O error — temp "p" folder is left in place for operator review
    */
-  async writeOrderFolder(hotFolderPath, job, dpofContent, imageFiles, reprintSuffix = null) {
-    const tempName  = buildFolderName('p', job, reprintSuffix);
-    const finalName = buildFolderName('o', job, reprintSuffix);
+  async writeOrderFolder(hotFolderPath, job, dpofContent, imageFiles, reprintSuffix = null, nameOpts = {}) {
+    const resolvedOpts = {
+      includeCustomerName: !!nameOpts.includeCustomerName,
+      customerName: nameOpts.customerName != null ? nameOpts.customerName : (job.customer_name || ''),
+    };
+    const tempName  = buildFolderName('p', job, reprintSuffix, resolvedOpts);
+    const finalName = buildFolderName('o', job, reprintSuffix, resolvedOpts);
     const tempPath  = path.join(hotFolderPath, tempName);
     const finalPath = path.join(hotFolderPath, finalName);
 

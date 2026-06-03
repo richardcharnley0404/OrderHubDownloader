@@ -13,16 +13,34 @@
 const UNSAFE_CHARS = /["/\\:*?<>|]/g;
 
 /**
+ * Extract the surname (last whitespace-separated token) from a full
+ * customer name. Falls back to the full name when the input contains
+ * a single token (no whitespace).
+ *
+ * @param {string} customerName  - e.g. "Richard Charnley", "Cher"
+ * @returns {string}             - sanitised surname (NTFS-safe), or '' for empty input
+ */
+function extractSurname(customerName) {
+  const safe = (customerName || '').replace(UNSAFE_CHARS, '').trim();
+  if (!safe) return '';
+  const tokens = safe.split(/\s+/);
+  return tokens.length > 1 ? tokens[tokens.length - 1] : safe;
+}
+
+/**
  * Build a DPOF output folder name from a job object.
  *
- * Format:  {prefix}{jobNo}[_{reprintSuffix}]_{product}_{optionValues}
+ * Format:  {prefix}{jobNo}[_{surname}][_{reprintSuffix}]_{product}_{optionValues}
  *
  * Examples:
- *   buildFolderName('p', job)
- *     → 'pPXDEMO-DR2PE0-1_4x6 Photo Print_lustre_full-bleed'
- *
  *   buildFolderName('o', job)
  *     → 'oPXDEMO-DR2PE0-1_4x6 Photo Print_lustre_full-bleed'
+ *
+ *   buildFolderName('o', job, null, { includeCustomerName: true, customerName: 'Richard Charnley' })
+ *     → 'oPXDEMO-DR2PE0-1_Charnley_4x6 Photo Print_lustre_full-bleed'
+ *
+ *   buildFolderName('o', job, 'r1', { includeCustomerName: true, customerName: 'Richard Charnley' })
+ *     → 'oPXDEMO-DR2PE0-1_Charnley_r1_4x6 Photo Print_lustre_full-bleed'
  *
  *   buildFolderName('o', job, 'r1')
  *     → 'oPXDEMO-DR2PE0-1_r1_4x6 Photo Print_lustre_full-bleed'
@@ -35,9 +53,12 @@ const UNSAFE_CHARS = /["/\\:*?<>|]/g;
  * @param {string}      prefix        - Single prefix char: 'p', 'o', 'q', or 'e'
  * @param {object}      job           - Job object from OrderHub API / local cache
  * @param {string|null} reprintSuffix - Optional reprint suffix, e.g. 'r1', 'r2'
+ * @param {object}      [opts]        - Optional behavior flags
+ * @param {boolean}     [opts.includeCustomerName=false] - Insert surname after jobNo
+ * @param {string}      [opts.customerName='']           - Source name; surname is extracted from this
  * @returns {string}
  */
-function buildFolderName(prefix, job, reprintSuffix = null) {
+function buildFolderName(prefix, job, reprintSuffix = null, opts = {}) {
   const jobNo   = (job.job_name || '').replace(UNSAFE_CHARS, '');
   const reprint = reprintSuffix ? `_${reprintSuffix.replace(UNSAFE_CHARS, '')}` : '';
   const product = (job.product  || '').replace(UNSAFE_CHARS, '').trim();
@@ -47,8 +68,16 @@ function buildFolderName(prefix, job, reprintSuffix = null) {
     .filter(Boolean)
     .join('_');
 
-  const segments = [`${jobNo}${reprint}`, product, options].filter(Boolean).join('_');
+  // Surname segment — falls between jobNo and reprintSuffix so reprints stay
+  // adjacent to the product (matches operator request 2026-05-18).
+  let surnameSeg = '';
+  if (opts.includeCustomerName) {
+    const surname = extractSurname(opts.customerName);
+    if (surname) surnameSeg = `_${surname}`;
+  }
+
+  const segments = [`${jobNo}${surnameSeg}${reprint}`, product, options].filter(Boolean).join('_');
   return `${prefix}${segments}`;
 }
 
-module.exports = { buildFolderName };
+module.exports = { buildFolderName, extractSurname };

@@ -40,13 +40,19 @@ class PrintControllerService {
       images: (job.lineItems || []).map(li => ({ filename: li.filename, quantity: li.quantity })),
     });
 
-    // Write order folder
+    // Write order folder. Default the customer-surname flag on for back-compat
+    // with controllers that pre-date this field.
     const folderPath = await orderFolderWriter.writeOrderFolder(
       controller.hotFolderPath,
       job.orderNumber,
       job.productCode,
       dpofContent,
-      job.imageFiles
+      job.imageFiles,
+      null,
+      {
+        includeCustomerName: controller.includeCustomerInFolder !== false,
+        customerName:        job.customerName || '',
+      }
     );
 
     // Update job status
