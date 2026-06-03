@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document covers the interconnected systems for distributing and running OrderHub Downloader (OHD):
+This document covers the interconnected systems for distributing and running OrderHub Desktop (OHD):
 
 1. **Instance registration** — each OHD install registers itself with OrderHub (OH)
 2. **Version control** — OH acts as the update server via API
@@ -444,7 +444,7 @@ exports.default = async function(configuration) {
     'sign code',
     `--file-list "${filePath}"`,
     `--publisher-name "Pixfizz"`,
-    `--description "OrderHub Downloader"`,
+    `--description "OrderHub Desktop"`,
     `--description-url "https://your-oh-app.com"`,
     `--azure-key-vault-tenant-id "${process.env.AZURE_TENANT_ID}"`,
     `--azure-key-vault-client-id "${process.env.AZURE_CLIENT_ID}"`,
@@ -460,7 +460,7 @@ exports.default = async function(configuration) {
 
 ```yaml
 appId: com.pixfizz.ohd
-productName: OrderHub Downloader
+productName: OrderHub Desktop
 
 win:
   target:

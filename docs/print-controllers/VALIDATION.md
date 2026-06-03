@@ -1,6 +1,6 @@
 # DPI Validation
 
-OrderHub Downloader validates the resolution of artwork images before they are sent to a print controller. This prevents low-quality jobs from printing automatically without review.
+OrderHub Desktop validates the resolution of artwork images before they are sent to a print controller. This prevents low-quality jobs from printing automatically without review.
 
 ---
 

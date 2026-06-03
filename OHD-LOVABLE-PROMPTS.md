@@ -6,7 +6,7 @@ These are the principle-led prompts to use when instructing Lovable to build OHD
 
 ## Prompt 1 — OHD Check-in API & Instance Tracking
 
-We need to extend OrderHub to support a check-in system for OrderHub Downloader (OHD), which is a Windows desktop Electron app used by our lab clients.
+We need to extend OrderHub to support a check-in system for OrderHub Desktop (OHD), which is a Windows desktop Electron app used by our lab clients.
 
 **Background**
 

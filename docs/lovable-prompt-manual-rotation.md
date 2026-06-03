@@ -2,7 +2,7 @@
 
 ## Context
 
-We have a Windows desktop companion app (OrderHub Downloader, Electron, system tray) that sits at the lab. It watches a local scan folder, converts TIFF → JPG, and uploads to IBM Cloud Object Storage. We're adding an on-device AI model (ONNX, EfficientNetV2-S) that predicts image orientation so we can auto-rotate film scans before upload.
+We have a Windows desktop companion app (OrderHub Desktop, Electron, system tray) that sits at the lab. It watches a local scan folder, converts TIFF → JPG, and uploads to IBM Cloud Object Storage. We're adding an on-device AI model (ONNX, EfficientNetV2-S) that predicts image orientation so we can auto-rotate film scans before upload.
 
 The model will be confident on most images (>90%) and those get auto-rotated. But a non-trivial percentage will fall below the confidence threshold and need a human to look at them and pick the correct rotation.
 

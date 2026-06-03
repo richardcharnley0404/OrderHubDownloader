@@ -1,6 +1,6 @@
 # Print Controller Setup Guide
 
-This guide walks through configuring print controllers, channels, and process mappings in OrderHub Downloader.
+This guide walks through configuring print controllers, channels, and process mappings in OrderHub Desktop.
 
 ---
 
@@ -98,7 +98,7 @@ The directory must exist before starting the app. It is not created automaticall
 
 ### Windows permissions required
 
-The user account running OrderHub Downloader needs:
+The user account running OrderHub Desktop needs:
 
 - **Read** access to the hot folder (to monitor for renames)
 - **Write** access to the hot folder (to create order subfolders)
@@ -187,7 +187,7 @@ After sending a real job:
 2. Open the folder and verify `DPOF.001` exists and `IMAGES\` contains the correct files
 3. Open `DPOF.001` in a text editor and check the channel number and image references
 4. Confirm the controller's software picks up the folder (prefix changes to `e`)
-5. Check the job status in the OrderHub Downloader job list — it should update to `accepted`
+5. Check the job status in the OrderHub Desktop job list — it should update to `accepted`
 
 ### Checking logs
 

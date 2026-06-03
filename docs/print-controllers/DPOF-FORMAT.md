@@ -1,6 +1,6 @@
 # DPOF File Format Reference
 
-DPOF (Digital Print Order Format) is the protocol used to communicate print job instructions to photo print controllers. OrderHub Downloader generates DPOF version 1.00 files.
+DPOF (Digital Print Order Format) is the protocol used to communicate print job instructions to photo print controllers. OrderHub Desktop generates DPOF version 1.00 files.
 
 The generated file is always named **`DPOF.001`** and placed at the root of the order folder.
 
@@ -49,7 +49,7 @@ VUQ RGN = END
 | Field | Example | Source | Description |
 |-------|---------|--------|-------------|
 | `GEN REV` | `01.00` | Hardcoded | DPOF standard revision number |
-| `GEN CRT` | `"OHD" 1.00` | Hardcoded | Creator identifier — "OHD" = OrderHub Downloader |
+| `GEN CRT` | `"OHD" 1.00` | Hardcoded | Creator identifier — "OHD" = OrderHub Desktop |
 | `GEN DTM` | `2026:02:21:15:30:45` | `new Date()` | Generation timestamp in `YYYY:MM:DD:HH:MM:SS` format |
 | `USR NAM` | `"Richard Charnley"` | `job.customerName` | Customer name from the OrderHub job |
 | `USR CID` | `"100456"` | `job.orderNumber` | Order number — used as the user/customer ID |
@@ -154,7 +154,7 @@ Order number `100456`, product `8x12GLOSS`, 2 images, 1 copy each.
 ```
 [HDR]
 GEN REV = 01.00                              ← DPOF format version
-GEN CRT = "OHD" 1.00                         ← Created by OrderHub Downloader v1.00
+GEN CRT = "OHD" 1.00                         ← Created by OrderHub Desktop v1.00
 GEN DTM = 2026:02:21:15:30:45               ← Timestamp of file generation
 USR NAM = "Jane Smith"                       ← Customer name
 USR CID = "100456"                           ← Order number (used as customer ID)

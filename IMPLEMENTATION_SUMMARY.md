@@ -2,7 +2,7 @@
 
 ## ✅ Project Complete
 
-The OrderHub Downloader application has been successfully implemented according to the plan. All core features are working and tested.
+The OrderHub Desktop application has been successfully implemented according to the plan. All core features are working and tested.
 
 ## Implementation Status
 
@@ -267,7 +267,7 @@ npm run build      # Create installer
 
 ### Output
 - Unpacked: `dist/win-unpacked/`
-- Installer: `dist/OrderHub Downloader Setup 1.0.0.exe`
+- Installer: `dist/OrderHub Desktop Setup 1.0.0.exe`
 
 ## Success Criteria
 
@@ -294,7 +294,7 @@ From log output (2026-02-13 11:06-11:12):
 
 ## Conclusion
 
-The OrderHub Downloader application is **complete and fully functional**. All planned features have been implemented and tested. The application is ready for:
+The OrderHub Desktop application is **complete and fully functional**. All planned features have been implemented and tested. The application is ready for:
 
 1. ✅ Further testing with real credentials
 2. ✅ Production deployment

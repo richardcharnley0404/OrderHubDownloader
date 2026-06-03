@@ -38,7 +38,7 @@ function OHDChrome({ dark, children, onSelectTab, tab, badges }) {
       <div className="ohd-titlebar">
         <div className="ohd-titlebar-left">
           <img src="assets/pixfizz-mark.svg" className="ohd-mark" alt="" />
-          <span className="ohd-title">OrderHub Downloader</span>
+          <span className="ohd-title">OrderHub Desktop</span>
         </div>
         <div className="ohd-titlebar-right">
           <span className="ohd-version">v1.1.0</span>

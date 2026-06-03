@@ -1,6 +1,6 @@
 # Icons
 
-This directory contains icon files for the OrderHub Downloader application.
+This directory contains icon files for the OrderHub Desktop application.
 
 ## Required Files
 

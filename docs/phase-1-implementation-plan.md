@@ -1,6 +1,6 @@
 # Phase 1 Implementation Plan — Film Scan AI Rotation (PW-007)
 
-**Scope:** Entirely local to OrderHub Downloader (OHD). No OrderHub/Lovable changes, no cross-app contract changes, no manual rotation UI. Adds AI-driven auto-rotation to the Mode 2 film scan pipeline, a new Film Review Panel for QC, and local per-frame telemetry logging to enable a feedback loop in a later phase.
+**Scope:** Entirely local to OrderHub Desktop (OHD). No OrderHub/Lovable changes, no cross-app contract changes, no manual rotation UI. Adds AI-driven auto-rotation to the Mode 2 film scan pipeline, a new Film Review Panel for QC, and local per-frame telemetry logging to enable a feedback loop in a later phase.
 
 **Source of truth for this plan:** `OrderHub Dowloader/ARCHITECTURE.md` (note: it lives in the subfolder, not the repo root — historical artefact). Section references below are to that doc. The implementer will have access to the live source tree and should verify line-level specifics (IPC handler registration order in `src/main/ipc-handlers.js`, esbuild config in `scripts/build-renderer.js`, electron-builder config in `electron-builder.yml`) against current code.
 

@@ -1,4 +1,4 @@
-# OrderHub Downloader
+# OrderHub Desktop
 
 A Windows desktop application that automatically downloads files from an FTP server based on jobs retrieved from the OrderHub API. Runs continuously in the background as a system tray application.
 
@@ -37,7 +37,7 @@ A Windows desktop application that automatically downloads files from an FTP ser
 
 2. **Find installer in**
    ```
-   dist/OrderHub Downloader Setup X.X.X.exe
+   dist/OrderHub Desktop Setup X.X.X.exe
    ```
 
 ## Configuration

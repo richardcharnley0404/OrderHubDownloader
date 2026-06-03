@@ -149,7 +149,7 @@ Full example: `o100456_8x12GLOSS`
 
 | Prefix | Status | Set by |
 |--------|--------|--------|
-| `o` | Submitted / pending | OrderHub Downloader (`OrderFolderWriter`) |
+| `o` | Submitted / pending | OrderHub Desktop (`OrderFolderWriter`) |
 | `e` | Accepted / processing | Print controller software |
 | `q` | Failed / rejected | Print controller software |
 

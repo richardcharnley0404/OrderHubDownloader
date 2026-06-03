@@ -67,7 +67,7 @@ Open the controller's own management software or logs. It will usually provide a
 
 ### Diagnosis step 4: Verify channel configuration
 
-In OrderHub Downloader settings, check that the channel number and print style code match what the controller software expects. The channel number must correspond to a real paper channel loaded in the printer.
+In OrderHub Desktop settings, check that the channel number and print style code match what the controller software expects. The channel number must correspond to a real paper channel loaded in the printer.
 
 ---
 
@@ -89,7 +89,7 @@ The hot folder directory must exist before the app starts. The app does not crea
 
 ### Step 2: Check Windows file permissions
 
-Right-click the hot folder → Properties → Security. The Windows user account running OrderHub Downloader needs:
+Right-click the hot folder → Properties → Security. The Windows user account running OrderHub Desktop needs:
 
 - **Modify** (includes Read, Write, and Delete)
 - Ensure permissions apply to **This folder, subfolders and files**

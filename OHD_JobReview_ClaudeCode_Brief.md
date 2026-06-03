@@ -2,7 +2,7 @@
 
 ## Overview
 
-Build a **Job Review Panel** into the existing OrderHub Downloader (OHD) Electron app.
+Build a **Job Review Panel** into the existing OrderHub Desktop (OHD) Electron app.
 
 This is a slide-in drawer that opens within the existing Electron window when an operator selects a job. It allows the operator to:
 

@@ -1,6 +1,6 @@
 # OHD Implementation Brief: Unified DPOF Generator & Controller UI
 
-**Project:** OrderHub Downloader (OHD)  
+**Project:** OrderHub Desktop (OHD)  
 **Prepared for:** Claude Code  
 **Date:** 2026-03-08  
 **Priority:** High

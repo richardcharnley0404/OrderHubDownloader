@@ -2,7 +2,7 @@
 
 ## Context
 
-I have a Node.js/Electron desktop companion app (OrderHub Downloader) that processes film scans. It uses **sharp** (https://sharp.pixelplumbing.com/, npm package `sharp`, currently v0.34.5) for all image manipulation. sharp is a native Node module wrapping libvips, shipped with prebuilt binaries for the major platforms.
+I have a Node.js/Electron desktop companion app (OrderHub Desktop) that processes film scans. It uses **sharp** (https://sharp.pixelplumbing.com/, npm package `sharp`, currently v0.34.5) for all image manipulation. sharp is a native Node module wrapping libvips, shipped with prebuilt binaries for the major platforms.
 
 In the Downloader, rotation is a one-liner:
 

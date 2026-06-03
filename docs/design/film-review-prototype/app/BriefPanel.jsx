@@ -22,7 +22,7 @@ function BriefPanel({ open, onClose }) {
           <section>
             <h3>What this is</h3>
             <p>
-              A new tab inside OrderHub Downloader, sitting next to <em>Jobs</em> and <em>Settings</em>,
+              A new tab inside OrderHub Desktop, sitting next to <em>Jobs</em> and <em>Settings</em>,
               for operators to visually confirm that the AI-predicted rotation on a roll of film
               was correct. The operator doesn't fix rotations here — they <strong>flag</strong> wrong
               frames so the ML team can measure error rate and collect training data.

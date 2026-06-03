@@ -1,4 +1,4 @@
-# Design Prompt — Film Review Panel for OrderHub Downloader
+# Design Prompt — Film Review Panel for OrderHub Desktop
 
 ## What I need from you
 
@@ -12,7 +12,7 @@ Feel free to show multiple variants if you think the trade-offs warrant it. I'd 
 
 ## Context
 
-**The app.** OrderHub Downloader (OHD) is a Windows desktop app (Electron, React 18) used by photo lab operators. It handles two broad workflows: print job dispatch and film scan ingestion. The panel you're designing belongs to the film scan side — specifically, it's a review surface for scans that have been run through an AI orientation model.
+**The app.** OrderHub Desktop (OHD) is a Windows desktop app (Electron, React 18) used by photo lab operators. It handles two broad workflows: print job dispatch and film scan ingestion. The panel you're designing belongs to the film scan side — specifically, it's a review surface for scans that have been run through an AI orientation model.
 
 **The workflow being supported.** A lab operator scans a roll of film (typically 36 frames, occasionally 24 or 120). The scans are saved as TIFFs in a watched folder. OHD processes them: it runs each frame through a local AI model that predicts the correct rotation (0°, 90°, 180°, or 270°) and automatically applies the predicted rotation using the image library sharp. The rotated images are then converted to JPEG and uploaded to cloud storage.
 

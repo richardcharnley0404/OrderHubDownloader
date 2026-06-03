@@ -2,7 +2,7 @@
 
 ## Overview
 
-Implement a configurable PDF post-processing pipeline in OrderHub Downloader (OHD). Each order controller can have a sequence of PDF transform steps that are applied in order to the incoming PDF before it is sent to the print controller hot folder. Steps are applied sequentially, with each step operating on the output of the previous step. Page number references in each step are **relative to the document as it exits the previous step**.
+Implement a configurable PDF post-processing pipeline in OrderHub Desktop (OHD). Each order controller can have a sequence of PDF transform steps that are applied in order to the incoming PDF before it is sent to the print controller hot folder. Steps are applied sequentially, with each step operating on the output of the previous step. Page number references in each step are **relative to the document as it exits the previous step**.
 
 ---
 

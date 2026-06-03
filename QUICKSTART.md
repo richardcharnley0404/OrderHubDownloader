@@ -146,7 +146,7 @@ Get-Content "$env:APPDATA\orderhub-downloader\logs\app.log" -Wait -Tail 20
 
 ### Option 2: Task Manager
 1. Open Task Manager (Ctrl + Shift + Esc)
-2. Find "OrderHub Downloader"
+2. Find "OrderHub Desktop"
 3. Click "End Task"
 
 ## Auto-Start Configuration
