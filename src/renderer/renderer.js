@@ -110,14 +110,21 @@ async function refreshAiQualityJobState() {
 const refreshAiQualityHeldJobs = refreshAiQualityJobState;
 
 /**
- * Returns true when AI Quality is enabled AND the given job is in a
- * status where scoring is still in scope AND scoring hasn't completed.
- * Used to gate Process/Assign/Dismiss buttons in the Jobs grid.
+ * Returns true when AI Quality is enabled AND scoring is actively in
+ * flight for the given job. Used to gate Process/Assign buttons in the
+ * Jobs grid and surface the "AI scoring…" indicator.
  *
  *   - Feature flag OFF → always false (preserves current behaviour)
  *   - Status not received/pending → false (scoring already happened or
  *     job is past the gate's scope)
- *   - No scoring entry yet (files not local, sidecar not built) → true
+ *   - No scoring entry yet → false (artwork not on disk OR job will never
+ *     have images — e.g. gift vouchers, non-fulfillment POS items. The
+ *     IPC handler `aiQuality:listHeldJobs` only publishes an entry once a
+ *     job folder exists on disk with at least one image, so the absence
+ *     of an entry means there is nothing to score. Previously this branch
+ *     returned true, which made the indicator show on every pre-artwork
+ *     job and prevented operators from dismissing erroneous jobs — see
+ *     bugfixes.md 2026-05-12 entry.)
  *   - Entry says phase='scoring' → true (partial / no images scored yet)
  *   - Entry says phase='scored' → false (all images have a verdict;
  *     held-state may still be true via a separate map but the gate is done)
@@ -126,29 +133,25 @@ function isPendingAIQuality(job) {
   if (!aiQualityEnabledCached) return false;
   if (job._status !== 'received' && job._status !== 'pending') return false;
   const status = aiQualityScoringStatusByJobId.get(String(job.id));
-  if (!status) return true;
+  if (!status) return false;
   return status.phase === 'scoring';
 }
 
 /**
- * Stricter sibling of isPendingAIQuality used to gate the Dismiss button.
+ * Used to gate the Dismiss button.
  *
- * Returns true ONLY when scoring is actively in flight — i.e. a sidecar
- * entry exists and its phase is still 'scoring'. The "no entry yet"
- * branch (files not local, sidecar not built) returns false here, unlike
- * the conservative isPendingAIQuality.
+ * Body is now identical to isPendingAIQuality after the 2026-05-12 fix:
+ * both return true only when an actual scoring entry exists and its
+ * phase is 'scoring'. The historical split (Dismiss had a stricter
+ * gate than Process to allow dismissing pre-artwork jobs) is preserved
+ * as two named functions for call-site readability, but the underlying
+ * predicate is the same — "no entry in the map" now means "nothing to
+ * score" rather than "scoring is conservatively assumed pending".
  *
- * Why split the two:
- *   - Process / Assign downstream-act on a job and must wait for scoring
- *     to confirm a verdict — they stay on isPendingAIQuality.
- *   - Dismiss is config-only (store:dismissJob just appends the jobId to
- *     a list — no file or sidecar mutation). The original gate comment
- *     said "dismissing mid-scoring would orphan a sidecar mid-update";
- *     that risk only applies when there IS a sidecar mid-update. POS
- *     orders that arrive in 'pending' status with no artwork never
- *     produce a sidecar at all, so there is nothing to orphan and the
- *     operator must be able to remove the row when the artwork is never
- *     going to come (walk-in customer abandoned the order, etc.).
+ * Process / Assign and Dismiss should both ungate when there is no
+ * artwork on disk — for non-fulfillment jobs (gift vouchers, etc.)
+ * scoring will never run, so blocking the operator from acting on the
+ * row is wrong. See bugfixes.md 2026-05-12 entry.
  */
 function isAiQualityScoringInProgress(job) {
   if (!aiQualityEnabledCached) return false;
@@ -834,13 +837,12 @@ function renderJobTable(jobs) {
     }
 
     // Wrap with dismiss button for non-dismissed tabs. Dismiss is gated
-    // ONLY on actively-in-progress scoring (isAiQualityScoringInProgress),
-    // not on the broader isPendingAIQuality. The narrower gate keeps the
-    // original "don't orphan a sidecar mid-update" safety while letting
-    // operators remove jobs that will never have a sidecar — most
-    // commonly POS / walk-in orders that come in as 'pending' and never
-    // receive artwork. With the broader gate those rows were stuck in
-    // the grid permanently.
+    // on actively-in-progress scoring only. After the 2026-05-12 fix
+    // isPendingAIQuality and isAiQualityScoringInProgress have the same
+    // body, but the gate stays here so a future divergence (e.g. wider
+    // Process gating) doesn't accidentally re-block Dismiss for jobs
+    // that will never receive artwork — gift vouchers, abandoned walk-in
+    // POS orders, etc.
     if (currentFilter !== 'dismissed') {
       const scoringInFlight = isAiQualityScoringInProgress(job);
       const dismissBtnAttrs = scoringInFlight
