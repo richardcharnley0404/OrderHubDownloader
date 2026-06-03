@@ -63,6 +63,38 @@ function resolveRoute(job) {
       const overrideCtrl = controllers.find(c => c.id === overrideMapping.controllerId);
 
       if (overrideCtrl) {
+        if (overrideCtrl.type === 'fujijobmaker') {
+          if (!overrideMapping.surface || !overrideMapping.printCode) {
+            // Mapping doesn't carry Fuji fields — fall through to normal routing.
+            logger.logWarning('Fuji JobMaker channel mapping override is missing surface/printCode', {
+              jobId:            job.id,
+              channelMappingId: overrideMapping.id,
+            });
+          } else {
+            const overrideSurfaceCode = overrideMapping.surfaceCode
+              || (overrideMapping.surface ? overrideMapping.surface.charAt(0).toUpperCase() : '');
+
+            return {
+              type:              'controller',
+              controllerType:    'fujijobmaker',
+              controllerId:      overrideCtrl.id,
+              controllerName:    overrideCtrl.name,
+              outputPath:        overrideCtrl.outputPath,
+              imageStagingRoot:  overrideCtrl.imageStagingRoot  || '',
+              printerName:       overrideCtrl.printerName       || '',
+              autoCorrect:       overrideCtrl.autoCorrect === undefined ? null : overrideCtrl.autoCorrect,
+              backprintMode:     overrideCtrl.backprintMode     || 'none',
+              backprintTemplate: overrideCtrl.backprintTemplate || '',
+              surface:           overrideMapping.surface,
+              surfaceCode:       overrideSurfaceCode,
+              printCode:         overrideMapping.printCode,
+              channelNumber:     null,
+              printSizeCode:     null,
+              bannerSheet:       false,
+              checkOrderStatus:  overrideCtrl.checkOrderStatus !== false,
+            };
+          }
+        }
         if (overrideCtrl.type === 'frontline') {
           return {
             type:             'controller',
@@ -248,6 +280,50 @@ function resolveRoute(job) {
       printSizeCode:       null,
       bannerSheet:         false,
       checkOrderStatus:    controller.checkOrderStatus !== false,
+    };
+  }
+
+  // ── Fuji JobMaker: look up channel mapping for printCode + surface ──────
+  if (controller.type === 'fujijobmaker') {
+    const channelMappings = store.get('channelMappings', []);
+    const channelMapping  = channelMappings.find(m =>
+      m.controllerId === controller.id &&
+      m.productCode  === productCode   &&
+      optionsMatch(m.options, options)
+    );
+    if (!channelMapping) {
+      return { type: 'unrouted', reason: 'no-channel', controller };
+    }
+    if (!channelMapping.surface || !channelMapping.printCode) {
+      return { type: 'unrouted', reason: 'no-channel', controller };
+    }
+
+    const surfaceCode = channelMapping.surfaceCode
+      || (channelMapping.surface ? channelMapping.surface.charAt(0).toUpperCase() : '');
+
+    return {
+      type:              'controller',
+      controllerType:    'fujijobmaker',
+      controllerId:      controller.id,
+      controllerName:    controller.name,
+      // hot folder where the .txt files are written; the controller field is
+      // named `outputPath` for parity with every other controller type.
+      outputPath:        controller.outputPath,
+      imageStagingRoot:  controller.imageStagingRoot  || '',
+      printerName:       controller.printerName       || '',
+      autoCorrect:       controller.autoCorrect === undefined ? null : controller.autoCorrect,
+      backprintMode:     controller.backprintMode     || 'none',
+      backprintTemplate: controller.backprintTemplate || '',
+      // Channel-resolved Fuji-specific fields — surfaced on the route so the
+      // dispatch method doesn't need to re-query the channel store.
+      surface:           channelMapping.surface,
+      surfaceCode,
+      printCode:         channelMapping.printCode,
+      // Legacy DPOF route fields — not used by Fuji but kept null for shape parity.
+      channelNumber:     null,
+      printSizeCode:     null,
+      bannerSheet:       false,
+      checkOrderStatus:  controller.checkOrderStatus !== false,
     };
   }
 
