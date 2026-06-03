@@ -136,6 +136,7 @@
             <!-- Print Controllers (legacy) tab hidden — code retained for Darkroom Pro integration reference -->
             <button type="button" class="settings-subtab" data-subtab="routing">Routing</button>
             <button type="button" class="settings-subtab" data-subtab="aienhancement">AI Enhancement</button>
+            <button type="button" class="settings-subtab" data-subtab="backup">Backup</button>
           </div>
 
           <!-- Sub-tab: Connection -->
@@ -696,6 +697,90 @@
                   <span>Auto-enhance when a job is opened in Job Review</span>
                 </label>
                 <small class="field-hint">Automatically starts enhancement for each image when the Job Review panel is opened.</small>
+              </div>
+            </fieldset>
+          </div>
+
+          <!-- Sub-tab: Backup & Restore -->
+          <div class="settings-subtab-panel" id="subtab-backup">
+            <fieldset class="panel-section">
+              <legend>Backup &amp; Restore</legend>
+              <p class="section-desc">
+                Snapshot non-sensitive OHD configuration to a network share so a
+                failed PC can be brought back online quickly. Passwords and API
+                keys are never written to the backup — operators re-enter those
+                after a restore.
+              </p>
+
+              <div class="form-group checkbox-group">
+                <label>
+                  <input type="checkbox" id="backupEnabled" name="backupEnabled">
+                  <span>Enable automatic daily backups</span>
+                </label>
+                <small class="field-hint">
+                  When enabled, OHD writes a backup at app launch (if the last
+                  successful run was more than 24 hours ago) and after the
+                  first config save of each day.
+                </small>
+              </div>
+
+              <div class="form-group">
+                <label for="backupFolderPath">Backup folder</label>
+                <div class="input-with-button">
+                  <input type="text" id="backupFolderPath" name="backupFolderPath"
+                    placeholder="\\NAS\OHD-Backups\ or Z:\Backups\OHD">
+                  <button type="button" id="backupFolderBrowseBtn" class="btn-browse">Browse...</button>
+                </div>
+                <small class="field-hint">
+                  UNC paths (<code>\\server\share\...</code>) are most reliable.
+                  Local and mapped drives also work, but mapped drives can be
+                  unavailable when OHD launches on Windows startup before the
+                  drive is mounted.
+                </small>
+                <div id="backupFolderStatus" class="backup-folder-status hidden"></div>
+              </div>
+
+              <div class="form-group checkbox-group">
+                <label>
+                  <input type="checkbox" id="backupIncludeCustomerDirectory" name="backupIncludeCustomerDirectory">
+                  <span>Include Order XML customer directory</span>
+                </label>
+                <small class="field-hint">
+                  Customer directory contains customer names and email addresses
+                  (PII). Leave checked unless your lab has a policy against
+                  storing this on the backup share.
+                </small>
+              </div>
+
+              <div class="form-group">
+                <label>Last backup</label>
+                <div id="backupLastStatus" class="backup-last-status">—</div>
+              </div>
+
+              <div class="form-group" style="display:flex;gap:8px;flex-wrap:wrap;">
+                <button type="button" id="backupRunNowBtn" class="btn-primary">Backup Now</button>
+                <button type="button" id="backupRestoreBtn" class="btn-secondary">Restore from Backup&hellip;</button>
+              </div>
+
+              <p class="field-hint" style="margin-top:14px;">
+                <strong>Note:</strong> Backups never contain passwords or API
+                keys. After a restore, re-enter your OrderHub API Key, FTP
+                Password, S3 Secret Access Key, and Topaz API Key.
+              </p>
+            </fieldset>
+
+            <fieldset class="panel-section">
+              <legend>This PC</legend>
+              <p class="section-desc">
+                The hostname identifies this PC's backup subfolder on the share.
+                The machine ID detects when two PCs accidentally share a hostname
+                (cloned image, re-used name) before they overwrite each other's
+                backups.
+              </p>
+              <div class="form-group">
+                <div id="backupMachineIdentity" class="backup-machine-identity" title="Click to copy">
+                  Loading&hellip;
+                </div>
               </div>
             </fieldset>
           </div>

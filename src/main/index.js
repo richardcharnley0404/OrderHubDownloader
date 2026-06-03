@@ -10,6 +10,7 @@ const aiInferenceClient = require('./services/ai-inference-client');
 const logger = require('./services/logger');
 const updater = require('./updater');
 const { runIntegrityQuarantineMigration } = require('./services/integrity-quarantine-migration');
+const backupServiceModule = require('./services/backup-service');
 
 // Disable libvips' operation cache. The cache retains file descriptors on
 // recently-read images so subsequent passes are faster — but on a slow SMB
@@ -32,6 +33,11 @@ if (!gotTheLock) {
     logger.info('Second instance detected, showing window');
     windowManager.showWindow();
   });
+
+  // Hourly backup interval handle — created inside whenReady() once the app
+  // is up; cleared in the existing before-quit handler so it doesn't keep
+  // the event loop alive during shutdown.
+  let backupIntervalHandle = null;
 
   // This method will be called when Electron has finished initialization
   app.whenReady().then(async () => {
@@ -77,6 +83,55 @@ if (!gotTheLock) {
       }
     }
 
+    // Daily backup launch trigger. Defer 30s so a network share has time to
+    // come back online after the PC resumes from sleep. Fire-and-forget — a
+    // failed backup must never disrupt startup. Gated on backupEnabled + a
+    // configured folder; the service itself also short-circuits when the
+    // last successful run was <24h ago.
+    if (config.backupEnabled && config.backupFolderPath) {
+      setTimeout(() => {
+        try {
+          const backupService = backupServiceModule.getDefault();
+          if (backupService._shouldRunDailyBackup()) {
+            backupService.runBackup({ trigger: 'launch-stale' }).catch((err) => {
+              logger.logError('[backup] launch-stale backup threw', err);
+            });
+          }
+        } catch (err) {
+          logger.logError('[backup] launch-stale wiring failed', err);
+        }
+      }, 30_000);
+    }
+
+    // Daily backup background interval. The launch trigger above handles
+    // "PC was off, just came on"; this hourly tick handles "PC has been on
+    // for days, no restart" — without it, _shouldRunDailyBackup() never
+    // re-runs after the first launch check, so a long-running instance
+    // stops backing up entirely.
+    //
+    // Re-reads config on every tick (configService.get(...) goes back to
+    // the disk-backed store) so a runtime backupEnabled toggle in Settings
+    // is honoured without restart. Gates and call shape mirror the launch
+    // trigger; only the trigger string differs so log analysis can tell
+    // launch-fired backups from interval-fired ones.
+    //
+    // No jitter: only one lab PC per backup root in current deployments,
+    // and the 24h gate is the real throttle even if multiple PCs ticked
+    // simultaneously. Add small jitter here if a fleet ever shares a root.
+    backupIntervalHandle = setInterval(() => {
+      try {
+        if (!configService.get('backupEnabled')) return;
+        if (!configService.get('backupFolderPath')) return;
+        const backupService = backupServiceModule.getDefault();
+        if (!backupService._shouldRunDailyBackup()) return; // silent — gate closed
+        backupService.runBackup({ trigger: 'interval-daily' }).catch((err) => {
+          logger.logError('[backup] interval-daily backup threw', err);
+        });
+      } catch (err) {
+        logger.logError('[backup] interval-daily tick failed', err);
+      }
+    }, 60 * 60 * 1000);
+
     // Film Scan AI Rotation (PW-007 Phase 1) — warm the ONNX orientation
     // service at startup when the feature flag is ON. init() is idempotent
     // and flag-gated internally, so calling it unconditionally is safe and
@@ -117,6 +172,13 @@ if (!gotTheLock) {
   // Handle app quit
   app.on('before-quit', () => {
     logger.info('Application quitting');
+
+    // Clear the hourly backup interval so it doesn't keep the event loop
+    // alive (or fire one more tick) during shutdown.
+    if (backupIntervalHandle) {
+      clearInterval(backupIntervalHandle);
+      backupIntervalHandle = null;
+    }
 
     // Stop polling
     if (pollingService.isRunning()) {

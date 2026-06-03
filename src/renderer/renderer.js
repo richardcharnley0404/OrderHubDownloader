@@ -1684,6 +1684,18 @@ function populateForm(config) {
     Number.isFinite(config.enhancementLocalTileOverlap) ? config.enhancementLocalTileOverlap : 16;
   updateEnhancementProviderSections();
 
+  // Backup & Restore (v1.6+) — guarded `?` chaining because the subtab is
+  // appended after the existing form and may not exist on dev builds during
+  // a partial rebuild.
+  const backupEnabledEl = document.getElementById('backupEnabled');
+  const backupFolderEl = document.getElementById('backupFolderPath');
+  const backupIncCustEl = document.getElementById('backupIncludeCustomerDirectory');
+  if (backupEnabledEl) backupEnabledEl.checked = Boolean(config.backupEnabled);
+  if (backupFolderEl) backupFolderEl.value = config.backupFolderPath || '';
+  if (backupIncCustEl) backupIncCustEl.checked = config.backupIncludeCustomerDirectory !== false;
+  renderBackupLastStatus(config);
+  renderBackupMachineIdentity(config);
+
   // Update enable states based on folders
   updateFilmScansEnableState();
   updateFileUploadsEnableState();
@@ -1749,6 +1761,12 @@ function getFormData() {
     enhancementAutoEnhance: document.getElementById('enhancementAutoEnhance').checked,
     enhancementLocalTileSize: parseInt(document.getElementById('enhancementLocalTileSize').value, 10) || 256,
     enhancementLocalTileOverlap: parseInt(document.getElementById('enhancementLocalTileOverlap').value, 10) || 16,
+    // Backup & Restore — only sent when the elements exist (see Phase 2).
+    ...(document.getElementById('backupEnabled') ? {
+      backupEnabled: document.getElementById('backupEnabled').checked,
+      backupFolderPath: document.getElementById('backupFolderPath').value.trim(),
+      backupIncludeCustomerDirectory: document.getElementById('backupIncludeCustomerDirectory').checked,
+    } : {}),
   };
 }
 
@@ -4779,3 +4797,529 @@ document.getElementById('excSaveBtn').addEventListener('click', async () => {
     showToast('Error saving exception: ' + err.message, 'error');
   }
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Backup & Restore (Settings → Backup subtab + Restore modal)
+//
+// Plain DOM wiring — mirrors the conventions used by the rest of the file
+// (id-based lookups, addEventListener, no component framework). All IPC
+// calls return structured `{success/ok, error?}` objects so we never throw
+// out of an event handler.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const BACKUP_SECTION_LABELS = {
+  config: 'Connection / FTP / Mode settings',
+  routing: 'Routing',
+  printControllers: 'Print Controllers',
+  appPrefs: 'App Preferences',
+  filmReviewPrefs: 'Film Review Preferences',
+};
+
+const BACKUP_REDACTED_LABELS = {
+  orderhubApiKey:    'OrderHub API Key',
+  ftpPassword:       'FTP Password',
+  s3SecretAccessKey: 'S3 Secret Access Key',
+  topazApiKey:       'Topaz API Key',
+};
+
+let backupRestoreState = {
+  hostname: '',
+  selectedFilePath: null,
+  selectedEnvelope: null,
+  // When the user clicks "Browse backups from other machines", widen the list.
+  showAllHosts: false,
+};
+
+function fmtBackupTimestamp(iso) {
+  if (!iso) return '—';
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return d.toLocaleString();
+  } catch { return iso; }
+}
+
+function fmtBackupSize(bytes) {
+  if (!Number.isFinite(bytes)) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function renderBackupLastStatus(config) {
+  const el = document.getElementById('backupLastStatus');
+  if (!el) return;
+  el.classList.remove('ok', 'amber', 'red', 'error');
+  if (config.backupLastError) {
+    el.classList.add('error');
+    el.textContent = `Failed — ${config.backupLastError}`;
+    return;
+  }
+  if (!config.backupLastRunAt) {
+    el.textContent = 'Never run on this PC.';
+    return;
+  }
+  const last = new Date(config.backupLastRunAt);
+  const ageMs = Date.now() - last.getTime();
+  const hours = ageMs / (60 * 60 * 1000);
+  const days = hours / 24;
+  let tone;
+  if (days > 7) tone = 'red';
+  else if (hours > 48) tone = 'amber';
+  else tone = 'ok';
+  el.classList.add(tone);
+  let suffix = '';
+  if (tone === 'amber') suffix = ` — ${Math.round(days)} day${Math.round(days) === 1 ? '' : 's'} ago`;
+  if (tone === 'red')   suffix = ` — ${Math.round(days)} days ago`;
+  el.textContent = `${fmtBackupTimestamp(config.backupLastRunAt)}  ✓ Success${suffix}`;
+}
+
+function renderBackupMachineIdentity(config) {
+  const el = document.getElementById('backupMachineIdentity');
+  if (!el) return;
+  const hostname = (config._hostname || (config.createdBy && config.createdBy.hostname) || '');
+  // The renderer doesn't have direct os.hostname() — we use the machineId as
+  // the canonical identity. Hostname is shown via the running backup file
+  // when the operator runs a backup. For now, show machineId + a hint.
+  const mid = config._machineId || '';
+  const shortId = mid ? mid.slice(0, 8) + '…' : '(not yet set — restart OHD)';
+  const display = hostname ? `${hostname}  ·  id: ${shortId}` : `id: ${shortId}`;
+  el.textContent = display;
+  el.dataset.copyValue = mid || '';
+}
+
+function setBackupFolderStatus(state, message) {
+  const el = document.getElementById('backupFolderStatus');
+  if (!el) return;
+  el.classList.remove('ok', 'error', 'pending', 'hidden');
+  if (!state) {
+    el.classList.add('hidden');
+    el.textContent = '';
+    return;
+  }
+  el.classList.add(state);
+  el.textContent = message || '';
+}
+
+async function validateBackupFolderField() {
+  const el = document.getElementById('backupFolderPath');
+  if (!el) return;
+  const value = el.value.trim();
+  if (!value) {
+    setBackupFolderStatus(null);
+    return;
+  }
+  setBackupFolderStatus('pending', 'Checking access to backup folder…');
+  try {
+    const result = await window.electronAPI.backupValidateFolder(value);
+    if (result && result.ok) {
+      setBackupFolderStatus('ok', 'Backup folder is writable.');
+    } else {
+      setBackupFolderStatus('error', (result && result.error) || 'Could not validate backup folder.');
+    }
+  } catch (err) {
+    setBackupFolderStatus('error', err.message || String(err));
+  }
+}
+
+async function refreshBackupStatusFromConfig() {
+  try {
+    const config = await window.electronAPI.getConfig();
+    renderBackupLastStatus(config);
+    renderBackupMachineIdentity(config);
+  } catch (err) {
+    console.error('[backup] refreshBackupStatusFromConfig failed', err);
+  }
+}
+
+// ── Backup Now flow ───────────────────────────────────────────────────────
+
+async function handleBackupNow() {
+  const btn = document.getElementById('backupRunNowBtn');
+  if (!btn) return;
+  const folderEl = document.getElementById('backupFolderPath');
+  if (folderEl && !folderEl.value.trim()) {
+    showStatus('Configure a backup folder first.', 'error');
+    return;
+  }
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = 'Backing up…';
+  try {
+    const result = await window.electronAPI.backupRunNow();
+    if (result && result.success) {
+      showStatus(`Backup written: ${result.filePath} (${fmtBackupSize(result.sizeBytes)})`, 'success');
+    } else if (result && result.code === 'HOSTNAME_COLLISION') {
+      openBackupCollisionModal(result.error || 'Hostname conflict on the backup share.');
+    } else {
+      showStatus(`Backup failed: ${(result && result.error) || 'unknown error'}`, 'error');
+    }
+  } catch (err) {
+    showStatus(`Backup failed: ${err.message || String(err)}`, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+    await refreshBackupStatusFromConfig();
+  }
+}
+
+// ── Collision modal ───────────────────────────────────────────────────────
+
+function openBackupCollisionModal(message) {
+  const modal = document.getElementById('backupCollisionModal');
+  const msgEl = document.getElementById('backupCollisionMessage');
+  if (!modal || !msgEl) return;
+  msgEl.textContent = message;
+  modal.classList.remove('hidden');
+}
+
+function closeBackupCollisionModal() {
+  const modal = document.getElementById('backupCollisionModal');
+  if (modal) modal.classList.add('hidden');
+}
+
+async function handleCollisionTakeover() {
+  const ok = window.confirm(
+    'Take over this folder?\n\n' +
+    "This will DELETE every backup currently in this hostname's subfolder " +
+    "on the share, then write a fresh one from this PC. Use this only when " +
+    'you are certain the previous PC no longer needs those backups.\n\n' +
+    'There is no undo.',
+  );
+  if (!ok) return;
+  closeBackupCollisionModal();
+  const btn = document.getElementById('backupRunNowBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Taking over…'; }
+  try {
+    const result = await window.electronAPI.backupRunNow({ takeOverFolder: true });
+    if (result && result.success) {
+      showStatus('Folder taken over and fresh backup written.', 'success');
+    } else {
+      showStatus(`Take-over failed: ${(result && result.error) || 'unknown error'}`, 'error');
+    }
+  } catch (err) {
+    showStatus(`Take-over failed: ${err.message || String(err)}`, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Backup Now'; }
+    await refreshBackupStatusFromConfig();
+  }
+}
+
+async function handleCollisionPickOther() {
+  closeBackupCollisionModal();
+  const result = await window.electronAPI.backupChooseFolder();
+  if (result && !result.canceled && result.path) {
+    const el = document.getElementById('backupFolderPath');
+    if (el) {
+      el.value = result.path;
+      await validateBackupFolderField();
+    }
+  }
+}
+
+// ── Restore modal ─────────────────────────────────────────────────────────
+
+async function openBackupRestoreModal() {
+  const modal = document.getElementById('backupRestoreModal');
+  if (!modal) return;
+  backupRestoreState = { hostname: '', selectedFilePath: null, selectedEnvelope: null, showAllHosts: false };
+  modal.classList.remove('hidden');
+  document.getElementById('backupRestoreList').classList.remove('hidden');
+  document.getElementById('backupRestorePreview').classList.add('hidden');
+  await refreshBackupRestoreList();
+}
+
+function closeBackupRestoreModal() {
+  const modal = document.getElementById('backupRestoreModal');
+  if (modal) modal.classList.add('hidden');
+}
+
+async function refreshBackupRestoreList() {
+  const list = document.getElementById('backupRestoreListItems');
+  const intro = document.getElementById('backupRestoreListIntro');
+  const switchLink = document.getElementById('backupRestoreSwitchHostLink');
+  if (!list) return;
+  list.innerHTML = '<div class="backup-list-empty">Loading…</div>';
+  try {
+    const items = await window.electronAPI.backupList({
+      allHosts: Boolean(backupRestoreState.showAllHosts),
+    });
+    if (!items || !items.length) {
+      list.innerHTML = '<div class="backup-list-empty">No backups found in this folder.</div>';
+      if (intro) {
+        intro.textContent = backupRestoreState.showAllHosts
+          ? 'No backups found in any host subfolder. Try Browse to file…'
+          : "No backups for this PC's hostname yet.";
+      }
+      if (switchLink) switchLink.textContent = backupRestoreState.showAllHosts
+        ? 'Show only this PC\'s backups'
+        : 'Browse backups from other machines';
+      return;
+    }
+    list.innerHTML = '';
+    for (const item of items) {
+      const row = document.createElement('div');
+      row.className = 'backup-list-row';
+      const when = document.createElement('div');
+      when.className = 'backup-list-when';
+      when.textContent = fmtBackupTimestamp(item.createdAt);
+      const meta = document.createElement('div');
+      meta.className = 'backup-list-meta';
+      const parts = [];
+      if (item.hostname) parts.push(`host ${item.hostname}`);
+      if (item.appVersion) parts.push(`OHD v${item.appVersion}`);
+      if (item.sizeBytes) parts.push(fmtBackupSize(item.sizeBytes));
+      if (item.customerDirectoryExcluded) parts.push('PII excluded');
+      meta.textContent = parts.join(' · ');
+      row.appendChild(when);
+      row.appendChild(meta);
+      row.addEventListener('click', () => selectBackupForPreview(item.path));
+      list.appendChild(row);
+    }
+    if (intro) {
+      intro.textContent = backupRestoreState.showAllHosts
+        ? 'Showing backups from every PC that has written to this share. Pick a backup to preview.'
+        : "Showing backups for this PC. Pick a backup to preview, or browse other machines below.";
+    }
+    if (switchLink) switchLink.textContent = backupRestoreState.showAllHosts
+      ? 'Show only this PC\'s backups'
+      : 'Browse backups from other machines';
+  } catch (err) {
+    list.innerHTML = `<div class="backup-list-empty">Could not list backups: ${err.message || err}</div>`;
+  }
+}
+
+async function selectBackupForPreview(filePath) {
+  try {
+    const result = await window.electronAPI.backupRead(filePath);
+    if (!result || !result.envelope) {
+      showStatus(`Could not read backup: ${(result && result.error) || 'unknown'}`, 'error');
+      return;
+    }
+    backupRestoreState.selectedFilePath = filePath;
+    backupRestoreState.selectedEnvelope = result.envelope;
+    renderBackupPreview(result.envelope, filePath);
+  } catch (err) {
+    showStatus(`Could not read backup: ${err.message || err}`, 'error');
+  }
+}
+
+function renderBackupPreview(envelope, filePath) {
+  const list = document.getElementById('backupRestoreList');
+  const preview = document.getElementById('backupRestorePreview');
+  const summary = document.getElementById('backupPreviewSummary');
+  const redactedUl = document.getElementById('backupPreviewRedacted');
+  const custWarn = document.getElementById('backupPreviewCustomerWarning');
+  if (!preview || !summary) return;
+
+  const host = envelope.createdBy?.hostname || '(unknown host)';
+  const ver = envelope.appVersion || '?';
+  const when = fmtBackupTimestamp(envelope.createdAt);
+  const machineId = envelope.createdBy?.machineId || '';
+  summary.innerHTML =
+    `<strong>From:</strong> ${escapeHtml(host)}<br>` +
+    `<strong>App version:</strong> ${escapeHtml(ver)}<br>` +
+    `<strong>Created:</strong> ${escapeHtml(when)}<br>` +
+    (machineId ? `<strong>Machine ID:</strong> ${escapeHtml(machineId)}<br>` : '') +
+    `<strong>File:</strong> ${escapeHtml(filePath)}`;
+
+  redactedUl.innerHTML = '';
+  const redacted = Array.isArray(envelope.redactedKeys) ? envelope.redactedKeys : [];
+  if (redacted.length === 0) {
+    const li = document.createElement('li');
+    li.textContent = '(none — but you should still verify credentials after restore)';
+    redactedUl.appendChild(li);
+  } else {
+    for (const key of redacted) {
+      const li = document.createElement('li');
+      li.textContent = BACKUP_REDACTED_LABELS[key] || key;
+      redactedUl.appendChild(li);
+    }
+  }
+
+  if (envelope.customerDirectoryExcluded) {
+    custWarn.classList.remove('hidden');
+  } else {
+    custWarn.classList.add('hidden');
+  }
+
+  list.classList.add('hidden');
+  preview.classList.remove('hidden');
+}
+
+function backToBackupList() {
+  document.getElementById('backupRestoreList').classList.remove('hidden');
+  document.getElementById('backupRestorePreview').classList.add('hidden');
+}
+
+function escapeHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+async function handleBackupRestoreConfirm() {
+  if (!backupRestoreState.selectedFilePath) return;
+  const selections = {
+    config:           document.getElementById('backupSel_config').checked,
+    routing:          document.getElementById('backupSel_routing').checked,
+    printControllers: document.getElementById('backupSel_printControllers').checked,
+    appPrefs:         document.getElementById('backupSel_appPrefs').checked,
+    filmReviewPrefs:  document.getElementById('backupSel_filmReviewPrefs').checked,
+  };
+  const confirmed = window.confirm(
+    'Restore the selected backup?\n\n' +
+    'This overwrites OHD\'s current configuration on this PC. ' +
+    'OHD will restart after the restore.\n\n' +
+    'Make sure you have your API keys and passwords ready — they are not in the backup.',
+  );
+  if (!confirmed) return;
+  const btn = document.getElementById('backupPreviewConfirmBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Restoring…'; }
+  try {
+    const result = await window.electronAPI.backupRestore(
+      backupRestoreState.selectedFilePath,
+      selections,
+    );
+    if (result && result.success) {
+      closeBackupRestoreModal();
+      openBackupRelaunchModal(result);
+    } else {
+      showStatus(`Restore failed: ${(result && result.error) || 'unknown error'}`, 'error');
+    }
+  } catch (err) {
+    showStatus(`Restore failed: ${err.message || String(err)}`, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Restore'; }
+  }
+}
+
+async function handleBackupRestoreBrowseFile() {
+  const pick = await window.electronAPI.backupChooseFile();
+  if (pick && !pick.canceled && pick.path) {
+    await selectBackupForPreview(pick.path);
+  }
+}
+
+// ── Relaunch modal ────────────────────────────────────────────────────────
+
+function openBackupRelaunchModal(result) {
+  const modal = document.getElementById('backupRelaunchModal');
+  if (!modal) return;
+  const notes = document.getElementById('backupRelaunchNotes');
+  const summary = document.getElementById('backupRelaunchSummary');
+  if (summary) {
+    const restored = (result.restoredSections || []).map((k) => BACKUP_SECTION_LABELS[k] || k);
+    const skipped  = (result.skippedSections  || []).map((k) => BACKUP_SECTION_LABELS[k] || k);
+    let txt = 'OHD needs to restart to apply the restored settings.';
+    if (restored.length) txt += ` Restored: ${restored.join(', ')}.`;
+    if (skipped.length)  txt += ` Skipped: ${skipped.join(', ')}.`;
+    summary.textContent = txt;
+  }
+  if (notes) {
+    const lines = Array.isArray(result.migrationNotes) ? result.migrationNotes : [];
+    if (lines.length === 0) {
+      notes.innerHTML = '';
+    } else {
+      notes.innerHTML = '<strong>Notes:</strong><ul style="margin:4px 0 0 18px;padding:0;">' +
+        lines.map((n) => `<li>${escapeHtml(n)}</li>`).join('') + '</ul>';
+    }
+  }
+  modal.classList.remove('hidden');
+}
+
+function closeBackupRelaunchModal() {
+  const modal = document.getElementById('backupRelaunchModal');
+  if (modal) modal.classList.add('hidden');
+}
+
+async function handleBackupRelaunchNow() {
+  try {
+    await window.electronAPI.backupRelaunch();
+  } catch (err) {
+    showStatus(`Could not relaunch: ${err.message || err}`, 'error');
+  }
+}
+
+// ── Wire-up ───────────────────────────────────────────────────────────────
+
+(function wireBackupSubtab() {
+  // Folder field — validate on blur and on change.
+  const folderEl = document.getElementById('backupFolderPath');
+  if (folderEl) {
+    folderEl.addEventListener('blur', validateBackupFolderField);
+    folderEl.addEventListener('change', validateBackupFolderField);
+  }
+
+  const browseBtn = document.getElementById('backupFolderBrowseBtn');
+  if (browseBtn) {
+    browseBtn.addEventListener('click', async () => {
+      try {
+        const result = await window.electronAPI.backupChooseFolder();
+        if (result && !result.canceled && result.path && folderEl) {
+          folderEl.value = result.path;
+          await validateBackupFolderField();
+        }
+      } catch (err) {
+        showStatus(`Could not pick folder: ${err.message || err}`, 'error');
+      }
+    });
+  }
+
+  const runBtn = document.getElementById('backupRunNowBtn');
+  if (runBtn) runBtn.addEventListener('click', handleBackupNow);
+
+  const restoreBtn = document.getElementById('backupRestoreBtn');
+  if (restoreBtn) restoreBtn.addEventListener('click', openBackupRestoreModal);
+
+  // Restore modal
+  const closeRestore = document.getElementById('backupRestoreCloseBtn');
+  if (closeRestore) closeRestore.addEventListener('click', closeBackupRestoreModal);
+  const backFromPreview = document.getElementById('backupPreviewBackBtn');
+  if (backFromPreview) backFromPreview.addEventListener('click', backToBackupList);
+  const confirmRestore = document.getElementById('backupPreviewConfirmBtn');
+  if (confirmRestore) confirmRestore.addEventListener('click', handleBackupRestoreConfirm);
+  const browseFileBtn = document.getElementById('backupRestoreBrowseFileBtn');
+  if (browseFileBtn) browseFileBtn.addEventListener('click', handleBackupRestoreBrowseFile);
+  const switchHost = document.getElementById('backupRestoreSwitchHostLink');
+  if (switchHost) {
+    switchHost.addEventListener('click', async (e) => {
+      e.preventDefault();
+      backupRestoreState.showAllHosts = !backupRestoreState.showAllHosts;
+      await refreshBackupRestoreList();
+    });
+  }
+
+  // Collision modal
+  const colTake = document.getElementById('backupCollisionTakeoverBtn');
+  if (colTake) colTake.addEventListener('click', handleCollisionTakeover);
+  const colPick = document.getElementById('backupCollisionPickOtherBtn');
+  if (colPick) colPick.addEventListener('click', handleCollisionPickOther);
+  const colCancel = document.getElementById('backupCollisionCancelBtn');
+  if (colCancel) colCancel.addEventListener('click', closeBackupCollisionModal);
+
+  // Relaunch modal
+  const relNow = document.getElementById('backupRelaunchNowBtn');
+  if (relNow) relNow.addEventListener('click', handleBackupRelaunchNow);
+  const relLater = document.getElementById('backupRelaunchLaterBtn');
+  if (relLater) relLater.addEventListener('click', closeBackupRelaunchModal);
+
+  // Machine identity click-to-copy
+  const idEl = document.getElementById('backupMachineIdentity');
+  if (idEl) {
+    idEl.addEventListener('click', async () => {
+      const val = idEl.dataset.copyValue || idEl.textContent;
+      try {
+        await navigator.clipboard.writeText(val);
+        showStatus('Machine ID copied to clipboard.', 'success');
+      } catch {
+        // Fallback for browsers without clipboard permission.
+        const range = document.createRange();
+        range.selectNodeContents(idEl);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+    });
+  }
+})();

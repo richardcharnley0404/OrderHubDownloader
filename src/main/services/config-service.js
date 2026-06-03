@@ -1,4 +1,5 @@
 const Store = require('electron-store');
+const crypto = require('crypto');
 
 // Hardcoded OrderHub API base URL (not user-configurable)
 const OH_API_BASE_URL = 'https://nazkcvruighrhpgcarxg.supabase.co/functions/v1/ohd-api';
@@ -334,6 +335,45 @@ const schema = {
   _migratedFromReplicate: {
     type: 'boolean',
     default: false
+  },
+  // ===========================================================================
+  // Backup & Restore (v1.6+) — non-sensitive configuration snapshots to a
+  // network share. See docs/backup-restore.md and backup-service.js.
+  // ===========================================================================
+  backupEnabled: {
+    type: 'boolean',
+    default: false
+  },
+  // UNC, local, or mapped-drive path. Empty until operator configures.
+  backupFolderPath: {
+    type: 'string',
+    default: ''
+  },
+  // Customer directory (orderXmlCustomers) is PII; included by default but
+  // operators can opt out per-lab.
+  backupIncludeCustomerDirectory: {
+    type: 'boolean',
+    default: true
+  },
+  // ISO 8601 of last successful backup. Drives the >24h "daily" trigger.
+  backupLastRunAt: {
+    type: ['string', 'null'],
+    default: null
+  },
+  // Last error message from a failed backup. Cleared on next success. Surfaced
+  // in the Settings UI so operators can see why automatic backups are silent.
+  backupLastError: {
+    type: ['string', 'null'],
+    default: null
+  },
+  // Persistent UUID for this install. Set once by _ensureMachineId() in the
+  // constructor; never overwritten by save(). Survives a Windows rename but
+  // intentionally does NOT survive a reinstall — that's the signal the
+  // collision check in backup-service.js uses to detect "another PC is using
+  // this hostname's subfolder".
+  _machineId: {
+    type: 'string',
+    default: ''
   }
 };
 
@@ -357,6 +397,21 @@ class ConfigService {
     });
     this._migrateReviewMode();
     this._migrateReplicateProvider();
+    this._ensureMachineId();
+  }
+
+  /**
+   * Generate a persistent UUID for this install on first launch. Used by the
+   * backup-service collision check to distinguish "same PC re-running" from
+   * "different PC pointing at the same hostname subfolder on the share".
+   *
+   * Idempotent — only writes if the key is empty. NEVER overwrites an existing
+   * value, otherwise a routine config save could invalidate every backup ever
+   * written by this install.
+   */
+  _ensureMachineId() {
+    if (this.store.get('_machineId')) return;
+    this.store.set('_machineId', crypto.randomUUID());
   }
 
   /**
@@ -493,6 +548,14 @@ class ConfigService {
       // One-shot toast trigger consumed by the renderer; cleared via
       // clearReplicateMigrationToast() once the toast has been shown.
       _migratedFromReplicate: this.store.get('_migratedFromReplicate'),
+      // Backup & Restore
+      backupEnabled: this.store.get('backupEnabled'),
+      backupFolderPath: this.store.get('backupFolderPath'),
+      backupIncludeCustomerDirectory: this.store.get('backupIncludeCustomerDirectory'),
+      backupLastRunAt: this.store.get('backupLastRunAt'),
+      backupLastError: this.store.get('backupLastError'),
+      // _machineId is read-only — exposed for diagnostics + Settings UI display
+      _machineId: this.store.get('_machineId'),
     };
   }
 
@@ -723,6 +786,51 @@ class ConfigService {
     if (typeof config.enhancementRescoreAfter === 'boolean') {
       this.store.set('enhancementRescoreAfter', config.enhancementRescoreAfter);
     }
+
+    // Backup & Restore settings. `_machineId` is intentionally NOT writable from
+    // here — it is set exactly once by _ensureMachineId() at first launch.
+    // Each backup* key uses `hasOwnProperty` so panels that don't know about
+    // these keys can save their own slice without resetting these to defaults.
+    if (Object.prototype.hasOwnProperty.call(config, 'backupEnabled')) {
+      this.store.set('backupEnabled', Boolean(config.backupEnabled));
+    }
+    if (Object.prototype.hasOwnProperty.call(config, 'backupFolderPath')) {
+      this.store.set('backupFolderPath', (config.backupFolderPath || '').trim());
+    }
+    if (Object.prototype.hasOwnProperty.call(config, 'backupIncludeCustomerDirectory')) {
+      this.store.set('backupIncludeCustomerDirectory', Boolean(config.backupIncludeCustomerDirectory));
+    }
+    // backupLastRunAt / backupLastError are written by backup-service, not the
+    // settings panel, but we still tolerate them being round-tripped through
+    // save() via getAll() so callers that re-save the full object don't
+    // accidentally null them out.
+    if (Object.prototype.hasOwnProperty.call(config, 'backupLastRunAt')) {
+      const v = config.backupLastRunAt;
+      if (v === null || typeof v === 'string') this.store.set('backupLastRunAt', v);
+    }
+    if (Object.prototype.hasOwnProperty.call(config, 'backupLastError')) {
+      const v = config.backupLastError;
+      if (v === null || typeof v === 'string') this.store.set('backupLastError', v);
+    }
+
+    // Fire-and-forget daily-trigger hook. A successful save that happens after
+    // the >24h window will produce a snapshot in the background. Lazy require
+    // to avoid a circular import (backup-service depends on configService).
+    // Wrapped in try/catch so a broken backup module never breaks save().
+    try {
+      if (this.store.get('backupEnabled') && this.store.get('backupFolderPath')) {
+        // eslint-disable-next-line global-require
+        const backupModule = require('./backup-service');
+        const backupService = typeof backupModule.getDefault === 'function'
+          ? backupModule.getDefault()
+          : backupModule;
+        if (backupService && typeof backupService._shouldRunDailyBackup === 'function' &&
+            backupService._shouldRunDailyBackup()) {
+          Promise.resolve(backupService.runBackup({ trigger: 'first-save-of-day' }))
+            .catch(() => { /* logged by backup-service */ });
+        }
+      }
+    } catch (_) { /* never let backup wiring block save */ }
 
     return this.getAll();
   }
