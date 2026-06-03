@@ -30,6 +30,11 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* Opt out of the .app-header's drag region (styles.css:161). Same
+     rationale as .jr-root in job-review.css — without this, any button
+     in .fr-chrome that overlaps the OS-reserved drag zone (~top 30px)
+     silently swallows clicks. `no-drag` inherits to descendants. */
+  -webkit-app-region: no-drag;
 }
 
 /* ─── Design tokens (aliased from app-wide --app-* in styles.css) ──────
@@ -114,6 +119,10 @@ body.app-theme-dark .film-review-panel {
   gap: var(--fr-s3);
   background: var(--fr-surface-raised);
   border-bottom: 1px solid var(--fr-border-subtle);
+  /* Belt-and-braces — opt out of .app-header's drag region (see
+     .film-review-root). Inherited today; explicit here so a future
+     refactor between root and chrome can't re-introduce the bug. */
+  -webkit-app-region: no-drag;
 }
 
 .fr-chrome__title {
