@@ -75,20 +75,37 @@ async function createReprint({ parentJobId, parentJobPath, sidecar, reprintJobId
     fs.mkdir(path.join(reprintJobPath, 'cache'),     { recursive: true }),
   ]);
 
-  // Source is always the parent's /originals/ — never /working/.
+  // Source baselines. /originals/ is the standard "untouched first-arrival"
+  // snapshot. /working/ is the printable surface — recropFromOriginal (Phase 2)
+  // writes recropped customer originals only to /working/ and never to
+  // /originals/, so a sidecar entry whose `filename` is a recropped basename
+  // will be missing from /originals/. Falling back to /working/ on ENOENT
+  // keeps reprints working for that one row class without muddying
+  // /originals/ with derivative bytes.
   const srcOriginals = originalsDir(parentJobPath);
+  const srcWorking   = path.join(parentJobPath, 'working');
+
+  async function copyFlaggedImage(filename, destAbs) {
+    const fromOriginals = path.join(srcOriginals, filename);
+    try {
+      await fs.copyFile(fromOriginals, destAbs);
+      return;
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+    }
+    const fromWorking = path.join(srcWorking, filename);
+    await fs.copyFile(fromWorking, destAbs);
+    console.warn(
+      `[reprint] /originals/${filename} missing — fell back to /working/. ` +
+      `Likely a Phase 2 re-cropped row.`
+    );
+  }
 
   // Copy each flagged image into both /originals/ and /working/ of the reprint job.
   await Promise.all(
     flaggedImages.flatMap(img => [
-      fs.copyFile(
-        path.join(srcOriginals, img.filename),
-        path.join(reprintJobPath, 'originals', img.filename),
-      ),
-      fs.copyFile(
-        path.join(srcOriginals, img.filename),
-        path.join(reprintJobPath, 'working', img.filename),
-      ),
+      copyFlaggedImage(img.filename, path.join(reprintJobPath, 'originals', img.filename)),
+      copyFlaggedImage(img.filename, path.join(reprintJobPath, 'working',   img.filename)),
     ])
   );
 

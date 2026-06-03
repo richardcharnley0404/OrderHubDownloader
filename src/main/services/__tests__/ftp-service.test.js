@@ -36,11 +36,12 @@ const REPO = path.resolve(__dirname, '..', '..', '..', '..');
 const SVC = path.join(REPO, 'src', 'main', 'services');
 
 // ----- Logger stub: capture calls so tests can assert log output -----
-const __logCalls = { info: [], warn: [], error: [] };
+const __logCalls = { info: [], warn: [], error: [], debug: [] };
 function resetLogCalls() {
   __logCalls.info.length = 0;
   __logCalls.warn.length = 0;
   __logCalls.error.length = 0;
+  __logCalls.debug.length = 0;
 }
 
 function stubModule(absPath, exports) {
@@ -53,9 +54,10 @@ stubModule(path.join(SVC, 'logger.js'), {
   logInfo:    (msg, fields)      => __logCalls.info.push({ msg, fields }),
   logWarning: (msg, fields)      => __logCalls.warn.push({ msg, fields }),
   logError:   (msg, err, fields) => __logCalls.error.push({ msg, err, fields }),
+  logDebug:   (msg, fields)      => __logCalls.debug.push({ msg, fields }),
   warn:  () => {},
   error: () => {},
-  logDebug: () => {},
+  debug: () => {},
 });
 
 const ftpService = require(path.join(SVC, 'ftp-service.js'));
@@ -311,4 +313,241 @@ test('markIntegritySuspect: sidecar I/O failure is swallowed — does not throw,
   const infoHit = __logCalls.info.find((c) =>
     c.msg.startsWith('[integrity-check] Suspect file flagged'));
   assert.ok(infoHit, 'info log fires regardless of sidecar I/O outcome');
+});
+
+
+// ─────────────────────────────────────────────────────────────────────────
+// 3. Expected-550 demotion on customer-original deletes.
+//
+//    Pixfizz Core ships uploads to `…/original-files/…` where the lab FTP
+//    user lacks DELE permission. We treat the resulting 550 as a successful
+//    no-op (debug log, doesn't trip allFilesSucceeded). Any other 550 (or
+//    any non-550 error) keeps its error-level log and the
+//    allFilesSucceeded=false consequence.
+// ─────────────────────────────────────────────────────────────────────────
+
+const { _isExpected550OnOriginalFiles, _handleFtpDeleteFailure } = ftpService;
+
+function ftpError(code, message) {
+  const err = new Error(message || `${code} test error`);
+  err.code = code;
+  err.name = 'FTPError';
+  return err;
+}
+
+// ---- Pure-helper matrix --------------------------------------------------
+
+test('_isExpected550OnOriginalFiles: 550 on /original-files/ path → true', () => {
+  const err = ftpError(550, '550 Delete operation failed.');
+  assert.equal(
+    _isExpected550OnOriginalFiles(err,
+      '/the-root/PXDEMO-ZW80N5_6a06f3fea1b75f41/PXDEMO-ZW80N5_38432974/original-files/13-576629810013.jpg'),
+    true,
+  );
+});
+
+test('_isExpected550OnOriginalFiles: 550 on /original-files/ with mixed case → true (lenient regex)', () => {
+  const err = ftpError(550, '550 nope');
+  assert.equal(
+    _isExpected550OnOriginalFiles(err, '/order/Original-Files/IMG.jpg'),
+    true,
+  );
+});
+
+test('_isExpected550OnOriginalFiles: 550 on /original-files/ with backslashes → true', () => {
+  const err = ftpError(550);
+  assert.equal(
+    _isExpected550OnOriginalFiles(err, 'C:\\share\\order\\original-files\\IMG.jpg'),
+    true,
+  );
+});
+
+test('_isExpected550OnOriginalFiles: 550 with NO `.code` but message starts with 550 → true (defensive)', () => {
+  const err = new Error('550 Delete operation failed.');
+  // basic-ftp v5 always sets `.code`, but the fallback exists so a future
+  // thrower (or a wrapped error) doesn't silently bypass the gate.
+  assert.equal(
+    _isExpected550OnOriginalFiles(err, '/order/original-files/x.jpg'),
+    true,
+  );
+});
+
+test('_isExpected550OnOriginalFiles: 550 on any other path → false (real perm issues still surface)', () => {
+  const err = ftpError(550, '550 Delete operation failed.');
+  assert.equal(_isExpected550OnOriginalFiles(err, '/the-root/order/IMG.jpg'),                 false);
+  assert.equal(_isExpected550OnOriginalFiles(err, '/the-root/order/job/IMG.jpg'),             false);
+  // Substring "original-files" without slashes either side must NOT trigger.
+  assert.equal(_isExpected550OnOriginalFiles(err, '/the-root/order/my-original-files-IMG.jpg'), false);
+});
+
+test('_isExpected550OnOriginalFiles: non-550 codes are always false, even on /original-files/', () => {
+  for (const code of [451, 500, 530, 553]) {
+    const err = ftpError(code, `${code} something else`);
+    assert.equal(
+      _isExpected550OnOriginalFiles(err, '/order/original-files/IMG.jpg'),
+      false,
+      `code ${code} must NOT be demoted`,
+    );
+  }
+});
+
+test('_isExpected550OnOriginalFiles: bad inputs degrade to false (defensive)', () => {
+  assert.equal(_isExpected550OnOriginalFiles(null,                  '/order/original-files/IMG.jpg'), false);
+  assert.equal(_isExpected550OnOriginalFiles(undefined,             '/order/original-files/IMG.jpg'), false);
+  assert.equal(_isExpected550OnOriginalFiles({},                    '/order/original-files/IMG.jpg'), false);
+  assert.equal(_isExpected550OnOriginalFiles(ftpError(550),         null),                            false);
+  assert.equal(_isExpected550OnOriginalFiles(ftpError(550),         ''),                              false);
+  assert.equal(_isExpected550OnOriginalFiles(ftpError(550),         42),                              false);
+});
+
+// ---- Behaviour contract: log channel + allFilesSucceeded consequence ----
+
+test('_handleFtpDeleteFailure: expected 550 → debug log only, returns {expected:true}', () => {
+  resetLogCalls();
+  const err = ftpError(550, '550 Delete operation failed.');
+  const result = _handleFtpDeleteFailure(err,
+    '/the-root/PXDEMO-ZW80N5_6a06f3fea1b75f41/PXDEMO-ZW80N5_38432974/original-files/13.jpg');
+  assert.deepEqual(result, { expected: true });
+  assert.equal(__logCalls.debug.length, 1, 'exactly one debug entry');
+  assert.match(__logCalls.debug[0].msg, /original-files/);
+  assert.equal(__logCalls.error.length, 0,
+    'expected-550 on /original-files/ must NOT produce an error-level entry');
+});
+
+test('_handleFtpDeleteFailure: 550 on non-original-files path → error log, returns {expected:false}', () => {
+  resetLogCalls();
+  const err = ftpError(550, '550 Delete operation failed.');
+  const result = _handleFtpDeleteFailure(err, '/the-root/order/IMG.jpg');
+  assert.deepEqual(result, { expected: false });
+  assert.equal(__logCalls.error.length, 1, 'real 550 elsewhere keeps its error entry');
+  assert.equal(__logCalls.error[0].msg, 'Failed to delete file from FTP');
+  assert.equal(__logCalls.debug.length, 0);
+});
+
+test('_handleFtpDeleteFailure: non-550 error on /original-files/ → error log (regression guard)', () => {
+  resetLogCalls();
+  const err = ftpError(530, '530 Login incorrect');
+  const result = _handleFtpDeleteFailure(err, '/order/original-files/IMG.jpg');
+  assert.deepEqual(result, { expected: false });
+  assert.equal(__logCalls.error.length, 1,
+    'a non-550 error on /original-files/ must still surface — only the read-only delete is expected');
+  assert.equal(__logCalls.debug.length, 0);
+});
+
+// `expected:true` is the contract that lets the call site keep
+// allFilesSucceeded=true → which is what allows the parent-folder cleanup
+// branch (line ~385 in ftp-service.js: `if (isSubfolder && allFilesSucceeded)`)
+// to be entered after a 550 on /original-files/. Asserting the return value
+// here is the load-bearing test for that behaviour change — the inline call
+// site is `if (!expected) allFilesSucceeded = false;` so a true return is
+// exactly the gate that keeps the cleanup branch reachable.
+test('_handleFtpDeleteFailure: expected:true is what keeps the parent-folder cleanup branch reachable', () => {
+  resetLogCalls();
+  const err = ftpError(550, '550 Delete operation failed.');
+
+  // Mirror the inline pattern at ftp-service.js line ~370:
+  let allFilesSucceeded = true;
+  const { expected } = _handleFtpDeleteFailure(err, '/order/original-files/IMG.jpg');
+  if (!expected) allFilesSucceeded = false;
+
+  assert.equal(allFilesSucceeded, true,
+    'after the demotion the per-folder success flag must stay true so the ' +
+    '`if (isSubfolder && allFilesSucceeded) { … client.removeDir … }` branch ' +
+    'is still entered (it will short-circuit naturally on the still-present file)');
+
+  // And a sibling regression guard — a NORMAL 550 elsewhere must still flip
+  // the flag, otherwise we'd be masking real permission problems.
+  resetLogCalls();
+  let normalFlag = true;
+  const normal = _handleFtpDeleteFailure(ftpError(550, '550'), '/order/job/IMG.jpg');
+  if (!normal.expected) normalFlag = false;
+  assert.equal(normalFlag, false, 'real 550 elsewhere still trips allFilesSucceeded');
+});
+
+
+// ─────────────────────────────────────────────────────────────────────────
+// 4. Windows-basename sanitiser.
+//
+//    Pixfizz Core occasionally escapes parentheses in upload filenames as
+//    `\(` / `\)`. The backslash is a legal character on the Unix-side FTP
+//    server but Windows treats it as a path separator — so `path.join` on
+//    the local target re-parses `2-AVIS\(3\).jpg` as a nested folder, and
+//    the open call ENOENTs on the (non-existent) intermediate folder.
+//    `_sanitiseWindowsBasename` replaces every Windows-reserved character
+//    in the basename with `_` so the local target survives even when the
+//    upstream filename is malformed.
+// ─────────────────────────────────────────────────────────────────────────
+
+const { _sanitiseWindowsBasename } = ftpService;
+
+test('_sanitiseWindowsBasename: clean filename → unchanged (no false-positive churn)', () => {
+  assert.equal(_sanitiseWindowsBasename('IMG_001.jpg'),                       'IMG_001.jpg');
+  assert.equal(_sanitiseWindowsBasename('2-AVIS_26-5FV39e8.jpg'),              '2-AVIS_26-5FV39e8.jpg');
+  assert.equal(_sanitiseWindowsBasename('file with spaces and (parens).jpg'), 'file with spaces and (parens).jpg');
+  assert.equal(_sanitiseWindowsBasename('résumé.png'),                         'résumé.png');
+  assert.equal(_sanitiseWindowsBasename('emoji-😀.jpg'),                       'emoji-😀.jpg');
+});
+
+test('_sanitiseWindowsBasename: literal backslash → replaced (the original-files \\( bug)', () => {
+  // This is the exact pathology from the customer log line.
+  assert.equal(
+    _sanitiseWindowsBasename('2-AVIS_26-5FV39e8\\(3\\).jpg'),
+    '2-AVIS_26-5FV39e8_(3_).jpg',
+  );
+});
+
+test('_sanitiseWindowsBasename: forward slash → replaced', () => {
+  // A `/` in a basename would let path.join compose an unintended subfolder
+  // — same failure mode as backslash, just less common on Windows hosts.
+  assert.equal(_sanitiseWindowsBasename('a/b.jpg'), 'a_b.jpg');
+});
+
+test('_sanitiseWindowsBasename: each Windows-reserved character is replaced', () => {
+  // Per https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file
+  // the reserved set is `< > : " / \ | ? *`.
+  for (const ch of ['<', '>', ':', '"', '/', '\\', '|', '?', '*']) {
+    assert.equal(
+      _sanitiseWindowsBasename(`x${ch}y.jpg`),
+      'x_y.jpg',
+      `reserved character ${JSON.stringify(ch)} must be replaced`,
+    );
+  }
+});
+
+test('_sanitiseWindowsBasename: control characters (0x00-0x1F) are replaced', () => {
+  // Belt-and-braces — Windows rejects these in CreateFile too. Unlikely in
+  // real customer filenames but cheap to guard against. Bad chars are built
+  // at runtime via String.fromCharCode so the test source stays ASCII-clean.
+  const labels = { 0x00: 'NUL', 0x09: 'TAB', 0x0A: 'LF', 0x0D: 'CR', 0x1F: 'US' };
+  for (const code of [0x00, 0x09, 0x0A, 0x0D, 0x1F]) {
+    const bad = 'a' + String.fromCharCode(code) + 'b.jpg';
+    assert.equal(_sanitiseWindowsBasename(bad), 'a_b.jpg', `control char 0x${code.toString(16)} (${labels[code]}) must be replaced`);
+  }
+  // Printable space (0x20) is fine in Windows filenames; must NOT be replaced.
+  assert.equal(_sanitiseWindowsBasename('a b.jpg'), 'a b.jpg');
+});
+
+test('_sanitiseWindowsBasename: multiple adjacent reserved characters are each replaced (no collapsing)', () => {
+  // Don't collapse runs — preserving length keeps the relationship between
+  // the original and sanitised name visually obvious in logs.
+  assert.equal(_sanitiseWindowsBasename('a\\\\b.jpg'), 'a__b.jpg');
+  assert.equal(_sanitiseWindowsBasename('a<>?:b.jpg'), 'a____b.jpg');
+});
+
+test('_sanitiseWindowsBasename: idempotent — re-sanitising a clean name is a no-op', () => {
+  const dirty = '2-AVIS_26-5FV39e8\\(3\\).jpg';
+  const clean = _sanitiseWindowsBasename(dirty);
+  assert.equal(_sanitiseWindowsBasename(clean), clean,
+    'a clean name must round-trip through the sanitiser unchanged');
+});
+
+test('_sanitiseWindowsBasename: non-string / empty inputs are returned unchanged (defensive)', () => {
+  // These come from upstream client.list parsing — guard so a malformed
+  // listing doesn't crash the download loop. The local mkdir / open call
+  // downstream will surface the underlying issue if `item.name` was bogus.
+  assert.equal(_sanitiseWindowsBasename(''),         '');
+  assert.equal(_sanitiseWindowsBasename(null),       null);
+  assert.equal(_sanitiseWindowsBasename(undefined),  undefined);
+  // Numbers, etc. — bail without throwing.
+  assert.equal(_sanitiseWindowsBasename(42),         42);
 });

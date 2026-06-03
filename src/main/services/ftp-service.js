@@ -24,6 +24,84 @@ function shouldIntegrityCheck(filename) {
 }
 
 /**
+ * Recognise an expected "FTP user can't delete this file" 550 against a
+ * customer-original upload. Pixfizz Core ships customer uploads to
+ * `…/original-files/…` and the lab FTP user typically only has read+list on
+ * that subfolder, so DELE comes back as 550. Treating these as a successful
+ * no-op (silent debug log + don't trip `allFilesSucceeded`) eliminates the
+ * 41+ error-level entries per sweep we were producing — and lets the parent
+ * folder cleanup branch be entered. The actual `removeDir` on the parent
+ * folder is gated by `client.list(remotePath).length === 0`, so a folder
+ * that's still full because we couldn't delete the contents is silently
+ * skipped without further noise. Any non-`original-files/` 550 keeps its
+ * error-level log so a real permission regression elsewhere still surfaces.
+ *
+ * Match is lenient: `/[\\/]original-files[\\/]/i` so forward- or back-slashed
+ * paths and any casing variant catch. False-positive risk is essentially
+ * zero — no Pixfizz layout is coincidentally going to contain that segment.
+ *
+ * @param {Error|null} err          - error thrown by basic-ftp's client.remove
+ * @param {string}     remotePath   - the path the DELE was attempted against
+ * @returns {boolean}
+ */
+function _isExpected550OnOriginalFiles(err, remotePath) {
+  if (!err || typeof err !== 'object') return false;
+  // basic-ftp's FTPError carries a numeric `.code` matching the FTP response
+  // (see node_modules/basic-ftp/dist/FtpContext.d.ts). Guard against future
+  // throwers that don't set `.code` by also matching the message prefix.
+  const code = err.code;
+  const isFtp550 = code === 550 ||
+    (typeof err.message === 'string' && /^\s*550(\b|\D)/.test(err.message));
+  if (!isFtp550) return false;
+  if (typeof remotePath !== 'string' || !remotePath) return false;
+  return /[\\/]original-files[\\/]/i.test(remotePath);
+}
+
+/**
+ * Centralised handler for a failed FTP DELE. Logs at debug level for the
+ * expected-550-on-original-files case and at error level for everything
+ * else, returning `{ expected }` so callers know whether to count the
+ * failure against `allFilesSucceeded`. Pulled out so both delete sites
+ * (skip-already-have and post-download cleanup) stay in sync.
+ *
+ * @param {Error}  delError
+ * @param {string} remoteItemPath
+ * @returns {{ expected: boolean }}
+ */
+// Windows filesystem reserved characters. On the FTP server (Linux-side)
+// these are all legal in a filename, but on a Windows client they either
+// have a path-separator meaning (`\` `/`) or are outright forbidden
+// (`< > : " | ? *` and ASCII 0-31). When Pixfizz Core's upload pipeline
+// escapes parentheses to `\(` / `\)` (or similar), the literal backslash
+// in the filename gets re-interpreted by the OS as a path separator and
+// the download fails with ENOENT on a non-existent intermediate folder.
+//
+// `_sanitiseWindowsBasename` replaces every reserved character in the
+// basename with `_`. The remote name is left untouched — only the local
+// target path is built from the sanitised version, so files still
+// download from their authentic server-side names and just land under a
+// Windows-friendly local name. Idempotent: re-running on a sanitised name
+// is a no-op.
+const _WINDOWS_RESERVED_CHARS_RE = /[<>:"/\\|?*\x00-\x1F]/g;
+
+function _sanitiseWindowsBasename(name) {
+  if (typeof name !== 'string' || !name) return name;
+  return name.replace(_WINDOWS_RESERVED_CHARS_RE, '_');
+}
+
+function _handleFtpDeleteFailure(delError, remoteItemPath) {
+  if (_isExpected550OnOriginalFiles(delError, remoteItemPath)) {
+    logger.logDebug(
+      'FTP delete on read-only original-files path (expected 550) — treating as success',
+      { remoteItemPath },
+    );
+    return { expected: true };
+  }
+  logger.logError('Failed to delete file from FTP', delError, { remoteItemPath });
+  return { expected: false };
+}
+
+/**
  * Flag a downloaded file as integrity-suspect without renaming, deleting,
  * or otherwise hiding it. The pivot from the v1.3.0 quarantine model:
  * detection and decision are separate concerns. OHD's job is to detect and
@@ -284,7 +362,18 @@ class FtpService {
 
     for (const item of items) {
       const remoteItemPath = remotePath.replace(/\/$/, '') + '/' + item.name;
-      const localItemPath = path.join(localPath, item.name);
+      // Local path uses a sanitised basename so Windows-illegal characters
+      // (notably literal `\` Pixfizz Core sometimes leaves in customer-
+      // upload filenames when escaping parens) don't get reinterpreted as
+      // path separators. Server-side name stays intact for the actual
+      // download fetch above.
+      const localItemName = _sanitiseWindowsBasename(item.name);
+      if (localItemName !== item.name) {
+        logger.logDebug('Sanitised filename for local target', {
+          remoteItemPath, originalName: item.name, sanitisedName: localItemName,
+        });
+      }
+      const localItemPath = path.join(localPath, localItemName);
 
       if (item.isDirectory) {
         onProgress({
@@ -320,7 +409,10 @@ class FtpService {
               await client.remove(remoteItemPath);
               logger.info('Deleted already-downloaded file from FTP', { remoteItemPath });
             } catch (delError) {
-              logger.logError('Failed to delete skipped file from FTP', delError, { remoteItemPath });
+              // Expected 550 against /original-files/ (Pixfizz read-only
+              // subfolder) → debug-level, treated as success. Any other
+              // failure stays error-level. No retry change.
+              _handleFtpDeleteFailure(delError, remoteItemPath);
             }
             continue;
           }
@@ -367,8 +459,14 @@ class FtpService {
                 await client.remove(remoteItemPath);
                 logger.info('Deleted file from FTP after successful download', { remoteItemPath });
               } catch (delError) {
-                logger.logError('Failed to delete file from FTP', delError, { remoteItemPath });
-                allFilesSucceeded = false;
+                // Expected 550 against /original-files/ keeps
+                // allFilesSucceeded=true so the parent-folder cleanup
+                // branch at the bottom of this function is still entered
+                // (it will short-circuit naturally when list() shows the
+                // undeletable file still present). All other failures
+                // still trip allFilesSucceeded as before.
+                const { expected } = _handleFtpDeleteFailure(delError, remoteItemPath);
+                if (!expected) allFilesSucceeded = false;
               }
             }
           }
@@ -429,5 +527,8 @@ const ftpService = new FtpService();
 ftpService._markIntegritySuspect = markIntegritySuspect;
 ftpService._shouldIntegrityCheck = shouldIntegrityCheck;
 ftpService._INTEGRITY_CHECK_EXTENSIONS = INTEGRITY_CHECK_EXTENSIONS;
+ftpService._isExpected550OnOriginalFiles = _isExpected550OnOriginalFiles;
+ftpService._handleFtpDeleteFailure = _handleFtpDeleteFailure;
+ftpService._sanitiseWindowsBasename = _sanitiseWindowsBasename;
 
 module.exports = ftpService;
