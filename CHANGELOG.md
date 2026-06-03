@@ -1,5 +1,86 @@
 ## Unreleased
 
+### Added — M5b batch crop UI + propagation for manual-source jobs (2026-05-25)
+
+Manual-source jobs with uncropped images now open Job Review directly in
+batch crop mode. Operator drags a default crop rectangle on a preview
+frame, toggles Portrait / Landscape, and clicks Apply Default to All —
+the new `ohd:job:batch-crop-apply` IPC loops the M5a-verified crop
+primitive over the uncropped subset and streams per-image progress to
+the renderer.
+
+- **Shared trigger predicate** (`src/shared/batchCropTrigger.js`): pure
+  `shouldEnterBatchCropMode(job, sidecar)` returning `{ enter, mode,
+  uncroppedCount, totalCount, reason }`. Mode `auto` → drawer opens
+  directly in batch mode; `button` → standard drawer with a prominent
+  "Batch Crop Remaining (X)" CTA above the grid; `standard` → no
+  manual signal or fully cropped, standard drawer. Mirrors
+  `holdForReview.js`'s placement so renderer + main agree.
+- **Shared crop primitive** (`src/main/jobs/batchCropActions.js`):
+  `_applyCropToSingleImage` was extracted from the body of
+  `ohd:job:crop-image` so both the per-image IPC (M5a) and the new
+  batch IPC call the same code path. The M5a 11 regression tests stay
+  green — the refactor is mechanical, the IPC's external contract
+  unchanged. New helper `_fractionalToPixelRect` scales a fractional
+  rect to per-image pixel coordinates and clamps to source bounds.
+- **Batch driver** (`applyBatchCrop` in the same file): strictly serial
+  per job (libvips cache + SMB sensitivity), per-image sidecar save,
+  per-image progress callback, one final save for the job-level
+  `batchCropDefaultRect` / `batchCropDefaultOrientation` /
+  `batchCropLastAppliedAt` fields. **Failure policy is
+  continue-best-effort**: per-image failures (corrupt uploads,
+  unreadable EXIF, libvips errors) land in `failed[]` but do NOT
+  abort the batch — successful images persist either way and operators
+  want all failures surfaced in one batch run rather than serially.
+  **Safety belt**: 10 consecutive failures sharing the same
+  `error.code` aborts the remainder (reason `consecutive-same-error`)
+  to prevent a runaway systemic failure (network drive unmounted,
+  sharp init crash) from spinning through 100 images.
+- **Sidecar schema** (flat sibling fields, no nested wrapper — see
+  M5a's "Brief vs. as-built" subsection): per-image `cropOrientation`,
+  `cropSource: 'batch' | 'per-image'`, `cropAppliedAt`, `cropRotation`
+  (null until M5c bakes rotation); job-level `batchCropDefaultRect`
+  (fractions), `batchCropDefaultOrientation`, `batchCropLastAppliedAt`.
+  Reconcile D in `sidecarManager.js` hydrates these on legacy sidecars
+  in-memory only — no spurious save (regression-tested).
+- **New IPC channels**:
+  - `ohd:job:batch-crop-apply` — accepts `filenames`, `fractionalRect`,
+    `orientation`; emits `ohd:batch-crop:progress` per image.
+  - `ohd:job:resolve-target-size` — reads the assigned route via
+    `routingService.resolveRoute(job)` and matches against
+    `allSizeOptions`. If no route or no size translation, returns a
+    structured `{ ok: false, reason }` so the UI can disable batch
+    mode with a tooltip. **No silent default fallback** — operator
+    must assign a route before cropping.
+- **Renderer** (`src/renderer/views/JobReview/BatchCropMode.jsx`):
+  top-bar with read-only target size pill, segmented orientation
+  toggle, primary Apply Default to All CTA, per-image progress text;
+  large draggable preview frame on the left for setting the default
+  rect (aspect locked to target size, drag-to-move, orientation swap
+  flips w/h); thumbnail grid on the right with the same fractional
+  rect overlaid on every uncropped thumb (cropped thumbs get a green
+  check); bottom bar surfaces post-batch summary + collapsible
+  failure details. Operator override (Exit Batch / Batch Crop
+  Remaining CTA) flips between batch and standard modes within the
+  same drawer without a reload.
+- **Tests**: 14 new tests in `batchCrop.test.js` — fractional → pixel
+  scaling unit tests at 200×150 / 4000×3000 / 1080×1920 / clamping /
+  zero-minimum; 5-image integration with full M5b sidecar assertions
+  + progress callback verification + raw-upload audit preservation;
+  mixed-dimension propagation; idempotency; continue-best-effort
+  failure handling; safety belt abort + counter reset; M5a regression
+  via single-image batch; cropSource default; Reconcile D no-spurious-
+  save. Full suite **520 / 520 pass** (was 506; +14 new).
+
+**Out of scope for M5b** — M5c will add focused per-image override mode
+(click a thumb to open a CropEditor-based modal with `[`/`]` navigation,
+R/L rotation baked into the file). Renderer bundle rebuilt; visual
+verification pending against a live manual job.
+
+### Verified — M5a single-image crop pipeline for manual jobs (2026-05-25)
+
+Verified the existing `ohd:job:crop-image` handler against the brief's M5a four-point contract for manual-source files. All four functional outcomes hold without source changes: cropped pixels at `working/<filename>` with matching dimensions; raw upload at the flat job folder root byte-identical before/after; sidecar gains `cropApplied + croppedPath + cropRect + channelMappingId` (and `filename` stays the original basename — load-bearing for `originalsManager.resetImage`, AI scoring's `_scanJobImages`, and reprint manager); dispatch substitution via `print-service._getEnhancedPathMap` sends the cropped path. Two new test files lock the contract: `manualCrop.test.js` (5 tests against the handler) and `manualCrop.dispatch.test.js` (6 tests against `_getEnhancedPathMap`). Brief updated with a "Brief vs. as-built" section under M5a and the M5b/M5c schema rewritten as flat sibling fields (`cropOrientation`, `cropSource`, `cropAppliedAt`, `cropRotation`, `batchCropDefaultRect`, etc.) — no nested `crop: {...}` / `batchCrop: {...}` wrappers, so M5b doesn't build a parallel structure and no on-disk sidecar migration is needed.
+
 ## v1.5.0 - 2026-05-04
 
 ### Added — AI Fix-up Service (auto-enhancement on quality-gate failure)
