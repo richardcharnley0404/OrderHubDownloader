@@ -70,6 +70,18 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
+  # ── Customer-facing branding overrides ───────────────────────────────
+  # productName stays "OrderHub Downloader" so the existing
+  # %APPDATA%/OrderHub Downloader/ data folder keeps working without
+  # migration (electron's app.getPath('userData') is derived from
+  # productName via electron-builder's defaults). These overrides force
+  # every operator-visible installer touchpoint to read "OrderHub
+  # Desktop" instead.
+  #
+  # ${version} is expanded by electron-builder from package.json.
+  artifactName: "OrderHub Desktop Setup ${version}.${ext}"
+  uninstallDisplayName: "OrderHub Desktop ${version}"
+  shortcutName: "OrderHub Desktop"
 
 publish:
   provider: generic

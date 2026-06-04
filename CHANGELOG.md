@@ -1,3 +1,17 @@
+## v1.7.4 - 2026-06-04
+
+### Changed: installer + shortcut + uninstall entry now read "OrderHub Desktop"
+
+Customer-facing strings on the installer filename, Start menu / desktop
+shortcut, and Add/Remove Programs entry now read "OrderHub Desktop"
+instead of "OrderHub Downloader". Aligns with the v1.4.0 UI rebrand and
+the existing tray tooltip. Internal `productName` stays "OrderHub
+Downloader" so the `%APPDATA%/OrderHub Downloader/` data folder keeps
+loading without migration — existing installs upgrade with zero data
+loss. The installer wizard pages themselves still display "OrderHub
+Downloader" during install (one-time visibility, not worth the
+NSIS-include risk to fix).
+
 ## v1.7.3 - 2026-06-03
 
 ### Changed: installer version stamping
