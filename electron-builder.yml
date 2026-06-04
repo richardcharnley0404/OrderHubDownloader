@@ -6,16 +6,34 @@ directories:
   output: dist
   buildResources: assets
 
-# Exclude dev-only directories from the packaged app. The big offenders are
-# tools/onnx-export/.venv and tools/onnx-export/.venv-jax (~5.5 GB of
-# Python ML stack used during MUSIQ-SPAQ conversion — not needed at
-# runtime). docs/ and .claude/ are also excluded for cleanliness.
+# Exclude dev-only directories AND any project-root debris from the packaged
+# app. The big offenders are tools/onnx-export/.venv and ../.venv-jax (~5.5 GB
+# of Python ML stack used during MUSIQ-SPAQ conversion — not needed at
+# runtime).
+#
+# CRITICAL: the additional patterns below (logs, status files, briefs, jsx
+# prototypes, scratch .js, `nul`) guard against a v1.7.0 build-pipeline bug
+# where untracked debris in the project root (build/dev/ci/renderer logs,
+# test status files, scratch `index.js`, the Windows `nul` redirect leftover)
+# was being swept into the asar by `**/*` and then mutating in size DURING
+# packaging — producing an asar whose payload byte stream no longer matched
+# its header offset table (every src/* file ended up reading bytes from the
+# previous file's content, throwing SyntaxError at startup).
 files:
   - "**/*"
   - "!tools/**/*"
   - "!docs/**/*"
   - "!.claude/**/*"
+  - "!.playwright-mcp/**/*"
   - "!**/*.test.js"
+  - "!*.log"
+  - "!*-log.txt"
+  - "!*-status.txt"
+  - "!crash-*.txt"
+  - "!nul"
+  - "!packaged-*.js"
+  - "!OHD_*Brief.md"
+  - "!OHD_*.jsx"
 
 # Ship the ONNX models + Apache 2.0 license attribution alongside the app.
 # asarUnpack is mandatory for the models: onnxruntime-node loads them by
