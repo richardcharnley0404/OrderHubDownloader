@@ -34,8 +34,18 @@ files:
   - "!packaged-*.js"
   - "!OHD_*Brief.md"
   - "!OHD_*.jsx"
-
-# Ship the ONNX models + Apache 2.0 license attribution alongside the app.
+  # `assets/` is also our `directories.buildResources` target (the NSIS
+  # installer reads its icon from there). electron-builder treats the
+  # buildResources directory as build-time only and IMPLICITLY EXCLUDES
+  # it from the packaged app, even when the `**/*` glob above would
+  # otherwise match it. That's why this explicit positive entry is
+  # required: it overrides the implicit buildResources exclusion so
+  # that the header logo (`assets/favicon hub.svg` referenced by
+  # `src/renderer/index.html`), the tray icon (`assets/favicon hub.png`
+  # from tray-manager.js), and the window icon (`assets/icon.ico` from
+  # window-manager.js) ship in the asar. v1.7.0/v1.7.1 missed this and
+  # the runtime UI ran with default Electron icons.
+  - "assets/**/*"
 # asarUnpack is mandatory for the models: onnxruntime-node loads them by
 # filesystem path and cannot read from inside an asar archive.
 extraResources:
