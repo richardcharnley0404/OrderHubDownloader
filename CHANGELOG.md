@@ -1,3 +1,28 @@
+## v1.7.2 - 2026-06-03
+
+### Fixed: v1.7.0 installer crashed silently on launch
+
+The v1.7.0 installer built and installed without error but the app
+exited within seconds of launch with no log output. Root cause was
+asar-packaging corruption — log files in the project root grew during
+the build, shifting payload offsets out of sync with the asar header.
+v1.7.1 added exclusion patterns to electron-builder.yml so debris
+files can't contaminate the asar.
+
+### Fixed: header logo, tray icon, taskbar icon all missing
+
+The `assets/` folder was being implicitly excluded from the asar by
+electron-builder's `buildResources` directive. The header logo
+(top-left of the window), tray icon, and taskbar / Alt-Tab icon all
+fell back to the generic Electron defaults. v1.7.2 explicitly includes
+`assets/**` in the packaged asar.
+
+### Distribution note
+
+v1.7.0 and v1.7.1 installers must not be redistributed. v1.7.2 is the
+first release where everything in the v1.7 feature set works
+end-to-end in production.
+
 ## v1.7.0 - 2026-06-03
 
 ### New: Manual Crop redesign — per-image-first workflow
