@@ -1,3 +1,12 @@
+## v1.7.3 - 2026-06-03
+
+### Changed: installer version stamping
+
+Pure metadata release. Bumps `package.json` to match the tagged release
+version so the installer filename (`OrderHub Downloader Setup 1.7.3.exe`)
+and Add/Remove Programs entry align with the git tag. No functional
+changes from v1.7.2.
+
 ## v1.7.2 - 2026-06-03
 
 ### Fixed: v1.7.0 installer crashed silently on launch
