@@ -24,7 +24,10 @@ class DPOFGenerator {
    * Generate the content of an AUTPRINT.MRK file.
    *
    * @param {object} params
-   * @param {string}   params.orderNumber    - e.g. "002296"
+   * @param {string}   params.orderNumber    - e.g. "PXDEMO-RW895E" — used for CVP1 traceability and as the CID fallback
+   * @param {string|number} [params.jobId]   - Numeric OH job id (e.g. 38459543) emitted as USR CID for Noritsu.
+   *                                            Required for Noritsu controllers — they reject non-numeric CID values.
+   *                                            Falls back to orderNumber when not provided (legacy callers).
    * @param {string}   params.customerName   - e.g. "Elizabeth Hammond"
    * @param {number}   params.channelNumber  - Print channel, e.g. 1
    * @param {string}   params.printSizeCode  - e.g. "KG", "2L", 'NML -PSIZE "8x4"'
@@ -33,10 +36,11 @@ class DPOFGenerator {
    * @param {string}   [params.controllerType] - 'noritsu' (default) or 'epson'
    * @returns {string} AUTPRINT.MRK content with CRLF line endings
    */
-  generate({ orderNumber, customerName, channelNumber, printSizeCode, images, timestamp = new Date(), controllerType = 'noritsu' }) {
+  generate({ orderNumber, jobId, customerName, channelNumber, printSizeCode, images, timestamp = new Date(), controllerType = 'noritsu' }) {
     const pad3    = n => String(n).padStart(3, '0');
     const dt      = this.formatTimestamp(timestamp);
     const isEpson = (controllerType === 'epson');
+    const cid     = (jobId !== undefined && jobId !== null && jobId !== '') ? jobId : orderNumber;
 
     const lines = [];
 
@@ -47,8 +51,9 @@ class DPOFGenerator {
     lines.push(`GEN DTM=${dt}`);
     lines.push(`USR NAM="${customerName}"`);
     // Noritsu uses a separate CID field; Epson Surelab uses NAM only.
+    // Noritsu controllers reject non-numeric CID — always pass numeric jobId.
     if (!isEpson) {
-      lines.push(`USR CID="${orderNumber}"`);
+      lines.push(`USR CID="${cid}"`);
     }
     if (!isEpson) lines.push('AUTO CORRECT=0');
     lines.push('VUQ RGN=BGN');

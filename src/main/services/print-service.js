@@ -304,6 +304,7 @@ class PrintService {
 
     const dpofContent = dpofGenerator.generate({
       orderNumber:    job.order_number || manifest.orderNumber || '',
+      jobId:          job.id,
       customerName:   job.customer_name || '',
       channelNumber:  route.channelNumber,
       printSizeCode:  route.printSizeCode,
@@ -474,6 +475,7 @@ class PrintService {
     // Generate DPOF content
     const dpofContent = dpofGenerator.generate({
       orderNumber:    job.order_number || manifest.orderNumber || '',
+      jobId:          job.id,
       customerName:   job.customer_name || '',
       channelNumber:  mapping.channelNumber,
       printSizeCode,
@@ -628,6 +630,7 @@ class PrintService {
 
     const dpofContent = dpofGenerator.generate({
       orderNumber:    parentJob.order_number  || '',
+      jobId:          parentJob.id,
       customerName:   parentJob.customer_name || '',
       channelNumber:  channelMapping.channelNumber,
       printSizeCode:  reprintPrintSizeCode,

@@ -1,3 +1,8 @@
+## v1.7.5 - 2026-06-04
+
+### Fixed: Noritsu DPOF jobs rejected when USR CID was alphanumeric
+Noritsu controllers require the USR CID field in the .mrk file to be numeric, but OHD was emitting the alphanumeric OrderHub job number (e.g. PXDEMO-RW895E). Affected DPOF jobs were rejected silently at the controller. CID now uses the numeric OrderHub job id (e.g. 38459543). Operator-visible CVP1 traceability line is unchanged — still shows the alphanumeric order code for printer-side identification.
+
 ## v1.7.4 - 2026-06-04
 
 ### Changed: installer + shortcut + uninstall entry now read "OrderHub Desktop"

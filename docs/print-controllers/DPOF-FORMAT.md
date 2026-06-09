@@ -36,7 +36,7 @@ GEN REV = 01.00
 GEN CRT = "OHD" 1.00
 GEN DTM = 2026:02:21:15:30:45
 USR NAM = "Richard Charnley"
-USR CID = "100456"
+USR CID = "38459543"
 AUTO CORRECT = 1
 VUQ RGN = BGN
 VUQ VNM = "NORITSU KOKI" -ATR "QSS-3901"
@@ -51,8 +51,8 @@ VUQ RGN = END
 | `GEN REV` | `01.00` | Hardcoded | DPOF standard revision number |
 | `GEN CRT` | `"OHD" 1.00` | Hardcoded | Creator identifier — "OHD" = OrderHub Desktop |
 | `GEN DTM` | `2026:02:21:15:30:45` | `new Date()` | Generation timestamp in `YYYY:MM:DD:HH:MM:SS` format |
-| `USR NAM` | `"Richard Charnley"` | `job.customerName` | Customer name from the OrderHub job |
-| `USR CID` | `"100456"` | `job.orderNumber` | Order number — used as the user/customer ID |
+| `USR NAM` | `"Richard Charnley"` | `job.customer_name` | Customer name from the OrderHub job |
+| `USR CID` | `"38459543"` | `job.id` (numeric OH job id) | **Must be numeric** — Noritsu controllers reject non-numeric values. Sourced from the OrderHub numeric job id, not the alphanumeric `order_number` (e.g. `PXDEMO-RW895E`). |
 | `AUTO CORRECT` | `1` | `controller.autoCorrect` | `1` = enable auto colour correction; `0` = disable |
 | `VUQ RGN` | `BGN` / `END` | Hardcoded | Vendor Unique Qualifier region delimiters |
 | `VUQ VNM` | `"NORITSU KOKI" -ATR "QSS-3901"` | `controller.vendorName` + `controller.vendorAttribute` | Vendor name and model attribute |
@@ -157,7 +157,7 @@ GEN REV = 01.00                              ← DPOF format version
 GEN CRT = "OHD" 1.00                         ← Created by OrderHub Desktop v1.00
 GEN DTM = 2026:02:21:15:30:45               ← Timestamp of file generation
 USR NAM = "Jane Smith"                       ← Customer name
-USR CID = "100456"                           ← Order number (used as customer ID)
+USR CID = "38459543"                         ← Numeric OrderHub job id (Noritsu requires numeric — alphanumeric order_number is rejected)
 AUTO CORRECT = 1                             ← Enable auto colour correction
 VUQ RGN = BGN                               ← Begin vendor-specific section
 VUQ VNM = "NORITSU KOKI" -ATR "QSS-3901"   ← Target controller vendor + model

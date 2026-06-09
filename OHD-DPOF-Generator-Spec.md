@@ -85,7 +85,7 @@ GEN REV=01.00
 GEN CRT="OHD" 1.00
 GEN DTM=2026:03:08:13:44:13
 USR NAM="Elizabeth Hammond"
-USR CID="002296"
+USR CID="38459543"
 AUTO CORRECT=0
 VUQ RGN=BGN
 VUQ VNM="NORITSU KOKI" -ATR "QSSPrint"
@@ -131,7 +131,7 @@ VUQ RGN=END
 | `GEN CRT` | `"OHD" 1.00` | Creator identifier — fixed string |
 | `GEN DTM` | `YYYY:MM:DD:HH:MM:SS` | Order creation timestamp |
 | `USR NAM` | `"Customer Full Name"` | Single quoted string — do not split first/last |
-| `USR CID` | `"OrderNumber"` | The OrderHub order number, quoted |
+| `USR CID` | `"38459543"` | **Numeric OrderHub job id** — Noritsu controllers reject non-numeric values. Do **not** use the alphanumeric `order_number` (e.g. `PXDEMO-RW895E`); use `job.id`. |
 | `AUTO CORRECT` | `0` | Always 0 — images are pre-processed, no printer correction |
 
 #### VUQ Vendor Block (Header — appears in BOTH `[HDR]` and each `[JOB]`)
@@ -260,6 +260,7 @@ interface DPOFOrderParams {
 function generateAutoprintMrk(params: DPOFOrderParams): string {
   const {
     orderNumber,
+    jobId,            // numeric OH job id — required for Noritsu CID
     customerName,
     channelNumber,
     printSizeCode,
@@ -279,7 +280,7 @@ function generateAutoprintMrk(params: DPOFOrderParams): string {
   lines.push('GEN CRT="OHD" 1.00')
   lines.push(`GEN DTM=${dt}`)
   lines.push(`USR NAM="${customerName}"`)
-  lines.push(`USR CID="${orderNumber}"`)
+  lines.push(`USR CID="${jobId}"`)            // Noritsu requires numeric CID
   lines.push('AUTO CORRECT=0')
   lines.push('VUQ RGN=BGN')
   lines.push('VUQ VNM="NORITSU KOKI" -ATR "QSSPrint"')
