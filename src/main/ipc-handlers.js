@@ -1202,6 +1202,107 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
     }
   });
 
+  // v1.7.8 — Routing-hold release.
+  //
+  // Called by the renderer's Resolve Hold modal. Two modes:
+  //   { controllerId: null }            → Release to default controller (the
+  //                                        process→controller mapping decides
+  //                                        the route at dispatch time).
+  //   { controllerId: <string> }        → Reassign to <controllerId>; before
+  //                                        persisting, validate that a channel
+  //                                        mapping exists for the job's
+  //                                        productCode + options under that
+  //                                        controller. On no-channel return
+  //                                        a payload the renderer chains into
+  //                                        the existing Assign Channel modal
+  //                                        (same flow as the unrouted-job
+  //                                        Assign button).
+  //
+  // Persists _routingHoldReleased=true (sticky), _routingReleasedAt (ISO
+  // timestamp for the audit-trail line), _routingReleasedTo (controller name
+  // for the same audit line). Reassignment ALSO sets _channelMappingOverride
+  // — same field the crop-to-size feature uses, which resolveRoute already
+  // short-circuits on.
+  ipcMain.handle('ohd:routing:release-hold', async (event, payload) => {
+    const { jobId, controllerId } = payload || {};
+    try {
+      const localJobs = jobService.getLocalJobs().jobs || [];
+      const job = localJobs.find(j => String(j.id) === String(jobId));
+      if (!job) {
+        return { ok: false, reason: 'job-not-found' };
+      }
+
+      const updates = {
+        _routingHoldReleased: true,
+        _routingReleasedAt:   new Date().toISOString(),
+      };
+
+      if (controllerId) {
+        // Reassign path — must validate the channel mapping exists for this
+        // controller. resolveRouteForController returns the same shape
+        // resolveRoute does so callers handle no-channel identically.
+        const route = routingService.resolveRouteForController(job, controllerId);
+        if (route.type === 'unrouted' && route.reason === 'no-channel') {
+          // Don't persist — let the renderer surface the Assign modal first.
+          return { ok: false, reason: 'no-channel', controller: route.controller };
+        }
+        if (route.type === 'unrouted') {
+          return { ok: false, reason: route.reason };
+        }
+
+        // Find the channel mapping id so we can persist the override (same
+        // mechanism crop-to-size uses; resolveRoute short-circuits on it).
+        const channelMappings = routingService.getChannelMappings();
+        const productCode = job.product_code;
+        const options     = job.options || [];
+        const matching = channelMappings.find(m =>
+          m.controllerId === controllerId &&
+          m.productCode  === productCode  &&
+          (function optsMatch() {
+            // Inline match to avoid coupling — see routing-service.optionsMatch
+            // for the canonical implementation; identical contract.
+            if (!Array.isArray(m.options) || m.options.length === 0) return true;
+            return m.options.every(mo =>
+              options.some(jo => jo.name === mo.name && jo.value === mo.value),
+            );
+          })(),
+        );
+        if (matching) {
+          updates._channelMappingOverride = matching.id;
+        }
+        updates._routingReleasedTo = route.controllerName;
+      } else {
+        // Release-to-default path — leave _channelMappingOverride alone (the
+        // process→controller mapping picks at dispatch time). Audit line
+        // still records the default controller name for operator clarity.
+        const route = routingService.resolveRoute(job);
+        updates._routingReleasedTo = route && route.controllerName ? route.controllerName : '';
+      }
+
+      jobService.updateJobLocally(jobId, updates);
+
+      // Hold gate may now pass — push to renderer + kick auto-print.
+      if (windowManager) {
+        const mainWindow = windowManager.getWindow();
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('jobs:updated', jobService.getLocalJobs());
+        }
+      }
+      runAutoPrint().catch(err => logger.logError('[auto-print] post-routing-hold-release check failed', err));
+
+      logger.info('[routing-hold] released', {
+        jobId,
+        mode:         controllerId ? 'reassign' : 'default',
+        controllerId: controllerId || null,
+        releasedTo:   updates._routingReleasedTo,
+      });
+      return { ok: true, releasedTo: updates._routingReleasedTo };
+    } catch (error) {
+      logger.logError('ohd:routing:release-hold error', error, { jobId, controllerId });
+      return { ok: false, reason: 'error', error: error.message };
+    }
+  });
+
   // Darkroom Pro manual assignment — stores a per-job channel mapping override.
   // Unlike DPOF (which creates a permanent channel mapping), Darkroom Pro assign
   // stores the selected mapping ID directly on the job so the routing can resolve it.
@@ -2534,10 +2635,12 @@ async function runAutoPrint() {
       // scored (so the per-image chips populate); only the dispatch is
       // skipped.
       const { computeHoldForReview } = require('../shared/holdForReview');
-      const hold = computeHoldForReview(job);
+      const hold = computeHoldForReview(job, {
+        routingHeldProcesses: routingService.getRoutingHeldProcesses(),
+      });
       if (hold._holdForReview) {
-        logger.info('[auto-print] job held for review (manual artwork)', {
-          jobId: job.id,
+        logger.info('[auto-print] job held for review', {
+          jobId:   job.id,
           reasons: hold._holdReasons,
         });
         continue;

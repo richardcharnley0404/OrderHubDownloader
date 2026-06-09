@@ -4,6 +4,15 @@ const Store = require('electron-store');
 const configService = require('./config-service');
 const logger = require('./logger');
 const { computeHoldForReview, formatHoldReasons } = require('../../shared/holdForReview');
+// Lazy require — routing-service requires electron-store at module load; lazy
+// keeps job-service test-loadable in environments that shim electron later.
+function _getRoutingHeldProcesses() {
+  try {
+    return require('./routing-service').getRoutingHeldProcesses();
+  } catch (_e) {
+    return new Set();
+  }
+}
 
 const jobStore = new Store({
   name: 'jobs-cache',
@@ -52,8 +61,11 @@ class JobService {
         const data = JSON.parse(response.body);
         const apiJobs = data.jobs || [];
 
-        // Map API fields to internal format and merge with existing local state
-        const mappedJobs = apiJobs.map(apiJob => this._mapApiJob(apiJob));
+        // Map API fields to internal format and merge with existing local state.
+        // Read the routing-hold set ONCE per poll so the per-job mapper doesn't
+        // re-hit electron-store N times.
+        const routingHeldProcesses = _getRoutingHeldProcesses();
+        const mappedJobs = apiJobs.map(apiJob => this._mapApiJob(apiJob, { routingHeldProcesses }));
 
         // Filter jobs by location: only accept jobs whose locations array includes our locationId
         const filteredJobs = this._filterByLocation(mappedJobs, locationId);
@@ -113,7 +125,7 @@ class JobService {
   /**
    * Map API job response to internal format
    */
-  _mapApiJob(apiJob) {
+  _mapApiJob(apiJob, ctx = {}) {
     const job = {
       // IDs
       id: apiJob.job_id,
@@ -171,7 +183,13 @@ class JobService {
     // (no module system → can't import from shared/) doesn't have to
     // duplicate the text mapping. The React Job Review panel could also
     // use the raw `_holdReasons` array.
-    const hold = computeHoldForReview(job);
+    // v1.7.8: pass routing-hold context if the caller supplied it. Mapper-side
+    // derivation works on apiJob fields only — the per-job _routingHoldReleased
+    // flag isn't known at this point (lives in the local cache), so the final
+    // re-derive happens in _mergeJobs after preservation. Safe to omit ctx:
+    // missing routing context yields the same backward-compatible behaviour
+    // as pre-v1.7.8 callers.
+    const hold = computeHoldForReview(job, ctx);
     return {
       ...job,
       ...hold,
@@ -187,6 +205,12 @@ class JobService {
   _mergeJobs(newJobs) {
     const existingMap = new Map(this.jobs.map(j => [j.id, j]));
     const newJobIds = new Set(newJobs.map(j => j.id));
+
+    // Read routing-hold set once for the whole merge — re-derived per job
+    // below so the routing-hold reason is consistent across newly-mapped and
+    // kept-local jobs and honours any preserved _routingHoldReleased flag.
+    const routingHeldProcesses = _getRoutingHeldProcesses();
+    const ctx = { routingHeldProcesses };
 
     // Map new jobs, preserving local-only fields where appropriate
     const merged = newJobs.map(newJob => {
@@ -212,7 +236,23 @@ class JobService {
       }
       if (existing._darkroomProSize)  preserved._darkroomProSize  = existing._darkroomProSize;
       if (existing._darkroomProMedia) preserved._darkroomProMedia = existing._darkroomProMedia;
-      return { ...newJob, ...preserved };
+      // v1.7.8: routing-hold release flag + channel-mapping override survive
+      // poll cycles. Without preservation the operator's release would be
+      // forgotten on the next poll and the hold would re-apply.
+      if (existing._routingHoldReleased) preserved._routingHoldReleased = existing._routingHoldReleased;
+      if (existing._routingReleasedAt)   preserved._routingReleasedAt   = existing._routingReleasedAt;
+      if (existing._routingReleasedTo)   preserved._routingReleasedTo   = existing._routingReleasedTo;
+      if (existing._channelMappingOverride) preserved._channelMappingOverride = existing._channelMappingOverride;
+
+      // Re-derive hold AFTER preservation so the routing-hold reason
+      // accounts for the merged _routingHoldReleased flag.
+      const mergedJob = { ...newJob, ...preserved };
+      const hold = computeHoldForReview(mergedJob, ctx);
+      return {
+        ...mergedJob,
+        ...hold,
+        _holdReasonsText: formatHoldReasons(hold._holdReasons),
+      };
     });
 
     // Keep locally-tracked jobs that are no longer returned by API
@@ -225,7 +265,7 @@ class JobService {
     // jobs and dispatches them. Cheap + idempotent (pure function).
     for (const existing of this.jobs) {
       if (!newJobIds.has(existing.id) && existing._status && existing._status !== 'pending') {
-        const hold = computeHoldForReview(existing);
+        const hold = computeHoldForReview(existing, ctx);
         merged.push({
           ...existing,
           ...hold,

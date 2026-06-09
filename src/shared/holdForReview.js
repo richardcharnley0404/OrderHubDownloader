@@ -46,6 +46,7 @@
 const REASON = Object.freeze({
   MANUAL_SOURCE: 'manual-source',
   MANUAL_FILE:   'manual-file',
+  ROUTING_HOLD:  'routing-hold',
 });
 
 // Operator-readable text for each reason, used by the renderer to build the
@@ -54,6 +55,7 @@ const REASON = Object.freeze({
 const REASON_TEXT = Object.freeze({
   [REASON.MANUAL_SOURCE]: 'Manual upload',
   [REASON.MANUAL_FILE]:   'Contains a manually-uploaded file',
+  [REASON.ROUTING_HOLD]:  'Held for manual routing — pick a controller',
 });
 
 /**
@@ -61,15 +63,23 @@ const REASON_TEXT = Object.freeze({
  *
  * @param {object} job - A job object from job-service._normalizeJob,
  *   carrying at least `artwork_source` (string|null) and `artwork_files`
- *   (Array<{ source?: string, … }>).
+ *   (Array<{ source?: string, … }>). For the routing-hold reason the job
+ *   must also carry `process` (string) and may carry `_routingHoldReleased`
+ *   (boolean) — the operator-side "released past this hold" flag persisted
+ *   on the jobs-cache entry.
+ * @param {object} [ctx] - Optional derivation context.
+ * @param {Set<string>} [ctx.routingHeldProcesses] - Set of process names
+ *   flagged "Hold for manual release" in Settings → Routing → Process
+ *   Routing. Supplied by the caller (job-service / runAutoPrint) which
+ *   reads it from routing-service.getRoutingHeldProcesses() — passed in
+ *   so this module stays pure and electron-store-free for node:test.
  * @returns {{ _holdForReview: boolean, _holdReasons: string[] }}
  *   `_holdForReview` is `_holdReasons.length > 0` (kept for read-site
  *   ergonomics; callers may also check the array length directly).
- *   `_holdReasons` is the canonical field — at most one entry today
- *   (manual-source XOR manual-file), but the array shape is preserved so
- *   future hold dimensions can stack without a schema change.
+ *   `_holdReasons` is the canonical field — reasons stack so future
+ *   hold dimensions can compose without a schema change.
  */
-function computeHoldForReview(job) {
+function computeHoldForReview(job, ctx = {}) {
   const reasons = [];
 
   if (!job || typeof job !== 'object') {
@@ -88,6 +98,22 @@ function computeHoldForReview(job) {
   // 'manual-source' is the stronger statement and we don't repeat it.
   if (!isManualJob && files.some((f) => f && f.source === 'manual')) {
     reasons.push(REASON.MANUAL_FILE);
+  }
+
+  // Routing hold (v1.7.8): process is flagged "Hold for manual release" in
+  // Process Routing AND the operator hasn't released this specific job yet.
+  // Released flag is per-job, persisted on the jobs-cache by the
+  // routing:releaseHold IPC handler. Toggling the process hold OFF in
+  // Settings drops this reason on the next derive — released flag is sticky
+  // and unaffected.
+  const heldProcesses = ctx && ctx.routingHeldProcesses;
+  if (
+    heldProcesses &&
+    typeof heldProcesses.has === 'function' &&
+    !job._routingHoldReleased &&
+    heldProcesses.has(job.process)
+  ) {
+    reasons.push(REASON.ROUTING_HOLD);
   }
 
   return { _holdForReview: reasons.length > 0, _holdReasons: reasons };

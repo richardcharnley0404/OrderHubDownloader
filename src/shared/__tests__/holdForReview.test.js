@@ -143,3 +143,66 @@ test('formatHoldReasons: non-array → empty string (defensive)', () => {
 test('formatHoldReasons: unknown reason code falls through verbatim', () => {
   assert.equal(formatHoldReasons(['nonsense']), 'nonsense');
 });
+
+// ── Routing hold (v1.7.8) ────────────────────────────────────────────────────
+
+test('Routing hold: process in held set → ROUTING_HOLD reason', () => {
+  const r = computeHoldForReview(
+    { artwork_source: 'pixfizz', artwork_files: [], process: 'Lab' },
+    { routingHeldProcesses: new Set(['Lab']) },
+  );
+  assert.equal(r._holdForReview, true);
+  assert.deepEqual(r._holdReasons, [REASON.ROUTING_HOLD]);
+});
+
+test('Routing hold: process NOT in held set → no routing reason', () => {
+  const r = computeHoldForReview(
+    { artwork_source: 'pixfizz', artwork_files: [], process: 'Lab' },
+    { routingHeldProcesses: new Set(['Dyesub']) },
+  );
+  assert.equal(r._holdForReview, false);
+  assert.deepEqual(r._holdReasons, []);
+});
+
+test('Routing hold: _routingHoldReleased=true overrides the held set', () => {
+  const r = computeHoldForReview(
+    { artwork_source: 'pixfizz', artwork_files: [], process: 'Lab', _routingHoldReleased: true },
+    { routingHeldProcesses: new Set(['Lab']) },
+  );
+  assert.equal(r._holdForReview, false,
+    'operator-released job stays released even when the process is still flagged hold');
+  assert.deepEqual(r._holdReasons, []);
+});
+
+test('Routing hold: stacks with manual-source (both reasons listed)', () => {
+  const r = computeHoldForReview(
+    { artwork_source: 'manual', artwork_files: [], process: 'Lab' },
+    { routingHeldProcesses: new Set(['Lab']) },
+  );
+  assert.equal(r._holdForReview, true);
+  assert.deepEqual(r._holdReasons, [REASON.MANUAL_SOURCE, REASON.ROUTING_HOLD]);
+});
+
+test('Routing hold: omitting ctx is backward-compatible (no routing reason)', () => {
+  // Pre-v1.7.8 callers pass no ctx — must behave identically to before.
+  const r = computeHoldForReview({
+    artwork_source: 'pixfizz', artwork_files: [], process: 'Lab',
+  });
+  assert.equal(r._holdForReview, false);
+  assert.deepEqual(r._holdReasons, []);
+});
+
+test('Routing hold: ctx without routingHeldProcesses is treated as empty', () => {
+  const r = computeHoldForReview(
+    { artwork_source: 'pixfizz', artwork_files: [], process: 'Lab' },
+    {},
+  );
+  assert.equal(r._holdForReview, false);
+});
+
+test('Routing hold: ROUTING_HOLD has operator-readable text in REASON_TEXT', () => {
+  assert.equal(
+    REASON_TEXT[REASON.ROUTING_HOLD],
+    'Held for manual routing — pick a controller',
+  );
+});

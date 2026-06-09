@@ -84,6 +84,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveException:         (exc)     => ipcRenderer.invoke('ohd:routing:save-exception',        exc),
   deleteException:       (id)      => ipcRenderer.invoke('ohd:routing:delete-exception',      { id }),
   getProcessValues:      ()        => ipcRenderer.invoke('ohd:routing:get-process-values'),
+  // v1.7.8 — release a routing-hold. controllerId=null releases to default;
+  // controllerId=<string> reassigns. Returns { ok, reason?, controller?, releasedTo? }.
+  // ok=false with reason='no-channel' carries `controller` so the renderer
+  // can chain into the existing Assign Channel modal.
+  routingReleaseHold:    (jobId, opts) => ipcRenderer.invoke('ohd:routing:release-hold', {
+    jobId,
+    controllerId: (opts && opts.controllerId) || null,
+  }),
 
   // Test utilities
   runPrintControllerTest: () => ipcRenderer.invoke('test:printController'),

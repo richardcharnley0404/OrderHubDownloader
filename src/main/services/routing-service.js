@@ -427,6 +427,116 @@ function resolveRoute(job) {
   };
 }
 
+// ── Routing-hold helpers (v1.7.8) ─────────────────────────────────────────────
+
+/**
+ * Return the set of process names currently flagged "Hold for manual release"
+ * in Settings → Routing → Process Routing. Empty set when nothing is held.
+ *
+ * Caller threads this into computeHoldForReview() via ctx.routingHeldProcesses
+ * — shared/holdForReview stays electron-store-free that way.
+ *
+ * Process names are normalised the same way saveProcessMapping normalises
+ * (trim + strip surrounding quotes) so the lookup matches resolveRoute's
+ * canonical key.
+ */
+function getRoutingHeldProcesses() {
+  const mappings = store.get('processControllerMappings', []);
+  return new Set(
+    mappings
+      .filter(m => m && m.hold === true)
+      .map(m => (m.process || '').trim().replace(/^"|"$/g, ''))
+      .filter(Boolean),
+  );
+}
+
+/**
+ * Resolve the route for a job AS IF it were routed to the supplied controller
+ * id — used by the routing:releaseHold IPC handler when the operator reassigns
+ * a held job to a different controller than the process→controller mapping
+ * would normally pick.
+ *
+ * Returns the same shape resolveRoute() produces (controller / unrouted /
+ * folder_copy / pdf_copy / no-channel). On `no-channel` the caller surfaces
+ * the existing Assign-channel modal pre-filled for the new controller.
+ *
+ * Bypasses Layer 1 (process folder exception) and Layer 2 (process →
+ * controller) entirely — the operator's controller choice is authoritative.
+ *
+ * @param {object} job
+ * @param {string} controllerId
+ */
+function resolveRouteForController(job, controllerId) {
+  const productCode = job.product_code;
+  const options     = job.options || [];
+
+  const controllers = store.get('orderControllers', []);
+  const controller  = controllers.find(c => c.id === controllerId);
+  if (!controller) {
+    return { type: 'unrouted', reason: 'no-controller' };
+  }
+
+  // Folder-style controllers don't carry channel mappings.
+  if (controller.type === 'pdf_copy') {
+    return {
+      type:             'controller',
+      controllerType:   controller.type,
+      controllerId:     controller.id,
+      controllerName:   controller.name,
+      outputPath:       controller.outputPath,
+      channelNumber:    null,
+      printSizeCode:    null,
+      bannerSheet:      controller.bannerSheet || false,
+      pdfPipeline:      controller.pdfPipeline || null,
+      checkOrderStatus: controller.checkOrderStatus !== false,
+    };
+  }
+  if (controller.type === 'folder_copy') {
+    return {
+      type:             'controller',
+      controllerType:   'folder_copy',
+      controllerId:     controller.id,
+      controllerName:   controller.name,
+      outputPath:       controller.outputPath,
+      channelNumber:    null,
+      printSizeCode:    null,
+      bannerSheet:      false,
+      checkOrderStatus: controller.checkOrderStatus !== false,
+    };
+  }
+
+  // DPOF + Darkroom Pro + Fuji + Frontline all need a channel mapping for
+  // {productCode, options}. Missing → surface no-channel so the renderer
+  // can chain into the existing Assign Channel modal.
+  const channelMappings = store.get('channelMappings', []);
+  const channelMapping  = channelMappings.find(m =>
+    m.controllerId === controllerId &&
+    m.productCode  === productCode   &&
+    optionsMatch(m.options, options),
+  );
+  if (!channelMapping) {
+    return { type: 'unrouted', reason: 'no-channel', controller };
+  }
+
+  // Mirror the Layer 3 return shape from resolveRoute (DPOF / Darkroom Pro
+  // both consume this same shape downstream). Frontline / Fuji reassignment
+  // can be added later if the use case emerges — v1.7.8 ships with the
+  // generic DPOF/Darkroom shape since that's the Lab use case.
+  return {
+    type:           'controller',
+    controllerType: controller.type || 'dpof',
+    controllerId:   controller.id,
+    controllerName: controller.name,
+    outputPath:     controller.outputPath,
+    channelNumber:  channelMapping.channelNumber,
+    printSizeCode:  resolvePrintSizeCode(channelMapping),
+    bannerSheet:      controller.bannerSheet || false,
+    skipAutoPrint:    channelMapping.skipAutoPrint || false,
+    checkOrderStatus: controller.checkOrderStatus !== false,
+    includeCustomerInFolder: controller.includeCustomerInFolder !== false,
+  };
+}
+
 // ── CRUD helpers ──────────────────────────────────────────────────────────────
 // These are thin wrappers used by the IPC handlers. All validation is the
 // caller's responsibility (IPC handlers receive user input from the renderer).
@@ -486,7 +596,14 @@ function saveProcessMapping(mapping) {
   // Strip surrounding quotes from the process key so stored keys are always
   // clean (e.g. "\"Wide Format\"" is saved as "Wide Format").
   const cleanProcess = (mapping.process || '').trim().replace(/^"|"$/g, '');
-  const cleanedMapping = { ...mapping, process: cleanProcess };
+  const cleanedMapping = {
+    ...mapping,
+    process: cleanProcess,
+    // v1.7.8: "Hold for manual release" flag. Sanitise to a strict boolean
+    // so absent / undefined / "false"-as-string can't silently leak in as
+    // truthy. Default is false (no hold) on fresh mappings.
+    hold: mapping.hold === true,
+  };
   const mappings = store.get('processControllerMappings', []);
   const idx = mappings.findIndex(m => m.process === cleanProcess);
   if (idx >= 0) {
@@ -828,7 +945,9 @@ function migrateFromPrintControllerStore() {
 
 module.exports = {
   resolveRoute,
+  resolveRouteForController,
   resolvePrintSizeCode,
+  getRoutingHeldProcesses,
   migrateFromPrintControllerStore,
   stripDeprecatedConfigJsonKeys,
   // Controllers

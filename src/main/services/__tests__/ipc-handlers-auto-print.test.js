@@ -88,6 +88,10 @@ const fakeJobService = {
 const fakeRoutingService = {
   getControllers: () => __controllers,
   resolveRoute: () => __routeForJob,
+  // v1.7.8 — runAutoPrint passes this into computeHoldForReview as ctx. Empty
+  // set means "no process is on hold", which is the right default for every
+  // existing test in this file (none of them exercise the routing-hold gate).
+  getRoutingHeldProcesses: () => new Set(),
 };
 
 const fakeConfigService = {
