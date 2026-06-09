@@ -1,3 +1,8 @@
+## v1.7.7 - 2026-06-04
+
+### Changed: DPOF subfolder renamed IMAGE → IMAGES per spec
+The DPOF specification uses "IMAGES" (plural) as the standard subfolder name; OHD was emitting "IMAGE" (singular). Worked on every controller we've tested, but non-spec. Folder name + .mrk IMG SRC path both updated. Existing dispatched folders on disk are self-consistent and don't need rewriting — only future dispatches use the new layout.
+
 ## v1.7.6 - 2026-06-04
 
 ### Fixed: Noritsu PRT PSL line corrupt when channel mapping uses a numeric size

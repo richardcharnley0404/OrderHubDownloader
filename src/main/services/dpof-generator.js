@@ -71,7 +71,7 @@ class DPOFGenerator {
       lines.push('PRT TYP=STD');
       lines.push(`PRT QTY=${pad3(image.quantity)}`);
       lines.push('IMG FMT=EXIF2 -J');
-      lines.push(`<IMG SRC="../IMAGE/${image.filename}">`);
+      lines.push(`<IMG SRC="../IMAGES/${image.filename}">`);
       lines.push('VUQ RGN=BGN');
       lines.push('VUQ VNM="NORITSU KOKI" -ATR "QSSPrint"');
       lines.push('VUQ VER=01.00');

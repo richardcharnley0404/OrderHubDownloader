@@ -7,7 +7,7 @@
  *
  * Folder structure written:
  *   {prefix}{jobNo}_{product}_{options}/
- *     IMAGE/           ← all image files copied here
+ *     IMAGES/          ← all image files copied here (DPOF spec: plural)
  *     MISC/
  *       AUTPRINT.MRK   ← DPOF instruction file
  *
@@ -47,15 +47,15 @@ class OrderFolderWriter {
     const tempPath  = path.join(hotFolderPath, tempName);
     const finalPath = path.join(hotFolderPath, finalName);
 
-    // Create IMAGE/ and MISC/ subdirectories
-    await fs.promises.mkdir(path.join(tempPath, 'IMAGE'), { recursive: true });
-    await fs.promises.mkdir(path.join(tempPath, 'MISC'),  { recursive: true });
+    // Create IMAGES/ and MISC/ subdirectories (DPOF spec: IMAGES, plural)
+    await fs.promises.mkdir(path.join(tempPath, 'IMAGES'), { recursive: true });
+    await fs.promises.mkdir(path.join(tempPath, 'MISC'),   { recursive: true });
 
-    // Copy all image files into IMAGE/
+    // Copy all image files into IMAGES/
     for (const img of imageFiles) {
       await fs.promises.copyFile(
         img.sourcePath,
-        path.join(tempPath, 'IMAGE', img.filename)
+        path.join(tempPath, 'IMAGES', img.filename)
       );
     }
 

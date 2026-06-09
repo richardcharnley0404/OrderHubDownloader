@@ -147,7 +147,7 @@ async function runTest() {
     log('Order folder created', folderPath);
 
     const autprintExists = fs.existsSync(path.join(folderPath, 'MISC', 'AUTPRINT.MRK'));
-    const imageExists    = fs.existsSync(path.join(folderPath, 'IMAGE', 'test-photo-001.jpg'));
+    const imageExists    = fs.existsSync(path.join(folderPath, 'IMAGES', 'test-photo-001.jpg'));
     log('AUTPRINT.MRK exists', autprintExists ? 'PASS' : 'FAIL');
     log('Image copied',        imageExists    ? 'PASS' : 'FAIL');
 

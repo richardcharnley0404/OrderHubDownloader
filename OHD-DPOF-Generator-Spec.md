@@ -98,7 +98,7 @@ PRT PID=001
 PRT TYP=STD
 PRT QTY=002
 IMG FMT=EXIF2 -J
-<IMG SRC="../IMAGE/Hammond_002296_1_Q2.jpg">
+<IMG SRC="../IMAGES/Hammond_002296_1_Q2.jpg">
 VUQ RGN=BGN
 VUQ VNM="NORITSU KOKI" -ATR "QSSPrint"
 VUQ VER=01.00
@@ -110,7 +110,7 @@ PRT PID=002
 PRT TYP=STD
 PRT QTY=001
 IMG FMT=EXIF2 -J
-<IMG SRC="../IMAGE/Hammond_002296_2_Q1.jpg">
+<IMG SRC="../IMAGES/Hammond_002296_2_Q1.jpg">
 VUQ RGN=BGN
 VUQ VNM="NORITSU KOKI" -ATR "QSSPrint"
 VUQ VER=01.00
@@ -176,7 +176,7 @@ The size code comes from the **channel mapping configuration** in OHD. Each chan
 | `PRT TYP` | `STD` | Always STD (standard print) |
 | `PRT QTY` | `001`, `002`, ... | Zero-padded to 3 digits, number of copies |
 | `IMG FMT` | `EXIF2 -J` | Always this value for JPEG images |
-| `<IMG SRC>` | `"../IMAGE/{filename}"` | Relative path — note `IMAGE` singular, not `IMAGES` |
+| `<IMG SRC>` | `"../IMAGES/{filename}"` | Relative path — `IMAGES` plural per DPOF spec. v1.7.6 and earlier used `IMAGE` (singular); v1.7.7+ uses `IMAGES` (plural) per DPOF spec — existing dispatched folders on disk remain self-consistent and don't need rewriting. |
 
 #### VUQ Vendor Block (Job — appears in each `[JOB]`)
 
@@ -201,12 +201,12 @@ VUQ RGN=END
 These rules are absolute — deviation causes controller parse errors:
 
 1. **No spaces around `=`** — `PRT PCH=001` not `PRT PCH = 001`
-2. **No spaces in `<IMG SRC>` tag** — `<IMG SRC="../IMAGE/file.jpg">` not `<IMG SRC = ...>`
+2. **No spaces in `<IMG SRC>` tag** — `<IMG SRC="../IMAGES/file.jpg">` not `<IMG SRC = ...>`
 3. **`[HDR]` and `[JOB]` tags on their own line**, followed immediately by fields on the next line
 4. **Line endings: `\r\n` (CRLF)** — Noritsu EZ Controller on Windows requires CRLF. Do not use LF only
 5. **File encoding: ASCII** — Do not use UTF-8 BOM or extended characters
 6. **`PRT PID` and `PRT QTY`** — always zero-padded to 3 digits (`001` not `1`)
-7. **Image folder name is `IMAGE`** (singular) — not `IMAGES`
+7. **Image folder name is `IMAGES`** (plural per DPOF spec) — v1.7.6 and earlier emitted `IMAGE` (singular); v1.7.7+ emits `IMAGES`
 8. **One AUTPRINT.MRK per order folder** — never combine multiple orders into one file
 
 ---
@@ -297,7 +297,7 @@ function generateAutoprintMrk(params: DPOFOrderParams): string {
     lines.push('PRT TYP=STD')
     lines.push(`PRT QTY=${pad3(image.quantity)}`)
     lines.push('IMG FMT=EXIF2 -J')
-    lines.push(`<IMG SRC="../IMAGE/${image.filename}">`)
+    lines.push(`<IMG SRC="../IMAGES/${image.filename}">`)
     lines.push('VUQ RGN=BGN')
     lines.push('VUQ VNM="NORITSU KOKI" -ATR "QSSPrint"')
     lines.push('VUQ VER=01.00')
@@ -358,8 +358,8 @@ After implementation, verify the following:
 - [ ] Generated file has no spaces around `=` signs
 - [ ] `[HDR]` and `[JOB]` tags are on their own lines
 - [ ] `PRT PID` and `PRT QTY` are zero-padded to 3 digits
-- [ ] `IMG SRC` paths use `../IMAGE/` (singular) not `../IMAGES/`
-- [ ] Order folder is created as `o{orderNumber}` with `IMAGE/` and `MISC/` subdirectories
+- [ ] `IMG SRC` paths use `../IMAGES/` (plural) per DPOF spec
+- [ ] Order folder is created as `o{orderNumber}` with `IMAGES/` and `MISC/` subdirectories
 - [ ] Multi-image orders produce one `[JOB]` block per image with sequential `PRT PID`
 - [ ] `PRT CVP1` contains `"{orderNumber}, {pid}"` for each job
 - [ ] File is ASCII encoded with no BOM
