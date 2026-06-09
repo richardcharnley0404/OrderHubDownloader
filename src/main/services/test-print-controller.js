@@ -16,6 +16,7 @@ const { jobStore } = require('./job-store');
 const { dpofGenerator } = require('./dpof-generator');
 const { orderFolderWriter } = require('./order-folder-writer');
 const { FolderMonitor } = require('./folder-monitor');
+const { resolvePrintSizeCode } = require('./routing-service');
 
 // ─── Helpers ─────────────────────────────────────────────────────
 const results = [];
@@ -125,8 +126,7 @@ async function runTest() {
     // ── Step 4: Generate DPOF and write to hot folder ──
     separator('Step 4: Generate DPOF & Write Order Folder');
 
-    const printSizeCode = mapping.printSizeCode ||
-      (mapping.size ? `NML -PSIZE "${mapping.size}"` : 'KG');
+    const printSizeCode = resolvePrintSizeCode(mapping);
     const dpofContent = dpofGenerator.generate({
       orderNumber:   job.orderNumber  || '',
       customerName:  job.customerName || '',

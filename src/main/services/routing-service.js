@@ -31,6 +31,43 @@ const store = new Store({ name: 'routing' });
  *   processFolderExceptions  ProcessFolderException[]
  */
 
+// ── Print Size Code resolution ────────────────────────────────────────────────
+
+/**
+ * Resolve a channel mapping's print size code into the exact value emitted as
+ * `PRT PSL=...` in the DPOF .mrk file.
+ *
+ * Noritsu controllers accept either a short standard code (`KG`, `2L`, `A4`,
+ * `KGW`, `B`, ...) OR a wrapped size in the form `NML -PSIZE "<W>x<H>"`. A
+ * bare size like `4x6` is NOT a valid PSL code and is rejected by the
+ * controller.
+ *
+ * Operators may enter any of those forms in the Print Size Code field. This
+ * helper centralises the "did the operator type a size or a code?" decision
+ * so all callers emit valid PSL values.
+ *
+ * Resolution rules:
+ *   - Blank → fall back to legacy `mapping.size` (wrapped) or `'KG'`.
+ *   - Matches `^<W>x<H>$` (whitespace and Unicode × tolerated) → wrap as
+ *     `NML -PSIZE "<W>x<H>"`, normalising Unicode × → ASCII x.
+ *   - Anything else (standard codes, pre-formatted NML strings) → pass
+ *     through unchanged.
+ *
+ * @param {object} mapping - Channel mapping with `printSizeCode` and (legacy) `size`.
+ * @returns {string} The value to emit after `PRT PSL=`.
+ */
+function resolvePrintSizeCode(mapping) {
+  const raw = (mapping.printSizeCode || '').trim();
+  if (!raw) {
+    return mapping.size ? `NML -PSIZE "${mapping.size}"` : 'KG';
+  }
+  if (/^\s*\d+(?:\.\d+)?\s*[x×]\s*\d+(?:\.\d+)?\s*$/i.test(raw)) {
+    const normalised = raw.replace(/\s+/g, '').replace(/×/g, 'x');
+    return `NML -PSIZE "${normalised}"`;
+  }
+  return raw;
+}
+
 // ── Route resolution ──────────────────────────────────────────────────────────
 
 /**
@@ -115,8 +152,7 @@ function resolveRoute(job) {
         }
 
         // DPOF and other controller types
-        const printSizeCode = overrideMapping.printSizeCode ||
-          (overrideMapping.size ? `NML -PSIZE "${overrideMapping.size}"` : 'KG');
+        const printSizeCode = resolvePrintSizeCode(overrideMapping);
 
         return {
           type:             'controller',
@@ -370,9 +406,9 @@ function resolveRoute(job) {
     return { type: 'unrouted', reason: 'no-channel', controller };
   }
 
-  // Derive printSizeCode from the channel mapping; fall back to NML or KG default
-  const printSizeCode = channelMapping.printSizeCode ||
-    (channelMapping.size ? `NML -PSIZE "${channelMapping.size}"` : 'KG');
+  // Derive printSizeCode from the channel mapping. Wrapping/fallback logic
+  // lives in resolvePrintSizeCode — see its docstring for the rules.
+  const printSizeCode = resolvePrintSizeCode(channelMapping);
 
   return {
     type:           'controller',
@@ -792,6 +828,7 @@ function migrateFromPrintControllerStore() {
 
 module.exports = {
   resolveRoute,
+  resolvePrintSizeCode,
   migrateFromPrintControllerStore,
   stripDeprecatedConfigJsonKeys,
   // Controllers

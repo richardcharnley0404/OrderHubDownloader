@@ -7,6 +7,7 @@ const { orderFolderWriter } = require('./order-folder-writer');
 const { FolderMonitor } = require('./folder-monitor');
 const { DarkroomProMonitor } = require('./darkroom-pro-monitor');
 const { FujiJobMakerMonitor } = require('./fuji-jobmaker-monitor');
+const { resolvePrintSizeCode } = require('./routing-service');
 const logger = require('./logger');
 
 class PrintControllerService {
@@ -29,9 +30,9 @@ class PrintControllerService {
     const mapping = printControllerStore.getProductMapping(job.mappingId);
     if (!mapping) throw new Error(`Product mapping ${job.mappingId} not found`);
 
-    // Generate DPOF content
-    const printSizeCode = mapping.printSizeCode ||
-      (mapping.size ? `NML -PSIZE "${mapping.size}"` : 'KG');
+    // Generate DPOF content. See routing-service.resolvePrintSizeCode for
+    // the wrap/passthrough rules.
+    const printSizeCode = resolvePrintSizeCode(mapping);
     const dpofContent = dpofGenerator.generate({
       orderNumber:   job.orderNumber  || '',
       customerName:  job.customerName || '',

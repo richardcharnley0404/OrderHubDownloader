@@ -16,6 +16,7 @@ const { frontlineFileWriter } = require('./frontline-file-writer');
 const { generateFujiJobMakerFiles } = require('./fuji-jobmaker-generator');
 const { fujiJobMakerFileWriter } = require('./fuji-jobmaker-file-writer');
 const { printControllerService } = require('./print-controller-service');
+const { resolvePrintSizeCode } = require('./routing-service');
 const logger = require('./logger');
 const { buildFolderName } = require('../../shared/printUtils');
 
@@ -468,9 +469,9 @@ class PrintService {
       }
     }
 
-    // Derive printSizeCode: use mapping's explicit code, fall back to NML size, then KG
-    const printSizeCode = mapping.printSizeCode ||
-      (mapping.size ? `NML -PSIZE "${mapping.size}"` : 'KG');
+    // Derive printSizeCode — wraps bare W×H sizes as NML -PSIZE, passes
+    // standard codes through. See routing-service.resolvePrintSizeCode.
+    const printSizeCode = resolvePrintSizeCode(mapping);
 
     // Generate DPOF content
     const dpofContent = dpofGenerator.generate({
@@ -624,9 +625,9 @@ class PrintService {
       reprintCorrectionsMap
     );
 
-    // Generate DPOF content using parent job's controller/channel settings
-    const reprintPrintSizeCode = channelMapping.printSizeCode ||
-      (channelMapping.size ? `NML -PSIZE "${channelMapping.size}"` : 'KG');
+    // Generate DPOF content using parent job's controller/channel settings.
+    // See routing-service.resolvePrintSizeCode for the wrap/passthrough rules.
+    const reprintPrintSizeCode = resolvePrintSizeCode(channelMapping);
 
     const dpofContent = dpofGenerator.generate({
       orderNumber:    parentJob.order_number  || '',

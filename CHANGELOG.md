@@ -1,3 +1,10 @@
+## v1.7.6 - 2026-06-04
+
+### Fixed: Noritsu PRT PSL line corrupt when channel mapping uses a numeric size
+When a channel mapping's Print Size Code was set to a paper size like "4x6", OHD emitted `PRT PSL=4x6` directly — an invalid Noritsu paper-size code, rejected by the controller. The generator now wraps sizes that look like W×H in the NML -PSIZE syntax Noritsu expects: `PRT PSL=NML -PSIZE "4x6"`. Standard codes (KG, 2L, A4) and operator-pre-formatted NML strings pass through unchanged.
+
+Also: the helper-text under "Print Size Code" in the channel-mapping editor now mentions you can just enter a paper size (4x6, 8x10) instead of the NML -PSIZE syntax — OHD will format it.
+
 ## v1.7.5 - 2026-06-04
 
 ### Fixed: Noritsu DPOF jobs rejected when USR CID was alphanumeric
