@@ -797,37 +797,50 @@ function renderJobTable(jobs) {
       actionHtml = reviewBtn;
     } else if (job._status === 'received') {
       const route = jobRouteCache.get(String(job.id));
+      // v1.7.8 — Routing-hold Resolve button. Shown alongside the normal
+      // action (Process / Assign) when the routing-hold reason is present.
+      // Stays alongside (not instead) so the operator can still override via
+      // Send-to-Print if they want — same philosophy as the manual-review
+      // chip. The button OPENS a modal; the action is per-job.
+      const routingHeld = Array.isArray(job._holdReasons) && job._holdReasons.includes('routing-hold');
+      const resolveBtn = routingHeld
+        ? `<button class="btn-action btn-resolve-routing-hold" data-job-id="${escapeHtml(String(job.id))}" title="Process is set to Hold for manual release. Pick a controller to dispatch.">Resolve</button>`
+        : '';
       if (route && route.type === 'unrouted') {
         if (route.reason === 'no-channel') {
           // Controller is assigned but no channel mapping yet — show Assign button
           const assignBtn = `<button class="btn-action btn-assign-channel" data-job-id="${escapeHtml(String(job.id))}">Assign</button>`;
-          actionHtml = `${reviewBtn}${maybeDisable(assignBtn)}`;
+          actionHtml = `${reviewBtn}${resolveBtn}${maybeDisable(assignBtn)}`;
         } else {
           // No controller AND no default folder configured
-          actionHtml = `${reviewBtn}<span class="route-unassigned-msg">No default folder — configure in Settings → Process Folders</span>`;
+          actionHtml = `${reviewBtn}${resolveBtn}<span class="route-unassigned-msg">No default folder — configure in Settings → Process Folders</span>`;
         }
       } else {
         // Routed (controller / default-folder / process-folder) or not yet resolved — normal Send to Print
         const processBtn = `<button class="btn-action btn-send-print" data-job-id="${escapeHtml(String(job.id))}">Process</button>`;
-        actionHtml = `${reviewBtn}${maybeDisable(processBtn)}`;
+        actionHtml = `${reviewBtn}${resolveBtn}${maybeDisable(processBtn)}`;
       }
     } else if (job._status === 'pending') {
       const route = jobRouteCache.get(String(job.id));
+      const routingHeld = Array.isArray(job._holdReasons) && job._holdReasons.includes('routing-hold');
+      const resolveBtn = routingHeld
+        ? `<button class="btn-action btn-resolve-routing-hold" data-job-id="${escapeHtml(String(job.id))}" title="Process is set to Hold for manual release. Pick a controller to dispatch.">Resolve</button>`
+        : '';
       if (route && route.type === 'unrouted') {
         if (route.reason === 'no-channel') {
           // Controller assigned but no channel mapping yet — show Assign
           const assignBtn = `<button class="btn-action btn-assign-channel" data-job-id="${escapeHtml(String(job.id))}">Assign</button>`;
-          actionHtml = `${reviewBtn}${maybeDisable(assignBtn)}`;
+          actionHtml = `${reviewBtn}${resolveBtn}${maybeDisable(assignBtn)}`;
         } else {
           // No controller AND no default folder configured
-          actionHtml = `${reviewBtn}<span class="route-unassigned-msg">No default folder — configure in Settings → Process Folders</span>`;
+          actionHtml = `${reviewBtn}${resolveBtn}<span class="route-unassigned-msg">No default folder — configure in Settings → Process Folders</span>`;
         }
       } else if (route && route.type !== 'unrouted') {
         // Valid route — show Review + Send to Print (same as received)
         const processBtn = `<button class="btn-action btn-send-print" data-job-id="${escapeHtml(String(job.id))}">Process</button>`;
-        actionHtml = `${reviewBtn}${maybeDisable(processBtn)}`;
+        actionHtml = `${reviewBtn}${resolveBtn}${maybeDisable(processBtn)}`;
       } else {
-        actionHtml = '<span style="color:#a0aec0;font-size:11px">--</span>';
+        actionHtml = `${reviewBtn}${resolveBtn}<span style="color:#a0aec0;font-size:11px">--</span>`;
       }
     } else if (job._status === 'warning') {
       const msg = job._warningMessage || 'Unknown warning — check Activity Log';
@@ -944,7 +957,7 @@ function renderJobTable(jobs) {
       <td>${escapeHtml(job.process || '--')}</td>
       <td>${escapeHtml(job.category || '--')}</td>
       <td class="flags-cell">${flagsHtml || ''}</td>
-      <td><span class="job-no" data-copy="${escapeHtml(jobNo)}" title="Click to copy">${escapeHtml(jobNo)}</span>${job.customer_name ? `<br><span class="customer-name">${escapeHtml(job.customer_name)}</span>` : ''}${job.created_at ? `<br><span class="ordered-date">${formatDueDate(job.created_at, job.date_format)}</span>` : ''}</td>
+      <td><span class="job-no" data-copy="${escapeHtml(jobNo)}" title="Click to copy">${escapeHtml(jobNo)}</span>${job.customer_name ? `<br><span class="customer-name">${escapeHtml(job.customer_name)}</span>` : ''}${job.created_at ? `<br><span class="ordered-date">${formatDueDate(job.created_at, job.date_format)}</span>` : ''}${job._routingReleasedAt ? `<br><span class="routing-released-note" title="Routing hold was released by operator">Released to ${escapeHtml(job._routingReleasedTo || 'default')} · ${escapeHtml(formatReleasedTimestamp(job._routingReleasedAt))}</span>` : ''}</td>
       <td>${escapeHtml(job.product || '--')}</td>
       <td>${job.quantity != null ? job.quantity : '--'}</td>
       <td>${optionsHtml || '<span style="color:#a0aec0">--</span>'}</td>
@@ -1092,6 +1105,17 @@ function renderJobTable(jobs) {
       if (job && route && route.type === 'unrouted' && route.reason === 'no-channel') {
         openAssignModal(job, route);
       }
+    });
+  });
+
+  // ── Resolve Routing Hold button (v1.7.8) ─────────────────────────────────
+  // Per-row click handler — opens the Resolve modal. Wired here (not
+  // delegated) to match the pattern of the surrounding action buttons.
+  document.querySelectorAll('.btn-resolve-routing-hold[data-job-id]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const jobId = btn.dataset.jobId;
+      const job   = allJobs.find(j => String(j.id) === String(jobId));
+      if (job) openResolveRoutingHoldModal(job);
     });
   });
 
@@ -1493,6 +1517,137 @@ function openAssignModal(job, route) {
       }
     }
   });
+})();
+
+// ══════════════════════════════════════
+// Resolve Routing Hold Modal (v1.7.8)
+// ══════════════════════════════════════
+//
+// Opens from the row's "Resolve" action button (rendered when
+// _holdReasons.includes('routing-hold')). Two radios:
+//   - Release to default <controller>     ← default selection
+//   - Reassign to <other controller>      ← dropdown of other controllers
+//
+// On confirm: calls ohd:routing:release-hold. If the reassign target has no
+// channel mapping for {productCode, options}, the IPC returns
+// { ok:false, reason:'no-channel', controller } and we chain into the existing
+// openAssignModal — once the operator adds the mapping, they re-Resolve.
+
+function formatReleasedTimestamp(iso) {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    // YYYY-MM-DD HH:MM — short, locale-stable, ASCII-safe for tooltips.
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  } catch (_) {
+    return iso;
+  }
+}
+
+function openResolveRoutingHoldModal(job) {
+  const modal = document.getElementById('resolveRoutingHoldModal');
+  if (!modal) return;
+
+  // Populate read-only fields
+  document.getElementById('rhModalProcess').textContent = job.process  || '—';
+  document.getElementById('rhModalProduct').textContent = job.product  || '—';
+
+  // Default-controller resolution: read from the cached route. Falls back to
+  // a generic label if the route hasn't resolved (rare race — held jobs are
+  // typically resolved before this modal opens).
+  const route = jobRouteCache.get(String(job.id));
+  const defaultName = (route && route.controllerName) || '(default — see Process Routing)';
+  document.getElementById('rhDefaultControllerName').textContent = defaultName;
+
+  // Reassign dropdown: exclude the default controller so the operator doesn't
+  // "reassign" to the same one (which is the Release path). Disabled until
+  // the reassign radio is picked.
+  const sel = document.getElementById('rhReassignControllerSelect');
+  sel.innerHTML = '';
+  const defaultCtrlId = route ? route.controllerId : null;
+  const others = (cachedOrderControllers || []).filter(c => c && c.id !== defaultCtrlId);
+  if (others.length === 0) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = 'No other controllers configured';
+    sel.appendChild(opt);
+    document.getElementById('rhModeReassign').disabled = true;
+  } else {
+    for (const c of others) {
+      const opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = c.name || c.id;
+      sel.appendChild(opt);
+    }
+    document.getElementById('rhModeReassign').disabled = false;
+  }
+
+  document.getElementById('rhModeDefault').checked  = true;
+  document.getElementById('rhModeReassign').checked = false;
+  sel.disabled = true;
+
+  modal.dataset.jobId = String(job.id);
+  modal.classList.remove('hidden');
+}
+
+(function initResolveRoutingHoldModal() {
+  const modal = document.getElementById('resolveRoutingHoldModal');
+  if (!modal) return;
+
+  const cancelBtn  = document.getElementById('rhCancelBtn');
+  const confirmBtn = document.getElementById('rhConfirmBtn');
+  const radioDef   = document.getElementById('rhModeDefault');
+  const radioRea   = document.getElementById('rhModeReassign');
+  const sel        = document.getElementById('rhReassignControllerSelect');
+
+  if (cancelBtn) cancelBtn.addEventListener('click', () => modal.classList.add('hidden'));
+  if (radioDef)  radioDef.addEventListener('change', () => { sel.disabled = true; });
+  if (radioRea)  radioRea.addEventListener('change', () => { sel.disabled = false; });
+
+  if (confirmBtn) {
+    confirmBtn.addEventListener('click', async () => {
+      const jobId      = modal.dataset.jobId;
+      const isReassign = radioRea && radioRea.checked;
+      const controllerId = isReassign ? (sel.value || null) : null;
+
+      if (isReassign && !controllerId) {
+        showToast('Pick a controller to reassign to.', 'error');
+        return;
+      }
+
+      confirmBtn.disabled    = true;
+      confirmBtn.textContent = 'Releasing…';
+
+      try {
+        const result = await window.electronAPI.routingReleaseHold(jobId, { controllerId });
+        if (result && result.ok) {
+          showToast(`Released — routed to ${result.releasedTo || 'default'}`, 'success');
+          modal.classList.add('hidden');
+          return;
+        }
+        // No-channel fallback — chain into the existing Assign Channel modal
+        // pre-filled for the chosen controller. Operator adds mapping, then
+        // re-Resolves the hold.
+        if (result && result.reason === 'no-channel' && result.controller) {
+          const job = allJobs.find(j => String(j.id) === String(jobId));
+          if (job) {
+            modal.classList.add('hidden');
+            openAssignModal(job, { type: 'unrouted', reason: 'no-channel', controller: result.controller });
+            showToast('Add a channel mapping for this controller, then re-Resolve the hold.', 'info', 8000);
+            return;
+          }
+        }
+        showToast(`Release failed: ${result && result.reason ? result.reason : 'unknown error'}`, 'error');
+      } catch (err) {
+        showToast('Release error: ' + (err && err.message ? err.message : String(err)), 'error');
+      } finally {
+        confirmBtn.disabled    = false;
+        confirmBtn.textContent = 'Release';
+      }
+    });
+  }
 })();
 
 /**
@@ -4662,18 +4817,51 @@ function renderProcessRouting(processValues, mappings, controllers) {
     const current = mappingByProcess[process];
     select.value = current ? (current.controllerId || '') : '';
 
+    // v1.7.8 — "Hold for manual release" checkbox. Held jobs surface in
+    // Job Review with a Resolve button (chip class = hold-review-chip,
+    // reason code = routing-hold). Toggling OFF drops the routing-hold
+    // reason on the next derive; already-released jobs stay released
+    // (the _routingHoldReleased flag on the job is sticky).
+    const holdLabel = document.createElement('label');
+    holdLabel.className = 'process-routing-hold-label';
+    holdLabel.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:12px;color:#444;cursor:pointer;margin-left:6px;white-space:nowrap;';
+    holdLabel.title = 'Hold new jobs matching this process until an operator resolves each one in Job Review.';
+    const holdCb = document.createElement('input');
+    holdCb.type = 'checkbox';
+    holdCb.className = 'process-routing-hold-cb';
+    holdCb.checked = !!(current && current.hold);
+    const holdText = document.createElement('span');
+    holdText.textContent = 'Hold for manual release';
+    holdLabel.appendChild(holdCb);
+    holdLabel.appendChild(holdText);
+
+    const saveCurrent = async () => {
+      // The controller select and the hold checkbox share a single save —
+      // saveProcessMapping is an upsert keyed by process name, so we must
+      // always send both fields together to preserve the other one.
+      await window.electronAPI.saveProcessMapping({
+        process,
+        controllerId: select.value || null,
+        hold: holdCb.checked,
+      });
+      await resolveRoutesForReceivedJobs(allJobs);
+      renderJobTable(getFilteredJobs());
+    };
+
     // Save immediately on change — no separate Save button
     select.addEventListener('change', async () => {
       try {
-        await window.electronAPI.saveProcessMapping({
-          process,
-          controllerId: select.value || null,
-        });
-        // Re-resolve routes so previously-warning jobs update immediately
-        await resolveRoutesForReceivedJobs(allJobs);
-        renderJobTable(getFilteredJobs());
+        await saveCurrent();
       } catch (err) {
         showToast('Error saving process mapping: ' + err.message, 'error');
+      }
+    });
+    holdCb.addEventListener('change', async () => {
+      try {
+        await saveCurrent();
+      } catch (err) {
+        showToast('Error saving hold flag: ' + err.message, 'error');
+        holdCb.checked = !holdCb.checked; // revert
       }
     });
 
@@ -4693,6 +4881,7 @@ function renderProcessRouting(processValues, mappings, controllers) {
     row.appendChild(label);
     row.appendChild(arrow);
     row.appendChild(select);
+    row.appendChild(holdLabel);
     row.appendChild(deleteBtn);
     list.appendChild(row);
   }

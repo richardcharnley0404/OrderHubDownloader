@@ -1456,6 +1456,47 @@
     </div>
   </div>
 
+  <!-- ═══ Resolve Routing Hold Modal (v1.7.8) ═══ -->
+  <div id="resolveRoutingHoldModal" class="pm-modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="resolveRoutingHoldModalTitle">
+    <div class="pm-modal">
+      <button type="button" class="pm-modal-close" aria-label="Close">&times;</button>
+      <h3 id="resolveRoutingHoldModalTitle">Resolve Routing Hold</h3>
+      <p class="section-desc" style="margin-top:0;margin-bottom:14px;">
+        This job's process is set to <em>Hold for manual release</em>. Pick how to proceed.
+      </p>
+
+      <div class="form-group">
+        <label class="form-label">Process</label>
+        <div id="rhModalProcess" class="modal-readonly-value">—</div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Product</label>
+        <div id="rhModalProduct" class="modal-readonly-value">—</div>
+      </div>
+
+      <fieldset class="form-group" style="border:0;padding:0;margin:0;">
+        <legend class="form-label" style="padding:0;">Action</legend>
+
+        <label style="display:flex;align-items:center;gap:8px;margin:6px 0;cursor:pointer;">
+          <input type="radio" name="rhMode" value="default" id="rhModeDefault" checked>
+          <span>Release to <strong id="rhDefaultControllerName">—</strong></span>
+        </label>
+
+        <label style="display:flex;align-items:center;gap:8px;margin:6px 0;cursor:pointer;">
+          <input type="radio" name="rhMode" value="reassign" id="rhModeReassign">
+          <span>Reassign to:</span>
+          <select id="rhReassignControllerSelect" class="form-control" disabled style="flex:1;min-width:160px;"></select>
+        </label>
+      </fieldset>
+
+      <div class="modal-actions" style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;">
+        <button type="button" id="rhCancelBtn" class="btn-secondary">Cancel</button>
+        <button type="button" id="rhConfirmBtn" class="btn-primary">Release</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ═══ Backup Restore Modal ═══ -->
   <div id="backupRestoreModal" class="pm-modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="backupRestoreModalTitle">
     <div class="pm-modal" style="width:560px;">

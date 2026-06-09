@@ -695,6 +695,16 @@ body.app-theme-dark .theme-toggle-btn::before { content: '\2600'; }  /* sun glyp
   color: var(--app-ink-faint);
 }
 
+/* v1.7.8 — routing-hold release audit caption. Sits under the customer /
+   ordered-date lines in the Job # cell. Quiet styling — explicitly NOT a
+   chip; deliberately understated so the row stays clean after release. */
+.routing-released-note {
+  font-size: 10px;
+  font-style: italic;
+  color: var(--app-ink-faint);
+  opacity: 0.75;
+}
+
 /* ── Flags column ── */
 .flags-cell {
   white-space: nowrap;
