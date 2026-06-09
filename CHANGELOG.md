@@ -1,3 +1,12 @@
+## v1.7.8 - 2026-06-04
+
+### New: Process Routing — hold for manual release
+When a process is set to "Hold for manual release" in Settings → Routing → Process Routing, every new job matching that process is held the moment it arrives. The held job shows a yellow chip in Job Review with a Resolve button. Click Resolve to:
+- Release to the default controller (no change to routing), OR
+- Reassign to a different controller (channel mapping validated; missing mapping opens the Assign dialog).
+
+Useful when a controller is offline, busy, or you want a chance to pick per-job. Toggling the hold off in Settings releases all matching held jobs on the next poll.
+
 ## v1.7.7 - 2026-06-04
 
 ### Changed: DPOF subfolder renamed IMAGE → IMAGES per spec
