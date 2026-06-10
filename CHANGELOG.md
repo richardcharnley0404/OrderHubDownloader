@@ -1,3 +1,10 @@
+## v1.7.10 - 2026-06-04
+
+### Fixed: Fuji JobMaker Process click failed with "Controller not found"
+When operators clicked Process on a Fuji-routed job, dispatch crashed with "Controller <id> not found" even though the controller was correctly configured. Root cause: the monitor-startup step looked up the controller in a legacy controller store (print-controllers.json) that's no longer the source of truth — controllers created via the modern Routing settings UI (which is everything except a historical Darkroom Pro entry) were invisible to that lookup. Fixed by routing the lookup through routing-service first, falling back to the legacy store for historical entries. Same pattern already used by the polling-service folder monitors.
+
+Stuck jobs from v1.7.9: just click Process again. The .txt file the previous attempt produced is preserved on disk; the writer is idempotent and the atomic rename means Frontier never saw a half-written file.
+
 ## v1.7.9 - 2026-06-04
 
 ### Fixed: Fuji JobMaker — per-job Assign modal couldn't save mappings

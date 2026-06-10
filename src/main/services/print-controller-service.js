@@ -7,7 +7,8 @@ const { orderFolderWriter } = require('./order-folder-writer');
 const { FolderMonitor } = require('./folder-monitor');
 const { DarkroomProMonitor } = require('./darkroom-pro-monitor');
 const { FujiJobMakerMonitor } = require('./fuji-jobmaker-monitor');
-const { resolvePrintSizeCode } = require('./routing-service');
+const routingService = require('./routing-service');
+const { resolvePrintSizeCode } = routingService;
 const logger = require('./logger');
 
 class PrintControllerService {
@@ -71,12 +72,28 @@ class PrintControllerService {
   // ─────────────────────────────────────────────────────────────────────────
 
   startMonitoring(controllerId) {
-    const controller = printControllerStore.getController(controllerId);
+    // v1.7.10: routing-service is the modern source of truth for controllers.
+    // We look there first, then fall back to the legacy printControllerStore
+    // so any pre-routing-service controllers (currently just a historical
+    // Darkroom Pro entry on Richard's machine) keep working. Pre-v1.7.10
+    // this path only consulted printControllerStore, which Fuji JobMaker
+    // controllers were never written to — Process click crashed with
+    // "Controller <id> not found". Same precedence pattern polling-service's
+    // _startFolderMonitors already uses (polling-service.js:540-560).
+    const controller =
+      routingService.getControllers().find(c => c.id === controllerId)
+      || printControllerStore.getController(controllerId);
     if (!controller) throw new Error(`Controller ${controllerId} not found`);
 
     if (this.monitors.has(controllerId)) {
       return; // Already monitoring
     }
+
+    // routing-service entries carry `outputPath`; the legacy store carries
+    // `hotFolderPath`. The Fuji controller currently carries both (same
+    // value), but defending against either-only shapes keeps both call
+    // paths above honest.
+    const hotFolderPath = controller.hotFolderPath || controller.outputPath;
 
     const onStatusChange = (status) => {
       jobStore.updateJobStatus(status.orderNumber, status.status);
@@ -91,12 +108,12 @@ class PrintControllerService {
       // Darkroom Pro: watches for .TXT disappearance (accepted) or .err appearance (failed)
       const monitor = new DarkroomProMonitor();
       const processedFolderName = controller.processedFolderName || 'processed';
-      monitor.startMonitoring(controller.hotFolderPath, processedFolderName, onStatusChange);
+      monitor.startMonitoring(hotFolderPath, processedFolderName, onStatusChange);
       this.monitors.set(controllerId, monitor);
 
       logger.info('Started Darkroom Pro monitoring', {
         controller: controller.name,
-        hotFolder: controller.hotFolderPath,
+        hotFolder: hotFolderPath,
         processedFolder: processedFolderName
       });
     } else if (controller.type === 'fujijobmaker') {
@@ -128,7 +145,7 @@ class PrintControllerService {
       };
 
       monitor.startMonitoring(
-        controller.hotFolderPath,
+        hotFolderPath,
         {
           failureTimeoutMs: controller.failureTimeoutMs,
           // sweepIntervalMs uses the monitor's default (60 s).
@@ -139,18 +156,18 @@ class PrintControllerService {
 
       logger.info('Started Fuji JobMaker monitoring', {
         controller: controller.name,
-        hotFolder:  controller.hotFolderPath,
+        hotFolder:  hotFolderPath,
         failureTimeoutMs: controller.failureTimeoutMs || 30 * 60 * 1000,
       });
     } else {
       // DPOF controllers (Noritsu, Epson): watches for folder prefix renames (o→e, o→q)
       const monitor = new FolderMonitor();
-      monitor.startMonitoring(controller.hotFolderPath, onStatusChange);
+      monitor.startMonitoring(hotFolderPath, onStatusChange);
       this.monitors.set(controllerId, monitor);
 
       logger.info('Started DPOF folder monitoring', {
         controller: controller.name,
-        hotFolder: controller.hotFolderPath
+        hotFolder: hotFolderPath
       });
     }
   }
