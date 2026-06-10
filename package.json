@@ -1,6 +1,6 @@
 {
   "name": "orderhub-downloader",
-  "version": "1.7.8",
+  "version": "1.7.9",
   "description": "Automatic FTP file downloader for OrderHub jobs",
   "main": "src/main/index.js",
   "scripts": {

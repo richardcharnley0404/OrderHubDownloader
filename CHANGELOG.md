@@ -1,3 +1,10 @@
+## v1.7.9 - 2026-06-04
+
+### Fixed: Fuji JobMaker — per-job Assign modal couldn't save mappings
+When operators clicked Assign on a job routed to a Fuji JobMaker controller, the modal showed the wrong fields (Noritsu-style Channel Number) and the save attempt was silently rejected server-side because the required Fuji fields (PrintCode, Surface, optional SurfaceCode) weren't being collected. The Settings → Channel Mappings modal has always been correct; the gap was only in the per-job Assign affordance.
+
+The Assign modal now detects Fuji JobMaker controllers and shows the right inputs. Workflow matches Darkroom Pro: fill the fields, save, mapping persists, job routes correctly on the next dispatch.
+
 ## v1.7.8 - 2026-06-04
 
 ### New: Process Routing — hold for manual release

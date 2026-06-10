@@ -1244,6 +1244,12 @@ function openAssignModal(job, route) {
   if (!modal) return;
 
   const isDarkroomPro = route.controller && route.controller.type === 'darkroompro';
+  // v1.7.9: Fuji JobMaker uses PrintCode + Surface (+ optional SurfaceCode)
+  // instead of Noritsu-style Channel Number. The Settings → Channel Mappings
+  // modal has always handled this correctly; the per-job Assign modal was
+  // still routing Fuji jobs through the DPOF default branch and silently
+  // failing IPC validation. See CHANGELOG v1.7.9.
+  const isFuji        = route.controller && route.controller.type === 'fujijobmaker';
 
   // Populate read-only fields
   document.getElementById('assignModalProduct').textContent     = job.product     || '—';
@@ -1266,10 +1272,25 @@ function openAssignModal(job, route) {
     document.getElementById('assignModalOptionsGroup').style.display = 'none';
   }
 
-  // Show DPOF or Darkroom Pro input section
-  document.getElementById('assignDpofGroup').style.display          = isDarkroomPro ? 'none' : '';
-  document.getElementById('assignSkipAutoPrintGroup').style.display  = isDarkroomPro ? 'none' : '';
+  // Show DPOF, Darkroom Pro, or Fuji JobMaker input section
+  document.getElementById('assignDpofGroup').style.display           = (isDarkroomPro || isFuji) ? 'none' : '';
+  document.getElementById('assignSkipAutoPrintGroup').style.display  = (isDarkroomPro || isFuji) ? 'none' : '';
   document.getElementById('assignDpGroup').style.display             = isDarkroomPro ? '' : 'none';
+  document.getElementById('assignFujiGroup').style.display           = isFuji        ? '' : 'none';
+
+  if (isFuji) {
+    // Reset the three Fuji fields each time the modal opens — the Assign
+    // affordance always creates a new channel mapping, never edits an
+    // existing one, so we deliberately don't pre-fill from any cache.
+    const printCodeInput   = document.getElementById('assignPrintCode');
+    const surfaceInput     = document.getElementById('assignSurface');
+    const surfaceCodeInput = document.getElementById('assignSurfaceCode');
+    printCodeInput.value   = '';
+    surfaceInput.value     = '';
+    surfaceCodeInput.value = '';
+    printCodeInput.setCustomValidity('');
+    surfaceInput.setCustomValidity('');
+  }
 
   if (isDarkroomPro) {
     // ── Populate the Size / Media fields ──────────────────────────────────
@@ -1352,11 +1373,14 @@ function openAssignModal(job, route) {
   modal.dataset.controllerId  = route.controller ? route.controller.id : '';
   modal.dataset.productCode   = job.product_code || '';
   modal.dataset.isDarkroomPro = isDarkroomPro ? '1' : '';
+  modal.dataset.isFuji        = isFuji        ? '1' : '';
   // Serialise job options for save handler (JSON)
   modal.dataset.jobOptions    = JSON.stringify(job.options || []);
 
   modal.classList.remove('hidden');
-  if (!isDarkroomPro) {
+  if (isFuji) {
+    document.getElementById('assignPrintCode').focus();
+  } else if (!isDarkroomPro) {
     document.getElementById('assignChannelNumber').focus();
   }
 }
@@ -1381,13 +1405,80 @@ function openAssignModal(job, route) {
     const jobId         = modal.dataset.jobId;
     const jobOptions    = JSON.parse(modal.dataset.jobOptions || '[]');
     const isDarkroomPro = modal.dataset.isDarkroomPro === '1';
+    const isFuji        = modal.dataset.isFuji        === '1';
 
     if (!controllerId) {
       showToast('No controller found — check Routing settings.', 'error');
       return;
     }
 
-    if (isDarkroomPro) {
+    if (isFuji) {
+      // ── Fuji JobMaker flow: create a new permanent channel mapping ──────
+      // Payload shape mirrors the Settings-side cmSaveBtn handler so the
+      // IPC handler's Fuji validator (ipc-handlers.js:1177) accepts both
+      // entry points identically.
+      const printCodeInput   = document.getElementById('assignPrintCode');
+      const surfaceInput     = document.getElementById('assignSurface');
+      const surfaceCodeInput = document.getElementById('assignSurfaceCode');
+
+      const printCode   = printCodeInput.value.trim();
+      const surface     = surfaceInput.value.trim();
+      const surfaceCode = surfaceCodeInput.value.trim();
+
+      // Validate before touching the Save button so the operator can correct
+      // errors in place — same setCustomValidity + reportValidity pattern
+      // the Darkroom Pro and DPOF branches use.
+      if (!printCode) {
+        printCodeInput.setCustomValidity('Print Code is required for Fuji JobMaker mappings.');
+        printCodeInput.reportValidity();
+        return;
+      }
+      printCodeInput.setCustomValidity('');
+
+      if (!surface) {
+        surfaceInput.setCustomValidity('Surface is required for Fuji JobMaker mappings.');
+        surfaceInput.reportValidity();
+        return;
+      }
+      surfaceInput.setCustomValidity('');
+
+      saveBtn.disabled    = true;
+      saveBtn.textContent = 'Saving...';
+
+      try {
+        const result = await window.electronAPI.saveChannelMapping({
+          id:             crypto.randomUUID(),
+          controllerId,
+          productCode,
+          options:        jobOptions,
+          // Fields not used by Fuji but kept in the shape for parity with
+          // the Settings-side payload — matches the DPOF/Frontline schema
+          // so persisted mappings stay homogeneous on disk.
+          channelNumber:  null,
+          printSizeCode:  '',
+          skipAutoPrint:  false,
+          // Fuji-specific — surfaceCode empty is fine; resolveRoute +
+          // print-service both default to surface[0].toUpperCase().
+          printCode,
+          surface,
+          surfaceCode,
+        });
+
+        if (result && result.success === false) {
+          throw new Error(result.error || 'Save failed');
+        }
+
+        modal.classList.add('hidden');
+        showToast('Channel mapping saved — job is ready to print', 'success');
+        await resolveRoutesForReceivedJobs(allJobs);
+        renderJobTable(getFilteredJobs());
+      } catch (err) {
+        showToast('Error saving channel mapping: ' + err.message, 'error', 8000);
+      } finally {
+        saveBtn.disabled    = false;
+        saveBtn.textContent = 'Save & Assign';
+      }
+    } else if (isDarkroomPro) {
       // ── Darkroom Pro flow: validate size + media, optionally save translations,
       //    store overrides on the job, then dispatch immediately ────────────────
 

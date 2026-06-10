@@ -1421,6 +1421,29 @@
         <small class="field-hint">Jobs routed to this channel will not be dispatched by Auto Print, even if the controller has Auto Print enabled.</small>
       </div>
 
+      <!-- Fuji JobMaker mode: PrintCode + Surface + optional SurfaceCode -->
+      <div id="assignFujiGroup" style="display:none">
+
+        <div class="form-group">
+          <label class="form-label" for="assignPrintCode">Print Code <span style="color:#e05252">*</span></label>
+          <input type="text" id="assignPrintCode" class="form-control" placeholder='e.g. 4x6' style="width:180px">
+          <p class="field-hint">The Frontier quick-print code for this product (written as <code>PrintCode=</code> in the .txt file).</p>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="assignSurface">Surface <span style="color:#e05252">*</span></label>
+          <input type="text" id="assignSurface" class="form-control" placeholder='e.g. Lustre' style="width:180px">
+          <p class="field-hint">Paper type — used as <code>Surface=</code> and the filename suffix (<code>{orderRef}_Lustre.txt</code>).</p>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="assignSurfaceCode">Surface Code <span style="font-weight:normal;color:#888">(optional)</span></label>
+          <input type="text" id="assignSurfaceCode" class="form-control" placeholder='e.g. L' style="width:120px" maxlength="3">
+          <p class="field-hint">Leave blank to use the first letter of Surface. Prefixes the <code>Order_ID</code> (e.g. <code>L-BALLY-T0PXA7</code>).</p>
+        </div>
+
+      </div>
+
       <!-- Darkroom Pro mode: direct Size / Media entry -->
       <div id="assignDpGroup" style="display:none">
 
