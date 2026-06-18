@@ -970,7 +970,7 @@ function renderJobTable(jobs) {
       <td>${escapeHtml(job.process || '--')}</td>
       <td>${escapeHtml(job.category || '--')}</td>
       <td class="flags-cell">${flagsHtml || ''}</td>
-      <td><span class="job-no" data-copy="${escapeHtml(jobNo)}" title="Click to copy">${escapeHtml(jobNo)}</span>${job.customer_name ? `<br><span class="customer-name">${escapeHtml(job.customer_name)}</span>` : ''}${job._routingReleasedAt ? `<br><span class="routing-released-note" title="Routing hold was released by operator">Released to ${escapeHtml(job._routingReleasedTo || 'default')} · ${escapeHtml(formatReleasedTimestamp(job._routingReleasedAt))}</span>` : ''}</td>
+      <td class="col-job-no"><span class="job-no" data-copy="${escapeHtml(jobNo)}" title="Click to copy">${escapeHtml(jobNo)}</span>${job.id != null ? `<br><span class="job-id" title="OH Job ID — useful for API lookups and folder names">ID ${escapeHtml(String(job.id))}</span>` : ''}${job.customer_name ? `<br><span class="customer-name">${escapeHtml(job.customer_name)}</span>` : ''}${job._routingReleasedAt ? `<br><span class="routing-released-note" title="Routing hold was released by operator">Released to ${escapeHtml(job._routingReleasedTo || 'default')} · ${escapeHtml(formatReleasedTimestamp(job._routingReleasedAt))}</span>` : ''}</td>
       <td>${escapeHtml(job.product || '--')}</td>
       <td>${job.quantity != null ? job.quantity : '--'}</td>
       <td>${optionsHtml || '<span style="color:#a0aec0">--</span>'}</td>

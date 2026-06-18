@@ -699,6 +699,28 @@ body.app-theme-dark .theme-toggle-btn::before { content: '\2600'; }  /* sun glyp
   color: var(--app-ink-faint);
 }
 
+/* OH job ID sub-line in the Job No cell. Monospace visually links the ID
+   to the job number above it; 10px + faint sits a step below
+   .customer-name so the cell reads as a clear hierarchy:
+       job number  (accent, 12px monospace, clickable to copy)
+       ID 12345    (10px monospace, faint — metadata)
+       Customer    (11px proportional, faint)                 */
+.job-id {
+  font-family: 'Consolas', 'Courier New', monospace;
+  font-size: 10px;
+  color: var(--app-ink-faint);
+}
+
+/* Job No column min-width. Sized to fit a typical OH job number
+   (e.g. "PXDEMO-KJAV1U-1", ~15 monospace chars + cell padding) plus
+   the ID and customer-name sub-lines without wrapping. Applied to
+   both <th> (index.html) and <td> (renderer.js renderJobTable) via
+   a marker class so the width isn't tied to column position — keeps
+   the rule robust if the column order changes. */
+.jobs-table .col-job-no {
+  min-width: 180px;
+}
+
 .ordered-date {
   font-size: 10px;
   color: var(--app-ink-faint);
