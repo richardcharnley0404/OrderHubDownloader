@@ -370,7 +370,7 @@ For `type: 'process-folder'` jobs, add `src/main/services/process-folder-service
 ```js
 async function copyToFolder(job, destFolderPath) {
   // Use same folder naming convention as DPOF:
-  // {prefix}{jobNo}_{product}_{options}
+  // {prefix}{jobId}_{jobNo}_{product}_{options}
   // But no IMAGES/MISC structure — files copied flat into the folder
   // No prefix swap needed — just copy directly
   // No status tracking — job goes straight to "Sent" status in OHD

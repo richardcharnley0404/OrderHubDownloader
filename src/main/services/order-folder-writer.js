@@ -6,7 +6,7 @@
  * Writes a DPOF job to a controller hot folder using the safe prefix-swap pattern.
  *
  * Folder structure written:
- *   {prefix}{jobNo}_{product}_{options}/
+ *   {prefix}{jobId}_{jobNo}_{product}_{options}/
  *     IMAGES/          ← all image files copied here (DPOF spec: plural)
  *     MISC/
  *       AUTPRINT.MRK   ← DPOF instruction file

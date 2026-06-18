@@ -30,25 +30,29 @@ function extractSurname(customerName) {
 /**
  * Build a DPOF output folder name from a job object.
  *
- * Format:  {prefix}{jobNo}[_{surname}][_{reprintSuffix}]_{product}_{optionValues}
+ * Format:  {prefix}{jobId}_{jobNo}[_{surname}][_{reprintSuffix}]_{product}_{optionValues}
  *
  * Examples:
  *   buildFolderName('o', job)
- *     → 'oPXDEMO-DR2PE0-1_4x6 Photo Print_lustre_full-bleed'
+ *     → 'o38461218_PXDEMO-DR2PE0-1_4x6 Photo Print_lustre_full-bleed'
  *
  *   buildFolderName('o', job, null, { includeCustomerName: true, customerName: 'Richard Charnley' })
- *     → 'oPXDEMO-DR2PE0-1_Charnley_4x6 Photo Print_lustre_full-bleed'
+ *     → 'o38461218_PXDEMO-DR2PE0-1_Charnley_4x6 Photo Print_lustre_full-bleed'
  *
  *   buildFolderName('o', job, 'r1', { includeCustomerName: true, customerName: 'Richard Charnley' })
- *     → 'oPXDEMO-DR2PE0-1_Charnley_r1_4x6 Photo Print_lustre_full-bleed'
+ *     → 'o38461218_PXDEMO-DR2PE0-1_Charnley_r1_4x6 Photo Print_lustre_full-bleed'
  *
  *   buildFolderName('o', job, 'r1')
- *     → 'oPXDEMO-DR2PE0-1_r1_4x6 Photo Print_lustre_full-bleed'
+ *     → 'o38461218_PXDEMO-DR2PE0-1_r1_4x6 Photo Print_lustre_full-bleed'
  *
  * Field mapping (confirmed against live job object):
+ *   jobId   ← job.id         e.g. 38461218 (numeric OH job id; same value emitted as USR CID)
  *   jobNo   ← job.job_name   e.g. "PXDEMO-DR2PE0-1"
  *   product ← job.product    e.g. '4x6" Photo Print'
  *   options ← job.options    e.g. [{ name: "finish-options", value: "lustre" }, ...]
+ *
+ * Job-id fallback: if job.id is missing/empty, falls back to job.order_number — mirrors
+ * the CID fallback in dpof-generator.js so the folder segment and USR CID stay aligned.
  *
  * @param {string}      prefix        - Single prefix char: 'p', 'o', 'q', or 'e'
  * @param {object}      job           - Job object from OrderHub API / local cache
@@ -59,6 +63,10 @@ function extractSurname(customerName) {
  * @returns {string}
  */
 function buildFolderName(prefix, job, reprintSuffix = null, opts = {}) {
+  const rawJobId = (job.id !== undefined && job.id !== null && job.id !== '')
+    ? job.id
+    : (job.order_number || '');
+  const jobId   = String(rawJobId).replace(UNSAFE_CHARS, '');
   const jobNo   = (job.job_name || '').replace(UNSAFE_CHARS, '');
   const reprint = reprintSuffix ? `_${reprintSuffix.replace(UNSAFE_CHARS, '')}` : '';
   const product = (job.product  || '').replace(UNSAFE_CHARS, '').trim();
@@ -77,7 +85,7 @@ function buildFolderName(prefix, job, reprintSuffix = null, opts = {}) {
   }
 
   const segments = [`${jobNo}${surnameSeg}${reprint}`, product, options].filter(Boolean).join('_');
-  return `${prefix}${segments}`;
+  return `${prefix}${jobId}_${segments}`;
 }
 
 module.exports = { buildFolderName, extractSurname };

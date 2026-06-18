@@ -14,6 +14,8 @@ const assert = require('node:assert/strict');
 const { buildFolderName, extractSurname } = require('../printUtils.js');
 
 const baseJob = {
+  id: 38461218,
+  order_number: 'PXDEMO-DR2PE0',
   job_name: 'PXDEMO-DR2PE0-1',
   product: '4x6" Photo Print',
   options: [
@@ -48,14 +50,40 @@ test('extractSurname returns empty string for empty / nullish input', () => {
 
 // ── buildFolderName: legacy behaviour (no opts) ─────────────────────────────
 
-test('buildFolderName without opts produces the legacy folder name', () => {
+test('buildFolderName without opts produces the jobId-prefixed folder name', () => {
   const name = buildFolderName('o', baseJob);
-  assert.equal(name, 'oPXDEMO-DR2PE0-1_4x6 Photo Print_lustre_full-bleed');
+  assert.equal(name, 'o38461218_PXDEMO-DR2PE0-1_4x6 Photo Print_lustre_full-bleed');
 });
 
 test('buildFolderName without opts handles a reprint suffix', () => {
   const name = buildFolderName('o', baseJob, 'r1');
-  assert.equal(name, 'oPXDEMO-DR2PE0-1_r1_4x6 Photo Print_lustre_full-bleed');
+  assert.equal(name, 'o38461218_PXDEMO-DR2PE0-1_r1_4x6 Photo Print_lustre_full-bleed');
+});
+
+// ── buildFolderName: jobId prefix ───────────────────────────────────────────
+
+test('buildFolderName places job.id immediately after the prefix, followed by underscore', () => {
+  const name = buildFolderName('o', baseJob);
+  assert.match(name, /^o38461218_/);
+});
+
+test('buildFolderName uses the same jobId for the p (interim) and o (final) prefixes', () => {
+  const pName = buildFolderName('p', baseJob);
+  const oName = buildFolderName('o', baseJob);
+  // p→o rename relies on the only difference being the leading prefix char
+  assert.equal('p' + oName.slice(1), pName);
+});
+
+test('buildFolderName falls back to order_number when job.id is missing', () => {
+  const jobWithoutId = { ...baseJob, id: undefined };
+  const name = buildFolderName('o', jobWithoutId);
+  assert.equal(name, 'oPXDEMO-DR2PE0_PXDEMO-DR2PE0-1_4x6 Photo Print_lustre_full-bleed');
+});
+
+test('buildFolderName falls back to order_number when job.id is empty string', () => {
+  const jobWithEmptyId = { ...baseJob, id: '' };
+  const name = buildFolderName('o', jobWithEmptyId);
+  assert.match(name, /^oPXDEMO-DR2PE0_/);
 });
 
 // ── buildFolderName: customer-surname option ────────────────────────────────
@@ -65,7 +93,7 @@ test('buildFolderName inserts surname between jobNo and product when enabled', (
     includeCustomerName: true,
     customerName:        'Richard Charnley',
   });
-  assert.equal(name, 'oPXDEMO-DR2PE0-1_Charnley_4x6 Photo Print_lustre_full-bleed');
+  assert.equal(name, 'o38461218_PXDEMO-DR2PE0-1_Charnley_4x6 Photo Print_lustre_full-bleed');
 });
 
 test('buildFolderName falls back to full name when only one token is present', () => {
@@ -73,7 +101,7 @@ test('buildFolderName falls back to full name when only one token is present', (
     includeCustomerName: true,
     customerName:        'Cher',
   });
-  assert.equal(name, 'oPXDEMO-DR2PE0-1_Cher_4x6 Photo Print_lustre_full-bleed');
+  assert.equal(name, 'o38461218_PXDEMO-DR2PE0-1_Cher_4x6 Photo Print_lustre_full-bleed');
 });
 
 test('buildFolderName inserts surname before the reprint suffix', () => {
@@ -81,7 +109,7 @@ test('buildFolderName inserts surname before the reprint suffix', () => {
     includeCustomerName: true,
     customerName:        'Richard Charnley',
   });
-  assert.equal(name, 'oPXDEMO-DR2PE0-1_Charnley_r1_4x6 Photo Print_lustre_full-bleed');
+  assert.equal(name, 'o38461218_PXDEMO-DR2PE0-1_Charnley_r1_4x6 Photo Print_lustre_full-bleed');
 });
 
 test('buildFolderName omits the surname segment when the flag is off', () => {
@@ -89,7 +117,7 @@ test('buildFolderName omits the surname segment when the flag is off', () => {
     includeCustomerName: false,
     customerName:        'Richard Charnley',
   });
-  assert.equal(name, 'oPXDEMO-DR2PE0-1_4x6 Photo Print_lustre_full-bleed');
+  assert.equal(name, 'o38461218_PXDEMO-DR2PE0-1_4x6 Photo Print_lustre_full-bleed');
 });
 
 test('buildFolderName omits the surname segment when the name is empty', () => {
@@ -97,7 +125,7 @@ test('buildFolderName omits the surname segment when the name is empty', () => {
     includeCustomerName: true,
     customerName:        '',
   });
-  assert.equal(name, 'oPXDEMO-DR2PE0-1_4x6 Photo Print_lustre_full-bleed');
+  assert.equal(name, 'o38461218_PXDEMO-DR2PE0-1_4x6 Photo Print_lustre_full-bleed');
 });
 
 test('buildFolderName strips NTFS-unsafe characters from the surname', () => {
@@ -105,7 +133,7 @@ test('buildFolderName strips NTFS-unsafe characters from the surname', () => {
     includeCustomerName: true,
     customerName:        'Mary Anne "Mae" O\\Donnell',
   });
-  assert.equal(name, 'oPXDEMO-DR2PE0-1_ODonnell_4x6 Photo Print_lustre_full-bleed');
+  assert.equal(name, 'o38461218_PXDEMO-DR2PE0-1_ODonnell_4x6 Photo Print_lustre_full-bleed');
 });
 
 test('buildFolderName preserves the p-prefix for the in-progress folder', () => {
@@ -113,5 +141,5 @@ test('buildFolderName preserves the p-prefix for the in-progress folder', () => 
     includeCustomerName: true,
     customerName:        'Richard Charnley',
   });
-  assert.equal(name, 'pPXDEMO-DR2PE0-1_Charnley_4x6 Photo Print_lustre_full-bleed');
+  assert.equal(name, 'p38461218_PXDEMO-DR2PE0-1_Charnley_4x6 Photo Print_lustre_full-bleed');
 });

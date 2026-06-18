@@ -545,7 +545,7 @@ class PrintService {
    *
    * Folder naming uses the parent job's product/options with the reprint
    * suffix inserted between the job number and product name:
-   *   oPXDEMO-DR2PE0-1_r1_4x6 Photo Print_lustre_full-bleed
+   *   o38461218_PXDEMO-DR2PE0-1_r1_4x6 Photo Print_lustre_full-bleed
    *
    * @param {object}   parentJob       - Parent API job object (job_name, product, options, …)
    * @param {string}   reprintJobPath  - Absolute path to the reprint job folder

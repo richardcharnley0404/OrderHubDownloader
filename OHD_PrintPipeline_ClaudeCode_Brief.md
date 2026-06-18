@@ -23,23 +23,24 @@ Replace the existing folder naming logic entirely.
 ### New naming format
 
 ```
-{prefix}{JobNo}_{Product}_{OptionValues}
+{prefix}{JobId}_{JobNo}_{Product}_{OptionValues}
 ```
 
 **Examples:**
 ```
-pPXDEMO-XXTFLD-1_4x6 Photo Print_lustre_full-bleed   ← while writing
-oPXDEMO-XXTFLD-1_4x6 Photo Print_lustre_full-bleed   ← ready for controller
+p38461218_PXDEMO-XXTFLD-1_4x6 Photo Print_lustre_full-bleed   ← while writing
+o38461218_PXDEMO-XXTFLD-1_4x6 Photo Print_lustre_full-bleed   ← ready for controller
 ```
 
 **Rules:**
+- `{JobId}` — the numeric OrderHub job id (`job.id`, e.g. `38461218`); same value emitted as `USR CID` in the DPOF file. Falls back to `job.order_number` when `job.id` is missing.
 - `{JobNo}` — the OrderHub job number as-is (e.g. `PXDEMO-XXTFLD-1`)
 - `{Product}` — product name with unsafe characters stripped (e.g. `4x6" Photo Print` → `4x6 Photo Print`)
 - `{OptionValues}` — all option values joined with `_` (e.g. `lustre` + `full-bleed` → `lustre_full-bleed`)
 - Strip all filesystem-unsafe characters from every segment: `" / \ : * ? < > |`
 - Do **not** strip spaces — leave them as-is for readability
 - Segments separated by `_`
-- Prefix character prepended directly before the job number (no separator)
+- Prefix character prepended directly before the job id (no separator); job id and job number separated by `_`
 
 **Helper function — add to a shared utility:**
 
@@ -70,7 +71,7 @@ This prevents the order controller from importing a partially-written job.
 
 ```
 1. Build folder name with prefix "p"
-2. Create folder: pPXDEMO-XXTFLD-1_4x6 Photo Print_lustre_full-bleed/
+2. Create folder: p38461218_PXDEMO-XXTFLD-1_4x6 Photo Print_lustre_full-bleed/
 3. Write all files into folder (IMAGES/ and MISC/ structure — see section 3)
 4. On success → rename folder: p → o
 5. On any write error → leave as p, log error, notify operator
@@ -143,7 +144,7 @@ function getSourcePath(job, image) {
 Every job sent to a DPOF controller must use this exact structure:
 
 ```
-{prefix}{JobNo}_{Product}_{Options}/
+{prefix}{JobId}_{JobNo}_{Product}_{Options}/
   IMAGES/
     IMG_001.jpg
     IMG_002.jpg
@@ -173,8 +174,8 @@ Reprint jobs (`-r1`, `-r2` etc.) must go through the full print pipeline — sam
 ### Folder naming for reprints
 
 ```
-pPXDEMO-XXTFLD-1_r1_4x6 Photo Print_lustre_full-bleed   ← while writing
-oPXDEMO-XXTFLD-1_r1_4x6 Photo Print_lustre_full-bleed   ← ready for controller
+p38461218_PXDEMO-XXTFLD-1_r1_4x6 Photo Print_lustre_full-bleed   ← while writing
+o38461218_PXDEMO-XXTFLD-1_r1_4x6 Photo Print_lustre_full-bleed   ← ready for controller
 ```
 
 The reprint suffix (`_r1`, `_r2`) is inserted between the job number and the product name.

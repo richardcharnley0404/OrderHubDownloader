@@ -2,7 +2,7 @@
  * Smoke test for order-folder-writer.js
  *
  * Asserts the on-disk DPOF folder layout matches the spec:
- *   {prefix}{jobNo}_..._{options}/
+ *   {prefix}{jobId}_{jobNo}_..._{options}/
  *     IMAGES/    ← image files (v1.7.7+ renamed from IMAGE singular per DPOF spec)
  *     MISC/
  *       AUTPRINT.MRK
