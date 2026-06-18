@@ -14,6 +14,19 @@ function _getRoutingHeldProcesses() {
   }
 }
 
+// Tenant date-format enum used by the renderer's formatDueDate helper.
+// OrderHub's /jobs/pending returns this at response level (e.g. "MDY"),
+// not per-job. We normalise here so a stray casing/whitespace from the API
+// can't silently make the renderer fall through to its DMY default.
+// Returns null for unknown values — the renderer's switch then takes its
+// own DMY fallback.
+const _DATE_FORMAT_ENUM = new Set(['DMY', 'YMD', 'MDY']);
+function _normaliseDateFormat(raw) {
+  if (typeof raw !== 'string') return null;
+  const upper = raw.trim().toUpperCase();
+  return _DATE_FORMAT_ENUM.has(upper) ? upper : null;
+}
+
 const jobStore = new Store({
   name: 'jobs-cache',
   defaults: { jobs: [], lastFetchTime: null }
@@ -65,7 +78,11 @@ class JobService {
         // Read the routing-hold set ONCE per poll so the per-job mapper doesn't
         // re-hit electron-store N times.
         const routingHeldProcesses = _getRoutingHeldProcesses();
-        const mappedJobs = apiJobs.map(apiJob => this._mapApiJob(apiJob, { routingHeldProcesses }));
+        // date_format is response-level (tenant locale) — not per-job. Stamp it
+        // onto every mapped job so the renderer's formatDueDate(date, fmt)
+        // can render dates without needing access to the raw response.
+        const dateFormat = _normaliseDateFormat(data.date_format);
+        const mappedJobs = apiJobs.map(apiJob => this._mapApiJob(apiJob, { routingHeldProcesses, dateFormat }));
 
         // Filter jobs by location: only accept jobs whose locations array includes our locationId
         const filteredJobs = this._filterByLocation(mappedJobs, locationId);
@@ -152,6 +169,11 @@ class JobService {
       created_at: apiJob.created_at || '',
       artwork_ready_at: apiJob.artwork_ready_at || '',
       due_date: apiJob.due_date || null,
+      // Tenant date-format hint (DMY | YMD | MDY). Source is response-level
+      // (passed via ctx from fetchJobs), not per-job. Renderer's
+      // formatDueDate() switches on this; absent/unrecognised falls back to
+      // DMY inside the helper.
+      date_format: ctx.dateFormat || null,
       notes: apiJob.notes || '',
       order_notes: apiJob.order_notes || '',
       is_rush: Boolean(apiJob.is_rush),
@@ -659,4 +681,8 @@ class JobService {
   }
 }
 
-module.exports = new JobService();
+const jobService = new JobService();
+// Test hook — module-scoped helper exposed for unit tests of the date_format
+// pass-through path. Production callers go through fetchJobs / _mapApiJob.
+jobService._normaliseDateFormat = _normaliseDateFormat;
+module.exports = jobService;

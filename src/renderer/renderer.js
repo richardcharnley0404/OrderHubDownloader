@@ -970,11 +970,14 @@ function renderJobTable(jobs) {
       <td>${escapeHtml(job.process || '--')}</td>
       <td>${escapeHtml(job.category || '--')}</td>
       <td class="flags-cell">${flagsHtml || ''}</td>
-      <td><span class="job-no" data-copy="${escapeHtml(jobNo)}" title="Click to copy">${escapeHtml(jobNo)}</span>${job.customer_name ? `<br><span class="customer-name">${escapeHtml(job.customer_name)}</span>` : ''}${job.created_at ? `<br><span class="ordered-date">${formatDueDate(job.created_at, job.date_format)}</span>` : ''}${job._routingReleasedAt ? `<br><span class="routing-released-note" title="Routing hold was released by operator">Released to ${escapeHtml(job._routingReleasedTo || 'default')} · ${escapeHtml(formatReleasedTimestamp(job._routingReleasedAt))}</span>` : ''}</td>
+      <td><span class="job-no" data-copy="${escapeHtml(jobNo)}" title="Click to copy">${escapeHtml(jobNo)}</span>${job.customer_name ? `<br><span class="customer-name">${escapeHtml(job.customer_name)}</span>` : ''}${job._routingReleasedAt ? `<br><span class="routing-released-note" title="Routing hold was released by operator">Released to ${escapeHtml(job._routingReleasedTo || 'default')} · ${escapeHtml(formatReleasedTimestamp(job._routingReleasedAt))}</span>` : ''}</td>
       <td>${escapeHtml(job.product || '--')}</td>
       <td>${job.quantity != null ? job.quantity : '--'}</td>
       <td>${optionsHtml || '<span style="color:#a0aec0">--</span>'}</td>
-      <td>${formatDueDate(job.due_date, job.date_format)}</td>
+      <td class="order-due-cell">
+        <div class="date-row"><span class="date-caption">Ordered</span><span class="date-value">${formatDueDate(job.created_at, job.date_format)}</span></div>
+        <div class="date-row"><span class="date-caption">Due</span><span class="date-value">${formatDueDate(job.due_date, job.date_format)}</span></div>
+      </td>
       <td class="job-action-cell">${actionHtml}</td>
     `;
 
