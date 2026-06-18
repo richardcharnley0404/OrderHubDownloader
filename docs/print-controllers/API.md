@@ -430,6 +430,8 @@ When a status change is detected, the DPOF path forwards the event to
 `{baseUrl}/jobs/{jobId}/completed`. With the flag OFF (the default),
 the handler is a full no-op.
 
+> Staging runbook: see [`AUTO_COMPLETE_TESTING.md`](./AUTO_COMPLETE_TESTING.md) for the step-by-step flag toggle, simulated `o→e` trigger, expected log sequences, and recovery behaviour on API failure.
+
 ### `stopMonitoring(controllerId)` → `void`
 
 Stops monitoring for a specific controller.
