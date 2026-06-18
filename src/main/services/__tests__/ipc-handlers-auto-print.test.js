@@ -574,3 +574,41 @@ test('Fix 1: unheld pixfizz job gets scored AND dispatched (regression guard the
   assert.equal(__scoreJobCalls.length, 1, 'happy-path job scored');
   assert.equal(__dispatchCalls.length, 1, 'happy-path job dispatched');
 });
+
+
+// ─────────────────────────────────────────────────────────────────────────
+// Awaiting-manifest gate — auto-print MUST skip jobs flagged
+// _awaitingManifest:true. polling-service tracks the wait + bounded
+// escalation; if auto-print proceeded it would throw "Order manifest not
+// found" inside _readManifest and enter the sticky-error path before the
+// manifest had a chance to land.
+// ─────────────────────────────────────────────────────────────────────────
+
+test('awaiting-manifest gate: _awaitingManifest:true jobs are not dispatched', async () => {
+  resetState();
+  __jobs = [makeJob({ _awaitingManifest: true })];
+  __controllers = [{ id: 'CTRL-1', autoprint: true, type: 'noritsu' }];
+  __routeForJob = makeDpofRoute();
+  __dispatchBehavior = 'success';
+
+  await _runAutoPrint();
+
+  assert.equal(__dispatchCalls.length, 0,
+    'auto-print must skip awaiting-manifest jobs — dispatch would throw before manifest lands');
+  const errorUpdate = __updateCalls.find((c) => c.updates && c.updates._status === 'error');
+  assert.equal(errorUpdate, undefined,
+    'skipped jobs must NOT flip to error — the sticky-error path was the bug we are gating against');
+});
+
+test('awaiting-manifest gate: flag cleared → job dispatches normally', async () => {
+  // Mirrors the auto-recovery flow once polling-service detects manifest arrival.
+  resetState();
+  __jobs = [makeJob({ _awaitingManifest: false })];
+  __controllers = [{ id: 'CTRL-1', autoprint: true, type: 'noritsu' }];
+  __routeForJob = makeDpofRoute();
+  __dispatchBehavior = 'success';
+
+  await _runAutoPrint();
+
+  assert.equal(__dispatchCalls.length, 1, 'cleared flag → normal dispatch path');
+});

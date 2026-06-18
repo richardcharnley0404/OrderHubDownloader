@@ -511,6 +511,17 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
         return { success: false, error: `Job cannot be sent to print (status: ${job._status})` };
       }
 
+      // Defensive: even though the renderer hides the Process button for
+      // awaiting-manifest jobs, a direct IPC call from devtools or a stale
+      // button click would still hit print-service._readManifest and throw.
+      // Surface a clean error here instead.
+      {
+        const local = jobDownloadService.checkLocalFiles(job);
+        if (local.hasFiles && !local.hasManifest) {
+          return { success: false, error: 'Manifest not yet received' };
+        }
+      }
+
       // AI Quality Gate (v1.2.0) — also gate manual Process clicks so the
       // workflow is consistent: operators must release a held job via the
       // Quality flag before manual dispatch will work.
@@ -2571,6 +2582,14 @@ async function runAutoPrint() {
     for (const job of jobs) {
       if (job._status !== 'received' && job._status !== 'pending') continue;
       if (job.created_at && new Date(job.created_at) < cutoff) continue;
+
+      // Awaiting-manifest gate. Files have arrived but the .json manifest
+      // hasn't yet; polling-service is tracking the wait + bounded escalation.
+      // Skipping here keeps dispatch from throwing "Order manifest not found"
+      // and entering the sticky-error path before the manifest has a chance
+      // to land. The flag is cleared by polling-service when the manifest
+      // appears OR by the timeout escalation path.
+      if (job._awaitingManifest) continue;
 
       // AI Quality Gate (v1.2.0) — score the job before dispatching. If
       // any image fails the threshold, the job is held this pass.

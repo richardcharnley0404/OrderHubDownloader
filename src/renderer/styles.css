@@ -567,6 +567,15 @@ body.app-theme-dark .theme-toggle-btn::before { content: '\2600'; }  /* sun glyp
   color: var(--app-red);
 }
 
+/* Job is still _status:'pending' but the order folder has image files
+   without the {orderNumber}.json manifest. Amber rather than red — this is
+   a transient wait, bounded by awaitingManifestTimeoutMs (default 10 min).
+   On timeout the job flips to _status:'error' and switches to .badge-error. */
+.badge-awaiting_manifest {
+  background: var(--app-amber-weak);
+  color: var(--app-amber);
+}
+
 /* One-line truncated `_errorMessage` shown directly under the error badge
    so operators don't have to hover the badge to find out why the job
    failed. Full message still available via the `title` attribute on both

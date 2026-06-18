@@ -686,6 +686,12 @@ function renderJobTable(jobs) {
     } else if (job._dpofAccepted) {
       statusClass = 'badge badge-dpof_accepted';
       statusLabel = 'Print Accepted';
+    } else if (job._awaitingManifest) {
+      // Files arrived but {orderNumber}.json hasn't yet. Polling-service is
+      // tracking the wait + bounded escalation; auto-print + manual Process
+      // are gated until the manifest lands or the timeout fires.
+      statusClass = 'badge badge-awaiting_manifest';
+      statusLabel = 'Awaiting JSON Manifest';
     } else if (job._status === 'pending') {
       // For pending jobs, "Pending" badge only makes sense when routing is incomplete
       // (action = Assign). If a valid route exists, show "Received" so the operator
@@ -794,6 +800,11 @@ function renderJobTable(jobs) {
       actionHtml = `${reviewBtn}<button class="btn-action btn-printed" disabled>Processed</button>`;
     } else if (job._status === 'in_production') {
       // Job already dispatched — review-only, no gate.
+      actionHtml = reviewBtn;
+    } else if (job._awaitingManifest) {
+      // Review stays available so operators can inspect already-downloaded
+      // images while waiting; Process is hidden until the manifest lands.
+      // Dismiss is appended by the wrapper below.
       actionHtml = reviewBtn;
     } else if (job._status === 'received') {
       const route = jobRouteCache.get(String(job.id));
@@ -943,7 +954,9 @@ function renderJobTable(jobs) {
     // the full message; the caption shows the first ~80 chars truncated.
     let errorHintHtml = '';
     let statusTitleAttr = '';
-    if (job._status === 'error' && job._errorMessage) {
+    if (job._awaitingManifest && job._awaitingManifestPath) {
+      statusTitleAttr = ` title="Order manifest not yet received: ${escapeHtml(job._awaitingManifestPath)}"`;
+    } else if (job._status === 'error' && job._errorMessage) {
       const full = String(job._errorMessage);
       const truncated = full.length > 80 ? full.slice(0, 77) + '…' : full;
       statusTitleAttr = ` title="${escapeHtml(full)}"`;

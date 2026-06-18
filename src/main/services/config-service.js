@@ -94,6 +94,17 @@ const schema = {
     type: 'boolean',
     default: false
   },
+  // How long (ms) a job's order folder may exist with image files but no
+  // {orderNumber}.json manifest before polling-service escalates the job to
+  // _status:'error'. Default 10 minutes — 20× safety margin over typical
+  // FTP/S3 manifest-arrival windows. Keeps the job dispatchable (status
+  // 'pending' + _awaitingManifest flag) for the duration; the bounded
+  // escalation stops jobs sitting awaiting forever.
+  awaitingManifestTimeoutMs: {
+    type: 'number',
+    default: 600000,
+    minimum: 0
+  },
   // Shared S3 settings
   s3Provider: {
     type: 'string',

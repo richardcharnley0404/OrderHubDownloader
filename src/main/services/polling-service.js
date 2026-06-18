@@ -236,11 +236,19 @@ class PollingService {
         }
       }
 
-      // For each pending job, check if files exist locally
+      // Awaiting-manifest timeout (ms). Default 10 min, configurable via
+      // electron-store. See config-service schema for rationale.
+      const awaitingTimeoutMs = configService.get('awaitingManifestTimeoutMs');
+
+      // For each pending job, check if files exist locally. Three-way decision:
+      //   hasManifest                 → existing markReceived flow
+      //   hasFiles && !hasManifest    → stamp _awaitingManifest; escalate to
+      //                                 error if older than the timeout
+      //   neither                     → still downloading, leave as-is
       for (const job of pendingJobs) {
         const result = jobDownloadService.checkLocalFiles(job);
 
-        if (result.found) {
+        if (result.hasManifest) {
           // Receive-time missing-size validation removed in v1.3.2.
           // The check was over-broad — it fired for all controller types,
           // but missing image-level size only matters for DPOF dispatch.
@@ -254,6 +262,20 @@ class PollingService {
               local_path: result.localPath,
               file_count: result.fileCount
             });
+            // Manifest arrived — clear any prior awaiting-manifest stamps so
+            // the renderer's badge/action branches return to the standard
+            // received/pending state.
+            if (job._awaitingManifest) {
+              jobService.updateJobLocally(job.id, {
+                _awaitingManifest: false,
+                _awaitingManifestSince: null,
+                _awaitingManifestPath: null,
+              });
+              logger.info('Polling: manifest arrived for previously-awaiting job', {
+                jobId: job.id,
+                orderNumber: job.order_number,
+              });
+            }
             this.lastJobPollSummary.receivedCount++;
             logger.info('Polling: job marked as received', {
               jobId: job.id,
@@ -264,6 +286,46 @@ class PollingService {
           } catch (error) {
             this.lastJobPollSummary.failedCount++;
             logger.logError('Polling: failed to mark job as received', error, { jobId: job.id });
+          }
+          continue;
+        }
+
+        if (result.hasFiles) {
+          // Files present but manifest missing. Stamp _awaitingManifest on
+          // first observation; on subsequent observations, check the timeout.
+          if (!job._awaitingManifest) {
+            const nowIso = new Date().toISOString();
+            jobService.updateJobLocally(job.id, {
+              _awaitingManifest: true,
+              _awaitingManifestSince: nowIso,
+              _awaitingManifestPath: result.manifestPath,
+            });
+            logger.info('Polling: job awaiting manifest', {
+              jobId: job.id,
+              orderNumber: job.order_number,
+              manifestPath: result.manifestPath,
+            });
+            continue;
+          }
+
+          const sinceMs = Date.parse(job._awaitingManifestSince);
+          if (Number.isFinite(sinceMs) && (Date.now() - sinceMs) > awaitingTimeoutMs) {
+            // Bounded escalation — the existing sticky-error path takes over
+            // (excluded from auto-print eligibility and OH-sync ACTIVE_LOCAL_STATUSES).
+            jobService.updateJobLocally(job.id, {
+              _status: 'error',
+              _errorMessage: `Order manifest not received within ${Math.round(awaitingTimeoutMs / 60000)} minutes — check FTP / S3 delivery (${result.manifestPath})`,
+              _awaitingManifest: false,
+              _awaitingManifestSince: null,
+              _awaitingManifestPath: null,
+            });
+            logger.logWarning('Polling: awaiting-manifest job escalated to error after timeout', {
+              jobId: job.id,
+              orderNumber: job.order_number,
+              awaitingTimeoutMs,
+              awaitingSince: job._awaitingManifestSince,
+              manifestPath: result.manifestPath,
+            });
           }
         }
       }

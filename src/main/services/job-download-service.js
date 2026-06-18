@@ -12,13 +12,32 @@ class JobDownloadService {
    * Check if artwork files exist locally for a given job.
    * Looks for: {downloadDirectory}/{order_number}_{order_id}/{order_number}_{job_id}/
    *
+   * Returns a three-state result so callers (polling-service in particular)
+   * can distinguish "still downloading" from "files arrived but manifest
+   * hasn't yet" — the two cases that previously collapsed into a single
+   * `found:false` and triggered an "Order manifest not found" race when
+   * markReceived fired too early.
+   *
+   *   hasFiles    — at least one file exists under localPath
+   *   hasManifest — {orderNumber}.json exists in the order folder (parent
+   *                 of localPath); read by print-service._readManifest at
+   *                 dispatch time
+   *   manifestPath — absolute path where the manifest is expected (always
+   *                  populated when localPath resolves, even if absent on
+   *                  disk) so the renderer can surface it as a tooltip
+   *   found       — preserved for backward compat with existing callers
+   *                 (AI Quality Gate at ipc-handlers.js:518, 2590);
+   *                 equals hasFiles, NOT hasFiles && hasManifest, so AI
+   *                 scoring can begin as soon as files arrive
+   *
    * @param {object} job - Job with order_number, order_id, and id fields
-   * @returns {{ found: boolean, localPath?: string, fileCount?: number }}
+   * @returns {{ found: boolean, hasFiles: boolean, hasManifest: boolean,
+   *             localPath?: string, manifestPath?: string, fileCount?: number }}
    */
   checkLocalFiles(job) {
     const downloadDirectory = configService.get('downloadDirectory');
     if (!downloadDirectory) {
-      return { found: false };
+      return { found: false, hasFiles: false, hasManifest: false };
     }
 
     const orderNumber = job.order_number || '';
@@ -31,42 +50,62 @@ class JobDownloadService {
         order_id: orderId,
         job_id: jobId
       });
-      return { found: false };
+      return { found: false, hasFiles: false, hasManifest: false };
     }
 
     // Build expected path: {downloadDir}/{order_number}_{order_id}/{order_number}_{job_id}/
     const orderFolderName = `${orderNumber}_${orderId}`;
     const jobFolderName = `${orderNumber}_${jobId}`;
-    const localPath = path.join(downloadDirectory, orderFolderName, jobFolderName);
+    const orderFolderPath = path.join(downloadDirectory, orderFolderName);
+    const localPath       = path.join(orderFolderPath, jobFolderName);
+    const manifestPath    = path.join(orderFolderPath, `${orderNumber}.json`);
 
     try {
       if (!fs.existsSync(localPath)) {
-        return { found: false };
+        return { found: false, hasFiles: false, hasManifest: false, localPath, manifestPath };
       }
 
       const stat = fs.statSync(localPath);
       if (!stat.isDirectory()) {
-        return { found: false };
+        return { found: false, hasFiles: false, hasManifest: false, localPath, manifestPath };
       }
 
-      const fileCount = this._countFiles(localPath);
+      const fileCount   = this._countFiles(localPath);
+      const hasFiles    = fileCount > 0;
+      // hasManifest = file exists, non-empty, and JSON-parseable.
+      // FTP delivery is NOT atomic — basic-ftp's downloadTo (ftp-service.js:429)
+      // writes the manifest directly to its final path; during the stream the
+      // file is observable with 0 bytes / partial content. A bare existsSync
+      // check would let the poll fire markReceived → dispatch → JSON.parse
+      // throws — same race we're gating against, just with a parse error
+      // instead of "not found". The parse is cheap (manifests are small,
+      // a few KB) and the result is the same one print-service._readManifest
+      // will parse a moment later. S3-delivered manifests are atomic
+      // (.tmp + rename, s3-artwork-downloader.js:421-424) so this check is
+      // a no-op for that path.
+      const hasManifest = this._manifestIsReadable(manifestPath);
 
-      if (fileCount === 0) {
-        // Folder exists but is empty — not ready yet
-        return { found: false };
+      if (hasFiles) {
+        logger.info('Local files found for job', {
+          jobId,
+          orderNumber,
+          localPath,
+          fileCount,
+          hasManifest,
+        });
       }
 
-      logger.info('Local files found for job', {
-        jobId,
-        orderNumber,
+      return {
+        found: hasFiles,
+        hasFiles,
+        hasManifest,
         localPath,
-        fileCount
-      });
-
-      return { found: true, localPath, fileCount };
+        manifestPath,
+        fileCount,
+      };
     } catch (error) {
       logger.logError('Error checking local files for job', error, { jobId, localPath });
-      return { found: false };
+      return { found: false, hasFiles: false, hasManifest: false, localPath, manifestPath };
     }
   }
 
@@ -83,6 +122,29 @@ class JobDownloadService {
    */
   getDownloadStatus(jobId) {
     return this.activeDownloads.get(jobId) || null;
+  }
+
+  /**
+   * Return true iff the manifest file exists, is non-empty, and parses as
+   * JSON. Used by checkLocalFiles to gate the FTP partial-write race —
+   * see the hasManifest comment in checkLocalFiles for the why.
+   *
+   * Parse errors are swallowed (returns false) — the polling loop's next
+   * cycle will re-check, and the file will either parse cleanly once FTP
+   * finishes streaming or stay stuck (in which case the
+   * awaitingManifestTimeoutMs escalation kicks in).
+   */
+  _manifestIsReadable(manifestPath) {
+    try {
+      if (!fs.existsSync(manifestPath)) return false;
+      const stat = fs.statSync(manifestPath);
+      if (!stat.isFile() || stat.size === 0) return false;
+      const raw = fs.readFileSync(manifestPath, 'utf-8');
+      JSON.parse(raw);
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   /**
