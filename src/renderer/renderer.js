@@ -815,7 +815,7 @@ function renderJobTable(jobs) {
       // chip. The button OPENS a modal; the action is per-job.
       const routingHeld = Array.isArray(job._holdReasons) && job._holdReasons.includes('routing-hold');
       const resolveBtn = routingHeld
-        ? `<button class="btn-action btn-resolve-routing-hold" data-job-id="${escapeHtml(String(job.id))}" title="Process is set to Hold for manual release. Pick a controller to dispatch.">Resolve</button>`
+        ? `<button class="btn-action btn-resolve-routing-hold" data-job-id="${escapeHtml(String(job.id))}" title="Process is set to Hold for manual release. Pick a controller to dispatch.">Destination</button>`
         : '';
       if (route && route.type === 'unrouted') {
         if (route.reason === 'no-channel') {
@@ -835,7 +835,7 @@ function renderJobTable(jobs) {
       const route = jobRouteCache.get(String(job.id));
       const routingHeld = Array.isArray(job._holdReasons) && job._holdReasons.includes('routing-hold');
       const resolveBtn = routingHeld
-        ? `<button class="btn-action btn-resolve-routing-hold" data-job-id="${escapeHtml(String(job.id))}" title="Process is set to Hold for manual release. Pick a controller to dispatch.">Resolve</button>`
+        ? `<button class="btn-action btn-resolve-routing-hold" data-job-id="${escapeHtml(String(job.id))}" title="Process is set to Hold for manual release. Pick a controller to dispatch.">Destination</button>`
         : '';
       if (route && route.type === 'unrouted') {
         if (route.reason === 'no-channel') {

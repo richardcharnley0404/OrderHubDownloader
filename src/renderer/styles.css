@@ -2442,6 +2442,69 @@ button {
   display: block;
 }
 
+/* Routing-hold modal footer — was inline-styled. Moved here so the rest
+   of the modal can stay markup-only. */
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+/* ── Routing-hold "Choose Destination" modal ── */
+/*
+   3-column grid alignment for the two action rows so the radios,
+   labels, and value cells line up vertically:
+     [radio]  Release to    <controller name>
+     [radio]  Reassign to   [select dropdown]
+   display:contents on the <label> rows lets the radio + label + control
+   participate in the parent's grid while preserving the click-anywhere-
+   selects-radio behaviour (the <label> still wraps its <input>).
+*/
+.rh-fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+.rh-options-grid {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: center;
+  column-gap: 10px;
+  row-gap: 8px;
+  margin-top: 6px;
+}
+.rh-options-grid .rh-option {
+  display: contents;
+}
+.rh-options-grid input[type="radio"] {
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--app-accent);
+}
+.rh-options-grid .rh-option-label {
+  font-size: 13px;
+  cursor: pointer;
+}
+/* Both value cells (the controller-name strong AND the reassign select)
+   share the same fixed width and left-align, so the two rows read as
+   aligned columns rather than ragged-right. The strong becomes block so
+   width applies; the select keeps its existing modal form-control
+   border/padding from `.pm-modal .form-group select` — only the width is
+   overridden here. The `select.rh-option-value` selector matches the
+   specificity of `.pm-modal .form-group select` (both 0,2,1) so source
+   order wins. */
+.rh-options-grid .rh-option-value,
+.rh-options-grid select.rh-option-value {
+  display: block;
+  width: 240px;
+  max-width: 100%;
+}
+.rh-options-grid strong.rh-option-value {
+  font-weight: 600;
+  cursor: pointer;
+}
+
 .pm-options-label {
   font-size: 11px;
   font-weight: 600;

@@ -1483,7 +1483,7 @@
   <div id="resolveRoutingHoldModal" class="pm-modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="resolveRoutingHoldModalTitle">
     <div class="pm-modal">
       <button type="button" class="pm-modal-close" aria-label="Close">&times;</button>
-      <h3 id="resolveRoutingHoldModalTitle">Resolve Routing Hold</h3>
+      <h3 id="resolveRoutingHoldModalTitle">Choose Destination</h3>
       <p class="section-desc" style="margin-top:0;margin-bottom:14px;">
         This job's process is set to <em>Hold for manual release</em>. Pick how to proceed.
       </p>
@@ -1498,22 +1498,26 @@
         <div id="rhModalProduct" class="modal-readonly-value">—</div>
       </div>
 
-      <fieldset class="form-group" style="border:0;padding:0;margin:0;">
-        <legend class="form-label" style="padding:0;">Action</legend>
+      <fieldset class="form-group rh-fieldset">
+        <legend class="form-label">Action</legend>
+        <div class="rh-options-grid">
 
-        <label style="display:flex;align-items:center;gap:8px;margin:6px 0;cursor:pointer;">
-          <input type="radio" name="rhMode" value="default" id="rhModeDefault" checked>
-          <span>Release to <strong id="rhDefaultControllerName">—</strong></span>
-        </label>
+          <label class="rh-option">
+            <input type="radio" name="rhMode" value="default" id="rhModeDefault" checked>
+            <span class="rh-option-label">Release to</span>
+            <strong id="rhDefaultControllerName" class="rh-option-value">—</strong>
+          </label>
 
-        <label style="display:flex;align-items:center;gap:8px;margin:6px 0;cursor:pointer;">
-          <input type="radio" name="rhMode" value="reassign" id="rhModeReassign">
-          <span>Reassign to:</span>
-          <select id="rhReassignControllerSelect" class="form-control" disabled style="flex:1;min-width:160px;"></select>
-        </label>
+          <label class="rh-option">
+            <input type="radio" name="rhMode" value="reassign" id="rhModeReassign">
+            <span class="rh-option-label">Reassign to</span>
+            <select id="rhReassignControllerSelect" class="form-control rh-option-value" disabled></select>
+          </label>
+
+        </div>
       </fieldset>
 
-      <div class="modal-actions" style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;">
+      <div class="modal-actions">
         <button type="button" id="rhCancelBtn" class="btn-secondary">Cancel</button>
         <button type="button" id="rhConfirmBtn" class="btn-primary">Release</button>
       </div>
