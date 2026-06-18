@@ -263,8 +263,31 @@ class JobService {
     // because pre-M2 cache entries lack the field entirely. Without this
     // the auto-print hold gate sees `undefined` on legacy-cached manual
     // jobs and dispatches them. Cheap + idempotent (pure function).
+    //
+    // Awaiting-manifest narrow exception: a job in _status:'pending' that
+    // has been stamped _awaitingManifest is also retained. Without this,
+    // a job whose API record drops out of /pending-jobs mid-awaiting would
+    // vanish from the cache before the polling-service escalation loop in
+    // the same pollJobs() tick could fire — leaving the folder + partial
+    // manifest on disk with no error trace for the operator.
+    //
+    // Why unconditional (not "within timeout"): the awaiting state itself
+    // is bounded by the polling escalation loop, which flips _status to
+    // 'error' once now - _awaitingManifestSince exceeds the threshold.
+    // Once escalated, the general rule above retains the job under the
+    // sticky-error path. So a pending+awaiting job persists in the cache
+    // for at most one polling cycle past its timeout before becoming
+    // 'error' — the bound is expressed through the escalation, not
+    // through this filter. A merge-side timeout check would silently drop
+    // jobs on the first cycle past threshold, never letting the polling
+    // loop fire — exactly the silent-vanish behaviour we are fixing.
     for (const existing of this.jobs) {
-      if (!newJobIds.has(existing.id) && existing._status && existing._status !== 'pending') {
+      if (newJobIds.has(existing.id)) continue;
+
+      const retain = (existing._status && existing._status !== 'pending')
+                  || (existing._status === 'pending' && existing._awaitingManifest === true);
+
+      if (retain) {
         const hold = computeHoldForReview(existing, ctx);
         merged.push({
           ...existing,
