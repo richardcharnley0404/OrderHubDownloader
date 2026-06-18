@@ -171,7 +171,7 @@ async function runTest() {
     const monitor = new FolderMonitor();
     monitor.startMonitoring(TEST_HOT_FOLDER, (statusUpdate) => {
       monitorDetected = true;
-      log('MONITOR DETECTED', `Order ${statusUpdate.orderNumber} -> ${statusUpdate.status}`);
+      log('MONITOR DETECTED', `Job ${statusUpdate.jobId} -> ${statusUpdate.status}`);
     });
 
     log('Monitoring started', TEST_HOT_FOLDER);

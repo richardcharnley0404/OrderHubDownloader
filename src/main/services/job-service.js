@@ -446,6 +446,18 @@ class JobService {
   }
 
   /**
+   * Find a job by its numeric OH job id. Used by the DPOF FolderMonitor
+   * pipeline, which extracts the id from the folder name as a string —
+   * Number() coercion at the boundary so it matches the numeric job.id
+   * the OrderHub API returns.
+   */
+  findJobById(jobId) {
+    const numeric = Number(jobId);
+    if (!Number.isFinite(numeric)) return undefined;
+    return this.jobs.find(j => j.id === numeric);
+  }
+
+  /**
    * Get jobs with a specific OHD status
    */
   getJobsByStatus(status) {

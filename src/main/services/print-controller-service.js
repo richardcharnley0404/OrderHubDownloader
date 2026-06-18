@@ -95,10 +95,22 @@ class PrintControllerService {
     // paths above honest.
     const hotFolderPath = controller.hotFolderPath || controller.outputPath;
 
+    // Darkroom Pro and Fuji JobMaker both emit { orderNumber, status, … }
+    // (Fuji via the onFujiStatus wrapper below). DPOF FolderMonitor emits a
+    // different shape { jobId, … } since the jobId folder-name change, so it
+    // has its own wrapper (onDpofStatusChange) further down.
     const onStatusChange = (status) => {
       jobStore.updateJobStatus(status.orderNumber, status.status);
       logger.info(`Print job status changed`, {
         orderNumber: status.orderNumber,
+        status: status.status,
+        controller: controller.name
+      });
+    };
+
+    const onDpofStatusChange = (status) => {
+      logger.info(`Print job status changed`, {
+        jobId: status.jobId,
         status: status.status,
         controller: controller.name
       });
@@ -162,7 +174,7 @@ class PrintControllerService {
     } else {
       // DPOF controllers (Noritsu, Epson): watches for folder prefix renames (o→e, o→q)
       const monitor = new FolderMonitor();
-      monitor.startMonitoring(hotFolderPath, onStatusChange);
+      monitor.startMonitoring(hotFolderPath, onDpofStatusChange);
       this.monitors.set(controllerId, monitor);
 
       logger.info('Started DPOF folder monitoring', {

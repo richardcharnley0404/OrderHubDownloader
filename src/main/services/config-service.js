@@ -86,6 +86,14 @@ const schema = {
     type: 'boolean',
     default: false
   },
+  // When ON, a printer-driven folder rename o→e (DPOF "accepted") triggers a
+  // POST to {baseUrl}/jobs/{jobId}/completed and marks the job locally
+  // completed. Default OFF — staging-only until validated; toggle via
+  // electron-store / devtools, no UI yet.
+  autoCompleteOnPrinterAccept: {
+    type: 'boolean',
+    default: false
+  },
   // Shared S3 settings
   s3Provider: {
     type: 'string',

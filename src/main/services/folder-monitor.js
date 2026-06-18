@@ -101,10 +101,12 @@ class FolderMonitor {
   }
 
   handlePrefixChange(folderName, prefix, callback) {
+    // Captures the numeric job id (job.id) that buildFolderName now writes
+    // immediately after the prefix, e.g. o38461218_PXDEMO-PFTAP4-1_…
     const match = folderName.match(/^[oeq](\d+)_(.+)$/);
     if (!match) return;
 
-    const [, orderNumber, productCode] = match;
+    const [, jobId, productCode] = match;
 
     let status;
     switch (prefix) {
@@ -114,7 +116,7 @@ class FolderMonitor {
       default:  return;
     }
 
-    callback({ orderNumber, productCode, status, timestamp: new Date() });
+    callback({ jobId, productCode, status, timestamp: new Date() });
   }
 
   stopMonitoring() {

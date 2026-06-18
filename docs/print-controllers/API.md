@@ -368,8 +368,8 @@ const monitor = new FolderMonitor();
 monitor.startMonitoring('C:\\PrintControllers\\Noritsu', (status) => {
   console.log(status);
   // {
-  //   orderNumber: '100456',
-  //   productCode: '8x12GLOSS',
+  //   jobId: '38461218',     // numeric OH job id captured from the folder name; same value as USR CID
+  //   productCode: 'PXDEMO-PFTAP4-1_8x12GLOSS',
   //   status: 'accepted',    // 'submitted' | 'accepted' | 'failed'
   //   timestamp: Date
   // }
@@ -423,10 +423,12 @@ Starts a `FolderMonitor` for the controller's hot folder. If monitoring is alrea
 printControllerService.startMonitoring('uuid-controller');
 ```
 
-When a status change is detected, it calls:
-```js
-jobStore.updateJobStatus(status.orderNumber, status.status);
-```
+When a status change is detected, the DPOF path forwards the event to
+`PollingService._handleFolderStatusChange`, which (when the
+`autoCompleteOnPrinterAccept` config flag is ON) looks the job up by
+`jobService.findJobById(status.jobId)` and on `'accepted'` POSTs to
+`{baseUrl}/jobs/{jobId}/completed`. With the flag OFF (the default),
+the handler is a full no-op.
 
 ### `stopMonitoring(controllerId)` → `void`
 

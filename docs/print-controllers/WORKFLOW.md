@@ -214,14 +214,15 @@ Hot folder filesystem event timeline:
    → Call handlePrefixChange('e100456_8x12GLOSS', 'e', callback)
 
 6. handlePrefixChange():
-   - Parse: orderNumber='100456', productCode='8x12GLOSS'
+   - Parse: jobId='38461218', productCode='PXDEMO-PFTAP4-1_8x12GLOSS'
    - prefix 'e' → status = 'accepted'
-   → callback({ orderNumber: '100456', productCode: '8x12GLOSS',
+   → callback({ jobId: '38461218',
+                productCode: 'PXDEMO-PFTAP4-1_8x12GLOSS',
                 status: 'accepted', timestamp: Date })
 
-7. PrintControllerService callback:
-   → jobStore.updateJobStatus('100456', 'accepted')
-   → Sets dpofStatus='accepted', dpofAcceptedAt=now
+7. PollingService._handleFolderStatusChange (DPOF auto-completion path):
+   → Gated by configService.get('autoCompleteOnPrinterAccept') — OFF by default.
+   → When ON: jobService.findJobById(jobId) + POST /jobs/{jobId}/completed.
 ```
 
 ### Regex used for folder parsing

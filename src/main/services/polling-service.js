@@ -607,56 +607,62 @@ class PollingService {
 
   /**
    * Handle a folder status change from a hot folder monitor.
-   * Maps printer folder renames to job status updates.
+   *
+   * Gated by config flag `autoCompleteOnPrinterAccept` (default false).
+   * When OFF this is a full no-op — no log, no local writes, no API call.
+   * When ON:
+   *   - 'submitted' (p→o)  → ignored; the submission already pushed a UI update.
+   *   - 'accepted'  (o→e)  → write _dpofAccepted/_dpofAcceptedAt, POST
+   *                          {baseUrl}/jobs/{jobId}/completed, notify renderer.
+   *                          On API failure: log warning, notify renderer, but
+   *                          do NOT force-mark the job complete locally — leave
+   *                          it visible and recoverable.
+   *   - 'failed'    (o→q)  → write _dpofFailed/_dpofFailedAt, notify renderer.
+   *   - unknown jobId      → silent (info log only, no warning spam).
+   *
+   * `findJobById` does Number() coercion at the boundary — the jobId from
+   * folder-monitor is a regex group (string), the API's job.id is numeric.
    */
   _handleFolderStatusChange(statusUpdate, controller) {
-    const { orderNumber, productCode, status, timestamp } = statusUpdate;
+    if (!configService.get('autoCompleteOnPrinterAccept')) return;
 
-    logger.info('Hot folder status change detected', {
-      controller: controller.name,
-      orderNumber,
-      productCode,
-      status
-    });
+    const { jobId, productCode, status, timestamp } = statusUpdate;
 
-    // Find the matching job in the local jobs list
-    const job = jobService.findJobByOrderNumber(orderNumber);
+    if (status !== 'accepted' && status !== 'failed') return;
 
+    const job = jobService.findJobById(jobId);
     if (!job) {
-      logger.logWarning('Hot folder status change for unknown job', {
-        orderNumber,
+      logger.info('Hot folder status change for job not in local cache — ignored', {
+        controller: controller.name,
+        jobId,
         productCode,
         status
       });
       return;
     }
 
-    // Map folder status to job updates
     if (status === 'accepted') {
       jobService.updateJobLocally(job.id, {
         _dpofAccepted: true,
         _dpofAcceptedAt: timestamp.toISOString()
       });
-      logger.info('Job DPOF accepted by printer — auto-marking as processed', { jobId: job.id, orderNumber });
+      logger.info('Job DPOF accepted by printer — auto-marking as completed', { jobId: job.id });
       jobService.markCompleted(job.id)
         .then(() => this._notifyJobsUpdated())
         .catch(err => {
-          logger.logWarning('DPOF auto-complete API call failed — updating locally', {
+          logger.logWarning('DPOF auto-complete API call failed — job left uncompleted for manual retry', {
             jobId: job.id, error: err.message,
           });
-          jobService.updateJobLocally(job.id, { _status: 'completed' });
           this._notifyJobsUpdated();
         });
-    } else if (status === 'failed') {
+    } else {
       jobService.updateJobLocally(job.id, {
         _dpofFailed: true,
         _dpofFailedAt: timestamp.toISOString()
       });
-      logger.logWarning('Job DPOF rejected by printer', { jobId: job.id, orderNumber });
-      logger.logWarning('Job DPOF rejected by printer', { jobId: job.id, orderNumber });
+      logger.logWarning('Job DPOF rejected by printer', { jobId: job.id });
     }
 
-    // Push update to renderer immediately
     this._notifyJobsUpdated();
   }
 }
