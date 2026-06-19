@@ -75,15 +75,22 @@ async function createReprint({ parentJobId, parentJobPath, sidecar, reprintJobId
     fs.mkdir(path.join(reprintJobPath, 'cache'),     { recursive: true }),
   ]);
 
-  // Source baselines. /originals/ is the standard "untouched first-arrival"
-  // snapshot. /working/ is the printable surface — recropFromOriginal (Phase 2)
-  // writes recropped customer originals only to /working/ and never to
-  // /originals/, so a sidecar entry whose `filename` is a recropped basename
-  // will be missing from /originals/. Falling back to /working/ on ENOENT
-  // keeps reprints working for that one row class without muddying
-  // /originals/ with derivative bytes.
+  // Source baselines for the three-layer fallback chain:
+  //   /originals/  — standard "untouched first-arrival" snapshot.
+  //   /working/    — printable surface; recropFromOriginal (Phase 2) writes
+  //                  recropped customer originals only to /working/ and never
+  //                  to /originals/, so a sidecar entry whose `filename` is a
+  //                  recropped basename will be missing from /originals/.
+  //   parent root  — where FTP/S3 ingestion writes verbatim copies. Falls back
+  //                  here when the sidecar/disk divergence pattern bites: the
+  //                  sidecar references a file that exists in the root but
+  //                  never made it into /working/ or /originals/. Most
+  //                  commonly hit when files arrive after ensureWorkingSetup's
+  //                  one-shot seed completed (see PXDEMO-Y64Z3U_38471868
+  //                  Fuji-reprint regression, 2026-06-19).
   const srcOriginals = originalsDir(parentJobPath);
   const srcWorking   = path.join(parentJobPath, 'working');
+  const srcRoot      = parentJobPath;
 
   async function copyFlaggedImage(filename, destAbs) {
     const fromOriginals = path.join(srcOriginals, filename);
@@ -94,10 +101,34 @@ async function createReprint({ parentJobId, parentJobPath, sidecar, reprintJobId
       if (err.code !== 'ENOENT') throw err;
     }
     const fromWorking = path.join(srcWorking, filename);
-    await fs.copyFile(fromWorking, destAbs);
-    console.warn(
-      `[reprint] /originals/${filename} missing — fell back to /working/. ` +
-      `Likely a Phase 2 re-cropped row.`
+    try {
+      await fs.copyFile(fromWorking, destAbs);
+      console.warn(
+        `[reprint] /originals/${filename} missing — fell back to /working/. ` +
+        `Likely a Phase 2 re-cropped row.`
+      );
+      return;
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+    }
+    const fromRoot = path.join(srcRoot, filename);
+    try {
+      await fs.copyFile(fromRoot, destAbs);
+      console.warn(
+        `[reprint] ${filename} missing from BOTH /originals/ AND /working/ ` +
+        `— fell back to job root. Root copy is the FTP/S3-delivered bytes; ` +
+        `if this was meant to be a re-cropped row (lives only in /working/), ` +
+        `the reprint will use the pre-crop original instead. Check the ` +
+        `operator's intent.`
+      );
+      return;
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+    }
+    throw new Error(
+      `Image not found anywhere for reprint: ${filename}. ` +
+      `Absent from /originals/, /working/, AND the job root (${srcRoot}). ` +
+      `Sidecar may reference a file that was deleted or never delivered.`
     );
   }
 
