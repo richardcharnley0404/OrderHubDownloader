@@ -730,6 +730,9 @@ class PrintService {
     if (route.controllerType === 'fujijobmaker') {
       return this._sendReprintViaFujiJobMaker(parentJob, route, reprintJobPath, reprintSuffix, reprintImages);
     }
+    if (route.controllerType === 'pdf_copy') {
+      return this._sendReprintViaPdfCopy(parentJob, route, reprintJobPath, reprintSuffix, reprintImages);
+    }
     // DPOF path covers noritsu / epson / legacy 'dpof' / unspecified —
     // see services/controller-types.js for the canonical set. The narrow
     // `=== 'dpof'` check that lived here previously was the v1.7.11
@@ -1212,6 +1215,155 @@ class PrintService {
       method:       'fujijobmaker-reprint',
       destPaths:    writeResult.writtenFiles,
       stagedFolder: writeResult.imageStagingFolder,
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Reprint — PDF-copy pipeline
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Send a built reprint job to a "pdf_copy" controller.
+   *
+   * Mirrors `_sendViaPdfCopyRouted` with the standard reprint-family
+   * adaptations:
+   *
+   *   1. PDFs come from `{reprintJobPath}/originals/`, listing the .pdf
+   *      files referenced in the reprint sidecar's `images` array. No
+   *      manifest is consulted. PDFs are NOT subject to CMY corrections
+   *      (they're document/vector-based, not pixel-graded), so the
+   *      `_applyCorrectionsToImageFiles` helper is intentionally skipped
+   *      — distinct from the DPOF / Darkroom Pro / Fuji reprints.
+   *   2. Destination folder = the reprint folder's own name
+   *      (`{path.basename(reprintJobPath)}` → `…_{id}-r{n}`), matching
+   *      `_sendReprintViaFolderCopy`'s naming so the reprint output
+   *      can't collide with the parent's `…_{id}` folder in the
+   *      controller output.
+   *   3. PDF pipeline + banner-sheet fallback branches mirror the normal
+   *      path verbatim, with `jobContext` derived from `parentJob` so
+   *      QR / job-number overlays render against the parent's identity
+   *      (the reprint inherits the parent's order context — the
+   *      operator-visible label on a re-printed PDF should still read
+   *      as the original job).
+   *   4. No `_markCompleted` / monitor / AI-quality / hold gates —
+   *      parent OH lifecycle untouched; operator already reviewed.
+   *
+   * Route validation: outputPath must be present. (The legacy "no
+   * controller" / "controller inactive" / "no channel mapping" failure
+   * modes don't apply to pdf_copy — routing-service skips Layer 3 for
+   * pdf_copy controllers at routing-service.js:228-241.)
+   *
+   * @param {object} parentJob       - Parent API job (from job-service cache)
+   * @param {object} route           - Pre-resolved route ({ controllerType:'pdf_copy', controllerName, outputPath, pdfPipeline, bannerSheet, … })
+   * @param {string} reprintJobPath  - Absolute path to the reprint job folder
+   * @param {string} reprintSuffix   - 'r1', 'r2', …
+   * @param {Array}  reprintImages   - Array from reprint sidecar.images ({ filename, qtyCurrent, corrections })
+   * @returns {Promise<{success:boolean, method?:string, destPath?:string, error?:string}>}
+   */
+  async _sendReprintViaPdfCopy(parentJob, route, reprintJobPath, reprintSuffix, reprintImages) {
+    if (!Array.isArray(reprintImages) || reprintImages.length === 0) {
+      return { success: false, error: 'Reprint has no images to send.' };
+    }
+
+    if (!route || !route.outputPath) {
+      return {
+        success: false,
+        error: 'PDF-copy reprint route missing required field (outputPath). Check Settings → Routing for the parent job\'s process.',
+      };
+    }
+
+    // Filter sidecar entries down to PDFs. Reprint folders for pdf_copy
+    // controllers should only ever contain PDFs, but the sidecar shape is
+    // shared with image jobs — guard explicitly so a mixed sidecar (which
+    // shouldn't happen but isn't impossible) doesn't silently include
+    // non-PDF entries.
+    const originalsPath = path.join(reprintJobPath, 'originals');
+    const pdfFiles = reprintImages
+      .filter(img => path.extname(img.filename).toLowerCase() === '.pdf')
+      .map(img => ({
+        sourcePath: path.join(originalsPath, img.filename),
+        filename:   path.basename(img.filename),
+      }));
+
+    if (pdfFiles.length === 0) {
+      return { success: false, error: 'Reprint has no PDF files to send (reprint sidecar contains no .pdf entries).' };
+    }
+
+    // Destination folder name = reprint folder's own basename so it can't
+    // collide with the parent's …_{id} folder in the controller output.
+    const reprintFolderName = path.basename(reprintJobPath);
+    const destFolder        = path.join(route.outputPath, reprintFolderName);
+
+    // jobContext drives PDF-pipeline overlays (QR, job-number stamp,
+    // etc.). Sourced from parentJob — the reprint inherits parent
+    // identity so the printed overlay reads as the original job.
+    // Matches _sendViaPdfCopyRouted's shape verbatim.
+    const jobContext = {
+      jobNumber:    parentJob.job_name || parentJob.order_number || String(parentJob.id),
+      orderId:      String(parentJob.order_id || parentJob.id),
+      qty:          parentJob.qty || 1,
+      customerName: parentJob.customer_name || '',
+    };
+
+    try {
+      fs.mkdirSync(destFolder, { recursive: true });
+      for (const pdfFile of pdfFiles) {
+        if (!fs.existsSync(pdfFile.sourcePath)) {
+          throw new Error(`Reprint PDF not found on disk: ${pdfFile.sourcePath}`);
+        }
+
+        const pipelineConfig = route.pdfPipeline;
+        if (pipelineConfig && pipelineConfig.steps && pipelineConfig.steps.length > 0) {
+          // Configured pipeline takes precedence over the legacy banner
+          // fallback — same precedence as the normal-send path.
+          const { applyPdfPipeline } = require('../../pdf-pipeline/pipeline');
+          let pdfBytes = await fs.promises.readFile(pdfFile.sourcePath);
+          pdfBytes = await applyPdfPipeline(new Uint8Array(pdfBytes), pipelineConfig, jobContext);
+          await fs.promises.writeFile(path.join(destFolder, pdfFile.filename), Buffer.from(pdfBytes));
+        } else if (route.bannerSheet) {
+          // Legacy banner-prepend fallback when no pipeline configured.
+          let finalBuffer = null;
+          try {
+            finalBuffer = await this._prependBannerPageToPdf(pdfFile.sourcePath, parentJob);
+          } catch (bannerErr) {
+            logger.logError('PDF reprint banner page generation failed — copying original PDF', bannerErr, {
+              parentJobId: parentJob.id,
+              reprintSuffix,
+            });
+          }
+          if (finalBuffer) {
+            await fs.promises.writeFile(path.join(destFolder, pdfFile.filename), finalBuffer);
+          } else {
+            fs.copyFileSync(pdfFile.sourcePath, path.join(destFolder, pdfFile.filename));
+          }
+        } else {
+          // Plain copy — no pipeline, no banner.
+          fs.copyFileSync(pdfFile.sourcePath, path.join(destFolder, pdfFile.filename));
+        }
+      }
+    } catch (writeErr) {
+      logger.logError('PDF reprint copy write failed', writeErr, {
+        parentJobId: parentJob.id,
+        reprintSuffix,
+        destFolder,
+      });
+      return { success: false, error: writeErr.message };
+    }
+
+    // Intentionally NO _markCompleted — parent lifecycle untouched.
+
+    logger.info('Reprint sent via PDF copy', {
+      parentJobId:  parentJob.id,
+      reprintSuffix,
+      controller:   route.controllerName,
+      destFolder,
+      files:        pdfFiles.length,
+    });
+
+    return {
+      success:  true,
+      method:   'pdf_copy-reprint',
+      destPath: destFolder,
     };
   }
 

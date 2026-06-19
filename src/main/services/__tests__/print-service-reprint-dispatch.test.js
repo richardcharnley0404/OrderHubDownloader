@@ -49,16 +49,19 @@ function withDispatchSpy(fn) {
       fc:   printService._sendReprintViaFolderCopy,
       dpof: printService._sendReprintViaDPOF,
       fuji: printService._sendReprintViaFujiJobMaker,
+      pdf:  printService._sendReprintViaPdfCopy,
     };
     printService._sendReprintViaDarkroomPro  = async () => { calls.push('darkroompro');  return { success: true, method: 'darkroom-pro-reprint' }; };
     printService._sendReprintViaFolderCopy   = async () => { calls.push('folder_copy');  return { success: true, method: 'folder-copy-reprint' }; };
     printService._sendReprintViaDPOF         = async () => { calls.push('dpof');         return { success: true, method: 'dpof-reprint' }; };
     printService._sendReprintViaFujiJobMaker = async () => { calls.push('fujijobmaker'); return { success: true, method: 'fujijobmaker-reprint' }; };
+    printService._sendReprintViaPdfCopy      = async () => { calls.push('pdf_copy');     return { success: true, method: 'pdf_copy-reprint' }; };
     t.after(() => {
       printService._sendReprintViaDarkroomPro  = orig.dp;
       printService._sendReprintViaFolderCopy   = orig.fc;
       printService._sendReprintViaDPOF         = orig.dpof;
       printService._sendReprintViaFujiJobMaker = orig.fuji;
+      printService._sendReprintViaPdfCopy      = orig.pdf;
       routingService.resolveRoute              = originalResolveRoute;
     });
     await fn(calls);
@@ -126,8 +129,15 @@ test('sendReprint: controllerType "fujijobmaker" dispatches to _sendReprintViaFu
   assert.equal(result.success, true);
 }));
 
+test('sendReprint: controllerType "pdf_copy" dispatches to _sendReprintViaPdfCopy (Phase 3b)', withDispatchSpy(async (calls) => {
+  stubRoute('pdf_copy');
+  const result = await printService.sendReprint(PARENT, REPRINT_PATH, 'r1', REPRINT_IMAGES);
+  assert.deepEqual(calls, ['pdf_copy'], 'must reach the PDF-copy reprint pipeline');
+  assert.equal(result.success, true);
+}));
+
 test('sendReprint: still-unsupported types return the not-yet-supported error', withDispatchSpy(async (calls) => {
-  for (const t of ['frontline', 'pdf_copy']) {
+  for (const t of ['frontline']) {
     stubRoute(t);
     const result = await printService.sendReprint(PARENT, REPRINT_PATH, 'r1', REPRINT_IMAGES);
     assert.equal(result.success, false, `${t} must not dispatch`);
