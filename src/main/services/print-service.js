@@ -17,6 +17,7 @@ const { generateFujiJobMakerFiles } = require('./fuji-jobmaker-generator');
 const { fujiJobMakerFileWriter } = require('./fuji-jobmaker-file-writer');
 const { printControllerService } = require('./print-controller-service');
 const { resolvePrintSizeCode } = require('./routing-service');
+const { isDpofType } = require('./controller-types');
 const logger = require('./logger');
 const { buildFolderName } = require('../../shared/printUtils');
 
@@ -553,44 +554,28 @@ class PrintService {
    * @param {Array}    reprintImages   - Array from reprint sidecar.images ({ filename, qtyCurrent })
    * @returns {Promise<{ success: boolean, folderName?: string, error?: string }>}
    */
-  async _sendReprintViaDPOF(parentJob, reprintJobPath, reprintSuffix, reprintImages) {
-    const mapping = configService.getProcessMapping(parentJob.process);
-    if (!mapping.controllerId) {
-      return { success: false, error: `Parent job "${parentJob.job_name}" has no controller mapping for process "${parentJob.process}".` };
-    }
-
-    const controller = printControllerStore.getController(mapping.controllerId);
-    if (!controller) {
-      throw new Error(`Print controller ${mapping.controllerId} not found.`);
-    }
-    if (!controller.isActive) {
-      throw new Error(`Print controller "${controller.name}" is not active.`);
-    }
-    if (controller.type === 'darkroompro') {
-      // Darkroom Pro reprints used to short-circuit here. They now have a
-      // proper pipeline (_sendReprintViaDarkroomPro) but reaching this
-      // method on a Darkroom Pro parent should never happen — the
-      // orchestrator (sendReprint) is responsible for dispatching to the
-      // correct controller-type method. If we land here it means a caller
-      // bypassed the orchestrator and called this DPOF-specific method
-      // directly; loud failure beats silent wrong-pipeline dispatch.
+  async _sendReprintViaDPOF(parentJob, route, reprintJobPath, reprintSuffix, reprintImages) {
+    // Defensive assertion — sendReprint already routes Darkroom Pro to its
+    // own pipeline, but if a future caller wires this method up directly
+    // we want loud failure rather than wrong-pipeline dispatch.
+    if (route && route.controllerType === 'darkroompro') {
       return {
         success: false,
-        error: 'Darkroom Pro reprints must go through sendReprint() — _sendReprintViaDPOF received a Darkroom Pro parent.'
+        error: 'Darkroom Pro reprints must go through sendReprint() — _sendReprintViaDPOF received a Darkroom Pro route.'
       };
     }
 
-    // Resolve product/channel mapping using parent job's product code + options
-    const optionsObj = {};
-    (parentJob.options || []).forEach(opt => { optionsObj[opt.name] = opt.value; });
-    const channelMapping = printControllerStore.findChannelForJob(
-      controller.id, parentJob.product_code || '', optionsObj
-    );
-
-    if (!channelMapping) {
+    // Route validation — the legacy `controller.isActive` / "controller not
+    // found" / "no product mapping" guards collapse into one check now,
+    // because resolveRoute only returns type:'controller' with all four
+    // dispatch fields when the controller AND its channel mapping resolved
+    // cleanly. A missing outputPath or channelNumber here means routing-
+    // service handed us a malformed route — surface it instead of crashing
+    // deep in orderFolderWriter / dpofGenerator.
+    if (!route || !route.outputPath || route.channelNumber == null) {
       return {
         success: false,
-        error: `No product mapping found for product code "${parentJob.product_code || '(none)'}". Add a mapping in Settings > Print Controllers.`
+        error: `Reprint route missing required fields (outputPath: ${route && route.outputPath ? 'ok' : 'missing'}, channelNumber: ${route && route.channelNumber != null ? 'ok' : 'missing'}). Check Settings → Routing for the parent job's process and product.`
       };
     }
 
@@ -625,23 +610,26 @@ class PrintService {
       reprintCorrectionsMap
     );
 
-    // Generate DPOF content using parent job's controller/channel settings.
-    // See routing-service.resolvePrintSizeCode for the wrap/passthrough rules.
-    const reprintPrintSizeCode = resolvePrintSizeCode(channelMapping);
-
+    // Generate DPOF content. All controller/channel inputs come from the
+    // resolved route — channelNumber and printSizeCode were derived by
+    // routing-service.resolveRoute via the same Layer-3 channelMappings
+    // lookup the normal sendViaDPOFRouted relies on (see
+    // routing-service.js:413-427 for the route shape).
     const dpofContent = dpofGenerator.generate({
       orderNumber:    parentJob.order_number  || '',
       jobId:          parentJob.id,
       customerName:   parentJob.customer_name || '',
-      channelNumber:  channelMapping.channelNumber,
-      printSizeCode:  reprintPrintSizeCode,
+      channelNumber:  route.channelNumber,
+      printSizeCode:  route.printSizeCode,
       images:         lineItems.map(li => ({ filename: li.filename, quantity: li.quantity })),
-      controllerType: controller.type,
+      controllerType: route.controllerType || 'noritsu',
     });
 
-    // Folder-name options sourced from the controller. Default on for back-compat.
+    // Folder-name options sourced from the route. Default on for back-compat
+    // — route.includeCustomerInFolder is `controller.includeCustomerInFolder
+    // !== false` per routing-service, so an undefined here also means "on".
     const nameOpts = {
-      includeCustomerName: controller.includeCustomerInFolder !== false,
+      includeCustomerName: route.includeCustomerInFolder !== false,
       customerName:        parentJob.customer_name || '',
     };
 
@@ -649,7 +637,7 @@ class PrintService {
     let writeResult;
     try {
       writeResult = await orderFolderWriter.writeOrderFolder(
-        controller.hotFolderPath,
+        route.outputPath,
         parentJob,
         dpofContent,
         imageFiles,
@@ -669,7 +657,7 @@ class PrintService {
     logger.info('Reprint sent to DPOF controller', {
       parentJobId:  parentJob.id,
       reprintSuffix,
-      controller:   controller.name,
+      controller:   route.controllerName,
       hotFolder:    writeResult.folderPath,
       folderName:   writeResult.folderName,
       images:       imageFiles.length
@@ -739,11 +727,15 @@ class PrintService {
     if (route.controllerType === 'folder_copy') {
       return this._sendReprintViaFolderCopy(parentJob, route, reprintJobPath, reprintSuffix, reprintImages);
     }
-    // DPOF path covers controllerType 'dpof' and legacy / unspecified —
-    // existing _sendReprintViaDPOF resolves its own controller config via
-    // the legacy printControllerStore so we don't need to pass the route.
-    if (!route.controllerType || route.controllerType === 'dpof') {
-      return this._sendReprintViaDPOF(parentJob, reprintJobPath, reprintSuffix, reprintImages);
+    // DPOF path covers noritsu / epson / legacy 'dpof' / unspecified —
+    // see services/controller-types.js for the canonical set. The narrow
+    // `=== 'dpof'` check that lived here previously was the v1.7.11
+    // Noritsu reprint bug. _sendReprintViaDPOF takes the route directly
+    // (no internal re-resolution via legacy stores) so routing-service-
+    // only process mappings + routing-hold release on the parent are
+    // honoured automatically.
+    if (isDpofType(route.controllerType)) {
+      return this._sendReprintViaDPOF(parentJob, route, reprintJobPath, reprintSuffix, reprintImages);
     }
 
     return {

@@ -4,6 +4,7 @@ const configService = require('./services/config-service');
 const s3Service = require('./services/s3-service');
 const jobService = require('./services/job-service');
 const printService = require('./services/print-service');
+const { DPOF_TYPES } = require('./services/controller-types');
 const { runTest: runPrintControllerTest } = require('./services/test-print-controller');
 const { printControllerStore } = require('./services/print-controller-store');
 const routingService = require('./services/routing-service');
@@ -2720,7 +2721,8 @@ async function runAutoPrint() {
       // Surfaced when yesterday's autoprint pivot routed darkroompro through
       // this loop for the first time (previously bypassed via direct
       // sendToPrint at renderer).
-      const DPOF_TYPES = new Set(['noritsu', 'epson', 'dpof']);
+      // DPOF_TYPES imported from services/controller-types — single source
+      // of truth shared with print-service.sendReprint's dispatch switch.
       const isDpofCtrl = DPOF_TYPES.has(ctrl.type) || !ctrl.type;
       if (isDpofCtrl && !route.channelNumber) continue;
 
