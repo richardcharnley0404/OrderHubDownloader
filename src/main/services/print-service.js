@@ -733,6 +733,9 @@ class PrintService {
     if (route.controllerType === 'pdf_copy') {
       return this._sendReprintViaPdfCopy(parentJob, route, reprintJobPath, reprintSuffix, reprintImages);
     }
+    if (route.controllerType === 'frontline') {
+      return this._sendReprintViaFrontline(parentJob, route, reprintJobPath, reprintSuffix, reprintImages);
+    }
     // DPOF path covers noritsu / epson / legacy 'dpof' / unspecified —
     // see services/controller-types.js for the canonical set. The narrow
     // `=== 'dpof'` check that lived here previously was the v1.7.11
@@ -1364,6 +1367,174 @@ class PrintService {
       success:  true,
       method:   'pdf_copy-reprint',
       destPath: destFolder,
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Reprint — Frontline pipeline
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Send a built reprint job to a Frontline controller.
+   *
+   * Mirrors `_sendViaFrontlineRouted` with the standard reprint-family
+   * adaptations:
+   *
+   *   1. Images come from `{reprintJobPath}/originals/` (the clean copies
+   *      reprintManager produced). No manifest is consulted — the reprint
+   *      sidecar's `images` array is the source of truth for which files
+   *      print and at what quantity. CMY corrections from the reprint
+   *      sidecar are re-applied to `{reprintJobPath}/working/` via
+   *      `_applyCorrectionsToImageFiles` (Frontline is JPEG-based; same
+   *      pattern as DPOF / Darkroom Pro / Fuji).
+   *   2. The `id` passed to the generator (and written into the XML's
+   *      `<customerID>` per frontline-generator's docstring) AND to the
+   *      file writer (which drives the folder name + XML filename) is
+   *      `${parentJob.id}-${reprintSuffix}` — e.g. `38461218-r1`. This
+   *      gives a reprint-suffixed `{outputPath}\{jobId}-r1\` folder and
+   *      `{jobId}-r1.xml` file, neither colliding with the parent's
+   *      `{outputPath}\{jobId}\` + `{jobId}.xml`. Frontline's print queue
+   *      dedupes on customerID, so the suffixed id also stops the queue
+   *      from rejecting the reprint as a duplicate of the parent.
+   *   3. job_name carries the reprint suffix too so operator-facing
+   *      log lines + backPrint placeholders ({jobName}) read as a
+   *      distinct reprint rather than the parent.
+   *   4. Parent OH lifecycle untouched — no `_markCompleted`. Reprint is
+   *      a sibling job.
+   *   5. No monitor registration (Frontline has no status-feedback
+   *      mechanism — normal-send is fire-and-forget too).
+   *   6. No AI Quality / Hold-for-review / auto-print gates.
+   *
+   * Route validation: outputPath, batchCode, and sortString must all be
+   * present. The latter two come from routing-service's Layer-3 channel-
+   * mapping lookup against the parent's productCode+options on the
+   * target controller; a missing field means the channel mapping isn't
+   * configured. Surface a clean error instead of generating a malformed
+   * XML.
+   *
+   * @param {object} parentJob       - Parent API job (from job-service cache)
+   * @param {object} route           - Pre-resolved route ({ controllerId, outputPath, device, backPrint1, backPrint2, batchCode, sortString, controllerName, … })
+   * @param {string} reprintJobPath  - Absolute path to the reprint job folder
+   * @param {string} reprintSuffix   - 'r1', 'r2', …
+   * @param {Array}  reprintImages   - Array from reprint sidecar.images ({ filename, qtyCurrent, corrections })
+   * @returns {Promise<{success:boolean, method?:string, destPath?:string, error?:string}>}
+   */
+  async _sendReprintViaFrontline(parentJob, route, reprintJobPath, reprintSuffix, reprintImages) {
+    if (!Array.isArray(reprintImages) || reprintImages.length === 0) {
+      return { success: false, error: 'Reprint has no images to send.' };
+    }
+
+    if (!route || !route.outputPath || !route.batchCode || !route.sortString) {
+      const missing = [
+        !route || !route.outputPath  ? 'outputPath'  : null,
+        !route || !route.batchCode   ? 'batchCode'   : null,
+        !route || !route.sortString  ? 'sortString'  : null,
+      ].filter(Boolean).join(', ');
+      return {
+        success: false,
+        error: `Frontline reprint route missing required fields (${missing}). Add a channel mapping for the parent's product on this controller in Settings → Routing.`,
+      };
+    }
+
+    const originalsPath = path.join(reprintJobPath, 'originals');
+    const workingPath   = path.join(reprintJobPath, 'working');
+
+    // Source = /originals/. No manifest, no enhanced-path lookup —
+    // matches the DPOF + Darkroom Pro + Fuji reprint methods.
+    let imageFiles = reprintImages.map(img => ({
+      sourcePath: path.join(originalsPath, img.filename),
+      filename:   img.filename,
+    }));
+
+    for (const img of imageFiles) {
+      if (!fs.existsSync(img.sourcePath)) {
+        return {
+          success: false,
+          error: `Reprint image not found on disk: ${img.sourcePath}`,
+        };
+      }
+    }
+
+    // Re-apply CMY corrections from the reprint sidecar to /working/.
+    const correctionsMap = new Map(
+      reprintImages.map(img => [img.filename, img.corrections || {}])
+    );
+    imageFiles = await this._applyCorrectionsToImageFiles(
+      imageFiles,
+      workingPath,
+      correctionsMap,
+    );
+
+    // Reprint-suffixed jobId drives BOTH the XML's <customerID> AND the
+    // writer's folder name + XML filename. Parent: `{outputPath}\{id}\` +
+    // `{id}.xml` + <customerID>{id}</customerID>. Reprint: same shape with
+    // `{id}-r1` everywhere. No collision in any of the three.
+    const reprintJobId   = `${parentJob.id}-${reprintSuffix}`;
+    const reprintJobName = `${parentJob.job_name || ''}-${reprintSuffix}`;
+
+    // Build the generator input. Images come from the reprint sidecar
+    // (filename + qtyCurrent), parallel to imageFiles after corrections
+    // so basenames line up.
+    const frontlineJob = {
+      id:            reprintJobId,
+      order_number:  parentJob.order_number  || '',
+      job_name:      reprintJobName,
+      customer_name: parentJob.customer_name || '',
+      images: reprintImages.map((img, i) => ({
+        filename:      imageFiles[i].filename,
+        quantity:      img.qtyCurrent || 1,
+        rotationAngle: 0,
+      })),
+    };
+
+    const controllerConfig = {
+      device:     route.device     || 'Pixfizz',
+      backPrint1: route.backPrint1 || '{jobName}  {customerName}',
+      backPrint2: route.backPrint2 || '{jobId}  {filename}',
+    };
+
+    const channelConfig = {
+      batchCode:  route.batchCode,
+      sortString: route.sortString,
+    };
+
+    const xmlContent = frontlineGenerator.generate(controllerConfig, channelConfig, frontlineJob);
+
+    let writeResult;
+    try {
+      writeResult = await frontlineFileWriter.writeJobFolder(
+        route.outputPath,
+        reprintJobId,
+        xmlContent,
+        imageFiles,
+      );
+    } catch (writeErr) {
+      logger.logError('Frontline reprint write failed', writeErr, {
+        parentJobId:  parentJob.id,
+        reprintSuffix,
+        controller:   route.controllerName,
+      });
+      return { success: false, error: writeErr.message };
+    }
+
+    // Intentionally NO _markCompleted — parent lifecycle untouched.
+    // Intentionally NO monitor registration — Frontline has no status
+    // feedback; normal-send is fire-and-forget too.
+
+    logger.info('Reprint sent via Frontline', {
+      parentJobId:  parentJob.id,
+      reprintSuffix,
+      controller:   route.controllerName,
+      reprintJobId,
+      destFolder:   writeResult.jobFolderPath,
+      xmlFile:      writeResult.xmlPath,
+      images:       imageFiles.length,
+    });
+
+    return {
+      success:  true,
+      method:   'frontline-reprint',
+      destPath: writeResult.jobFolderPath,
     };
   }
 

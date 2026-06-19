@@ -45,23 +45,26 @@ function withDispatchSpy(fn) {
   return async (t) => {
     const calls = [];
     const orig = {
-      dp:   printService._sendReprintViaDarkroomPro,
-      fc:   printService._sendReprintViaFolderCopy,
-      dpof: printService._sendReprintViaDPOF,
-      fuji: printService._sendReprintViaFujiJobMaker,
-      pdf:  printService._sendReprintViaPdfCopy,
+      dp:    printService._sendReprintViaDarkroomPro,
+      fc:    printService._sendReprintViaFolderCopy,
+      dpof:  printService._sendReprintViaDPOF,
+      fuji:  printService._sendReprintViaFujiJobMaker,
+      pdf:   printService._sendReprintViaPdfCopy,
+      front: printService._sendReprintViaFrontline,
     };
     printService._sendReprintViaDarkroomPro  = async () => { calls.push('darkroompro');  return { success: true, method: 'darkroom-pro-reprint' }; };
     printService._sendReprintViaFolderCopy   = async () => { calls.push('folder_copy');  return { success: true, method: 'folder-copy-reprint' }; };
     printService._sendReprintViaDPOF         = async () => { calls.push('dpof');         return { success: true, method: 'dpof-reprint' }; };
     printService._sendReprintViaFujiJobMaker = async () => { calls.push('fujijobmaker'); return { success: true, method: 'fujijobmaker-reprint' }; };
     printService._sendReprintViaPdfCopy      = async () => { calls.push('pdf_copy');     return { success: true, method: 'pdf_copy-reprint' }; };
+    printService._sendReprintViaFrontline    = async () => { calls.push('frontline');    return { success: true, method: 'frontline-reprint' }; };
     t.after(() => {
       printService._sendReprintViaDarkroomPro  = orig.dp;
       printService._sendReprintViaFolderCopy   = orig.fc;
       printService._sendReprintViaDPOF         = orig.dpof;
       printService._sendReprintViaFujiJobMaker = orig.fuji;
       printService._sendReprintViaPdfCopy      = orig.pdf;
+      printService._sendReprintViaFrontline    = orig.front;
       routingService.resolveRoute              = originalResolveRoute;
     });
     await fn(calls);
@@ -136,15 +139,53 @@ test('sendReprint: controllerType "pdf_copy" dispatches to _sendReprintViaPdfCop
   assert.equal(result.success, true);
 }));
 
-test('sendReprint: still-unsupported types return the not-yet-supported error', withDispatchSpy(async (calls) => {
-  for (const t of ['frontline']) {
-    stubRoute(t);
+test('sendReprint: controllerType "frontline" dispatches to _sendReprintViaFrontline (Phase 3c)', withDispatchSpy(async (calls) => {
+  stubRoute('frontline');
+  const result = await printService.sendReprint(PARENT, REPRINT_PATH, 'r1', REPRINT_IMAGES);
+  assert.deepEqual(calls, ['frontline'], 'must reach the Frontline reprint pipeline');
+  assert.equal(result.success, true);
+}));
+
+// ── Matrix-complete assertion ────────────────────────────────────────────────
+//
+// Every controllerType the system can produce must route to a reprint
+// dispatch arm. With Phase 3c landed the "not yet supported" branch should
+// be unreachable for any configured controller — only truly-unknown types
+// (e.g. typos, future-but-unwired types) should hit it.
+
+test('sendReprint: reprint matrix is complete — every configured controllerType dispatches', withDispatchSpy(async (calls) => {
+  const matrix = [
+    { type: '',             arm: 'dpof'         }, // legacy untyped → DPOF
+    { type: 'dpof',         arm: 'dpof'         },
+    { type: 'noritsu',      arm: 'dpof'         },
+    { type: 'epson',        arm: 'dpof'         },
+    { type: 'darkroompro',  arm: 'darkroompro'  },
+    { type: 'folder_copy',  arm: 'folder_copy'  },
+    { type: 'fujijobmaker', arm: 'fujijobmaker' },
+    { type: 'pdf_copy',     arm: 'pdf_copy'     },
+    { type: 'frontline',    arm: 'frontline'    },
+  ];
+
+  for (const { type, arm } of matrix) {
+    calls.length = 0;
+    stubRoute(type);
     const result = await printService.sendReprint(PARENT, REPRINT_PATH, 'r1', REPRINT_IMAGES);
-    assert.equal(result.success, false, `${t} must not dispatch`);
-    assert.match(result.error, /not yet supported for controller type/);
-    assert.match(result.error, new RegExp(t));
+    assert.equal(result.success, true, `controllerType "${type}" must dispatch (matrix-complete invariant)`);
+    assert.deepEqual(calls, [arm], `controllerType "${type}" must reach the "${arm}" reprint arm`);
   }
-  assert.deepEqual(calls, [], 'none of the unsupported types should reach a dispatch arm');
+}));
+
+test('sendReprint: truly-unknown controllerType still returns the not-yet-supported error (forward-compat)', withDispatchSpy(async (calls) => {
+  // The unsupported branch isn't dead — it's the safety net for typos in
+  // routing config or future controller types added to routing-service
+  // ahead of their reprint dispatcher. Pinning the message keeps the
+  // operator-facing error from regressing into a raw crash.
+  stubRoute('totally-fictional-controller-type');
+  const result = await printService.sendReprint(PARENT, REPRINT_PATH, 'r1', REPRINT_IMAGES);
+  assert.equal(result.success, false);
+  assert.match(result.error, /not yet supported for controller type/);
+  assert.match(result.error, /totally-fictional-controller-type/);
+  assert.deepEqual(calls, [], 'unknown types must not reach any dispatch arm');
 }));
 
 test('sendReprint: unrouted parent fails before the dispatch switch', withDispatchSpy(async (calls) => {
