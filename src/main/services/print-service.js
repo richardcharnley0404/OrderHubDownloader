@@ -727,6 +727,9 @@ class PrintService {
     if (route.controllerType === 'folder_copy') {
       return this._sendReprintViaFolderCopy(parentJob, route, reprintJobPath, reprintSuffix, reprintImages);
     }
+    if (route.controllerType === 'fujijobmaker') {
+      return this._sendReprintViaFujiJobMaker(parentJob, route, reprintJobPath, reprintSuffix, reprintImages);
+    }
     // DPOF path covers noritsu / epson / legacy 'dpof' / unspecified —
     // see services/controller-types.js for the canonical set. The narrow
     // `=== 'dpof'` check that lived here previously was the v1.7.11
@@ -1009,6 +1012,206 @@ class PrintService {
       method:     'folder_copy-reprint',
       sourcePath: workingPath,
       destPath:   destFolder,
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Reprint — Fuji JobMaker pipeline
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Send a built reprint job to a Fuji JobMaker controller.
+   *
+   * Mirrors `_sendViaFujiJobMakerRouted` with the standard reprint-family
+   * adaptations:
+   *
+   *   1. Images come from `{reprintJobPath}/originals/` (the clean copies
+   *      reprintManager produced). No manifest — the reprint sidecar's
+   *      `images` array is the source of truth for which files print and
+   *      at what qty. CMY corrections from the reprint sidecar are
+   *      re-applied to `{reprintJobPath}/working/` via
+   *      `_applyCorrectionsToImageFiles` (Fuji is JPEG-based; corrections
+   *      matter — same as DPOF / Darkroom Pro).
+   *   2. The orderRef passed to the file writer is
+   *      `${parentJob.order_number}-${reprintSuffix}` so the writer
+   *      derives reprint-suffixed surface filenames
+   *      (`{orderRef}-r1_Lustre.txt`) AND a reprint-suffixed staging
+   *      folder (`{imageStagingRoot}\{orderRef}-r1\`) — neither collides
+   *      with the parent's outputs in the same hot folder.
+   *   3. Parent OH lifecycle is left untouched — no `_markInProduction` /
+   *      `_markCompleted`. Reprint is a sibling job.
+   *   4. The Fuji monitor is NOT registered for the reprint surface files.
+   *      The monitor's accept/timed-out callback feeds into the parent's
+   *      `jobStore.updateJobStatus` (via print-controller-service's
+   *      `onFujiStatus` wrapper). If the reprint were tracked, its
+   *      acceptance would mutate the parent's status — incorrect. The
+   *      reprint folder/files are still on disk for the operator to
+   *      inspect; status feedback for the reprint specifically is out of
+   *      scope (parity with the DPOF + Darkroom Pro reprint methods,
+   *      which also bypass monitoring).
+   *   5. No AI Quality scoring / Hold-for-review / auto-print gates — the
+   *      operator reviewed before triggering the reprint.
+   *
+   * Route validation: outputPath, imageStagingRoot, surface, and printCode
+   * must all be present. Routing-service's Layer-3 channel-mapping lookup
+   * populates surface/surfaceCode/printCode from the parent's
+   * productCode+options on the target controller, so a missing field here
+   * means the route was hand-constructed or the parent's product has no
+   * mapping on this controller. Surface a clean error instead of crashing
+   * inside `generateFujiJobMakerFiles`.
+   *
+   * @param {object} parentJob       - Parent API job (from job-service cache)
+   * @param {object} route           - Pre-resolved route ({ controllerId, outputPath, imageStagingRoot, surface, surfaceCode, printCode, printerName, autoCorrect, backprintMode, backprintTemplate, controllerName, … })
+   * @param {string} reprintJobPath  - Absolute path to the reprint job folder
+   * @param {string} reprintSuffix   - 'r1', 'r2', …
+   * @param {Array}  reprintImages   - Array from reprint sidecar.images ({ filename, qtyCurrent, corrections })
+   * @returns {Promise<{success:boolean, method?:string, destPaths?:string[], stagedFolder?:string, error?:string}>}
+   */
+  async _sendReprintViaFujiJobMaker(parentJob, route, reprintJobPath, reprintSuffix, reprintImages) {
+    if (!Array.isArray(reprintImages) || reprintImages.length === 0) {
+      return { success: false, error: 'Reprint has no images to send.' };
+    }
+
+    // Route validation — collapses the legacy "controller not found" /
+    // "controller not active" / "no channel mapping" branches into one
+    // shape-check on the route. routing-service.resolveRoute only returns
+    // a fully-populated fujijobmaker route when the controller exists
+    // AND the channel mapping for productCode+options resolved cleanly.
+    if (!route || !route.outputPath || !route.imageStagingRoot || !route.surface || !route.printCode) {
+      const missing = [
+        !route || !route.outputPath        ? 'outputPath'        : null,
+        !route || !route.imageStagingRoot  ? 'imageStagingRoot'  : null,
+        !route || !route.surface           ? 'surface'           : null,
+        !route || !route.printCode         ? 'printCode'         : null,
+      ].filter(Boolean).join(', ');
+      return {
+        success: false,
+        error: `Fuji JobMaker reprint route missing required fields (${missing}). Add a channel mapping for the parent's product on this controller in Settings → Routing.`,
+      };
+    }
+
+    const originalsPath = path.join(reprintJobPath, 'originals');
+    const workingPath   = path.join(reprintJobPath, 'working');
+
+    // Source = /originals/. No manifest, no enhanced-path lookup —
+    // matches the DPOF + Darkroom Pro reprint methods.
+    let imageFiles = reprintImages.map(img => ({
+      sourcePath: path.join(originalsPath, img.filename),
+      filename:   img.filename,
+    }));
+
+    for (const img of imageFiles) {
+      if (!fs.existsSync(img.sourcePath)) {
+        return {
+          success: false,
+          error: `Reprint image not found on disk: ${img.sourcePath}`,
+        };
+      }
+    }
+
+    // Re-apply CMY corrections from the reprint sidecar to /working/.
+    const correctionsMap = new Map(
+      reprintImages.map(img => [img.filename, img.corrections || {}])
+    );
+    imageFiles = await this._applyCorrectionsToImageFiles(
+      imageFiles,
+      workingPath,
+      correctionsMap,
+    );
+
+    // Reprint-suffixed orderRef drives the writer's filenames + staging
+    // folder. Parent: orderRef='PXDEMO-XYZ' → file 'PXDEMO-XYZ_Lustre.txt'
+    // + staging 'imageStagingRoot\PXDEMO-XYZ\'. Reprint: orderRef
+    // 'PXDEMO-XYZ-r1' → 'PXDEMO-XYZ-r1_Lustre.txt' +
+    // 'imageStagingRoot\PXDEMO-XYZ-r1\'. No collision.
+    const reprintOrderRef = `${parentJob.order_number || ''}-${reprintSuffix}`;
+
+    const fullName = (parentJob.customer_name || '').trim();
+    const surface     = route.surface;
+    const surfaceCode = route.surfaceCode || (surface ? surface.charAt(0).toUpperCase() : '');
+
+    const fujiJob = {
+      orderRef: reprintOrderRef,
+      id:       parentJob.id,
+      jobName:  parentJob.job_name || parentJob.order_number || '',
+      dueAt:    parentJob.due_at || null,
+      customer: {
+        fullName,
+        email: parentJob.customer_email || '',
+        phone: parentJob.customer_phone || '',
+      },
+      surfaceGroups: [{
+        surface,
+        surfaceCode,
+        images: reprintImages.map((img, i) => ({
+          filename:  imageFiles[i].filename,
+          printCode: route.printCode,
+          quantity:  img.qtyCurrent || 1,
+          // backPrint deliberately undefined — 'image' mode is deferred
+          // in v0, matching the normal-send path.
+        })),
+      }],
+    };
+
+    const controllerCfg = {
+      imageStagingRoot:  route.imageStagingRoot,
+      printerName:       route.printerName || '',
+      autoCorrect:       route.autoCorrect === undefined ? null : route.autoCorrect,
+      backprintMode:     route.backprintMode     || 'none',
+      backprintTemplate: route.backprintTemplate || '',
+    };
+
+    let surfaceFiles;
+    try {
+      surfaceFiles = generateFujiJobMakerFiles(fujiJob, controllerCfg);
+    } catch (genErr) {
+      logger.logError('Fuji JobMaker reprint generation failed', genErr, {
+        parentJobId:  parentJob.id,
+        reprintSuffix,
+        controller:   route.controllerName,
+      });
+      return { success: false, error: genErr.message };
+    }
+
+    let writeResult;
+    try {
+      writeResult = await fujiJobMakerFileWriter.writeOrderFiles({
+        hotFolderPath:    route.outputPath,
+        imageStagingRoot: route.imageStagingRoot,
+        orderRef:         reprintOrderRef,
+        imageFiles,
+        surfaceFiles,
+      });
+    } catch (writeErr) {
+      logger.logError('Fuji JobMaker reprint write failed — staged images may remain', writeErr, {
+        parentJobId:  parentJob.id,
+        reprintSuffix,
+        controller:   route.controllerName,
+      });
+      return { success: false, error: writeErr.message };
+    }
+
+    // Intentionally NO printControllerService.startMonitoring + NO
+    // monitor.trackSubmission — see method docstring point 4.
+    // Intentionally NO _markInProduction / _markCompleted — parent
+    // lifecycle untouched.
+
+    logger.info('Reprint sent via Fuji JobMaker', {
+      parentJobId:  parentJob.id,
+      reprintSuffix,
+      controller:   route.controllerName,
+      orderRef:     reprintOrderRef,
+      surface,
+      printCode:    route.printCode,
+      files:        writeResult.writtenFiles.map(p => path.basename(p)),
+      stagedImages: writeResult.copiedImages.length,
+    });
+
+    return {
+      success:      true,
+      method:       'fujijobmaker-reprint',
+      destPaths:    writeResult.writtenFiles,
+      stagedFolder: writeResult.imageStagingFolder,
     };
   }
 

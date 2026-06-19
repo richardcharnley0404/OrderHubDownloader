@@ -45,18 +45,21 @@ function withDispatchSpy(fn) {
   return async (t) => {
     const calls = [];
     const orig = {
-      dp:  printService._sendReprintViaDarkroomPro,
-      fc:  printService._sendReprintViaFolderCopy,
+      dp:   printService._sendReprintViaDarkroomPro,
+      fc:   printService._sendReprintViaFolderCopy,
       dpof: printService._sendReprintViaDPOF,
+      fuji: printService._sendReprintViaFujiJobMaker,
     };
-    printService._sendReprintViaDarkroomPro = async () => { calls.push('darkroompro'); return { success: true, method: 'darkroom-pro-reprint' }; };
-    printService._sendReprintViaFolderCopy  = async () => { calls.push('folder_copy'); return { success: true, method: 'folder-copy-reprint' }; };
-    printService._sendReprintViaDPOF        = async () => { calls.push('dpof');        return { success: true, method: 'dpof-reprint' }; };
+    printService._sendReprintViaDarkroomPro  = async () => { calls.push('darkroompro');  return { success: true, method: 'darkroom-pro-reprint' }; };
+    printService._sendReprintViaFolderCopy   = async () => { calls.push('folder_copy');  return { success: true, method: 'folder-copy-reprint' }; };
+    printService._sendReprintViaDPOF         = async () => { calls.push('dpof');         return { success: true, method: 'dpof-reprint' }; };
+    printService._sendReprintViaFujiJobMaker = async () => { calls.push('fujijobmaker'); return { success: true, method: 'fujijobmaker-reprint' }; };
     t.after(() => {
-      printService._sendReprintViaDarkroomPro = orig.dp;
-      printService._sendReprintViaFolderCopy  = orig.fc;
-      printService._sendReprintViaDPOF        = orig.dpof;
-      routingService.resolveRoute             = originalResolveRoute;
+      printService._sendReprintViaDarkroomPro  = orig.dp;
+      printService._sendReprintViaFolderCopy   = orig.fc;
+      printService._sendReprintViaDPOF         = orig.dpof;
+      printService._sendReprintViaFujiJobMaker = orig.fuji;
+      routingService.resolveRoute              = originalResolveRoute;
     });
     await fn(calls);
   };
@@ -116,8 +119,15 @@ test('sendReprint: controllerType "folder_copy" still dispatches to its own meth
   assert.deepEqual(calls, ['folder_copy']);
 }));
 
+test('sendReprint: controllerType "fujijobmaker" dispatches to _sendReprintViaFujiJobMaker (Phase 3a)', withDispatchSpy(async (calls) => {
+  stubRoute('fujijobmaker');
+  const result = await printService.sendReprint(PARENT, REPRINT_PATH, 'r1', REPRINT_IMAGES);
+  assert.deepEqual(calls, ['fujijobmaker'], 'must reach the Fuji JobMaker reprint pipeline');
+  assert.equal(result.success, true);
+}));
+
 test('sendReprint: still-unsupported types return the not-yet-supported error', withDispatchSpy(async (calls) => {
-  for (const t of ['frontline', 'fujijobmaker', 'pdf_copy']) {
+  for (const t of ['frontline', 'pdf_copy']) {
     stubRoute(t);
     const result = await printService.sendReprint(PARENT, REPRINT_PATH, 'r1', REPRINT_IMAGES);
     assert.equal(result.success, false, `${t} must not dispatch`);
