@@ -18,6 +18,7 @@ const { fujiJobMakerFileWriter } = require('./fuji-jobmaker-file-writer');
 const { printControllerService } = require('./print-controller-service');
 const { resolvePrintSizeCode } = require('./routing-service');
 const { isDpofType } = require('./controller-types');
+const { ManifestNotFoundError } = require('./awaiting-manifest');
 const logger = require('./logger');
 const { buildFolderName } = require('../../shared/printUtils');
 
@@ -79,7 +80,7 @@ class PrintService {
     }
 
     // Read order manifest
-    const manifest = this._readManifest(orderFolderPath, job.order_number);
+    const manifest = await this._readManifest(orderFolderPath, job.order_number);
     const jobManifest = this._findJobInManifest(manifest, job);
 
     if (!jobManifest) {
@@ -234,7 +235,7 @@ class PrintService {
       throw new Error(`Job folder not found: ${jobFolderPath}`);
     }
 
-    const manifest = this._readManifest(orderFolderPath, job.order_number);
+    const manifest = await this._readManifest(orderFolderPath, job.order_number);
     const jobManifest = this._findJobInManifest(manifest, job);
 
     if (!jobManifest) {
@@ -402,7 +403,7 @@ class PrintService {
     }
 
     // Read order manifest ({orderNumber}.json)
-    const manifest = this._readManifest(orderFolderPath, job.order_number);
+    const manifest = await this._readManifest(orderFolderPath, job.order_number);
     const jobManifest = this._findJobInManifest(manifest, job);
 
     if (!jobManifest) {
@@ -1561,7 +1562,7 @@ class PrintService {
       throw new Error(`Job folder not found: ${jobFolderPath}`);
     }
 
-    const manifest    = this._readManifest(orderFolderPath, job.order_number);
+    const manifest    = await this._readManifest(orderFolderPath, job.order_number);
     const jobManifest = this._findJobInManifest(manifest, job);
 
     if (!jobManifest) {
@@ -1646,7 +1647,7 @@ class PrintService {
       throw new Error(`Job folder not found: ${jobFolderPath}`);
     }
 
-    const manifest    = this._readManifest(orderFolderPath, job.order_number);
+    const manifest    = await this._readManifest(orderFolderPath, job.order_number);
     const jobManifest = this._findJobInManifest(manifest, job);
 
     if (!jobManifest) {
@@ -1815,7 +1816,7 @@ class PrintService {
       throw new Error(`Job folder not found: ${jobFolderPath}`);
     }
 
-    const manifest    = this._readManifest(orderFolderPath, job.order_number);
+    const manifest    = await this._readManifest(orderFolderPath, job.order_number);
     const jobManifest = this._findJobInManifest(manifest, job);
 
     if (!jobManifest) {
@@ -1990,7 +1991,7 @@ class PrintService {
       throw new Error(`Job folder not found: ${jobFolderPath}`);
     }
 
-    const manifest    = this._readManifest(orderFolderPath, job.order_number);
+    const manifest    = await this._readManifest(orderFolderPath, job.order_number);
     const jobManifest = this._findJobInManifest(manifest, job);
 
     if (!jobManifest) {
@@ -2141,7 +2142,7 @@ class PrintService {
       throw new Error(`Job folder not found: ${jobFolderPath}`);
     }
 
-    const manifest    = this._readManifest(orderFolderPath, job.order_number);
+    const manifest    = await this._readManifest(orderFolderPath, job.order_number);
     const jobManifest = this._findJobInManifest(manifest, job);
 
     if (!jobManifest) {
@@ -2299,21 +2300,66 @@ class PrintService {
   /**
    * Read order manifest JSON from the order folder.
    * Manifest filename is {orderNumber}.json (e.g. PXDEMO-K9MYDG.json)
+   *
+   * Retries a few times before failing. FTP delivery to the watched share is
+   * NOT atomic (basic-ftp's downloadTo writes the manifest in place), and
+   * OrderHub re-pushes an order folder when later jobs are added to the same
+   * order — so the manifest can momentarily vanish, be zero-byte, or be
+   * half-written exactly when a dispatch happens to read it (a TOCTOU race on
+   * the SMB share). polling-service's awaiting-manifest gate only covers the
+   * FIRST arrival of the manifest; once a job has been markReceived it is no
+   * longer gated, so a re-push blip lands straight in this read and previously
+   * threw "Order manifest not found", entering the sticky-error path even
+   * though the file reappeared a moment later. The retry absorbs that blip.
+   *
+   * Budget: 4 attempts, 250ms apart → at most 3 * 250ms = 750ms of added
+   * latency before giving up. This runs synchronously inside the per-job
+   * auto-print loop (it blocks the jobs queued behind it), so the window is
+   * deliberately kept small; the genuine "manifest never arrived" case is
+   * already handled upstream by the awaiting-manifest gate.
    */
-  _readManifest(orderFolderPath, orderNumber) {
+  async _readManifest(orderFolderPath, orderNumber) {
+    const MAX_ATTEMPTS = 4;
+    const RETRY_DELAY_MS = 250;
     const manifestFilename = `${orderNumber}.json`;
     const manifestPath = path.join(orderFolderPath, manifestFilename);
 
-    if (!fs.existsSync(manifestPath)) {
-      throw new Error(`Order manifest not found: ${manifestPath}`);
+    let lastParseError = null;
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      let present = false;
+      try {
+        present = fs.existsSync(manifestPath) && fs.statSync(manifestPath).size > 0;
+      } catch (_) {
+        // stat can throw transiently on SMB during an overwrite — treat as absent
+        present = false;
+      }
+
+      if (present) {
+        try {
+          const raw = fs.readFileSync(manifestPath, 'utf-8');
+          return JSON.parse(raw);
+        } catch (error) {
+          // A half-written manifest mid-overwrite parses as invalid JSON.
+          // Treat as transient and retry; only surface if it never settles.
+          lastParseError = error;
+        }
+      }
+
+      if (attempt < MAX_ATTEMPTS) {
+        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+      }
     }
 
-    try {
-      const raw = fs.readFileSync(manifestPath, 'utf-8');
-      return JSON.parse(raw);
-    } catch (error) {
-      throw new Error(`Failed to read order manifest: ${error.message}`);
+    if (lastParseError) {
+      // A manifest that exists but never parses across the whole retry budget
+      // is treated as a genuine (terminal) corruption, NOT a delivery blip —
+      // stays a plain Error so the auto-print re-arm path leaves it alone.
+      throw new Error(`Failed to read order manifest: ${lastParseError.message}`);
     }
+    // Typed so the auto-print catch can re-arm the awaiting-manifest wait
+    // instead of going to sticky error. Message preserved verbatim.
+    throw new ManifestNotFoundError(manifestPath);
   }
 
   /**
@@ -2571,3 +2617,4 @@ class PrintService {
 }
 
 module.exports = new PrintService();
+// (manifest retry + typed-error re-arm wired 2026-06-24)

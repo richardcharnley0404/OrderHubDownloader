@@ -5,6 +5,7 @@ const s3Service = require('./services/s3-service');
 const jobService = require('./services/job-service');
 const printService = require('./services/print-service');
 const { DPOF_TYPES } = require('./services/controller-types');
+const { awaitingReArmUpdates } = require('./services/awaiting-manifest');
 const { runTest: runPrintControllerTest } = require('./services/test-print-controller');
 const { printControllerStore } = require('./services/print-controller-store');
 const routingService = require('./services/routing-service');
@@ -2678,6 +2679,15 @@ async function runAutoPrint() {
             controllerName: labelName,
           });
         } catch (err) {
+          // Manifest missing at dispatch (re-push blip outlasting the
+          // _readManifest retry) — re-arm the awaiting-manifest wait instead
+          // of going terminal, so polling-service self-heals or escalates.
+          const reArm = awaitingReArmUpdates(job, err);
+          if (reArm) {
+            jobService.updateJobLocally(job.id, reArm);
+            logger.logWarning('[auto-print] Folder copy: manifest missing — re-armed as awaiting', { jobId: job.id, manifestPath: err.manifestPath });
+            continue;
+          }
           logger.logError('[auto-print] Folder copy failed for job ' + job.id, err, { jobId: job.id });
           jobService.updateJobLocally(job.id, {
             _status: 'error',
@@ -2738,6 +2748,18 @@ async function runAutoPrint() {
       try {
         result = await printService.sendViaDPOFRouted(job, route);
       } catch (err) {
+        // Manifest missing at dispatch (a re-push blip that outlasted the
+        // _readManifest retry budget) is NOT terminal — re-arm the
+        // awaiting-manifest wait so the next poll re-checks and either
+        // markReceived's it or escalates after awaitingManifestTimeoutMs.
+        // This is the one case that must NOT enter the sticky-error path,
+        // because the manifest typically reappears within seconds.
+        const reArm = awaitingReArmUpdates(job, err);
+        if (reArm) {
+          jobService.updateJobLocally(job.id, reArm);
+          logger.logWarning('[auto-print] Dispatch: manifest missing — re-armed as awaiting', { jobId: job.id, manifestPath: err.manifestPath });
+          continue;
+        }
         // Generalized in v1.3.2 — the previous manifest-only special case
         // was added to break a retry loop on that specific error, but every
         // other dispatch error class still retry-looped. The eligibility
