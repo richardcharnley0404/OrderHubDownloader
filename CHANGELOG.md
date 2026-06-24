@@ -1,4 +1,4 @@
-## Unreleased
+## v1.7.14 - 2026-06-24
 
 ### Fixed: Orders occasionally stuck on "Order manifest not found" even though the file was there
 Some jobs failed auto-print with a red "Order manifest not found" error while the order's `.json` manifest was clearly sitting in the folder. Seen on order PRLE-EL2KTR: the canvas jobs printed fine, but two Photo Print jobs in the same order errored against the very same manifest the canvas jobs had just read successfully.
