@@ -4,6 +4,7 @@ const Store = require('electron-store');
 const configService = require('./config-service');
 const logger = require('./logger');
 const { computeHoldForReview, formatHoldReasons } = require('../../shared/holdForReview');
+const { recoverManifestErrors } = require('../../shared/manifestErrorRecovery');
 // Lazy require — routing-service requires electron-store at module load; lazy
 // keeps job-service test-loadable in environments that shim electron later.
 function _getRoutingHeldProcesses() {
@@ -38,6 +39,22 @@ class JobService {
     this.jobs = jobStore.get('jobs') || [];
     this.lastFetchTime = jobStore.get('lastFetchTime') || null;
     logger.info('JobService: loaded persisted jobs', { count: this.jobs.length });
+
+    // Startup self-heal: reset sticky "Order manifest not found" errors to
+    // 'pending' so they re-dispatch now the manifest has (almost certainly)
+    // landed. Clears the backlog accumulated on pre-fix builds the moment the
+    // updated app launches. Safe to run every launch — see
+    // src/shared/manifestErrorRecovery.js for the rationale and the error
+    // classes it deliberately leaves terminal.
+    try {
+      const recovered = recoverManifestErrors(this.jobs);
+      if (recovered > 0) {
+        this._persistJobs();
+        logger.info(`JobService: reset ${recovered} sticky manifest-not-found job(s) to pending for automatic re-attempt`);
+      }
+    } catch (err) {
+      logger.logError('JobService: manifest-error startup recovery failed', err);
+    }
   }
 
   /**
