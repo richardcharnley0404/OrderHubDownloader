@@ -123,6 +123,10 @@ class FolderWatchService {
         const entries = fs.readdirSync(watchFolder, { withFileTypes: true });
         const folders = entries.filter((e) => e.isDirectory());
 
+        if (folders.length > 0) {
+          logger.info(`filmScans: ${folders.length} folder(s) in watch folder this cycle`);
+        }
+
         for (const folder of folders) {
           const watchPath = path.join(watchFolder, folder.name);
 
@@ -612,7 +616,17 @@ class FolderWatchService {
             }
           }
 
-          break;
+          // Throughput fix (2026-06-24): this loop previously `break`-ed here,
+          // processing only ONE stable roll per cycle. With the film-scans
+          // timer at filmScansAutoSyncMinutes (default 5 min), a batch of scans
+          // drained at ~1 roll / 5 min, so a day's scanning backed up for
+          // hours. We now process EVERY stable folder in this cycle's snapshot.
+          // Safe because: unstable folders still `continue` (retried next
+          // cycle); the per-roll try/catch above isolates failures so one bad
+          // roll can't halt the rest; the readdir snapshot is taken once at
+          // cycle start so the loop is bounded (folders arriving mid-cycle are
+          // picked up next tick); and the _filmScanProcessing guard prevents
+          // overlapping cycles.
         }
       } catch (error) {
         logger.logError('filmScans: error scanning watch folder', error);
