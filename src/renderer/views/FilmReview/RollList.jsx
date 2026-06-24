@@ -61,6 +61,93 @@ function formatRelative(iso) {
   return new Date(iso).toLocaleDateString();
 }
 
+// ── Pipeline status strip ──────────────────────────────────────────────────
+//
+// At-a-glance view of what the film-scan pipeline is doing in the background,
+// computed entirely from the rolls list this panel already loads. The pipeline
+// is serial (one roll at a time), so the operator's complaint — "scans take
+// ages to show up" — is really a queue-depth problem; surfacing the queue makes
+// it visible. Refreshes on the same roll-processed events that drive the cards.
+
+// The single pipeline stage a roll is currently in. Order matters: provisional
+// states (folder detected, no frames yet) take precedence over upload state.
+// Returns null for rolls that are done (uploaded / reviewed / plain ready) —
+// those aren't "in the pipeline" and don't belong in the strip.
+function rollStage(r) {
+  if (r.processingStatus === 'detected')   return 'watching';
+  if (r.processingStatus === 'processing') return 'processing';
+  if (r.uploadStatus === 'uploading')      return 'uploading';
+  if (r.uploadStatus === 'pending')        return 'pending';
+  if (r.uploadStatus === 'failed')         return 'failed';
+  return null;
+}
+
+const PIPELINE_STAGES = [
+  { key: 'watching',   label: 'Watching' },
+  { key: 'processing', label: 'Processing' },
+  { key: 'uploading',  label: 'Uploading' },
+  { key: 'pending',    label: 'Awaiting approval' },
+  { key: 'failed',     label: 'Failed' },
+];
+
+function PipelineStatus({ rolls }) {
+  const { counts, active } = useMemo(() => {
+    const counts = { watching: 0, processing: 0, uploading: 0, pending: 0, failed: 0 };
+    let active = null;
+    for (const r of rolls) {
+      const stage = rollStage(r);
+      if (!stage) continue;
+      counts[stage] += 1;
+      // Serial pipeline → at most one roll is actively processing/uploading.
+      if (!active && (stage === 'processing' || stage === 'uploading')) {
+        active = { id: r.rollId, stage };
+      }
+    }
+    return { counts, active };
+  }, [rolls]);
+
+  const queued   = counts.watching + counts.processing + counts.pending;
+  const inFlight = counts.processing + counts.uploading;
+  const total    = queued + counts.uploading + counts.failed;
+  // Stay out of the way when there's nothing queued, in-flight, or failed.
+  if (total === 0) return null;
+
+  const shownChips = PIPELINE_STAGES.filter((s) => counts[s.key] > 0);
+
+  let lead;
+  if (inFlight > 0) {
+    lead = <span>Working through the queue — <strong>{queued}</strong> roll{queued === 1 ? '' : 's'} waiting or in progress</span>;
+  } else if (queued > 0) {
+    lead = <span><strong>{queued}</strong> roll{queued === 1 ? '' : 's'} queued for processing</span>;
+  } else {
+    lead = <span>Pipeline idle — <strong>{counts.failed}</strong> roll{counts.failed === 1 ? '' : 's'} need attention</span>;
+  }
+
+  return (
+    <div className="fr-pipeline" role="status" aria-live="polite">
+      <div className="fr-pipeline__lead">
+        <span className={'fr-pipeline__pulse' + (inFlight > 0 ? ' is-active' : '')} aria-hidden="true" />
+        {lead}
+      </div>
+
+      <div className="fr-pipeline__chips">
+        {shownChips.map((s) => (
+          <span key={s.key} className={`fr-pipeline__chip fr-pipeline__chip--${s.key}`}>
+            <span className="fr-pipeline__chip-value">{counts[s.key]}</span>
+            <span className="fr-pipeline__chip-label">{s.label}</span>
+          </span>
+        ))}
+      </div>
+
+      {active && (
+        <div className="fr-pipeline__now" title="The pipeline processes one roll at a time">
+          {active.stage === 'uploading' ? 'Uploading' : 'Processing'} <strong>{active.id}</strong>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function RollList({ refreshKey, onOpenRoll }) {
   const [rolls,   setRolls]   = useState([]);
   const [loading, setLoading] = useState(true);
@@ -100,6 +187,8 @@ export function RollList({ refreshKey, onOpenRoll }) {
 
   return (
     <div className="fr-body">
+      <PipelineStatus rolls={rolls} />
+
       <div className="fr-rolls-toolbar">
         <div className="fr-filter-group" role="tablist" aria-label="Roll status filter">
           {FILTERS.map((f) => (
