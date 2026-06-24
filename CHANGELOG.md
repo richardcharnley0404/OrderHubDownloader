@@ -1,3 +1,14 @@
+## v1.7.15 - 2026-06-24
+
+### Fixed: Existing "Order manifest not found" errors now clear themselves on update
+The retry above protects *new* jobs, but any jobs already stuck in this error on the previous version would have stayed stuck — the app treats a manifest error as final and never retries it. On launch, OrderHub Desktop now automatically resets any job sitting in an "Order manifest not found" error back to pending, so it re-attempts on the next poll. Since the manifest has almost always landed by then, the backlog of stuck jobs clears itself shortly after you install this update — no manual action needed. (Genuine failures are left alone: a manifest that's truly missing simply re-enters the normal wait, and corrupt-manifest errors stay flagged.)
+
+### Fixed: Film scans took hours to appear in OrderHub
+When several scan rolls were dropped into the watch folder together, they trickled into OrderHub one roll at a time — roughly one every few minutes — so a day's scanning could back up for hours. The film-scan watcher was processing only a single roll per cycle and then waiting for the next timer tick. It now works through every ready roll in one pass, so a batch drains continuously instead of one-per-tick. Rolls still process one at a time, but with no idle wait between them.
+
+### New: Film Review pipeline status panel
+The Film Review page now shows a live status strip at the top: how many rolls are watching, processing, uploading, awaiting approval, or failed, plus the roll currently in flight — so you can see what the scan pipeline is doing in the background at a glance. Below it, a "Where the time goes" breakdown averages how long each stage (watchguard wait, copy, AI rotate, S3 upload) takes across recent rolls and highlights the slowest, making it easy to spot where any delay is coming from.
+
 ## v1.7.14 - 2026-06-24
 
 ### Fixed: Orders occasionally stuck on "Order manifest not found" even though the file was there
