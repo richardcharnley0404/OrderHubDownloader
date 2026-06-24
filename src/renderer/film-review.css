@@ -360,6 +360,59 @@ body.app-theme-dark .fr-pipeline__chip--processing {
   font-family: var(--fr-mono);
 }
 
+/* ─── Pipeline timing breakdown (v2) ─────────────────────────────────────
+   "Where the time goes" — per-stage average durations across recent completed
+   rolls, with the slowest stage highlighted amber so the bottleneck is
+   obvious. Driven by the per-roll `timeline` stamped in folder-watch-service. */
+.fr-timing {
+  display: flex;
+  align-items: center;
+  gap: var(--fr-s3);
+  flex-wrap: wrap;
+  margin-bottom: var(--fr-s4);
+  font-size: 12px;
+  color: var(--fr-ink-dim);
+}
+.fr-timing__lead {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  font-weight: 600;
+  color: var(--fr-ink-dim);
+}
+.fr-timing__sample {
+  font-weight: 400;
+  color: var(--fr-ink-faint);
+  font-size: 11px;
+}
+.fr-timing__stages {
+  display: inline-flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.fr-timing__stage {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 9px;
+  border-radius: var(--fr-radius);
+  background: var(--fr-surface-raised);
+  border: 1px solid var(--fr-border-subtle);
+}
+.fr-timing__stage-label { color: var(--fr-ink-faint); }
+.fr-timing__stage-value {
+  font-variant-numeric: tabular-nums;
+  color: var(--fr-ink);
+  font-weight: 600;
+}
+.fr-timing__stage.is-slowest {
+  border-color: var(--fr-amber, #b07a00);
+  background: var(--fr-amber-weak, rgba(255, 176, 32, 0.12));
+}
+.fr-timing__stage.is-slowest .fr-timing__stage-label {
+  color: var(--fr-amber, #b07a00);
+}
+
 /* ─── Roll list grid ─────────────────────────────────────────────────── */
 
 .fr-roll-grid {

@@ -148,6 +148,85 @@ function PipelineStatus({ rolls }) {
   );
 }
 
+// ── Pipeline timing breakdown (v2) ─────────────────────────────────────────
+//
+// "Where the time goes" — averages each pipeline stage's duration across the
+// most recent completed rolls (from the per-roll `timeline` stamped by
+// folder-watch-service) and highlights the slowest stage. This is the
+// bottleneck finder: it tells the operator whether the lag is the watchguard
+// wait (config), the AI rotation (CPU), or the S3 upload (network).
+
+function fmtDur(ms) {
+  if (ms == null || !isFinite(ms) || ms < 0) return '—';
+  const s = Math.round(ms / 1000);
+  if (s < 1)  return '<1s';
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  return rem ? `${m}m ${rem}s` : `${m}m`;
+}
+
+const TIMING_STAGES = [
+  { key: 'wait',   label: 'Watchguard wait', from: 'detectedAt',      to: 'stableAt'   },
+  { key: 'copy',   label: 'Copy',            from: 'stableAt',        to: 'copiedAt'   },
+  { key: 'rotate', label: 'AI rotate',       from: 'copiedAt',        to: 'rotatedAt'  },
+  { key: 'upload', label: 'S3 upload',       from: 'uploadStartedAt', to: 'uploadedAt' },
+];
+
+function PipelineTiming({ rolls }) {
+  const { stages, sampleCount } = useMemo(() => {
+    // Rolls are sorted lastSeenAt-desc, so the first 25 with a completed
+    // timeline are the most recent. Averaging smooths per-roll variance.
+    const withTl = rolls.filter((r) => r.timeline && r.timeline.uploadedAt).slice(0, 25);
+    const acc = {};
+    for (const s of TIMING_STAGES) acc[s.key] = { sum: 0, n: 0 };
+    for (const r of withTl) {
+      const tl = r.timeline;
+      for (const s of TIMING_STAGES) {
+        const a = Date.parse(tl[s.from]);
+        const b = Date.parse(tl[s.to]);
+        if (isFinite(a) && isFinite(b) && b >= a) {
+          acc[s.key].sum += (b - a);
+          acc[s.key].n += 1;
+        }
+      }
+    }
+    const stages = TIMING_STAGES.map((s) => ({
+      ...s,
+      avg: acc[s.key].n > 0 ? acc[s.key].sum / acc[s.key].n : null,
+    }));
+    return { stages, sampleCount: withTl.length };
+  }, [rolls]);
+
+  if (sampleCount === 0) return null;
+
+  const slowest = stages.reduce(
+    (best, s) => (s.avg != null && (best == null || s.avg > best.avg) ? s : best),
+    null,
+  );
+
+  return (
+    <div className="fr-timing" role="group" aria-label="Pipeline stage timing">
+      <span className="fr-timing__lead">
+        Where the time goes
+        <span className="fr-timing__sample">avg of {sampleCount} roll{sampleCount === 1 ? '' : 's'}</span>
+      </span>
+      <div className="fr-timing__stages">
+        {stages.map((s) => (
+          <span
+            key={s.key}
+            className={'fr-timing__stage' + (slowest && s.key === slowest.key ? ' is-slowest' : '')}
+            title={slowest && s.key === slowest.key ? 'Slowest stage — likely your bottleneck' : undefined}
+          >
+            <span className="fr-timing__stage-label">{s.label}</span>
+            <span className="fr-timing__stage-value">{s.avg == null ? '—' : fmtDur(s.avg)}</span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function RollList({ refreshKey, onOpenRoll }) {
   const [rolls,   setRolls]   = useState([]);
   const [loading, setLoading] = useState(true);
@@ -188,6 +267,7 @@ export function RollList({ refreshKey, onOpenRoll }) {
   return (
     <div className="fr-body">
       <PipelineStatus rolls={rolls} />
+      <PipelineTiming rolls={rolls} />
 
       <div className="fr-rolls-toolbar">
         <div className="fr-filter-group" role="tablist" aria-label="Roll status filter">

@@ -356,6 +356,7 @@ class FrameMetadataStore {
         storagePath:     rollRec ? rollRec.storagePath     : undefined,
         processingStatus: rollRec ? rollRec.processingStatus || null : null,
         detectedAt:      rollRec ? rollRec.detectedAt      : undefined,
+        timeline:        rollRec ? rollRec.timeline        : undefined,
       };
     });
 
@@ -386,6 +387,7 @@ class FrameMetadataStore {
         storagePath:     rollRec.storagePath,
         processingStatus: rollRec.processingStatus,
         detectedAt:      rollRec.detectedAt,
+        timeline:        rollRec.timeline,
       });
     }
 

@@ -161,12 +161,23 @@ class FolderWatchService {
             continue;
           }
 
+          // v2 timing (2026-06-24): capture per-stage timestamps so the Film
+          // Review panel can show where each roll spends its time and flag the
+          // slowest stage. Purely additive — written to the roll record's
+          // `timeline`; never affects the pipeline. stableAt is "now" because
+          // the watchguard just passed.
+          const tStableIso = new Date().toISOString();
+          let tDetectedIso = null;
+          let tCopiedIso   = null;
+          let tRotatedIso  = null;
+
           // M8-3: stability passed — flip the provisional record to
           // 'processing' so the panel pill changes from Watching → Processing.
           if (config.filmScanRotationEnabled) {
             try {
               const frameMetadataStore = require('./frame-metadata-store');
               const existing = frameMetadataStore.getRoll(folder.name);
+              if (existing) tDetectedIso = existing.detectedAt || null;
               if (existing && existing.processingStatus === 'detected') {
                 frameMetadataStore.updateRoll(folder.name, { processingStatus: 'processing' });
                 emitRollUpdate(folder.name);
@@ -185,6 +196,7 @@ class FolderWatchService {
 
             // Step 1: Copy to permanent storage
             await this._copyFolder(watchPath, storagePath);
+            tCopiedIso = new Date().toISOString();
             logger.info(`filmScans: copied ${folder.name} to storage (${storagePath})`);
 
             // Step 2: Delete from watch folder
@@ -381,6 +393,8 @@ class FolderWatchService {
                       `filmScans: ${rollId} smart-check — lowConf=${lowConfCount} rotErr=${rotErrorCount} → ${deferUpload ? 'pending review' : 'auto upload'}`
                     );
                   }
+                  // Rotation + thumbnail pass complete — stamp it for the timeline.
+                  tRotatedIso = new Date().toISOString();
                   try {
                     frameMetadataStore.recordRoll(rollId, {
                       storagePath,
@@ -390,6 +404,12 @@ class FolderWatchService {
                       uploadError: null,
                       uploadedAt: null,
                       processingStatus: null,
+                      timeline: {
+                        detectedAt: tDetectedIso,
+                        stableAt:   tStableIso,
+                        copiedAt:   tCopiedIso,
+                        rotatedAt:  tRotatedIso,
+                      },
                     });
                     if (rollId !== folder.name) {
                       frameMetadataStore.deleteRoll(folder.name);
@@ -485,9 +505,11 @@ class FolderWatchService {
                 if (config.filmScanRotationEnabled) {
                   try {
                     const frameMetadataStore = require('./frame-metadata-store');
+                    const _rec = frameMetadataStore.getRoll(rollId);
                     frameMetadataStore.updateRoll(rollId, {
                       uploadStatus: 'uploading',
                       uploadError: null,
+                      timeline: { ...((_rec && _rec.timeline) || {}), uploadStartedAt: new Date().toISOString() },
                     });
                   } catch (_) { /* best-effort */ }
                   try {
@@ -559,10 +581,13 @@ class FolderWatchService {
                   if (config.filmScanRotationEnabled) {
                     try {
                       const frameMetadataStore = require('./frame-metadata-store');
+                      const _rec = frameMetadataStore.getRoll(rollId);
+                      const _now = new Date().toISOString();
                       frameMetadataStore.updateRoll(rollId, {
                         uploadStatus: 'uploaded',
                         uploadError: null,
-                        uploadedAt: new Date().toISOString(),
+                        uploadedAt: _now,
+                        timeline: { ...((_rec && _rec.timeline) || {}), uploadedAt: _now },
                       });
                       // M9: Auto and Smart-confident rolls bypass the operator
                       // panel entirely. Once the auto-upload succeeds the roll
