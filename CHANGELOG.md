@@ -1,3 +1,16 @@
+## Unreleased
+
+### Fixed: Orders occasionally stuck on "Order manifest not found" even though the file was there
+Some jobs failed auto-print with a red "Order manifest not found" error while the order's `.json` manifest was clearly sitting in the folder. Seen on order PRLE-EL2KTR: the canvas jobs printed fine, but two Photo Print jobs in the same order errored against the very same manifest the canvas jobs had just read successfully.
+
+Root cause: the manifest arrives over FTP to the watched share without an atomic write, and OrderHub re-pushes the whole order folder whenever later jobs are added to the same order. During that re-push the manifest momentarily vanishes / is zero-byte / is half-written. If a dispatch happened to read it in that split-second window it threw "not found", and the job dropped into a sticky error that was never retried — so it stayed stuck even though the file reappeared a moment later. (The existing "Awaiting JSON Manifest" wait only guards a manifest's *first* arrival, not a later re-push.)
+
+Two-part fix:
+- The manifest read now retries up to 4 times, 250ms apart (~750ms total), which absorbs the brief blip in the vast majority of cases.
+- If the manifest is still missing after that, the job is no longer marked as a hard error. It drops back into the normal "Awaiting JSON Manifest" wait, so the next poll re-checks it and either resumes automatically when the file returns, or — only if the manifest genuinely never arrives within 10 minutes — escalates to a clear "manifest not received within N minutes" error.
+
+Operator impact: these transient failures should now self-recover with no manual action, and a red manifest error once again means the file really is missing rather than briefly unavailable. Note: the auto-recovery applies to automatic printing; if you click Process manually and hit the same rare blip you may still see an error — just click Process again.
+
 ## v1.7.10 - 2026-06-04
 
 ### Fixed: Fuji JobMaker Process click failed with "Controller not found"
