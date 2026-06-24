@@ -11,6 +11,33 @@ Two-part fix:
 
 Operator impact: these transient failures should now self-recover with no manual action, and a red manifest error once again means the file really is missing rather than briefly unavailable. Note: the auto-recovery applies to automatic printing; if you click Process manually and hit the same rare blip you may still see an error — just click Process again.
 
+## v1.7.13 - 2026-06-19
+
+### Fixed: Reprints failed on Fuji JobMaker, PDF, and Frontline controllers
+Reprinting a job already worked on Noritsu/Epson, Darkroom Pro, and folder-copy controllers, but a job routed to a Fuji JobMaker, PDF-copy, or Frontline controller hit a "reprint not yet supported for controller type" dead end. All three now have full reprint dispatch, completing the matrix so a reprint works from any controller type OHD can print to.
+
+Also fixed: when a re-cropped reprint's source image isn't in the usual /originals/ or /working/ folders, reprint now falls back to the order's root folder instead of failing — this covers files that arrived before the working-set folders were created.
+
+## v1.7.12 - 2026-06-19
+
+### Fixed: Reprints rejected on Noritsu/Epson controllers
+After v1.7.11, reprinting a job on a Noritsu or Epson controller failed in two stages — first "reprint not yet supported for controller type", then, once past that, "no controller mapping for process". Both came from the reprint path using older internal lookups that are empty on installs whose routing is configured entirely through Settings → Routing (the modern setup).
+
+Reprint now uses the same routing the normal print path uses, so Noritsu/Epson reprints dispatch correctly. As a bonus, any "hold for manual release" decision on the original job is honoured automatically on the reprint.
+
+## v1.7.11 - 2026-06-18
+
+### New: "Awaiting JSON Manifest" state for jobs whose files arrive before their manifest
+A job's image folder sometimes lands on the watched share a moment before the order's `.json` manifest does. OHD used to treat that brief gap as a hard failure and drop the job into a sticky error. Now a job in that state shows an amber "Awaiting JSON Manifest" badge and simply waits: the next poll picks it up automatically once the manifest arrives, or — only if the manifest never shows up within 10 minutes — it escalates to a clear "manifest not received" error. (The current Unreleased fix extends this same safety net to a manifest that briefly disappears during a re-push.)
+
+### New: Order/Due date column, job IDs in the grid, and a Destination picker for held jobs
+Several Job Review tweaks landed together:
+- The Ordered and Due dates now share one stacked column, shown in your tenant's configured date format.
+- The OrderHub job ID now appears in the Job No cell (column widened to fit), making it easier to cross-reference a job back in OrderHub.
+- Jobs held for manual release gained a "Destination" button and a cleaner release dialog, so you can pick where a held job goes without digging through menus.
+
+Also in this release: DPOF folder names are now prefixed with the numeric job id (matching the Noritsu USR CID), and an opt-in "gated DPOF hot-folder auto-completion" mode was added (off by default).
+
 ## v1.7.10 - 2026-06-04
 
 ### Fixed: Fuji JobMaker Process click failed with "Controller not found"
