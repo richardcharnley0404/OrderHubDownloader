@@ -1921,6 +1921,11 @@ function populateForm(config) {
   document.getElementById('filmScansStorageFolder').value = config.filmScansStorageFolder || '';
   document.getElementById('filmScansAutoSyncMinutes').value = config.filmScansAutoSyncMinutes || 5;
   document.getElementById('filmScansWatchguardMinutes').value = config.filmScansWatchguardMinutes || 5;
+  {
+    const retEl = document.getElementById('filmScansRetentionDays');
+    // 0 is a valid value (keep forever), so guard against `|| 30` swallowing it.
+    if (retEl) retEl.value = (config.filmScansRetentionDays ?? 30);
+  }
 
   // Film Scans — AI Rotation + Review Mode (M7-8 + M9)
   const aiRotEl = document.getElementById('filmScanRotationEnabled');
@@ -2040,6 +2045,10 @@ function getFormData() {
     filmScansStorageFolder: document.getElementById('filmScansStorageFolder').value.trim(),
     filmScansAutoSyncMinutes: parseInt(document.getElementById('filmScansAutoSyncMinutes').value, 10) || 5,
     filmScansWatchguardMinutes: parseInt(document.getElementById('filmScansWatchguardMinutes').value, 10) || 5,
+    filmScansRetentionDays: (() => {
+      const v = parseInt(document.getElementById('filmScansRetentionDays').value, 10);
+      return Number.isFinite(v) && v >= 0 ? v : 30; // 0 allowed = keep forever
+    })(),
     // Film Scans — AI Rotation + Review Mode (M7-8 + M9). When AI is off we
     // force review mode back to 'never' — Smart/Always are meaningless without
     // AI metadata to review. The UI disables the radios in that state, but

@@ -2,6 +2,7 @@ const path = require('path');
 const fs = require('fs');
 const configService = require('./config-service');
 const logger = require('./logger');
+const { resolveManifestPath } = require('./manifest-path');
 
 class JobDownloadService {
   constructor() {
@@ -58,7 +59,7 @@ class JobDownloadService {
     const jobFolderName = `${orderNumber}_${jobId}`;
     const orderFolderPath = path.join(downloadDirectory, orderFolderName);
     const localPath       = path.join(orderFolderPath, jobFolderName);
-    const manifestPath    = path.join(orderFolderPath, `${orderNumber}.json`);
+    const manifestPath    = resolveManifestPath(orderFolderPath, orderNumber);
 
     try {
       if (!fs.existsSync(localPath)) {

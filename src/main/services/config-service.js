@@ -152,6 +152,16 @@ const schema = {
     minimum: 1,
     maximum: 60
   },
+  // Film Review history retention. Reviewed/uploaded rolls are dropped from
+  // the Film tab's history (metadata + thumbnail cache only — NEVER the scan
+  // files in the permanent storage folder) once they are older than this many
+  // days. 0 = keep forever.
+  filmScansRetentionDays: {
+    type: 'number',
+    default: 30,
+    minimum: 0,
+    maximum: 3650
+  },
   // Film Scan AI Rotation (PW-007 Phase 1) — flag-gated, default OFF
   filmScanRotationEnabled: {
     type: 'boolean',
@@ -639,6 +649,7 @@ class ConfigService {
       filmScansStorageFolder: this.store.get('filmScansStorageFolder'),
       filmScansAutoSyncMinutes: this.store.get('filmScansAutoSyncMinutes'),
       filmScansWatchguardMinutes: this.store.get('filmScansWatchguardMinutes'),
+      filmScansRetentionDays: this.store.get('filmScansRetentionDays'),
       // Film Scan AI Rotation
       filmScanRotationEnabled: this.store.get('filmScanRotationEnabled'),
       filmScanRotationConfidenceThreshold: this.store.get('filmScanRotationConfidenceThreshold'),
@@ -799,6 +810,14 @@ class ConfigService {
     const filmWatchguard = parseInt(config.filmScansWatchguardMinutes, 10);
     if (!isNaN(filmWatchguard) && filmWatchguard >= 1 && filmWatchguard <= 60) {
       this.store.set('filmScansWatchguardMinutes', filmWatchguard);
+    }
+    // Film Review history retention (days). 0 = keep forever. Only written when
+    // the caller passes the key, so an unrelated save can't reset it.
+    if (Object.prototype.hasOwnProperty.call(config, 'filmScansRetentionDays')) {
+      const retentionDays = parseInt(config.filmScansRetentionDays, 10);
+      if (!isNaN(retentionDays) && retentionDays >= 0 && retentionDays <= 3650) {
+        this.store.set('filmScansRetentionDays', retentionDays);
+      }
     }
 
     // Save Film Scan AI Rotation settings — these keys have no dedicated UI yet,

@@ -76,6 +76,7 @@ function formatRelative(iso) {
 function rollStage(r) {
   if (r.processingStatus === 'detected')   return 'watching';
   if (r.processingStatus === 'processing') return 'processing';
+  if (r.processingStatus === 'converting') return 'converting';
   if (r.uploadStatus === 'uploading')      return 'uploading';
   if (r.uploadStatus === 'pending')        return 'pending';
   if (r.uploadStatus === 'failed')         return 'failed';
@@ -85,6 +86,7 @@ function rollStage(r) {
 const PIPELINE_STAGES = [
   { key: 'watching',   label: 'Watching' },
   { key: 'processing', label: 'Processing' },
+  { key: 'converting', label: 'Converting' },
   { key: 'uploading',  label: 'Uploading' },
   { key: 'pending',    label: 'Awaiting approval' },
   { key: 'failed',     label: 'Failed' },
@@ -92,33 +94,34 @@ const PIPELINE_STAGES = [
 
 function PipelineStatus({ rolls }) {
   const { counts, active } = useMemo(() => {
-    const counts = { watching: 0, processing: 0, uploading: 0, pending: 0, failed: 0 };
+    const counts = { watching: 0, processing: 0, converting: 0, uploading: 0, pending: 0, failed: 0 };
     let active = null;
     for (const r of rolls) {
       const stage = rollStage(r);
       if (!stage) continue;
       counts[stage] += 1;
-      // Serial pipeline → at most one roll is actively processing/uploading.
-      if (!active && (stage === 'processing' || stage === 'uploading')) {
+      // Serial pipeline → at most one roll is actively in-flight at a time.
+      if (!active && (stage === 'processing' || stage === 'converting' || stage === 'uploading')) {
         active = { id: r.rollId, stage };
       }
     }
     return { counts, active };
   }, [rolls]);
 
-  const queued   = counts.watching + counts.processing + counts.pending;
-  const inFlight = counts.processing + counts.uploading;
-  const total    = queued + counts.uploading + counts.failed;
-  // Stay out of the way when there's nothing queued, in-flight, or failed.
+  const activeCount  = counts.processing + counts.converting + counts.uploading;
+  const waiting      = counts.watching + counts.pending;
+  const outstanding  = activeCount + waiting;
+  const total        = outstanding + counts.failed;
+  // Stay out of the way when there's nothing waiting, in-flight, or failed.
   if (total === 0) return null;
 
   const shownChips = PIPELINE_STAGES.filter((s) => counts[s.key] > 0);
 
   let lead;
-  if (inFlight > 0) {
-    lead = <span>Working through the queue — <strong>{queued}</strong> roll{queued === 1 ? '' : 's'} waiting or in progress</span>;
-  } else if (queued > 0) {
-    lead = <span><strong>{queued}</strong> roll{queued === 1 ? '' : 's'} queued for processing</span>;
+  if (activeCount > 0) {
+    lead = <span>Working through the queue — <strong>{outstanding}</strong> roll{outstanding === 1 ? '' : 's'} waiting or in progress</span>;
+  } else if (waiting > 0) {
+    lead = <span><strong>{waiting}</strong> roll{waiting === 1 ? '' : 's'} waiting</span>;
   } else {
     lead = <span>Pipeline idle — <strong>{counts.failed}</strong> roll{counts.failed === 1 ? '' : 's'} need attention</span>;
   }
@@ -126,7 +129,7 @@ function PipelineStatus({ rolls }) {
   return (
     <div className="fr-pipeline" role="status" aria-live="polite">
       <div className="fr-pipeline__lead">
-        <span className={'fr-pipeline__pulse' + (inFlight > 0 ? ' is-active' : '')} aria-hidden="true" />
+        <span className={'fr-pipeline__pulse' + (activeCount > 0 ? ' is-active' : '')} aria-hidden="true" />
         {lead}
       </div>
 
@@ -141,7 +144,7 @@ function PipelineStatus({ rolls }) {
 
       {active && (
         <div className="fr-pipeline__now" title="The pipeline processes one roll at a time">
-          {active.stage === 'uploading' ? 'Uploading' : 'Processing'} <strong>{active.id}</strong>
+          {active.stage === 'uploading' ? 'Uploading' : active.stage === 'converting' ? 'Converting' : 'Processing'} <strong>{active.id}</strong>
         </div>
       )}
     </div>
@@ -167,10 +170,11 @@ function fmtDur(ms) {
 }
 
 const TIMING_STAGES = [
-  { key: 'wait',   label: 'Watchguard wait', from: 'detectedAt',      to: 'stableAt'   },
-  { key: 'copy',   label: 'Copy',            from: 'stableAt',        to: 'copiedAt'   },
-  { key: 'rotate', label: 'AI rotate',       from: 'copiedAt',        to: 'rotatedAt'  },
-  { key: 'upload', label: 'S3 upload',       from: 'uploadStartedAt', to: 'uploadedAt' },
+  { key: 'wait',    label: 'Watchguard wait', from: 'detectedAt',       to: 'stableAt'     },
+  { key: 'copy',    label: 'Copy',            from: 'stableAt',         to: 'copiedAt'     },
+  { key: 'rotate',  label: 'AI rotate',       from: 'copiedAt',         to: 'rotatedAt'    },
+  { key: 'convert', label: 'TIFF→JPEG',       from: 'convertStartedAt', to: 'convertedAt'  },
+  { key: 'upload',  label: 'S3 upload',       from: 'uploadStartedAt',  to: 'uploadedAt'   },
 ];
 
 function PipelineTiming({ rolls }) {
@@ -212,14 +216,14 @@ function PipelineTiming({ rolls }) {
         <span className="fr-timing__sample">avg of {sampleCount} roll{sampleCount === 1 ? '' : 's'}</span>
       </span>
       <div className="fr-timing__stages">
-        {stages.map((s) => (
+        {stages.filter((s) => s.avg != null).map((s) => (
           <span
             key={s.key}
             className={'fr-timing__stage' + (slowest && s.key === slowest.key ? ' is-slowest' : '')}
             title={slowest && s.key === slowest.key ? 'Slowest stage — likely your bottleneck' : undefined}
           >
             <span className="fr-timing__stage-label">{s.label}</span>
-            <span className="fr-timing__stage-value">{s.avg == null ? '—' : fmtDur(s.avg)}</span>
+            <span className="fr-timing__stage-value">{fmtDur(s.avg)}</span>
           </span>
         ))}
       </div>
@@ -367,10 +371,13 @@ function RollCard({ roll, onOpen, onDeleted, onApproved }) {
   const isProvisional = !!roll.processingStatus;
   const provisionalLabel =
     roll.processingStatus === 'processing' ? 'Processing'
+    : roll.processingStatus === 'converting' ? 'Converting'
     : roll.processingStatus === 'detected' ? 'Watching' : null;
   const provisionalClass =
     roll.processingStatus === 'processing'
       ? 'fr-roll-card__status fr-roll-card__status--processing'
+      : roll.processingStatus === 'converting'
+      ? 'fr-roll-card__status fr-roll-card__status--converting'
       : 'fr-roll-card__status fr-roll-card__status--watching';
 
   const statusLabel = isReviewed ? 'Reviewed' : 'Ready';
@@ -558,6 +565,8 @@ function RollCard({ roll, onOpen, onDeleted, onApproved }) {
         <div className="fr-roll-card__hint">
           {roll.processingStatus === 'processing'
             ? 'Rotating frames and generating thumbnails…'
+            : roll.processingStatus === 'converting'
+            ? 'Converting TIFFs to JPEG…'
             : 'Waiting for the watchguard timer before processing.'}
         </div>
       ) : (

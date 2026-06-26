@@ -106,7 +106,7 @@ export function FilmReviewApp() {
   return (
     <div className="film-review-panel">
       <header className="fr-chrome">
-        <span className="fr-chrome__title">Film Review</span>
+        <span className="fr-chrome__title">Film Scans</span>
         {openRollId && (
           <>
             <span className="fr-chrome__crumb">/ {openRollId}</span>

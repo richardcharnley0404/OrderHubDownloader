@@ -329,12 +329,14 @@ body.app-theme-dark .film-review-panel {
   color: var(--fr-ink-dim);
   border-color: var(--fr-border);
 }
-.fr-pipeline__chip--processing {
+.fr-pipeline__chip--processing,
+.fr-pipeline__chip--converting {
   background: rgba(50, 197, 255, 0.12);
   color: var(--fr-accent-ink);
   border-color: var(--fr-accent);
 }
-body.app-theme-dark .fr-pipeline__chip--processing {
+body.app-theme-dark .fr-pipeline__chip--processing,
+body.app-theme-dark .fr-pipeline__chip--converting {
   color: var(--fr-accent);
 }
 .fr-pipeline__chip--uploading {
@@ -491,12 +493,14 @@ body.app-theme-dark .fr-pipeline__chip--processing {
   color: var(--fr-ink-dim);
   border: 1px solid var(--fr-border);
 }
-.fr-roll-card__status--processing {
+.fr-roll-card__status--processing,
+.fr-roll-card__status--converting {
   background: rgba(50, 197, 255, 0.12);
   color: var(--fr-accent-ink);
   border: 1px solid var(--fr-accent);
 }
-body.app-theme-dark .fr-roll-card__status--processing {
+body.app-theme-dark .fr-roll-card__status--processing,
+body.app-theme-dark .fr-roll-card__status--converting {
   color: var(--fr-accent);
 }
 

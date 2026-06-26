@@ -63,6 +63,27 @@
 
 const Store = require('electron-store');
 
+/**
+ * Decide whether a roll summary (a listRollsWithSummary() entry) is safe to
+ * drop from the Film Review history. Only FINISHED rolls qualify: a roll reaches
+ * status 'reviewed' only once every frame is reviewed, which for the pipeline
+ * means it uploaded successfully (Auto / Smart-confident) or was operator-
+ * approved (Manual). In-flight (detected/processing), awaiting-approval
+ * (uploadStatus 'pending'), uploading, and failed rolls are never 'reviewed',
+ * so they're always kept. Age is taken from uploadedAt when present, else
+ * lastSeenAt.
+ *
+ * @param {object} summary
+ * @param {number} cutoffMs  prune rolls last touched before this epoch-ms
+ * @returns {boolean}
+ */
+function isRollPrunable(summary, cutoffMs) {
+  if (!summary || !summary.rollId) return false;
+  if (summary.status !== 'reviewed') return false;
+  const ts = Date.parse(summary.uploadedAt || summary.lastSeenAt || '');
+  return Number.isFinite(ts) && ts < cutoffMs;
+}
+
 class FrameMetadataStore {
   constructor() {
     // Separate store file — keeps this data out of config.json and avoids
@@ -521,6 +542,30 @@ class FrameMetadataStore {
   }
 
   /**
+   * Retention sweep: drop reviewed rolls older than `maxAgeDays` from the
+   * history. Removes the frame records and the roll record only — it does NOT
+   * touch the scan files in the permanent storage folder, nor the thumbnail
+   * cache (the caller deletes thumbnails, since it knows the userData path).
+   * 0 / falsy / invalid maxAgeDays disables pruning (keep forever).
+   *
+   * @param {number} maxAgeDays
+   * @returns {string[]} rollIds that were pruned
+   */
+  pruneOldRolls(maxAgeDays) {
+    const days = Number(maxAgeDays);
+    if (!Number.isFinite(days) || days <= 0) return [];
+    const cutoffMs = Date.now() - days * 24 * 60 * 60 * 1000;
+    const pruned = [];
+    for (const summary of this.listRollsWithSummary()) {
+      if (!isRollPrunable(summary, cutoffMs)) continue;
+      this.deleteFramesByRoll(summary.rollId);
+      this.deleteRoll(summary.rollId);
+      pruned.push(summary.rollId);
+    }
+    return pruned;
+  }
+
+  /**
    * Test / devtools helper — wipes every frame record. NOT exposed over IPC.
    * Kept private-by-convention (leading underscore).
    */
@@ -532,3 +577,4 @@ class FrameMetadataStore {
 const frameMetadataStore = new FrameMetadataStore();
 module.exports = frameMetadataStore;
 module.exports.FrameMetadataStore = FrameMetadataStore;
+module.exports.isRollPrunable = isRollPrunable;

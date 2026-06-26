@@ -56,6 +56,7 @@ class FolderWatchService {
   constructor() {
     this.lastSummary = { filmScans: null, fileUploads: null };
     this._filmScanProcessing = false;
+    this._resumedUploads = false;
   }
 
   async processAll() {
@@ -87,6 +88,37 @@ class FolderWatchService {
     this._filmScanProcessing = true;
     const summary = { processed: 0, skipped: 0, failed: 0, errors: [] };
     try {
+      // Retention sweep — drop reviewed rolls older than the configured window
+      // from the Film Review history. Removes metadata + the thumbnail cache
+      // only; the scan files in the permanent storage folder are NEVER touched.
+      // Best-effort, once per cycle so the history self-trims as the lab works.
+      try {
+        const frameMetadataStore = require('./frame-metadata-store');
+        const prunedRolls = frameMetadataStore.pruneOldRolls(config.filmScansRetentionDays);
+        if (prunedRolls.length > 0) {
+          const { app } = require('electron');
+          const thumbsRoot = path.join(app.getPath('userData'), 'thumbnails');
+          for (const rollId of prunedRolls) {
+            try { this._deleteFolderRecursive(path.join(thumbsRoot, rollId)); } catch (_) { /* best-effort */ }
+          }
+          logger.info(`filmScans: retention pruned ${prunedRolls.length} old roll(s) from Film Review history`);
+        }
+      } catch (pruneErr) {
+        logger.logWarning('filmScans: retention prune failed', { error: pruneErr.message });
+      }
+
+      // One-time-per-launch: resume any upload interrupted by a crash / network
+      // hang in a previous session (roll left stuck at uploadStatus:'uploading').
+      // Files are safe in storage, so we just re-run the upload.
+      if (!this._resumedUploads) {
+        this._resumedUploads = true;
+        try {
+          await this._resumeInterruptedUploads(config);
+        } catch (resumeErr) {
+          logger.logWarning('filmScans: resume interrupted uploads failed', { error: resumeErr.message });
+        }
+      }
+
       const watchFolder = config.filmScansWatchFolder;
       const storageFolder = config.filmScansStorageFolder;
       const stabilityMinutes = config.filmScansWatchguardMinutes || config.fileStabilityMinutes;
@@ -447,6 +479,26 @@ class FolderWatchService {
                 const ext = path.extname(f).toLowerCase();
                 return ext === '.tif' || ext === '.tiff';
               });
+              const convRollId  = path.basename(storagePath);
+              // TIFF→JPEG is the heaviest non-upload step and only happens on
+              // TIFF rolls. Surface it as a distinct live phase ("Converting…"
+              // on the card) and time it on its own so the "TIFF→JPEG" stat
+              // measures just this work. Only meaningful when rotation is on
+              // (that's when a roll record exists); JPEG-only rolls skip it.
+              const trackConvert = config.filmScanRotationEnabled && tiffFiles.length > 0;
+
+              if (trackConvert) {
+                try {
+                  const fms = require('./frame-metadata-store');
+                  const rec = fms.getRoll(convRollId);
+                  fms.updateRoll(convRollId, {
+                    processingStatus: 'converting',
+                    timeline: { ...((rec && rec.timeline) || {}), convertStartedAt: new Date().toISOString() },
+                  });
+                  emitRollUpdate(convRollId);
+                } catch (_) { /* best-effort */ }
+              }
+
               for (const tiffFile of tiffFiles) {
                 const srcPath  = path.join(storagePath, tiffFile);
                 const jpgFile  = path.basename(tiffFile, path.extname(tiffFile)) + '.jpg';
@@ -457,6 +509,18 @@ class FolderWatchService {
                 } catch (convErr) {
                   logger.logError(`filmScans: failed to convert ${tiffFile} to JPEG - skipping`, convErr);
                 }
+              }
+
+              if (trackConvert) {
+                try {
+                  const fms = require('./frame-metadata-store');
+                  const rec = fms.getRoll(convRollId);
+                  fms.updateRoll(convRollId, {
+                    processingStatus: null,
+                    timeline: { ...((rec && rec.timeline) || {}), convertedAt: new Date().toISOString() },
+                  });
+                  emitRollUpdate(convRollId);
+                } catch (_) { /* best-effort */ }
               }
             }
 
@@ -731,6 +795,118 @@ class FolderWatchService {
     }
 
     return summary;
+  }
+
+  // Best-effort emit of the Film Review roll-processed event (class-level twin
+  // of the per-cycle emitRollUpdate closure, for use outside _processFilmScans).
+  _emitFilmReviewRoll(rollId) {
+    try {
+      const { BrowserWindow } = require('electron');
+      for (const w of BrowserWindow.getAllWindows()) {
+        if (w && !w.isDestroyed()) w.webContents.send('ohd:filmReview:roll-processed', { rollId });
+      }
+    } catch (_) { /* best-effort */ }
+  }
+
+  /**
+   * On startup, re-attempt any roll stuck at uploadStatus:'uploading'. Normal
+   * flow never leaves a roll there — it only persists if a prior upload was
+   * interrupted (network hang, crash, force-quit). Runs once per launch.
+   */
+  async _resumeInterruptedUploads(config) {
+    if (!config.filmScanRotationEnabled) return; // roll records only exist then
+    const frameMetadataStore = require('./frame-metadata-store');
+    let stuck = [];
+    try {
+      stuck = frameMetadataStore.listRollsWithSummary().filter(r => r.uploadStatus === 'uploading');
+    } catch (_) {
+      return;
+    }
+    if (stuck.length === 0) return;
+    logger.logWarning(`filmScans: resuming ${stuck.length} interrupted upload(s) left from a previous session`);
+    for (const r of stuck) {
+      try {
+        await this._uploadRollFromStorage(r.rollId, config);
+      } catch (err) {
+        logger.logError(`filmScans: resume upload threw for ${r.rollId}`, err);
+      }
+    }
+  }
+
+  /**
+   * Re-upload one roll from its permanent-storage copy. Mirrors the inline
+   * Step 3 upload: stamps 'uploading', retries 3× with backoff, then
+   * 'uploaded' + markRollReviewed, or 'failed'. Best-effort; never throws.
+   */
+  async _uploadRollFromStorage(rollId, config) {
+    const frameMetadataStore = require('./frame-metadata-store');
+    const rec = frameMetadataStore.getRoll(rollId);
+    if (!rec) return;
+
+    const storagePath = rec.storagePath;
+    if (!storagePath || !fs.existsSync(storagePath)) {
+      frameMetadataStore.updateRoll(rollId, {
+        uploadStatus: 'failed',
+        uploadError: 'Cannot resume upload — stored files not found',
+      });
+      this._emitFilmReviewRoll(rollId);
+      logger.logWarning(`filmScans: cannot resume upload for ${rollId} — storage path missing (${storagePath})`);
+      return;
+    }
+
+    const locationId = (rec.locationId != null) ? rec.locationId : config.locationId;
+    const s3Prefix   = rec.s3Prefix || `film-scans/${locationId}/`;
+    const s3Config   = this._buildS3Config(config, locationId);
+    if (!s3Config) {
+      logger.logWarning(`filmScans: cannot resume upload for ${rollId} — S3 not configured`);
+      return;
+    }
+
+    frameMetadataStore.updateRoll(rollId, {
+      uploadStatus: 'uploading',
+      uploadError: null,
+      timeline: { ...((rec.timeline) || {}), uploadStartedAt: new Date().toISOString() },
+    });
+    this._emitFilmReviewRoll(rollId);
+
+    const MAX_ATTEMPTS = 3;
+    const BACKOFFS_MS = [30_000, 90_000];
+    let result;
+    let attempt = 0;
+    while (attempt < MAX_ATTEMPTS) {
+      attempt += 1;
+      try {
+        result = await s3Service.uploadFolder(storagePath, s3Prefix, s3Config, (progress) => {
+          logger.info(`filmScans: (resume) ${progress.message}`);
+        });
+      } catch (uploadError) {
+        const totalFiles = fs.readdirSync(storagePath).length;
+        logger.logError(`filmScans: (resume) uploadFolder threw for ${rollId} (attempt ${attempt}/${MAX_ATTEMPTS})`, uploadError);
+        result = { uploaded: 0, failed: totalFiles, total: totalFiles };
+      }
+      if (result.failed === 0) break;
+      if (attempt < MAX_ATTEMPTS) {
+        await new Promise(r => setTimeout(r, BACKOFFS_MS[attempt - 1]));
+      }
+    }
+
+    if (result.failed > 0) {
+      const msg = `Resumed upload incomplete for ${rollId}: ${result.uploaded}/${result.total} uploaded, ${result.failed} file(s) failed after ${attempt}/${MAX_ATTEMPTS} attempts`;
+      frameMetadataStore.updateRoll(rollId, { uploadStatus: 'failed', uploadError: msg });
+      logger.logWarning(`filmScans: ${msg}`);
+    } else {
+      const nowIso = new Date().toISOString();
+      const cur = frameMetadataStore.getRoll(rollId) || {};
+      frameMetadataStore.updateRoll(rollId, {
+        uploadStatus: 'uploaded',
+        uploadError: null,
+        uploadedAt: nowIso,
+        timeline: { ...((cur.timeline) || {}), uploadedAt: nowIso },
+      });
+      try { frameMetadataStore.markRollReviewed(rollId); } catch (_) { /* best-effort */ }
+      logger.info(`filmScans: (resume) upload complete for ${rollId}`);
+    }
+    this._emitFilmReviewRoll(rollId);
   }
 
   _getDateSubfolder() {

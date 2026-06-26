@@ -1,3 +1,21 @@
+## v1.7.16 - 2026-06-26
+
+### Fixed: Film scan uploads could get stuck on "Uploading…" after a network drop
+If the internet dropped while a roll was uploading to S3 — even a brief outage — the upload could hang indefinitely. The roll would sit showing "Uploading…" forever with nothing actually transferring, and because the pipeline was held up behind it, all further film-scan processing stalled until OHD was restarted. The upload now has a hard timeout that always fires even on a stalled/half-open connection, bails out early when the network is clearly down, and — on the next launch — automatically resumes any roll left mid-upload, finishing it from the safe copy already in your storage folder. So a network blip no longer wedges a roll or the whole pipeline, and an interrupted upload recovers itself.
+
+### Fixed: Some jobs failed with "Image not found" when the images were in the working/originals folders
+A job whose images had ended up in its `working/` or `originals/` subfolders — but not in the job-folder root — could fail to print, with the controller receiving no images, because every dispatch path read images only from the root. Dispatch now falls back through root → working → originals to find the images wherever they validly live (the same way reprints already do), so this no longer fails. Applies to every controller type: Fuji JobMaker, Noritsu/Epson DPOF, Darkroom Pro, folder-copy, PDF, and Frontline.
+
+### Changed: Order manifest can also be named order.json
+When reading an order's JSON manifest, OHD still looks for `{ordernumber}.json` first, but now falls back to a generic `order.json` in the same folder if the order-named file isn't present. This makes manifest delivery more forgiving without changing how OHD writes its own manifests.
+
+### New: Film Scans housekeeping — history retention, clearer naming, and TIFF visibility
+A few improvements to the film-scan area:
+
+- The **Film Review** tab is now called **Film Scans** (matching its settings), and shows whenever Film Scans is enabled.
+- A new **History Retention (days)** setting (default **30**) automatically clears old reviewed rolls from the Film Scans history so the list doesn't grow forever. Set it to **0** to keep everything. This only trims the on-screen history — your stored scan files are never touched.
+- **TIFF** rolls now show a distinct **"Converting"** step while they're converted to JPEG, and the *"Where the time goes"* breakdown gains a **TIFF→JPEG** timing figure, so that stage is visible on its own.
+
 ## v1.7.15 - 2026-06-24
 
 ### Fixed: Existing "Order manifest not found" errors now clear themselves on update

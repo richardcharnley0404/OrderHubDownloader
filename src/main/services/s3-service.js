@@ -65,6 +65,15 @@ class S3Service {
     let uploaded = 0;
     let failed = 0;
 
+    // Early-abort guard: if the network is clearly down, bail out of the batch
+    // after a couple of consecutive network failures instead of grinding through
+    // every remaining file (each burning its full timeout). The roll-level retry
+    // and the startup resume re-attempt the whole roll later.
+    const NETWORK_ERR = /(socket hang up|ECONNRESET|ECONNREFUSED|ENETUNREACH|ENETDOWN|EHOSTUNREACH|EAI_AGAIN|ETIMEDOUT|timed out|network stalled|Request timeout)/i;
+    const NET_ABORT = 2;
+    let consecutiveNetFails = 0;
+    let aborted = false;
+
     try {
       for (const filePath of files) {
         // Build descriptor for this single file.
@@ -85,6 +94,11 @@ class S3Service {
         } catch (error) {
           failed++;
           logger.logError(`Failed to obtain pre-signed URL for ${name}`, error);
+          if (NETWORK_ERR.test((error && error.message) || '')) {
+            if (++consecutiveNetFails >= NET_ABORT) { aborted = true; break; }
+          } else {
+            consecutiveNetFails = 0;
+          }
           continue;
         }
 
@@ -97,13 +111,24 @@ class S3Service {
         try {
           await this._uploadWithRetry(filePath, presignEntry.upload_url, presignEntry.s3_key || name);
           uploaded++;
+          consecutiveNetFails = 0;
           if (progressCallback) {
             progressCallback({ message: `Uploaded ${uploaded}/${files.length}: ${relPath}`, status: 'uploading' });
           }
         } catch (error) {
           failed++;
           logger.logError(`Failed to upload ${presignEntry.s3_key || name} after retries`, error);
+          if (NETWORK_ERR.test((error && error.message) || '')) {
+            if (++consecutiveNetFails >= NET_ABORT) { aborted = true; break; }
+          } else {
+            consecutiveNetFails = 0;
+          }
         }
+      }
+
+      if (aborted) {
+        failed = files.length - uploaded;
+        logger.logWarning(`filmScans: aborted upload of ${folderName} — network appears down (${NET_ABORT} consecutive failures); ${uploaded}/${files.length} uploaded. Will retry the whole roll.`);
       }
     } catch (outerError) {
       // Unexpected error outside per-file handling (e.g. fs failure mid-loop).
@@ -245,30 +270,47 @@ class S3Service {
           'Content-Type': contentType,
           'Content-Length': fileStat.size
         },
-        timeout: 300000 // 5 min for large files
+        // No-progress (idle) timeout: resets on socket activity, so a healthy
+        // transfer never trips it; a stalled/half-open socket does, in ~2 min.
+        timeout: 120000
       };
 
-      const req = protocol.request(options, (res) => {
+      // Single-settle guard + a wall-clock BACKSTOP. The socket-idle `timeout`
+      // above does NOT reliably fire when the network drops mid-transfer and the
+      // TCP socket goes half-open (the exact "stuck Uploading… with no network
+      // activity" failure). This absolute timer always fires, so the await can
+      // never hang forever. Cleared on settle.
+      let settled = false;
+      let req = null;
+      let hardTimer = null;
+      const finish = (err) => {
+        if (settled) return;
+        settled = true;
+        if (hardTimer) { clearTimeout(hardTimer); hardTimer = null; }
+        if (err) { try { if (req) req.destroy(); } catch (_) { /* ignore */ } reject(err); }
+        else resolve();
+      };
+      hardTimer = setTimeout(
+        () => finish(new Error('Upload request timed out (network stalled)')),
+        600000 // 10 min absolute cap
+      );
+
+      req = protocol.request(options, (res) => {
         let body = '';
         res.on('data', chunk => { body += chunk; });
         res.on('end', () => {
-          if (res.statusCode >= 200 && res.statusCode < 300) {
-            resolve();
-          } else {
-            reject(new Error(`Upload failed: HTTP ${res.statusCode} — ${body.substring(0, 200)}`));
-          }
+          if (res.statusCode >= 200 && res.statusCode < 300) finish();
+          else finish(new Error(`Upload failed: HTTP ${res.statusCode} — ${body.substring(0, 200)}`));
         });
+        res.on('error', (e) => finish(e));
       });
 
-      req.on('error', reject);
-      req.on('timeout', () => {
-        req.destroy();
-        reject(new Error('Upload request timed out'));
-      });
+      req.on('error', (e) => finish(e));
+      req.on('timeout', () => finish(new Error('Upload request timed out')));
 
       // Stream the file — works for any size without loading into memory
       const readStream = fs.createReadStream(filePath);
-      readStream.on('error', reject);
+      readStream.on('error', (e) => finish(e));
       readStream.pipe(req);
     });
   }

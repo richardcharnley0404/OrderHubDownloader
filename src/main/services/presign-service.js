@@ -154,17 +154,30 @@ class PresignService {
           options.headers['Content-Length'] = Buffer.byteLength(bodyStr);
         }
 
-        const req = protocol.request(options, (res) => {
+        // Single-settle guard + wall-clock backstop, so a half-open socket
+        // (network dropped) can't hang this presign request indefinitely — the
+        // socket-idle `timeout` above doesn't reliably fire in that case.
+        let settled = false;
+        let req = null;
+        let hardTimer = null;
+        const finish = (err, value) => {
+          if (settled) return;
+          settled = true;
+          if (hardTimer) { clearTimeout(hardTimer); hardTimer = null; }
+          if (err) { try { if (req) req.destroy(); } catch (_) { /* ignore */ } reject(err); }
+          else resolve(value);
+        };
+        hardTimer = setTimeout(() => finish(new Error('Request timed out (network stalled)')), 30000);
+
+        req = protocol.request(options, (res) => {
           let data = '';
           res.on('data', chunk => { data += chunk; });
-          res.on('end', () => resolve({ statusCode: res.statusCode, body: data }));
+          res.on('end', () => finish(null, { statusCode: res.statusCode, body: data }));
+          res.on('error', (e) => finish(e));
         });
 
-        req.on('error', reject);
-        req.on('timeout', () => {
-          req.destroy();
-          reject(new Error('Request timeout'));
-        });
+        req.on('error', (e) => finish(e));
+        req.on('timeout', () => finish(new Error('Request timeout')));
 
         if (bodyStr) req.write(bodyStr);
         req.end();

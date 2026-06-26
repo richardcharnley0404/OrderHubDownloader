@@ -19,6 +19,8 @@ const { printControllerService } = require('./print-controller-service');
 const { resolvePrintSizeCode } = require('./routing-service');
 const { isDpofType } = require('./controller-types');
 const { ManifestNotFoundError } = require('./awaiting-manifest');
+const { resolveManifestPath } = require('./manifest-path');
+const { resolveDispatchImageSource } = require('./dispatch-image-source');
 const logger = require('./logger');
 const { buildFolderName } = require('../../shared/printUtils');
 
@@ -121,7 +123,7 @@ class PrintService {
     for (const img of jobManifest.images) {
       const basename = path.basename(img.filename);
       const enhancedPath = enhancedMap.get(basename);
-      const absoluteFilepath = enhancedPath || path.join(orderFolderPath, img.filename);
+      const absoluteFilepath = resolveDispatchImageSource({ rootPath: path.join(orderFolderPath, img.filename), jobFolderPath, basename, enhancedPath });
 
       if (enhancedPath) {
         logger.info('Using enhanced image for Darkroom Pro print', { basename, enhancedPath });
@@ -262,7 +264,7 @@ class PrintService {
         logger.info('Using enhanced image for DPOF print', { filename: basename, enhancedPath });
       }
       return {
-        sourcePath: enhancedPath || path.join(orderFolderPath, img.filename),
+        sourcePath: resolveDispatchImageSource({ rootPath: path.join(orderFolderPath, img.filename), jobFolderPath, basename, enhancedPath }),
         filename: basename
       };
     });
@@ -452,7 +454,7 @@ class PrintService {
         logger.info('Using enhanced image for DPOF print', { filename: basename, enhancedPath });
       }
       return {
-        sourcePath: enhancedPath || path.join(orderFolderPath, img.filename),
+        sourcePath: resolveDispatchImageSource({ rootPath: path.join(orderFolderPath, img.filename), jobFolderPath, basename, enhancedPath }),
         filename: basename
       };
     });
@@ -1578,7 +1580,7 @@ class PrintService {
         logger.info('Using enhanced image for folder-copy print', { filename: basename, enhancedPath });
       }
       return {
-        sourcePath: enhancedPath || path.join(orderFolderPath, img.filename),
+        sourcePath: resolveDispatchImageSource({ rootPath: path.join(orderFolderPath, img.filename), jobFolderPath, basename, enhancedPath }),
         filename:   basename,
       };
     });
@@ -1675,7 +1677,7 @@ class PrintService {
       const basename     = path.basename(img.filename);
       const enhancedPath = enhancedMap.get(basename);
       return {
-        sourcePath: enhancedPath || path.join(orderFolderPath, img.filename),
+        sourcePath: resolveDispatchImageSource({ rootPath: path.join(orderFolderPath, img.filename), jobFolderPath, basename, enhancedPath }),
         filename:   basename,
       };
     });
@@ -1847,7 +1849,7 @@ class PrintService {
         logger.info('Using enhanced image for Fuji JobMaker print', { filename: basename, enhancedPath });
       }
       return {
-        sourcePath: enhancedPath || path.join(orderFolderPath, img.filename),
+        sourcePath: resolveDispatchImageSource({ rootPath: path.join(orderFolderPath, img.filename), jobFolderPath, basename, enhancedPath }),
         filename:   basename,
       };
     });
@@ -2000,10 +2002,13 @@ class PrintService {
 
     const pdfFiles = jobManifest.images
       .filter(img => path.extname(img.filename).toLowerCase() === '.pdf')
-      .map(img => ({
-        sourcePath: path.join(orderFolderPath, img.filename),
-        filename:   path.basename(img.filename),
-      }));
+      .map(img => {
+        const basename = path.basename(img.filename);
+        return {
+          sourcePath: resolveDispatchImageSource({ rootPath: path.join(orderFolderPath, img.filename), jobFolderPath, basename }),
+          filename:   basename,
+        };
+      });
 
     if (pdfFiles.length === 0) {
       throw new Error(`No PDF files found in job ${job.id} manifest.`);
@@ -2157,7 +2162,7 @@ class PrintService {
       const basename     = path.basename(img.filename);
       const enhancedPath = enhancedMap.get(basename);
       return {
-        sourcePath: enhancedPath || path.join(orderFolderPath, img.filename),
+        sourcePath: resolveDispatchImageSource({ rootPath: path.join(orderFolderPath, img.filename), jobFolderPath, basename, enhancedPath }),
         filename:   basename,
       };
     });
@@ -2321,12 +2326,16 @@ class PrintService {
   async _readManifest(orderFolderPath, orderNumber) {
     const MAX_ATTEMPTS = 4;
     const RETRY_DELAY_MS = 250;
-    const manifestFilename = `${orderNumber}.json`;
-    const manifestPath = path.join(orderFolderPath, manifestFilename);
+    // Seed with the primary name so a never-found error references
+    // {orderNumber}.json; re-resolved each attempt below.
+    let manifestPath = path.join(orderFolderPath, `${orderNumber}.json`);
 
     let lastParseError = null;
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      // Re-resolve each attempt so a late-arriving manifest under either the
+      // {orderNumber}.json primary name or the order.json fallback is picked up.
+      manifestPath = resolveManifestPath(orderFolderPath, orderNumber);
       let present = false;
       try {
         present = fs.existsSync(manifestPath) && fs.statSync(manifestPath).size > 0;

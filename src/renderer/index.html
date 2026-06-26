@@ -27,7 +27,7 @@
 
     <nav class="tab-bar">
       <button class="tab active" data-tab="jobs">Jobs</button>
-      <button class="tab" data-tab="film">Film Review</button>
+      <button class="tab" data-tab="film">Film Scans</button>
       <button class="tab" data-tab="orderxml">Order XML</button>
       <button class="tab" data-tab="settings">Settings</button>
       <button class="tab" data-tab="activity">Activity Log</button>
@@ -451,6 +451,15 @@
                   <input type="number" id="filmScansWatchguardMinutes" name="filmScansWatchguardMinutes"
                     value="5" min="1" max="60" style="width: 80px;">
                   <small class="field-hint">Wait time before processing a folder.</small>
+                </div>
+              </div>
+
+              <div class="form-row">
+                <div class="form-group form-group-grow">
+                  <label for="filmScansRetentionDays">History Retention (days)</label>
+                  <input type="number" id="filmScansRetentionDays" name="filmScansRetentionDays"
+                    value="30" min="0" max="3650" style="width: 80px;">
+                  <small class="field-hint">How long reviewed rolls stay in the Film Scans history. 0 = keep forever. Only the on-screen history is trimmed — your stored scan files are never deleted.</small>
                 </div>
               </div>
 
