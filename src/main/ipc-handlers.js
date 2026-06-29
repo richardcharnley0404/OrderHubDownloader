@@ -3290,6 +3290,132 @@ ipcMain.handle('ohd:filmReview:rotate-frame', async (event, payload) => {
 });
 
 /**
+ * Permanently delete a single frame from a roll that has NOT been uploaded.
+ *
+ * Use case: the scanner's first few frames are leader/blank scans the operator
+ * drops before upload. Removes EVERY on-disk copy of that frame — the image in
+ * storage plus its sibling format (TIFF ⇄ JPEG) and its thumbnail — and the
+ * metadata record, so the frame never reaches S3 or the gallery. Hard delete,
+ * no recycle. Refused once the roll is uploaded / uploading (the gallery is
+ * already built from what was sent).
+ *
+ * Returns { ok:true, rollId, removedCount } or { ok:false, error }.
+ */
+ipcMain.handle('ohd:filmReview:delete-frame', async (event, frameIdRaw) => {
+  const frameId = typeof frameIdRaw === 'string' ? frameIdRaw : (frameIdRaw && frameIdRaw.frameId);
+  try {
+    if (!frameId) return { ok: false, error: 'frameId is required' };
+
+    const rec = frameMetadataStore.get(frameId);
+    if (!rec) return { ok: false, error: 'Frame not found' };
+    const rollId = rec.rollId;
+
+    // Gate: never delete from an uploaded / in-flight roll.
+    const roll = frameMetadataStore.getRoll(rollId);
+    const us = roll && roll.uploadStatus;
+    if (us === 'uploaded' || us === 'uploading') {
+      return { ok: false, error: 'This roll has already been uploaded — frames can only be deleted before upload.' };
+    }
+
+    // Remove every on-disk copy of this frame: the image in any format and its
+    // thumbnail. Best-effort per file; a missing file isn't an error.
+    const removed = [];
+    const tryUnlink = (p) => {
+      try {
+        if (p && fs.existsSync(p)) { fs.unlinkSync(p); removed.push(p); }
+      } catch (err) {
+        logger.logWarning(`[filmReview] delete-frame: failed to remove ${p}`, { error: err.message });
+      }
+    };
+    if (rec.originalPath) {
+      const dir  = path.dirname(rec.originalPath);
+      const stem = path.basename(rec.originalPath, path.extname(rec.originalPath));
+      for (const ext of ['.tif', '.tiff', '.jpg', '.jpeg']) {
+        tryUnlink(path.join(dir, stem + ext));
+      }
+    }
+    tryUnlink(rec.thumbnailPath);
+
+    // Drop the frame record; if the roll is now empty, drop the roll record too.
+    frameMetadataStore.deleteFrame(frameId);
+    const remaining = frameMetadataStore.listByRoll(rollId);
+    if (remaining.length === 0) {
+      frameMetadataStore.deleteRoll(rollId);
+    }
+
+    logger.info(`[filmReview] delete-frame ${frameId}: removed ${removed.length} file(s)`, { rollId, remaining: remaining.length });
+
+    // Refresh the panel (list view re-fetches; detail view re-fetches on return value).
+    try {
+      for (const w of BrowserWindow.getAllWindows()) {
+        if (w && !w.isDestroyed()) w.webContents.send('ohd:filmReview:roll-processed', { rollId });
+      }
+    } catch (_) { /* best-effort */ }
+
+    return { ok: true, rollId, removedCount: removed.length, rollEmptied: remaining.length === 0 };
+  } catch (err) {
+    logger.logError('[filmReview] delete-frame failed', err);
+    return { ok: false, error: err.message };
+  }
+});
+
+/**
+ * Permanently delete MANY frames at once (multi-select in the roll grid).
+ * Same rules as delete-frame, applied per frame, with one roll-cleanup + one
+ * panel refresh at the end. Frames whose roll is already uploaded are skipped
+ * (reported in `errors`). Returns { ok, deleted, errors, rollId, rollEmptied }.
+ */
+ipcMain.handle('ohd:filmReview:delete-frames', async (event, payload) => {
+  const frameIds = Array.isArray(payload) ? payload : (payload && payload.frameIds);
+  try {
+    if (!Array.isArray(frameIds) || frameIds.length === 0) return { ok: false, error: 'No frames selected' };
+
+    let rollId = null;
+    let deleted = 0;
+    const errors = [];
+    const tryUnlink = (p) => {
+      try { if (p && fs.existsSync(p)) fs.unlinkSync(p); }
+      catch (err) { logger.logWarning(`[filmReview] delete-frames: failed to remove ${p}`, { error: err.message }); }
+    };
+
+    for (const frameId of frameIds) {
+      const rec = frameMetadataStore.get(frameId);
+      if (!rec) { errors.push(`${frameId}: not found`); continue; }
+      if (!rollId) rollId = rec.rollId;
+      const roll = frameMetadataStore.getRoll(rec.rollId);
+      const us = roll && roll.uploadStatus;
+      if (us === 'uploaded' || us === 'uploading') { errors.push(`${frameId}: roll already uploaded`); continue; }
+
+      if (rec.originalPath) {
+        const dir  = path.dirname(rec.originalPath);
+        const stem = path.basename(rec.originalPath, path.extname(rec.originalPath));
+        for (const ext of ['.tif', '.tiff', '.jpg', '.jpeg']) tryUnlink(path.join(dir, stem + ext));
+      }
+      tryUnlink(rec.thumbnailPath);
+      frameMetadataStore.deleteFrame(frameId);
+      deleted++;
+    }
+
+    let rollEmptied = false;
+    if (rollId) {
+      const remaining = frameMetadataStore.listByRoll(rollId);
+      if (remaining.length === 0) { frameMetadataStore.deleteRoll(rollId); rollEmptied = true; }
+      try {
+        for (const w of BrowserWindow.getAllWindows()) {
+          if (w && !w.isDestroyed()) w.webContents.send('ohd:filmReview:roll-processed', { rollId });
+        }
+      } catch (_) { /* best-effort */ }
+    }
+
+    logger.info(`[filmReview] delete-frames: removed ${deleted} frame(s)`, { rollId, errorCount: errors.length });
+    return { ok: deleted > 0, deleted, errors, rollId, rollEmptied };
+  } catch (err) {
+    logger.logError('[filmReview] delete-frames failed', err);
+    return { ok: false, error: err.message };
+  }
+});
+
+/**
  * Approve a roll for S3 upload (PW-007 M7 — Manual Review mode).
  *
  * Called from RollReview's "Approve & Upload" button when the roll is in the

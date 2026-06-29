@@ -517,6 +517,19 @@ class FrameMetadataStore {
   }
 
   /**
+   * Remove a single frame record by frameId. Returns true if it existed and
+   * was removed, false otherwise. Used by the Film Review per-frame delete.
+   */
+  deleteFrame(frameId) {
+    if (!frameId) return false;
+    const frames = this.store.get('frames', {});
+    if (!frames[frameId]) return false;
+    delete frames[frameId];
+    this.store.set('frames', frames);
+    return true;
+  }
+
+  /**
    * Remove every frame record belonging to a given roll. Used by the Film
    * Review delete-roll flow alongside `deleteRoll(rollId)` — together they
    * scrub all on-disk metadata for the roll so the panel forgets about it

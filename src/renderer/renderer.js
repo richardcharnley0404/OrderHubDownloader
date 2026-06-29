@@ -11,6 +11,8 @@ const testLocalBtn = document.getElementById('testLocalBtn');
 const testTopazBtn = document.getElementById('testTopazBtn');
 const selectFilmScansWatchBtn = document.getElementById('selectFilmScansWatchBtn');
 const selectFilmScansStorageBtn = document.getElementById('selectFilmScansStorageBtn');
+const selectFilmScansSourceBtn = document.getElementById('selectFilmScansSourceBtn');
+const clearFilmScansSourceBtn = document.getElementById('clearFilmScansSourceBtn');
 const selectFileUploadsWatchBtn = document.getElementById('selectFileUploadsWatchBtn');
 const selectFileUploadsStorageBtn = document.getElementById('selectFileUploadsStorageBtn');
 const selectProcessFolderBtn = document.getElementById('selectProcessFolderBtn');
@@ -1918,6 +1920,7 @@ function populateForm(config) {
   // Film Scans
   document.getElementById('filmScansEnabled').checked = config.filmScansEnabled || false;
   document.getElementById('filmScansWatchFolder').value = config.filmScansWatchFolder || '';
+  document.getElementById('filmScansSourceFolder').value = config.filmScansSourceFolder || '';
   document.getElementById('filmScansStorageFolder').value = config.filmScansStorageFolder || '';
   document.getElementById('filmScansAutoSyncMinutes').value = config.filmScansAutoSyncMinutes || 5;
   document.getElementById('filmScansWatchguardMinutes').value = config.filmScansWatchguardMinutes || 5;
@@ -2042,6 +2045,7 @@ function getFormData() {
     // Film Scans
     filmScansEnabled: document.getElementById('filmScansEnabled').checked,
     filmScansWatchFolder: document.getElementById('filmScansWatchFolder').value.trim(),
+    filmScansSourceFolder: document.getElementById('filmScansSourceFolder').value.trim(),
     filmScansStorageFolder: document.getElementById('filmScansStorageFolder').value.trim(),
     filmScansAutoSyncMinutes: parseInt(document.getElementById('filmScansAutoSyncMinutes').value, 10) || 5,
     filmScansWatchguardMinutes: parseInt(document.getElementById('filmScansWatchguardMinutes').value, 10) || 5,
@@ -2644,6 +2648,16 @@ selectFilmScansWatchBtn.addEventListener('click', async () => {
   await selectDirectoryFor('filmScansWatchFolder');
   updateFilmScansEnableState();
 });
+if (selectFilmScansSourceBtn) {
+  selectFilmScansSourceBtn.addEventListener('click', async () => {
+    await selectDirectoryFor('filmScansSourceFolder');
+  });
+}
+if (clearFilmScansSourceBtn) {
+  clearFilmScansSourceBtn.addEventListener('click', () => {
+    document.getElementById('filmScansSourceFolder').value = '';
+  });
+}
 selectFilmScansStorageBtn.addEventListener('click', async () => {
   await selectDirectoryFor('filmScansStorageFolder');
   updateFilmScansEnableState();

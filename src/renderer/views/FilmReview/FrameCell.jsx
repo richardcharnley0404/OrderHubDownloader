@@ -48,6 +48,9 @@ export function FrameCell({
   onClick,        // fn(frame) — opens detail view (M4d); no-op until then
   onHoverStart,   // fn(frameId) — mouse enter or keyboard focus
   onHoverEnd,     // fn(frameId) — mouse leave or keyboard blur
+  selectable,     // boolean — roll not yet uploaded → selection (for deletion) enabled
+  selected,       // boolean — frame is currently selected
+  onToggleSelect, // fn(frame) — toggle this frame's selection
 }) {
   const rot        = frame.rotation || {};
   const confidence = typeof rot.confidence === 'number' ? rot.confidence : null;
@@ -99,6 +102,11 @@ export function FrameCell({
     onOpenFlagMenu?.(frame, e.currentTarget);
   };
 
+  const handleSelectToggle = (e) => {
+    e.stopPropagation();
+    onToggleSelect?.(frame);
+  };
+
   const handleCellClick = () => {
     onClick?.(frame);
   };
@@ -116,6 +124,7 @@ export function FrameCell({
     <div
       className={
         'fr-frame-cell' + modifier +
+        (selected ? ' fr-frame-cell--selected' : '') +
         (isFlashing ? ' fr-frame-cell--flash' : '')
       }
       data-frame-id={frame.frameId}
@@ -166,6 +175,19 @@ export function FrameCell({
           <span className="fr-flag-badge" title={`${flags.length} operator flag(s)`}>
             ⚑ {flags.length}
           </span>
+        )}
+
+        {selectable && (
+          <button
+            type="button"
+            className={'fr-select-box' + (selected ? ' is-selected' : '')}
+            title={selected ? 'Click to deselect' : 'Click to select for deletion'}
+            aria-label={selected ? 'Deselect frame' : 'Select frame'}
+            aria-pressed={!!selected}
+            onClick={handleSelectToggle}
+          >
+            {selected ? '✓' : ''}
+          </button>
         )}
 
         <div className="fr-frame-cell__hover-actions">

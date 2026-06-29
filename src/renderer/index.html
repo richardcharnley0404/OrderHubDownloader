@@ -422,6 +422,17 @@
               </div>
 
               <div class="form-group">
+                <label for="filmScansSourceFolder">Scanner Source Folder (optional)</label>
+                <div class="input-with-button">
+                  <input type="text" id="filmScansSourceFolder" name="filmScansSourceFolder"
+                    placeholder="(optional) folder the scanner writes to" readonly>
+                  <button type="button" id="selectFilmScansSourceBtn" class="btn-browse">Browse...</button>
+                  <button type="button" id="clearFilmScansSourceBtn" class="btn-browse">Clear</button>
+                </div>
+                <small class="field-hint">If set, OHD copies new scans from here into the Watch Folder and never deletes or changes anything in this folder — it stays your untouched archive. Leave empty to feed the Watch Folder directly (current behaviour).</small>
+              </div>
+
+              <div class="form-group">
                 <label for="filmScansWatchFolder">Watch Folder</label>
                 <div class="input-with-button">
                   <input type="text" id="filmScansWatchFolder" name="filmScansWatchFolder"

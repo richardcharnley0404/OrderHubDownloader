@@ -867,6 +867,7 @@ body.app-theme-dark .fr-roll-card__status--converting {
   display: flex;
   align-items: flex-start;
   justify-content: flex-end;
+  gap: 6px;
   padding: 6px;
   opacity: 0;
   pointer-events: none;
@@ -895,6 +896,84 @@ body.app-theme-dark .fr-roll-card__status--converting {
   transition: background 80ms ease;
 }
 .fr-flag-icon-btn:hover { background: #fff; }
+
+/* Per-frame selection checkbox (top-left). Shown for not-yet-uploaded rolls so
+   the operator can tick leader/blank frames and delete them in one batch.
+   Visible on cell hover, and always once selected. */
+.fr-select-box {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  background: rgba(0, 0, 0, 0.35);
+  color: #fff;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 80ms ease;
+  z-index: 2;
+}
+.fr-frame-cell:hover .fr-select-box,
+.fr-select-box.is-selected { opacity: 1; }
+.fr-select-box.is-selected {
+  background: var(--fr-accent);
+  border-color: var(--fr-accent);
+  color: var(--fr-accent-ink);
+}
+.fr-frame-cell--selected {
+  outline: 3px solid var(--fr-accent);
+  outline-offset: -3px;
+}
+
+/* Batch delete bar — appears above the grid when ≥1 frame is ticked. */
+.fr-select-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--fr-s2);
+  margin-bottom: var(--fr-s3);
+  padding: var(--fr-s2) var(--fr-s3);
+  background: var(--fr-surface-raised);
+  border: 1px solid var(--fr-border-subtle);
+  border-radius: var(--fr-radius);
+}
+.fr-select-bar__count {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fr-ink);
+}
+.fr-select-bar__spacer { flex: 1 1 auto; }
+.fr-select-bar__clear {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--fr-border);
+  color: var(--fr-ink-dim);
+  border-radius: var(--fr-radius);
+  padding: 5px 12px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.fr-select-bar__clear:hover { background: var(--fr-surface-sunk); color: var(--fr-ink); }
+.fr-select-bar__delete {
+  appearance: none;
+  background: var(--fr-red, #d04848);
+  border: 0;
+  color: #fff;
+  border-radius: var(--fr-radius);
+  padding: 6px 14px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.fr-select-bar__delete:hover { filter: brightness(1.05); }
 
 /* Footer row — numeric % + frame index. Hidden at tight density. */
 .fr-frame-cell__footer {

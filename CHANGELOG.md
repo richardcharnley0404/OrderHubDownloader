@@ -1,3 +1,18 @@
+## v1.7.17 - 2026-06-26
+
+### New: Scanner Source Folder — keep the scanner's output untouched
+Labs were manually copying their scanner's output folder before letting OHD run, because OHD *moves* files out of the Watch Folder (and the AI rotation step then edits the stored copies), so there was no pristine, untouched copy left behind. A new optional **Scanner Source Folder** setting (Settings → Film Scans) fixes this: when set, OHD copies new scan folders from it into the Watch Folder and processes those, while **never deleting or changing anything in the Scanner Source Folder** — it stays your clean archive. Leave it empty to keep the current behaviour (feed the Watch Folder directly).
+
+It also handles scanners that group rolls under a per-day folder — e.g. `Scanner\06272026\00000004\…`. OHD recognises the date folders automatically and copies the **roll folders inside them** across (the date level is dropped), so the layout the pipeline sees is unchanged. This whole feature is an additional step on top of the existing pipeline; the consume/rotate/upload path is untouched.
+
+Note: with this enabled a roll waits out the Watchguard time twice (once to confirm the scan finished in the source folder, then again in the Watch Folder), so allow a little extra time before processing starts.
+
+### New: Delete unwanted frames before a roll is uploaded
+Scanner leader frames and blank scans can now be removed from a roll before it's uploaded, so they never reach S3 or the gallery. Open a roll in Film Scans, **tick the frames** you want gone (a selection circle appears on each frame as you hover), then click **Delete selected** — a single confirmation removes them all permanently (the image, its matching TIFF/JPEG, and its thumbnail). Only available before a roll is uploaded; once a roll is on S3 the option is hidden.
+
+### Fixed: Large or layered TIFF scans failed to produce a JPEG
+TIFF rolls are converted to JPEG so the online galleries have images to show. Very large TIFFs (e.g. ~180 MB) or TIFFs carrying extra layers/metadata from retouching could fail that conversion quietly — the TIFF would upload but no JPEG was created. The conversion now uses the same tolerant settings as the rest of the film pipeline (it allows very large images and ignores non-fatal warnings), matching the rotation and thumbnail steps that already read those same files successfully, so these scans now convert correctly.
+
 ## v1.7.16 - 2026-06-26
 
 ### Fixed: Film scan uploads could get stuck on "Uploading…" after a network drop

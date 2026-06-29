@@ -74,6 +74,7 @@ export function RollReview({ rollId, tweaks, onBack }) {
   const [pendingRotations, setPendingRotations] = useState(0);
   const [uploading,        setUploading]        = useState(false);
   const [uploadError,      setUploadError]      = useState(null);
+  const [selectedIds,      setSelectedIds]      = useState(() => new Set()); // frameIds selected for deletion
   const flashTimer = useRef(null);
   // Serializes rapid-fire rotate-frame IPC calls. Without this, hitting R
   // four times quickly would fire four concurrent sharp rotations on the
@@ -86,6 +87,7 @@ export function RollReview({ rollId, tweaks, onBack }) {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    setSelectedIds(new Set()); // drop any selection when the open roll changes
     (async () => {
       try {
         const r = await window.electronAPI.filmReviewGetRoll(rollId);
@@ -168,6 +170,44 @@ export function RollReview({ rollId, tweaks, onBack }) {
       console.warn('[filmReview] quick-flag failed', err);
     }
   }, [patchFrame, flashOnce]);
+
+  // Multi-select delete (leader/blank scans). Tick frames' checkboxes to build
+  // a selection, then delete them all with ONE confirmation. Only offered while
+  // the roll hasn't been uploaded (selection is gated where it's passed in).
+  const toggleSelect = useCallback((frame) => {
+    if (!frame) return;
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(frame.frameId)) next.delete(frame.frameId);
+      else next.add(frame.frameId);
+      return next;
+    });
+  }, []);
+
+  const clearSelection = useCallback(() => setSelectedIds(new Set()), []);
+
+  const onDeleteSelected = useCallback(async () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    const ok = window.confirm(
+      `Permanently delete ${ids.length} frame${ids.length === 1 ? '' : 's'}?\n\n` +
+      `Their images and thumbnails are removed from disk for good — this can't be undone, and they won't be uploaded.`
+    );
+    if (!ok) return;
+    try {
+      const res = await window.electronAPI.filmReviewDeleteFrames(ids);
+      if (!res || (!res.ok && !res.deleted)) {
+        window.alert(`Couldn't delete frames: ${res?.error || (res?.errors && res.errors[0]) || 'unknown error'}`);
+        return;
+      }
+      if (res.rollEmptied) { onBack?.(); return; }
+      const r = await window.electronAPI.filmReviewGetRoll(rollId);
+      if (r) setRoll(r); else onBack?.();
+      setSelectedIds(new Set());
+    } catch (err) {
+      window.alert(`Couldn't delete frames: ${err?.message || String(err)}`);
+    }
+  }, [selectedIds, rollId, onBack]);
 
   // Open flag menu for a specific frame from the flag-icon button.
   const openFlagMenu = useCallback((frame, anchorEl) => {
@@ -309,6 +349,9 @@ export function RollReview({ rollId, tweaks, onBack }) {
   }
 
   const density = tweaks?.density || 'regular';
+  // Per-frame delete is only allowed before the roll is uploaded — once it's on
+  // S3 the gallery is already built from what was sent.
+  const canDeleteFrames = roll.uploadStatus !== 'uploaded' && roll.uploadStatus !== 'uploading';
 
   return (
     <div className="fr-body">
@@ -438,9 +481,21 @@ export function RollReview({ rollId, tweaks, onBack }) {
         {tweaks?.showKbdHint !== false && (
           <div className="fr-kbd-hint">
             Hover a frame &middot; <code>F</code> quick-flag &middot; click <span style={{fontSize: 13}}>⚑</span> for menu
+            {canDeleteFrames && <> &middot; tick frames to delete</>}
           </div>
         )}
       </div>
+
+      {canDeleteFrames && selectedIds.size > 0 && (
+        <div className="fr-select-bar">
+          <span className="fr-select-bar__count">{selectedIds.size} frame{selectedIds.size === 1 ? '' : 's'} selected</span>
+          <span className="fr-select-bar__spacer" />
+          <button type="button" className="fr-select-bar__clear" onClick={clearSelection}>Clear</button>
+          <button type="button" className="fr-select-bar__delete" onClick={onDeleteSelected}>
+            Delete selected
+          </button>
+        </div>
+      )}
 
       {filteredFrames.length === 0 ? (
         <div className="fr-empty">
@@ -461,6 +516,9 @@ export function RollReview({ rollId, tweaks, onBack }) {
               onClick={() => setFocusedFrameId(frame.frameId)}
               onHoverStart={(id) => setHoverFrame(id)}
               onHoverEnd={(id) => setHoverFrame((prev) => prev === id ? null : prev)}
+              selectable={canDeleteFrames}
+              selected={selectedIds.has(frame.frameId)}
+              onToggleSelect={toggleSelect}
             />
           ))}
         </div>

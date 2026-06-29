@@ -221,6 +221,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   filmReviewMarkRollReviewed: (rollId)                 => ipcRenderer.invoke('ohd:filmReview:mark-roll-reviewed', rollId),
   filmReviewOpenFolder:       (rollId)                 => ipcRenderer.invoke('ohd:filmReview:open-folder', rollId),
   filmReviewRotateFrame:      (frameId, delta)         => ipcRenderer.invoke('ohd:filmReview:rotate-frame', { frameId, delta }),
+  filmReviewDeleteFrame:      (frameId)                => ipcRenderer.invoke('ohd:filmReview:delete-frame', frameId),
+  filmReviewDeleteFrames:     (frameIds)               => ipcRenderer.invoke('ohd:filmReview:delete-frames', frameIds),
   filmReviewApproveRoll:      (rollId)                 => ipcRenderer.invoke('ohd:filmReview:approve-roll', rollId),
   filmReviewDeleteRoll:       (rollId)                 => ipcRenderer.invoke('ohd:filmReview:delete-roll',  rollId),
   filmReviewGetTweaks:        ()                       => ipcRenderer.invoke('ohd:filmReview:get-tweaks'),

@@ -88,6 +88,22 @@ class FolderWatchService {
     this._filmScanProcessing = true;
     const summary = { processed: 0, skipped: 0, failed: 0, errors: [] };
     try {
+      // Scanner source mirror (optional, additive, UPSTREAM). If a scanner
+      // source folder is configured, copy new/changed stable folders from it
+      // into the watch folder; the existing pipeline below then consumes them
+      // exactly as before. The source folder is never modified — it stays the
+      // lab's pristine archive. Best-effort; never breaks the cycle. The whole
+      // consume/rotate/upload path below is intentionally left untouched.
+      try {
+        const filmScanSourceMirror = require('./film-scan-source-mirror');
+        const mirrorResult = await filmScanSourceMirror.mirror(config, logger);
+        if (mirrorResult.copied > 0 || mirrorResult.errors.length > 0) {
+          logger.info(`filmScans: scanner mirror — copied ${mirrorResult.copied}, skipped ${mirrorResult.skipped}, error(s) ${mirrorResult.errors.length}`);
+        }
+      } catch (mirrorErr) {
+        logger.logWarning('filmScans: scanner source mirror failed', { error: mirrorErr.message });
+      }
+
       // Retention sweep — drop reviewed rolls older than the configured window
       // from the Film Review history. Removes metadata + the thumbnail cache
       // only; the scan files in the permanent storage folder are NEVER touched.
@@ -504,7 +520,15 @@ class FolderWatchService {
                 const jpgFile  = path.basename(tiffFile, path.extname(tiffFile)) + '.jpg';
                 const destPath = path.join(storagePath, jpgFile);
                 try {
-                  await sharp(srcPath).jpeg({ quality: 90 }).toFile(destPath);
+                  // Match the rotation/thumbnail steps' lenient options:
+                  // failOn:'none' tolerates the libvips warnings that big,
+                  // layered, touched-up TIFFs trigger (which the strict default
+                  // turns fatal), and limitInputPixels:false allows very large
+                  // scans past sharp's ~268MP guard. Without these, big/layered
+                  // TIFFs failed to convert and uploaded with no JPEG.
+                  await sharp(srcPath, { limitInputPixels: false, failOn: 'none' })
+                    .jpeg({ quality: 90 })
+                    .toFile(destPath);
                   logger.info(`filmScans: converted ${tiffFile} -> ${jpgFile}`);
                 } catch (convErr) {
                   logger.logError(`filmScans: failed to convert ${tiffFile} to JPEG - skipping`, convErr);

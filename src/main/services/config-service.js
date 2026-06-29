@@ -136,6 +136,14 @@ const schema = {
     type: 'string',
     default: ''
   },
+  // Optional scanner source folder. When set, OHD COPIES new/changed folders
+  // from here into the watch folder and NEVER deletes or modifies anything in
+  // here — it stays the lab's pristine archive. Empty = feature off (the watch
+  // folder is fed directly, as before).
+  filmScansSourceFolder: {
+    type: 'string',
+    default: ''
+  },
   filmScansStorageFolder: {
     type: 'string',
     default: ''
@@ -646,6 +654,7 @@ class ConfigService {
       // Film Scans
       filmScansEnabled: this.store.get('filmScansEnabled'),
       filmScansWatchFolder: this.store.get('filmScansWatchFolder'),
+      filmScansSourceFolder: this.store.get('filmScansSourceFolder'),
       filmScansStorageFolder: this.store.get('filmScansStorageFolder'),
       filmScansAutoSyncMinutes: this.store.get('filmScansAutoSyncMinutes'),
       filmScansWatchguardMinutes: this.store.get('filmScansWatchguardMinutes'),
@@ -800,6 +809,7 @@ class ConfigService {
     // Save Film Scans settings
     this.store.set('filmScansEnabled', Boolean(config.filmScansEnabled));
     this.store.set('filmScansWatchFolder', (config.filmScansWatchFolder || '').trim());
+    this.store.set('filmScansSourceFolder', (config.filmScansSourceFolder || '').trim());
     this.store.set('filmScansStorageFolder', (config.filmScansStorageFolder || '').trim());
 
     // Save Film Scans timer settings
