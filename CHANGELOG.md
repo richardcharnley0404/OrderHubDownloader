@@ -1,3 +1,8 @@
+## v1.7.19 - 2026-07-01
+
+### New: Set ignored options straight from the Assign Channel modal
+The per-job **Assign Channel** modal now shows an **Ignore** checkbox next to each option, so you can mark options as non-matching at the moment you assign a job — no need to open Settings afterwards. Boxes are pre-ticked for anything the controller already ignores. Ticking one and hitting **Save & Assign** adds it to the controller's ignore list (controller-wide, exactly like the Settings editor), so the new mapping matches with it already in effect and the option drops off the job row. Works for Fuji JobMaker, Darkroom Pro and Noritsu/Epson assignments.
+
 ## v1.7.18 - 2026-07-01
 
 ### New: {originalFilename} token for Darkroom Pro and Fuji JobMaker back-prints

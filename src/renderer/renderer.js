@@ -1287,6 +1287,55 @@ function getDpofOutputActionHtml(reviewBtnHtml, jobId, prefix) {
  * @param {object} job   - Job object from allJobs
  * @param {object} route - Route from jobRouteCache: { type:'unrouted', reason:'no-channel', controller }
  */
+/**
+ * Reconcile a controller's ignoredOptionNames from a set of on-screen per-option
+ * "Ignore" toggles. Adds names ticked, removes names shown-but-unticked, and
+ * leaves ignore names for options NOT shown untouched. Persists via
+ * saveOrderController (so matching + display pick it up) and updates the local
+ * cache. No-op when nothing changed. Shared by the Assign modal and the Edit
+ * Channel Mapping modal so their ignore semantics never drift.
+ *
+ * @param {string} controllerId
+ * @param {string[]} tickedIgnore    option names ticked "Ignore" (as displayed)
+ * @param {Set<string>} untickedNames lowercased names shown but NOT ticked
+ */
+async function reconcileControllerIgnore(controllerId, tickedIgnore, untickedNames) {
+  const ctrl = cachedOrderControllers.find(c => c.id === controllerId);
+  if (!ctrl) return;
+  const existing = Array.isArray(ctrl.ignoredOptionNames) ? ctrl.ignoredOptionNames : [];
+  const byLower = new Map();   // lowercased name -> display name
+  for (const n of existing) {
+    const k = String(n == null ? '' : n).trim().toLowerCase();
+    if (k) byLower.set(k, String(n).trim());
+  }
+  for (const n of tickedIgnore) byLower.set(n.toLowerCase(), n);
+  for (const key of untickedNames) {
+    if (!tickedIgnore.some(t => t.toLowerCase() === key)) byLower.delete(key);
+  }
+  const newIgnore   = Array.from(byLower.values());
+  const existingSet = new Set(existing.map(x => String(x).trim().toLowerCase()).filter(Boolean));
+  const newSet      = new Set(newIgnore.map(x => x.toLowerCase()));
+  const changed = existingSet.size !== newSet.size || [...newSet].some(k => !existingSet.has(k));
+  if (!changed) return;
+  const updated = { ...ctrl, ignoredOptionNames: newIgnore };
+  const res = await window.electronAPI.saveOrderController(updated);
+  if (res && res.success === false) throw new Error(res.error || 'Failed to save ignored options');
+  cachedOrderControllers = cachedOrderControllers.map(c => c.id === updated.id ? updated : c);
+}
+
+/** Read the Assign modal's per-option Ignore checkboxes into {tickedIgnore, untickedNames}. */
+function _collectAssignModalIgnore() {
+  const tickedIgnore = [];
+  const untickedNames = new Set();
+  document.querySelectorAll('#assignModalOptions .assign-opt-ignore').forEach(cb => {
+    const name = (cb.dataset.optname || '').trim();
+    if (!name) return;
+    if (cb.checked) tickedIgnore.push(name);
+    else            untickedNames.add(name.toLowerCase());
+  });
+  return { tickedIgnore, untickedNames };
+}
+
 function openAssignModal(job, route) {
   const modal = document.getElementById('assignChannelModal');
   if (!modal) return;
@@ -1304,14 +1353,25 @@ function openAssignModal(job, route) {
   document.getElementById('assignModalProductCode').textContent = job.product_code || '—';
   document.getElementById('assignModalController').textContent  = route.controller ? route.controller.name : '—';
 
-  // Options pills
+  // Options — each shown as a pill with an "Ignore" toggle. Ticking Ignore adds
+  // the option name to this controller's ignore list (controller-wide) on Save,
+  // exactly like the Settings-side Edit Channel Mapping modal. Seeded from the
+  // controller's current ignore list so already-ignored options show ticked.
   const optionsEl = document.getElementById('assignModalOptions');
+  const assignIgnoreSet = controllerIgnoredNameSet(route.controller ? route.controller.id : '');
   if (Array.isArray(job.options) && job.options.length > 0) {
     optionsEl.innerHTML = job.options
       .filter(o => o && (o.name || o.key))
       .map(o => {
-        const label = o.value ? `${o.name || o.key}: ${o.value}` : (o.name || o.key);
-        return `<span class="option-pill">${escapeHtml(label)}</span>`;
+        const name    = o.name || o.key;
+        const label   = o.value ? `${name}: ${o.value}` : name;
+        const checked = assignIgnoreSet.has(String(name).trim().toLowerCase()) ? 'checked' : '';
+        return `<label class="assign-opt-row" style="display:inline-flex;align-items:center;gap:6px;margin:0 10px 6px 0">
+          <span class="option-pill">${escapeHtml(label)}</span>
+          <span style="display:inline-flex;align-items:center;gap:3px;font-size:11px;color:#888;cursor:pointer;-webkit-app-region:no-drag" title="Ignore this option when matching jobs on this controller">
+            <input type="checkbox" class="assign-opt-ignore" data-optname="${escapeHtml(name)}" ${checked} style="margin:0">Ignore
+          </span>
+        </label>`;
       })
       .join('');
     document.getElementById('assignModalOptionsGroup').style.display = '';
@@ -1494,6 +1554,12 @@ function openAssignModal(job, route) {
       saveBtn.textContent = 'Saving...';
 
       try {
+        // Persist any per-option Ignore ticks to the controller first, so the
+        // new mapping matches (and displays) with them already in effect.
+        {
+          const { tickedIgnore, untickedNames } = _collectAssignModalIgnore();
+          await reconcileControllerIgnore(controllerId, tickedIgnore, untickedNames);
+        }
         const result = await window.electronAPI.saveChannelMapping({
           id:             crypto.randomUUID(),
           controllerId,
@@ -1568,6 +1634,12 @@ function openAssignModal(job, route) {
       saveBtn.textContent = 'Saving...';
 
       try {
+        // 0. Persist any per-option Ignore ticks to the controller.
+        {
+          const { tickedIgnore, untickedNames } = _collectAssignModalIgnore();
+          await reconcileControllerIgnore(controllerId, tickedIgnore, untickedNames);
+        }
+
         // 1. Optionally persist translation entries to the controller
 
         if (saveSizeTick || saveMediaTick) {
@@ -1630,6 +1702,11 @@ function openAssignModal(job, route) {
       const skipAutoPrint = document.getElementById('assignSkipAutoPrint').checked;
 
       try {
+        // Persist any per-option Ignore ticks to the controller first.
+        {
+          const { tickedIgnore, untickedNames } = _collectAssignModalIgnore();
+          await reconcileControllerIgnore(controllerId, tickedIgnore, untickedNames);
+        }
         const result = await window.electronAPI.saveChannelMapping({
           id:            crypto.randomUUID(),
           controllerId,
