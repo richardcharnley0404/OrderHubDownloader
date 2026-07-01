@@ -1,3 +1,18 @@
+## v1.7.18 - 2026-07-01
+
+### New: {originalFilename} token for Darkroom Pro and Fuji JobMaker back-prints
+Darkroom Pro **Photo Lines** and Fuji JobMaker **Back Print Templates** gain an `{originalFilename}` token. It resolves, per image, to the customer's original upload filename with Pixfizz's leading image-index prefix removed — e.g. a file stored as `5_576629810005.jpg` prints as `576629810005.jpg`. Because the value is taken from the order manifest / job record (not from whatever file is physically dispatched), **reprints and re-crops emit the correct original filename** for each image automatically. Orders that didn't ship an original (non-Pixfizz, older orders) leave the token blank rather than failing the job. (On Fuji the back-print is still sanitised and truncated to 40 characters by Frontier's rules.)
+
+### New: Ignore options that don't affect the print route
+Some products are sent every variant a customer can pick — finish, layout, border, image enhancement, mounting, and so on — but only one or two of those actually decide where the job prints. A cut print, for example, only cares about **finish**; its layout varies job to job and shouldn't matter. Previously every option on a channel mapping had to match exactly, so a varying option (like `layout-options`) would stop a job matching and push it to manual **Assign**.
+
+You can now mark an option as **Ignore** in a channel mapping (Settings → Routing → edit a mapping): tick the new *Ignore* box next to the option. Ignored options are skipped when matching jobs, so a job still matches no matter what value it carries for them. The setting belongs to the **controller**, so it applies to every mapping on that controller — set it once and it sticks even when new mappings are auto-created. Options you don't tick keep matching exactly as before, and controllers with nothing ticked behave identically to previous versions.
+
+Ignored options are also **hidden from the job list** for jobs routed to that controller, so the row only shows the variants that actually affect the print — less clutter. (The option is still recorded on the order and still visible in the mapping editor; only the job-row chip is hidden.)
+
+### Changed: Fuji JobMaker output uses the Job No
+Fuji JobMaker order files (the `.txt` filename, `Order_ID=`, `ImagePath=`, and the image staging folder) now use the **Job No** (e.g. `ORD-O4YK5Z-1`) instead of the bare order number. This prevents two jobs in the same order from colliding on a shared filename/folder. Reprints keep their `-r1` suffix (e.g. `ORD-O4YK5Z-1-r1`).
+
 ## v1.7.17 - 2026-06-26
 
 ### New: Scanner Source Folder — keep the scanner's output untouched

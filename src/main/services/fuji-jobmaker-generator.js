@@ -1,6 +1,6 @@
 'use strict';
 
-const { resolveTemplate } = require('./template-tokens');
+const { resolveTemplate, originalDisplayName } = require('./template-tokens');
 
 /**
  * Fuji JobMaker Output Generator
@@ -146,6 +146,9 @@ function _resolveBackPrint(controller, job, image) {
     if (!controller.backprintTemplate) return null;
     const resolved = resolveTemplate(controller.backprintTemplate, _toTokenJob(job), {
       filename: image.filename,
+      // Customer's original upload filename (index-prefix stripped); blank when
+      // the order didn't ship one. Same {originalFilename} token as Darkroom Pro.
+      originalFilename: originalDisplayName(image.originalFilename),
     });
     const cleaned = _sanitiseBackprintText(resolved);
     return cleaned || null;

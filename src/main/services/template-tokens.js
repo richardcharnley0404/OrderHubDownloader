@@ -20,6 +20,10 @@
  *   {orderNumber}   Order number (e.g. "PXDEMO-091YEC")
  *   {jobName}       Job name (e.g. "PXDEMO-091YEC-1") — falls back to orderNumber
  *   {filename}      Per-image filename including extension — supplied via ctx
+ *   {originalFilename} Per-image customer original upload filename — supplied
+ *                   via ctx. The caller is responsible for reducing the stored
+ *                   manifest-relative path to whatever display form it wants
+ *                   (this resolver just substitutes the string it's given).
  *
  * Empty/missing values resolve to empty string rather than throwing — the
  * resulting line still gets written, just with the token slot blank. This
@@ -62,7 +66,28 @@ function resolveTemplate(template, job = {}, ctx = {}) {
     .replace(/\{jobId\}/g,        String(job.id || ''))
     .replace(/\{orderNumber\}/g,  job.order_number   || '')
     .replace(/\{jobName\}/g,      job.job_name       || job.order_number || '')
-    .replace(/\{filename\}/g,     ctx.filename       || '');
+    .replace(/\{filename\}/g,     ctx.filename       || '')
+    .replace(/\{originalFilename\}/g, ctx.originalFilename || '');
+}
+
+/**
+ * Reduce a stored manifest-relative originalFilename to the value emitted for
+ * the {originalFilename} token.
+ *
+ * The manifest stores a path like "PXDEMO-XYZ_123/original-files/5_IMG.jpg".
+ * We emit just the customer's original filename with Pixfizz's leading
+ * image-index prefix removed, e.g. "5_576629810005.jpg" -> "576629810005.jpg"
+ * (the "5" is the image ordinal Pixfizz prepends; separator may be "-" or "_").
+ *
+ * Splits on both slash styles so it's correct on Linux (tests) and Windows.
+ * Returns '' for a falsy/missing value so the token resolves blank, matching
+ * every other optional token. Shared by the Darkroom Pro and Fuji JobMaker
+ * emitters.
+ */
+function originalDisplayName(rel) {
+  if (!rel || typeof rel !== 'string') return '';
+  const base = rel.split(/[\\/]/).pop() || '';
+  return base.replace(/^\d+[-_]/, '');
 }
 
 /**
@@ -77,6 +102,7 @@ const SUPPORTED_TOKENS = [
   '{orderNumber}',
   '{jobName}',
   '{filename}',
+  '{originalFilename}',
 ];
 
-module.exports = { resolveTemplate, SUPPORTED_TOKENS };
+module.exports = { resolveTemplate, SUPPORTED_TOKENS, originalDisplayName };

@@ -3,7 +3,7 @@
 const fs     = require('fs');
 const path   = require('path');
 const logger = require('./logger');
-const { resolveTemplate } = require('./template-tokens');
+const { resolveTemplate, originalDisplayName } = require('./template-tokens');
 
 /**
  * Darkroom Pro Output Generator
@@ -296,6 +296,9 @@ async function generateDarkroomProFile(job, controller) {
     // Normalise to Windows backslashes as Darkroom Pro requires them.
     const filepath = image.sourcePath.replace(/\//g, '\\');
     const filename = image.filename || path.basename(filepath);
+    // Customer's original upload filename (index-prefix stripped). Blank when
+    // the order didn't ship one — matches the other optional tokens.
+    const originalFilename = originalDisplayName(image.originalFilename);
 
     lines.push(`Qty=${qty}`);
     lines.push(`Size=${size}`);
@@ -303,10 +306,11 @@ async function generateDarkroomProFile(job, controller) {
     lines.push(`Date= ${formattedDate}`);
     lines.push(`Orderid=${jobIdentifier}`);
 
-    // Configurable photo lines — resolved per image so {filename} and any
-    // future per-image tokens reflect the current image, not the first one.
+    // Configurable photo lines — resolved per image so {filename},
+    // {originalFilename} and any future per-image tokens reflect the current
+    // image, not the first one.
     for (const pl of photoLines) {
-      const value = resolveTemplate(pl.ohdTemplate, tokenJob, { filename });
+      const value = resolveTemplate(pl.ohdTemplate, tokenJob, { filename, originalFilename });
       lines.push(`${pl.darkroomField}=${value}`);
     }
 
@@ -335,4 +339,4 @@ async function generateDarkroomProFile(job, controller) {
   return destPath;
 }
 
-module.exports = { generateDarkroomProFile, resolveSize, resolveMedia };
+module.exports = { generateDarkroomProFile, resolveSize, resolveMedia, originalDisplayName };

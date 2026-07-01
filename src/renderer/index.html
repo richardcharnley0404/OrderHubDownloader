@@ -1122,7 +1122,7 @@
       <div class="form-group" id="ocBackprintTemplateGroup" style="display:none">
         <label for="ocBackprintTemplate">Back Print Template</label>
         <input type="text" id="ocBackprintTemplate" placeholder="{firstName}/{filename}/{date}" style="width:100%;">
-        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Tokens: <code>{customerName}</code> <code>{firstName}</code> <code>{lastName}</code> <code>{orderNumber}</code> <code>{jobName}</code> <code>{jobId}</code> <code>{filename}</code> <code>{date}</code>. Resolved per image; sanitised and truncated to 40 chars by Frontier's <code>BackPrint=</code> field.</small>
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Tokens: <code>{customerName}</code> <code>{firstName}</code> <code>{lastName}</code> <code>{orderNumber}</code> <code>{jobName}</code> <code>{jobId}</code> <code>{filename}</code> <code>{originalFilename}</code> <code>{date}</code>. Resolved per image; sanitised and truncated to 40 chars by Frontier's <code>BackPrint=</code> field.</small>
       </div>
 
       <div class="form-group" id="ocFailureTimeoutMsGroup" style="display:none">
@@ -1275,6 +1275,7 @@
         <div class="pm-options-label">Options (name : value pairs)</div>
         <div id="cmOptionsList"></div>
         <button type="button" id="cmAddOptionBtn" class="btn-secondary" style="font-size:11px;padding:3px 10px;margin-top:4px;">+ Add Option</button>
+        <small class="field-hint" style="display:block;margin-top:4px;">Tick <strong>Ignore</strong> on an option to skip it when matching jobs &mdash; it applies to <em>every</em> mapping on this controller, so jobs whose value for that option varies still match.</small>
       </div>
 
       <!-- DPOF / standard controller fields -->

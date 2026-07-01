@@ -2327,6 +2327,14 @@ button {
   padding: 20px 24px 18px;
 }
 
+/* Channel Mapping editor carries an extra per-row "Ignore" toggle on each
+   option line, so it needs more horizontal room than the default 420px modal
+   or the label clips. Scoped to this modal only — every other .pm-modal keeps
+   the standard width. */
+#channelMappingModal .pm-modal {
+  width: 560px;
+}
+
 .pm-modal h3 {
   margin: 0 0 14px;
   /* Reserve space on the right for the .pm-modal-close × button. */
@@ -2520,6 +2528,12 @@ button {
 .rh-options-grid strong.rh-option-value {
   font-weight: 600;
   cursor: pointer;
+}
+
+/* Ignored options in a channel-mapping row — shown red so it's obvious they
+   don't take part in matching. */
+.cm-opt-ignored {
+  color: #c0392b;
 }
 
 .pm-options-label {

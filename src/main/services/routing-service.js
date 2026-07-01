@@ -271,7 +271,7 @@ function resolveRoute(job) {
       channelMapping = channelMappings.find(m =>
         m.controllerId === controller.id &&
         m.productCode  === productCode   &&
-        optionsMatch(m.options, options)
+        optionsMatchWithIgnore(m.options, options, controller)
       );
     }
 
@@ -328,7 +328,7 @@ function resolveRoute(job) {
     const channelMapping  = channelMappings.find(m =>
       m.controllerId === controller.id &&
       m.productCode  === productCode   &&
-      optionsMatch(m.options, options)
+      optionsMatchWithIgnore(m.options, options, controller)
     );
     if (!channelMapping) {
       return { type: 'unrouted', reason: 'no-channel', controller };
@@ -372,7 +372,7 @@ function resolveRoute(job) {
     const channelMapping  = channelMappings.find(m =>
       m.controllerId === controller.id &&
       m.productCode  === productCode   &&
-      optionsMatch(m.options, options)
+      optionsMatchWithIgnore(m.options, options, controller)
     );
     if (!channelMapping) {
       return { type: 'unrouted', reason: 'no-channel', controller };
@@ -400,7 +400,7 @@ function resolveRoute(job) {
   const channelMapping  = channelMappings.find(m =>
     m.controllerId === controller.id &&
     m.productCode  === productCode   &&
-    optionsMatch(m.options, options)
+    optionsMatchWithIgnore(m.options, options, controller)
   );
   if (!channelMapping) {
     return { type: 'unrouted', reason: 'no-channel', controller };
@@ -742,6 +742,46 @@ function optionsMatch(mappingOptions, jobOptions) {
   );
 }
 
+/**
+ * Per-controller "ignore these option names when matching" support.
+ *
+ * Some products are sent every variant/option (finish, layout, border, image
+ * enhancement, foam-core mounting, shopify_* ids, …) but only one or two of
+ * those actually distinguish the print route. For a cut-print controller, for
+ * example, only `finish-options` matters; `layout-options` is noise that
+ * varies per job and would otherwise force a channel mapping to match an exact
+ * combination (or send the job to manual Assign).
+ *
+ * A controller may declare `ignoredOptionNames: string[]`. Any option whose
+ * `name` (case-insensitive, trimmed) is on that list is stripped from BOTH the
+ * mapping and the job before `optionsMatch` runs, so a mapping that still
+ * carries the ignored option as documentation no longer *requires* it, and a
+ * job with a differing value for it still matches.
+ *
+ * Default is an empty/absent list → byte-identical to the previous matcher, so
+ * existing controllers and channel mappings behave exactly as before. The
+ * filter is scoped to the resolved controller, so enabling it on one controller
+ * cannot affect any other controller, process, or site.
+ */
+function controllerIgnoreSet(controller) {
+  const list = controller && Array.isArray(controller.ignoredOptionNames)
+    ? controller.ignoredOptionNames
+    : [];
+  return new Set(
+    list.map(n => String(n == null ? '' : n).trim().toLowerCase()).filter(Boolean)
+  );
+}
+
+function optionsMatchWithIgnore(mappingOptions, jobOptions, controller) {
+  const ignore = controllerIgnoreSet(controller);
+  if (ignore.size === 0) return optionsMatch(mappingOptions, jobOptions);
+  const strip = opts =>
+    (Array.isArray(opts) ? opts : []).filter(
+      o => o && !ignore.has(String(o.name == null ? '' : o.name).trim().toLowerCase())
+    );
+  return optionsMatch(strip(mappingOptions), strip(jobOptions));
+}
+
 // ── Migrations ───────────────────────────────────────────────────────────────
 
 // Routing keys that originally lived in config.json but now live exclusively
@@ -947,6 +987,7 @@ module.exports = {
   resolveRoute,
   resolveRouteForController,
   resolvePrintSizeCode,
+  optionsMatchWithIgnore,
   getRoutingHeldProcesses,
   migrateFromPrintControllerStore,
   stripDeprecatedConfigJsonKeys,

@@ -846,6 +846,10 @@ class PrintService {
       imagesByQty.get(qty).push({
         filename:   imageFiles[i].filename,
         sourcePath: imageFiles[i].sourcePath,
+        // From the reprint sidecar entry — stable across reprints/re-crops, so
+        // {originalFilename} shows the customer's true original even though the
+        // dispatched file comes from /originals/ or /working/.
+        originalFilename: img.originalFilename || null,
       });
     });
 
@@ -1130,10 +1134,11 @@ class PrintService {
 
     // Reprint-suffixed orderRef drives the writer's filenames + staging
     // folder. Parent: orderRef='PXDEMO-XYZ' → file 'PXDEMO-XYZ_Lustre.txt'
-    // + staging 'imageStagingRoot\PXDEMO-XYZ\'. Reprint: orderRef
-    // 'PXDEMO-XYZ-r1' → 'PXDEMO-XYZ-r1_Lustre.txt' +
-    // 'imageStagingRoot\PXDEMO-XYZ-r1\'. No collision.
-    const reprintOrderRef = `${parentJob.order_number || ''}-${reprintSuffix}`;
+    // + staging 'imageStagingRoot\PXDEMO-XYZ-1\'. Reprint: orderRef
+    // 'PXDEMO-XYZ-1-r1' → 'PXDEMO-XYZ-1-r1_Lustre.txt' +
+    // 'imageStagingRoot\PXDEMO-XYZ-1-r1\'. No collision.
+    // Base on the Job No (job_name, e.g. ORD-O4YK5Z-1), matching the normal send.
+    const reprintOrderRef = `${parentJob.job_name || parentJob.order_number || ''}-${reprintSuffix}`;
 
     const fullName = (parentJob.customer_name || '').trim();
     const surface     = route.surface;
@@ -1156,6 +1161,9 @@ class PrintService {
           filename:  imageFiles[i].filename,
           printCode: route.printCode,
           quantity:  img.qtyCurrent || 1,
+          // From the reprint sidecar entry — stable across reprints/re-crops,
+          // so {originalFilename} shows the customer's true original.
+          originalFilename: img.originalFilename || null,
           // backPrint deliberately undefined — 'image' mode is deferred
           // in v0, matching the normal-send path.
         })),
@@ -1698,6 +1706,10 @@ class PrintService {
       imagesByQty.get(qty).push({
         filename:   imageFiles[i].filename,
         sourcePath: imageFiles[i].sourcePath,
+        // Customer original upload path (manifest-relative). Carried through so
+        // the {originalFilename} photo-line token resolves per image. null when
+        // the manifest didn't ship one — token then resolves blank.
+        originalFilename: manifestImg.originalFilename || null,
       });
     });
 
@@ -1872,7 +1884,10 @@ class PrintService {
     const surfaceCode = route.surfaceCode || (surface ? surface.charAt(0).toUpperCase() : '');
 
     const fujiJob = {
-      orderRef: job.order_number || '',
+      // Use the Job No (job_name, e.g. ORD-O4YK5Z-1) as the orderRef so the
+      // surface filename, Order_ID, ImagePath and staging folder are all
+      // job-level — multiple Fuji jobs within one order no longer collide.
+      orderRef: job.job_name || job.order_number || '',
       id:       job.id,
       jobName:  job.job_name || job.order_number || '',
       dueAt:    job.due_at || null,
@@ -1888,6 +1903,9 @@ class PrintService {
           filename:  imageFiles[i].filename,
           printCode: route.printCode,
           quantity:  manifestImg.quantity || 1,
+          // Customer original upload path — feeds the {originalFilename}
+          // back-print token. null when the manifest didn't ship one.
+          originalFilename: manifestImg.originalFilename || null,
           // backPrint is left undefined — 'image' mode is deferred in v0.
         })),
       }],
@@ -1916,7 +1934,9 @@ class PrintService {
       writeResult = await fujiJobMakerFileWriter.writeOrderFiles({
         hotFolderPath:    route.outputPath,
         imageStagingRoot: route.imageStagingRoot,
-        orderRef:         job.order_number || '',
+        // Job No (job_name) — must match fujiJob.orderRef so the staging
+        // folder and the .txt's ImagePath line up.
+        orderRef:         job.job_name || job.order_number || '',
         imageFiles,
         surfaceFiles,
       });

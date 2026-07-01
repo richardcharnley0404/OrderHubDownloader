@@ -215,9 +215,9 @@ test('Fuji reprint: orderRef carries the reprint suffix', async (t) => {
 
   await printService.sendReprint(PARENT, reprintPath, 'r2', [{ filename: 'a.jpg', qtyCurrent: 1 }]);
 
-  assert.equal(__generateCalls[0].fujiJob.orderRef, 'PXTEST-FUJI-r2');
-  assert.equal(__writeCalls[0].orderRef,           'PXTEST-FUJI-r2',
-    'writer orderRef drives surface filenames AND staging folder name');
+  assert.equal(__generateCalls[0].fujiJob.orderRef, 'PXTEST-FUJI-1-r2');
+  assert.equal(__writeCalls[0].orderRef,           'PXTEST-FUJI-1-r2',
+    'writer orderRef = Job No (job_name) + reprint suffix; drives filenames AND staging folder');
 });
 
 test('Fuji reprint: surface filenames and staging folder both reprint-suffixed', async (t) => {
@@ -230,10 +230,10 @@ test('Fuji reprint: surface filenames and staging folder both reprint-suffixed',
 
   // Surface file in the hot folder
   assert.equal(result.destPaths.length, 1);
-  assert.equal(path.basename(result.destPaths[0]), 'PXTEST-FUJI-r1_Lustre.txt');
-  assert.match(result.destPaths[0], /hot\\fuji\\PXTEST-FUJI-r1_Lustre\.txt$/);
+  assert.equal(path.basename(result.destPaths[0]), 'PXTEST-FUJI-1-r1_Lustre.txt');
+  assert.match(result.destPaths[0], /hot\\fuji\\PXTEST-FUJI-1-r1_Lustre\.txt$/);
   // Staging folder
-  assert.match(result.stagedFolder, /staging\\PXTEST-FUJI-r1$/);
+  assert.match(result.stagedFolder, /staging\\PXTEST-FUJI-1-r1$/);
 });
 
 test('Fuji reprint: reprintImages + qtyCurrent flow into surfaceGroups.images', async (t) => {

@@ -179,9 +179,27 @@ const jobRouteCache = new Map();
  * @param {Array} jobs
  */
 async function resolveRoutesForReceivedJobs(jobs) {
-  // Resolve routes for both 'received' and 'pending' jobs so that the Assign
-  // button can appear even before local files have been downloaded.
-  const jobsToResolve = jobs.filter(j => j._status === 'received' || j._status === 'pending');
+  // Ensure the renderer's controller cache is populated before we render the
+  // Jobs table. It's otherwise only loaded when Settings → Routing is opened,
+  // so on a fresh start (Jobs tab, Settings never visited) the per-row "hide
+  // ignored options" filter had no ignore lists to consult and showed every
+  // chip. Routing/matching is unaffected by this (that runs in the main process
+  // off the persisted store) — this is purely so the renderer knows each
+  // controller's ignoredOptionNames. Lazy + guarded so it costs one fetch.
+  await ensureOrderControllersCached();
+
+  // Resolve routes for every active (non-completed) job, not just
+  // received/pending. Two reasons:
+  //   1. The Assign button needs the route for received/pending jobs (its
+  //      original purpose).
+  //   2. The job-row option pills hide options the job's controller ignores,
+  //      which needs the resolved controller — so in-production / processed
+  //      jobs must be resolved too, or their ignored options would still show.
+  // resolveRoute is side-effect-free, so caching extra routes is harmless; the
+  // status-badge lookup that reads this cache is gated on _status === 'pending'
+  // and is unaffected. Completed-history jobs are skipped to avoid resolving a
+  // potentially large archive on every render.
+  const jobsToResolve = jobs.filter(j => j._status !== 'completed');
   await Promise.all(jobsToResolve.map(async job => {
     try {
       const route = await window.electronAPI.routingResolve(job);
@@ -712,11 +730,22 @@ function renderJobTable(jobs) {
     }
 
     // Options pills (array of { name, value })
+    // Hide any option this job's resolved controller is configured to ignore
+    // for matching — it doesn't affect routing, so showing it is just clutter.
+    // Display-only: matching/dispatch already strip these names independently.
+    // If the job isn't routed to a controller yet, ignoredNames is empty and
+    // every option shows (we can't know what's irrelevant without a controller).
+    const _pillRoute   = jobRouteCache.get(String(job.id));
+    const _pillCtrlId  = _pillRoute
+      ? (_pillRoute.controllerId || (_pillRoute.controller && _pillRoute.controller.id))
+      : null;
+    const ignoredNames = _pillCtrlId ? controllerIgnoredNameSet(_pillCtrlId) : new Set();
     let optionsHtml = '';
     if (Array.isArray(job.options)) {
       for (const opt of job.options) {
         const optName = opt && (opt.name || opt.key);
         if (optName) {
+          if (ignoredNames.has(String(optName).trim().toLowerCase())) continue;
           const label = opt.value ? `${optName}: ${opt.value}` : optName;
           optionsHtml += `<span class="option-pill">${escapeHtml(label)}</span>`;
         }
@@ -725,6 +754,7 @@ function renderJobTable(jobs) {
       // Fallback for legacy object format
       for (const [key, val] of Object.entries(job.options)) {
         if (val) {
+          if (ignoredNames.has(String(key).trim().toLowerCase())) continue;
           const label = val === true ? key : `${key}: ${val}`;
           optionsHtml += `<span class="option-pill">${escapeHtml(label)}</span>`;
         }
@@ -3992,9 +4022,25 @@ async function loadRoutingSection() {
 async function loadOrderControllers() {
   try {
     cachedOrderControllers = await window.electronAPI.getOrderControllers();
+    _orderControllersCached = true;
     renderOrderControllers(cachedOrderControllers);
   } catch (err) {
     console.error('Error loading order controllers:', err);
+  }
+}
+
+// Data-only loader for contexts that need the controller cache (e.g. the Jobs
+// table's "hide ignored options" filter) but must not touch the Settings DOM.
+// Guarded so it fetches once; Settings edits keep cachedOrderControllers fresh
+// in place afterwards.
+let _orderControllersCached = false;
+async function ensureOrderControllersCached() {
+  if (_orderControllersCached) return;
+  try {
+    cachedOrderControllers = await window.electronAPI.getOrderControllers();
+    _orderControllersCached = true;
+  } catch (err) {
+    console.error('Error caching order controllers:', err);
   }
 }
 
@@ -4147,6 +4193,7 @@ const PHOTO_LINE_TOKENS = [
   '{orderNumber}',
   '{jobName}',
   '{filename}',
+  '{originalFilename}',
 ];
 
 function _refreshPhotoLineAddBtnState() {
@@ -5094,9 +5141,23 @@ function renderChannelMappings(mappings, controllers) {
     groupHeader.textContent = ctrlName;
     group.appendChild(groupHeader);
 
+    // Option names this controller ignores when matching — rendered in red in
+    // each mapping row so it's obvious which options are non-matching.
+    const ignoreSet = new Set(
+      (ctrl && Array.isArray(ctrl.ignoredOptionNames) ? ctrl.ignoredOptionNames : [])
+        .map(n => String(n == null ? '' : n).trim().toLowerCase())
+        .filter(Boolean)
+    );
+
     for (const mapping of ctrlMappings) {
-      const optionStr = (mapping.options || [])
-        .map(o => `${o.name}: ${o.value}`)
+      const optionsHtml = (mapping.options || [])
+        .map(o => {
+          const text    = escapeHtml(`${o.name}: ${o.value}`);
+          const ignored = ignoreSet.has(String(o.name == null ? '' : o.name).trim().toLowerCase());
+          return ignored
+            ? `<span class="cm-opt-ignored" title="Ignored when matching jobs on this controller">${text}</span>`
+            : text;
+        })
         .join(' · ');
 
       const row = document.createElement('div');
@@ -5107,7 +5168,7 @@ function renderChannelMappings(mappings, controllers) {
       const isFrontlineMapping = ctrl && ctrl.type === 'frontline';
       infoDiv.innerHTML =
         `<span class="channel-mapping-product">${escapeHtml(mapping.productCode)}</span>` +
-        (optionStr ? `<span class="channel-mapping-options">${escapeHtml(optionStr)}</span>` : '') +
+        (optionsHtml ? `<span class="channel-mapping-options">${optionsHtml}</span>` : '') +
         (isFrontlineMapping
           ? `<span class="channel-mapping-channel">→ ${escapeHtml(mapping.batchCode || '(no batch code)')}</span>` +
             (mapping.sortString ? `<span class="channel-mapping-options">${escapeHtml(mapping.sortString)}</span>` : '')
@@ -5178,8 +5239,10 @@ function openChannelMappingModal(mapping = null, controllers = null) {
 
   const optsList = document.getElementById('cmOptionsList');
   optsList.innerHTML = '';
+  const ignoreSet = controllerIgnoredNameSet(mapping ? mapping.controllerId : '');
   for (const opt of (mapping ? (mapping.options || []) : [])) {
-    addChannelMappingOptionRow(optsList, opt.name, opt.value);
+    const isIgnored = ignoreSet.has(String(opt.name == null ? '' : opt.name).trim().toLowerCase());
+    addChannelMappingOptionRow(optsList, opt.name, opt.value, isIgnored);
   }
 
   modal.dataset.editingId = mapping ? mapping.id : '';
@@ -5207,7 +5270,7 @@ function _updateCmFields(controllerId, ctrlList) {
   document.getElementById('cmSurfaceCodeGroup').style.display    = isFuji ? '' : 'none';
 }
 
-function addChannelMappingOptionRow(container, name = '', value = '') {
+function addChannelMappingOptionRow(container, name = '', value = '', ignored = false) {
   const row = document.createElement('div');
   row.className = 'mapping-row';
   row.style.cssText = 'display:flex;align-items:center;gap:4px;margin-bottom:4px;';
@@ -5215,15 +5278,42 @@ function addChannelMappingOptionRow(container, name = '', value = '') {
     <input type="text" class="cm-opt-name"  placeholder="name"  value="${escapeHtml(name)}"  style="flex:1">
     <span style="color:#666">:</span>
     <input type="text" class="cm-opt-value" placeholder="value" value="${escapeHtml(value)}" style="flex:1">
+    <label title="Ignore this option when matching jobs on this controller (applies to every mapping on the controller)" style="display:flex;align-items:center;gap:3px;font-size:11px;color:#888;white-space:nowrap;cursor:pointer;-webkit-app-region:no-drag">
+      <input type="checkbox" class="cm-opt-ignore" ${ignored ? 'checked' : ''} style="margin:0">Ignore
+    </label>
     <button type="button" style="background:none;border:none;color:#c0392b;cursor:pointer;font-size:18px;line-height:1;padding:0 4px">&times;</button>
   `;
   row.querySelector('button').addEventListener('click', () => row.remove());
   container.appendChild(row);
 }
 
+/**
+ * Build the lowercased set of option names a controller currently ignores for
+ * matching. Used to seed the per-row "Ignore" checkboxes in the channel mapping
+ * modal. Tolerates missing controller / missing field (returns empty set).
+ */
+function controllerIgnoredNameSet(controllerId) {
+  const ctrl = (cachedOrderControllers || []).find(c => c.id === controllerId);
+  const list = ctrl && Array.isArray(ctrl.ignoredOptionNames) ? ctrl.ignoredOptionNames : [];
+  return new Set(list.map(n => String(n == null ? '' : n).trim().toLowerCase()).filter(Boolean));
+}
+
+/** Re-seed each existing option row's Ignore checkbox from a controller's ignore list. */
+function reseedCmIgnoreChecks(controllerId) {
+  const ignore = controllerIgnoredNameSet(controllerId);
+  document.querySelectorAll('#cmOptionsList .mapping-row').forEach(r => {
+    const name = (r.querySelector('.cm-opt-name')?.value || '').trim().toLowerCase();
+    const box  = r.querySelector('.cm-opt-ignore');
+    if (box) box.checked = !!name && ignore.has(name);
+  });
+}
+
 document.getElementById('addChannelMappingBtn').addEventListener('click', () => openChannelMappingModal(null));
 document.getElementById('cmControllerId').addEventListener('change', (e) => {
   _updateCmFields(e.target.value, cachedOrderControllers);
+  // The ignore list belongs to the controller, so re-seed the per-row Ignore
+  // checkboxes whenever the selected controller changes.
+  reseedCmIgnoreChecks(e.target.value);
 });
 document.getElementById('cmAddOptionBtn').addEventListener('click', () => {
   addChannelMappingOptionRow(document.getElementById('cmOptionsList'));
@@ -5246,7 +5336,7 @@ document.getElementById('cmSaveBtn').addEventListener('click', async () => {
   if (!controllerId)                         { alert('Please select a controller.');                  return; }
   if (!productCode)                          { alert('Product code is required.');                    return; }
 
-  const selectedController = cachedOrderControllers.find(c => c.id === controllerId);
+  let   selectedController = cachedOrderControllers.find(c => c.id === controllerId);
   const isFrontlineCtrl    = selectedController?.type === 'frontline';
   const isDarkroomProCtrl  = selectedController?.type === 'darkroompro';
   const isFujiCtrl         = selectedController?.type === 'fujijobmaker';
@@ -5261,15 +5351,60 @@ document.getElementById('cmSaveBtn').addEventListener('click', async () => {
   }
 
   const options = [];
+  const tickedIgnore  = [];          // option names ticked "Ignore" (as typed)
+  const untickedNames = new Set();   // lowercased names present but NOT ticked
   document.querySelectorAll('#cmOptionsList .mapping-row').forEach(r => {
     const name  = r.querySelector('.cm-opt-name').value.trim();
     const value = r.querySelector('.cm-opt-value').value.trim();
+    const ignoreChecked = !!r.querySelector('.cm-opt-ignore')?.checked;
     if (name && value) options.push({ name, value });
+    if (name) {
+      if (ignoreChecked) tickedIgnore.push(name);
+      else               untickedNames.add(name.toLowerCase());
+    }
   });
 
   const skipAutoPrint = document.getElementById('cmSkipAutoPrint').checked;
   const editingId = modal.dataset.editingId;
   try {
+    // ── Reconcile the controller-wide ignore list with the per-row toggles ──
+    // Semantics: ignore is a property of the CONTROLLER ("ignore this option
+    // name when matching any job on this controller"), but it's edited here via
+    // the per-row checkboxes. Names ticked are added; names shown-but-unticked
+    // are removed; ignore names for options NOT shown in this modal (other
+    // products on the same controller) are left untouched. Persist BEFORE the
+    // channel-mapping save so the runAutoPrint() that save triggers re-resolves
+    // routes with the new ignore list already in effect.
+    if (selectedController) {
+      const existing = Array.isArray(selectedController.ignoredOptionNames)
+        ? selectedController.ignoredOptionNames : [];
+      const byLower = new Map();   // lowercased name -> display name
+      for (const n of existing) {
+        const key = String(n == null ? '' : n).trim().toLowerCase();
+        if (key) byLower.set(key, String(n).trim());
+      }
+      for (const n of tickedIgnore) byLower.set(n.toLowerCase(), n);
+      for (const key of untickedNames) {
+        if (!tickedIgnore.some(t => t.toLowerCase() === key)) byLower.delete(key);
+      }
+      const newIgnore   = Array.from(byLower.values());
+      const existingSet  = new Set(existing.map(x => String(x).trim().toLowerCase()).filter(Boolean));
+      const newSet       = new Set(newIgnore.map(x => x.toLowerCase()));
+      const changed = existingSet.size !== newSet.size || [...newSet].some(k => !existingSet.has(k));
+      if (changed) {
+        const updatedCtrl = { ...selectedController, ignoredOptionNames: newIgnore };
+        const ctrlRes = await window.electronAPI.saveOrderController(updatedCtrl);
+        if (ctrlRes && ctrlRes.success === false) {
+          showToast('Error saving ignored options: ' + (ctrlRes.error || 'Save failed'), 'error', 8000);
+          return;
+        }
+        cachedOrderControllers = cachedOrderControllers.map(c =>
+          c.id === updatedCtrl.id ? updatedCtrl : c
+        );
+        selectedController = updatedCtrl;
+      }
+    }
+
     const payload = {
       id: editingId || crypto.randomUUID(),
       controllerId,
