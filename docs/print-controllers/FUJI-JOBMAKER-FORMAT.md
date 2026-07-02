@@ -204,6 +204,7 @@ When `backprintMode = 'text'`, the template uses the same shared `template-token
 | `{jobName}` | `job.job_name` (fallback `{orderNumber}`) | `BALLY-Q7F39E-1` |
 | `{jobId}` | `job.id` | `38414838` |
 | `{filename}` | Per-image filename | `03505-cut-print_..._Q1.jpg` |
+| `{originalFilename}` | Customer's original upload filename, leading image-index prefix stripped (`5_576629810005.jpg` → `576629810005.jpg`); from the manifest/job record, so reprint-safe. Blank when none shipped. Note the back-print is still sanitised + truncated to 40 chars. | `576629810005.jpg` |
 | `{date}` | Current date `dd/MMM/yy` | `07/May/26` |
 
 Default template seed for new controllers (matches a common Frontline convention):

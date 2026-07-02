@@ -209,6 +209,7 @@ Tokens are case-sensitive and resolved per image via the shared `template-tokens
 | `{orderNumber}` | Order number | `PXDEMO-091YEC` |
 | `{jobName}` | Job name (falls back to `{orderNumber}`) | `PXDEMO-091YEC-1` |
 | `{filename}` | Per-image filename including extension | `PXDEMO-091YEC_..._pages1.jpeg` |
+| `{originalFilename}` | Customer's original upload filename, with Pixfizz's leading image-index prefix stripped (`5_576629810005.jpg` → `576629810005.jpg`). Taken from the order manifest / job record, so it stays correct on reprints and re-crops. Blank when the order shipped no original. | `576629810005.jpg` |
 
 Missing/empty values resolve to an empty string rather than throwing — this avoids blocking a job over an optional template token.
 
