@@ -32,6 +32,11 @@ export function ThumbnailGrid({
   aiQualityThreshold,
   onOpenOriginal,
   onRevealOriginal,
+  // Perfectly Clear multi-select (M3, 2026-07-03)
+  enhanceMultiSelectMode = false,
+  enhanceSelected = null,          // Set<filename> or null
+  onToggleEnhanceSelected,         // (filename) => void
+  enhanceStatusByFilename = null,  // Map<filename, status> or null
 }) {
   const scrollRef = useRef(null);
 
@@ -121,6 +126,10 @@ export function ThumbnailGrid({
             originalPath = `${orderRoot}\\${img.originalFilename.replace(/\//g, '\\')}`;
           }
 
+          const enhanceStatus = enhanceStatusByFilename
+            ? (enhanceStatusByFilename.get(img.filename) || null)
+            : null;
+
           return (
             <ThumbnailCard
               key={img.filename}
@@ -134,6 +143,14 @@ export function ThumbnailGrid({
               jobArtworkSource={jobArtworkSource}
               onOpenOriginal={onOpenOriginal}
               onRevealOriginal={onRevealOriginal}
+              enhanceMultiSelectMode={enhanceMultiSelectMode}
+              isEnhanceSelected={enhanceSelected ? enhanceSelected.has(img.filename) : false}
+              onToggleEnhanceSelected={
+                onToggleEnhanceSelected
+                  ? () => onToggleEnhanceSelected(img.filename)
+                  : undefined
+              }
+              enhanceStatus={enhanceStatus}
             />
           );
         })}

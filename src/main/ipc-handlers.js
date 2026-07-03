@@ -2361,6 +2361,88 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
     }
   });
 
+  /**
+   * ohd:enhancement:batchRun  (Perfectly Clear — M3)
+   * Payload:  { jobId, jobPath, filenames: string[], configId?, timeoutMs?, triggeredBy? }
+   * Returns:  { success: true, batchId } | { success: false, error }
+   *
+   * Kicks off a Perfectly Clear batch through the shared hot-folder client
+   * and returns a synthetic batch ID. Per-file completion runs the same
+   * cache→working copy-back + sidecar update the single-image path uses,
+   * so partial batches (some enhanced, some rejected) land on disk exactly
+   * like the single-image case — `_getEnhancedPathMap` needs zero changes.
+   *
+   * The renderer polls `ohd:enhancement:batchStatus` and can abort via
+   * `ohd:enhancement:batchCancel`.
+   */
+  ipcMain.handle('ohd:enhancement:batchRun', async (event, payload = {}) => {
+    const { jobId, jobPath, filenames, configId, timeoutMs, triggeredBy } = payload;
+    try {
+      logger.info('ohd:enhancement:batchRun started', {
+        jobId, count: Array.isArray(filenames) ? filenames.length : 0, configId,
+      });
+      const batchId = await enhancementManager.startBatchEnhancement({
+        jobId, jobPath, filenames, configId, timeoutMs, triggeredBy,
+      });
+      return { success: true, batchId };
+    } catch (error) {
+      logger.logError('ohd:enhancement:batchRun error', error, { jobId });
+      return { success: false, error: error.message };
+    }
+  });
+
+  /**
+   * ohd:enhancement:batchStatus  (Perfectly Clear — M3)
+   * Payload:  { batchId }
+   * Returns:  { success, batchId, files: [{filename, status, error?}], counts, finished }
+   */
+  ipcMain.handle('ohd:enhancement:batchStatus', async (event, { batchId } = {}) => {
+    try {
+      return await enhancementManager.checkBatchStatus(batchId);
+    } catch (error) {
+      logger.logError('ohd:enhancement:batchStatus error', error, { batchId });
+      return { success: false, error: error.message };
+    }
+  });
+
+  /**
+   * ohd:enhancement:batchCancel  (Perfectly Clear — M3)
+   * Payload:  { batchId }
+   * Returns:  { success, cancelled? } | { success: false, error }
+   *
+   * Cooperative cancel: files already resolved keep their terminal status;
+   * still-queued files eventually resolve to 'cancelled' when the client
+   * sees the abort. In-flight staged copies at QuickServer aren't recalled.
+   */
+  ipcMain.handle('ohd:enhancement:batchCancel', async (event, { batchId } = {}) => {
+    try {
+      return await enhancementManager.cancelBatch(batchId);
+    } catch (error) {
+      logger.logError('ohd:enhancement:batchCancel error', error, { batchId });
+      return { success: false, error: error.message };
+    }
+  });
+
+  /**
+   * ohd:enhancement:revert  (Perfectly Clear — M3)
+   * Payload:  { jobId, jobPath, filename }
+   * Returns:  { success, sidecar } | { success: false, error }
+   *
+   * Restore /working/{filename} from the pre-PC snapshot in /cache/ and
+   * strip the enhancement bookkeeping fields from the sidecar. Crop fields
+   * are deliberately left untouched — crop still wins over enhancement at
+   * dispatch and is orthogonal per the M3 decision.
+   */
+  ipcMain.handle('ohd:enhancement:revert', async (event, { jobId, jobPath, filename } = {}) => {
+    try {
+      logger.info('ohd:enhancement:revert', { jobId, filename });
+      return await enhancementManager.revertEnhancement({ jobId, jobPath, filename });
+    } catch (error) {
+      logger.logError('ohd:enhancement:revert error', error, { jobId, filename });
+      return { success: false, error: error.message };
+    }
+  });
+
   // ── Backup & Restore (v1.6+) ──
   //
   // Lazy-init the backup-service singleton so a broken backup module never

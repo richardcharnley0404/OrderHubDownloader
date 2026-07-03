@@ -460,6 +460,49 @@
   outline-offset: 1px;
 }
 
+/* Perfectly Clear multi-select checkbox (M3, 2026-07-03) — only visible
+   when the enhancement panel is in multi-select mode. Sits next to the
+   REPRINT/FLAG toggle in the top-left badge stack. Uses the same faint
+   dark base + solid brand-purple selected state used elsewhere for AI-
+   related affordances (matches .jr-badge--ai for visual grouping). */
+.jr-card__enh-select {
+  border: none;
+  border-radius: 2px;
+  padding: 0 4px;
+  min-width: 18px;
+  font-size: 11px;
+  font-family: var(--app-mono);
+  line-height: 1.4;
+  cursor: pointer;
+  background: rgba(0, 0, 0, 0.55);
+  color: rgba(255, 255, 255, 0.9);
+  transition: background 0.12s, color 0.12s, opacity 0.12s;
+  opacity: 0.75;
+}
+.jr-card__enh-select:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.78);
+}
+.jr-card__enh-select.is-on {
+  background: var(--app-purple-ai);
+  color: #fff;
+  opacity: 1;
+}
+.jr-card__enh-select:focus-visible {
+  outline: 2px solid var(--app-purple-ai);
+  outline-offset: 1px;
+}
+
+/* Per-file PC batch status badges. Renders alongside FLAG/MOD/AI in the
+   top-left stack when a card is participating in an in-flight batch. */
+.jr-badge--enh-status-queued     { background: rgba(0, 0, 0, 0.6); }
+.jr-badge--enh-status-processing { background: var(--app-brand-blue, #3b82f6); }
+.jr-badge--enh-status-enhanced   { background: var(--app-brand-green); }
+.jr-badge--enh-status-rejected   { background: var(--app-red); }
+.jr-badge--enh-status-timeout    { background: var(--app-red); }
+.jr-badge--enh-status-cancelled  { background: rgba(0, 0, 0, 0.6); }
+.jr-badge--enh-status-error      { background: var(--app-red); }
+
 /* AI Quality score pill — bottom-right */
 .jr-score {
   position: absolute;
@@ -1007,6 +1050,50 @@
   background: transparent;
   border: 1px solid var(--app-border);
   color: var(--app-ink-dim);
+}
+.jr-enh-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Perfectly Clear panel — multi-select controls (M3, 2026-07-03) */
+.jr-enh-single {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.jr-enh-multi {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--app-border);
+  padding-top: var(--app-s2);
+  margin-top: var(--app-s2);
+}
+.jr-enh-multi__hint {
+  font-size: 10px;
+  color: var(--app-ink-dim);
+  font-family: var(--app-mono);
+  letter-spacing: 0.03em;
+}
+.jr-enh-multi__row {
+  display: flex;
+  gap: 6px;
+}
+.jr-enh-multi__row .jr-enh-btn { flex: 1; }
+.jr-enh-batch-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 4px;
+  background: var(--app-panel-2, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--app-border);
+}
+.jr-enh-batch-summary__line {
+  font-size: 11px;
+  font-family: var(--app-mono);
+  color: var(--app-ink);
 }
 
 /* ─── Send-reprint action (top-bar pill, was bottom bar pre-2026-05-18) ── */

@@ -58,6 +58,31 @@ export function useJobReview(jobId, jobPath, ohJobId = null) {
   // that rarely changes during a Review session.
   const [aiQualityThreshold, setAiQualityThreshold] = useState(50);
 
+  // -- Perfectly Clear multi-select (M3) ---------------------------------------
+  //
+  // Separate selection set from the reprint flag set — the two are unrelated
+  // (an operator can multi-select images for AI enhancement without touching
+  // reprint status, and vice versa). Only reachable when the operator enters
+  // multi-select mode from the enhancement panel; toggling off clears the set
+  // so a stale selection can't leak into a subsequent session.
+  const [enhanceMultiSelectMode, setEnhanceMultiSelectMode] = useState(false);
+  const [enhanceSelected, setEnhanceSelected] = useState(() => new Set());
+
+  // -- Perfectly Clear batch state (M3) ----------------------------------------
+  //
+  // Tracks per-file batch progress so the ThumbnailGrid can badge each card
+  // and the enhancement panel can render counts / cancel button / done state.
+  // `null` when no batch is in flight; while running, values are
+  //   'queued' | 'enhanced' | 'rejected' | 'timeout' | 'cancelled' | 'error'
+  // (matches the main-side per-file states 1:1). `enhanceBatchId` is
+  // non-null iff a poll is active.
+  const [enhanceBatchId, setEnhanceBatchId] = useState(null);
+  const [enhanceBatchStatusByFilename, setEnhanceBatchStatusByFilename] = useState(() => new Map());
+  const [enhanceBatchCounts, setEnhanceBatchCounts] = useState(null);
+  const [enhanceBatchFinished, setEnhanceBatchFinished] = useState(false);
+  const [enhanceBatchError, setEnhanceBatchError] = useState(null);
+  const enhanceBatchPollRef = useRef(null);
+
   // Stable refs so async callbacks always see the latest values.
   const jobIdRef   = useRef(jobId);
   const jobPathRef = useRef(jobPath);
@@ -104,6 +129,10 @@ export function useJobReview(jobId, jobPath, ohJobId = null) {
     setHoldCorrection(false);
     setCropEditorOpen(false);
     setCropSizeOption(null);
+    // Reset the M3 Perfectly Clear multi-select set so a stale selection
+    // from the previous job can't leak into the new one.
+    setEnhanceMultiSelectMode(false);
+    setEnhanceSelected(new Set());
     persistedSidecarRef.current = null;
 
     window.electronAPI.jobLoad({ jobId, jobPath })
@@ -237,6 +266,185 @@ export function useJobReview(jobId, jobPath, ohJobId = null) {
       img.reprint ? { ...img, reprint: false } : img
     ));
   }, []);
+
+  // -- Enhance multi-select actions (Perfectly Clear, M3) ----------------------
+  //
+  // These operate on `enhanceSelected` — completely separate from reprint
+  // flags. Entering the mode is idempotent; exiting always clears the set
+  // so re-entering starts fresh.
+  const enterEnhanceMultiSelect = useCallback(() => {
+    setEnhanceMultiSelectMode(true);
+  }, []);
+
+  const exitEnhanceMultiSelect = useCallback(() => {
+    setEnhanceMultiSelectMode(false);
+    setEnhanceSelected(new Set());
+  }, []);
+
+  const toggleEnhanceSelected = useCallback((filename) => {
+    setEnhanceSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(filename)) next.delete(filename);
+      else next.add(filename);
+      return next;
+    });
+  }, []);
+
+  const selectAllForEnhance = useCallback(() => {
+    setEnhanceSelected(() => {
+      const all = (sidecarRef.current?.images || []).map(i => i.filename);
+      return new Set(all);
+    });
+  }, []);
+
+  const clearEnhanceSelected = useCallback(() => {
+    setEnhanceSelected(new Set());
+  }, []);
+
+  // -- Perfectly Clear batch orchestration (M3) --------------------------------
+  //
+  // startEnhanceBatch kicks off a batch via IPC and starts a ~1.5 s poll
+  // that mirrors per-file state into `enhanceBatchStatusByFilename`. On
+  // finish, refreshes the sidecar so `AI` badges + `enhancementSource` flip
+  // in the same tick as the last-file transition. Multiple concurrent
+  // batches on the same job are not supported — starting a new one
+  // cancels the previous.
+  function _stopEnhanceBatchPoll() {
+    if (enhanceBatchPollRef.current) {
+      clearInterval(enhanceBatchPollRef.current);
+      enhanceBatchPollRef.current = null;
+    }
+  }
+
+  const startEnhanceBatch = useCallback(async ({ filenames, configId }) => {
+    if (!Array.isArray(filenames) || filenames.length === 0) {
+      throw new Error('No images selected for enhancement.');
+    }
+    _stopEnhanceBatchPoll();
+    // Seed the per-file map so cards immediately show a 'queued' badge
+    // before the first status poll returns.
+    const seeded = new Map();
+    for (const f of filenames) seeded.set(f, 'queued');
+    setEnhanceBatchStatusByFilename(seeded);
+    setEnhanceBatchCounts({ queued: filenames.length, enhanced: 0, rejected: 0, timeout: 0, cancelled: 0, error: 0 });
+    setEnhanceBatchFinished(false);
+    setEnhanceBatchError(null);
+
+    const result = await window.electronAPI.enhancementBatchRun({
+      jobId:   jobIdRef.current,
+      jobPath: jobPathRef.current,
+      filenames,
+      configId: configId || null,
+      triggeredBy: 'operator',
+    });
+    if (!result || !result.success) {
+      const err = new Error((result && result.error) || 'Failed to start Perfectly Clear batch');
+      setEnhanceBatchError(err.message);
+      throw err;
+    }
+    const batchId = result.batchId;
+    setEnhanceBatchId(batchId);
+
+    // ~1.5 s poll matches the client's default poll interval.
+    enhanceBatchPollRef.current = setInterval(async () => {
+      try {
+        const status = await window.electronAPI.enhancementBatchStatus({ batchId });
+        if (!status || !status.success) {
+          _stopEnhanceBatchPoll();
+          setEnhanceBatchError((status && status.error) || 'Batch status lookup failed');
+          setEnhanceBatchFinished(true);
+          return;
+        }
+        const next = new Map();
+        for (const f of status.files) next.set(f.filename, f.status);
+        setEnhanceBatchStatusByFilename(next);
+        setEnhanceBatchCounts(status.counts);
+        if (status.finished) {
+          _stopEnhanceBatchPoll();
+          setEnhanceBatchFinished(true);
+          // Refresh the sidecar so AI badges + enhancementSource land in
+          // the renderer immediately — otherwise the `Revert` button
+          // wouldn't appear until the next manual reload.
+          try {
+            const loadResult = await window.electronAPI.jobLoad({
+              jobId:   jobIdRef.current,
+              jobPath: jobPathRef.current,
+            });
+            if (loadResult && loadResult.success) {
+              setSidecar(loadResult.sidecar);
+              persistedSidecarRef.current = loadResult.sidecar;
+              setFilenames(loadResult.filenames);
+            }
+          } catch (_) { /* non-fatal */ }
+        }
+      } catch (err) {
+        _stopEnhanceBatchPoll();
+        setEnhanceBatchError(err.message);
+        setEnhanceBatchFinished(true);
+      }
+    }, 1500);
+    return batchId;
+  }, []);
+
+  const cancelEnhanceBatch = useCallback(async () => {
+    const id = enhanceBatchId;
+    if (!id) return;
+    try {
+      await window.electronAPI.enhancementBatchCancel({ batchId: id });
+    } catch (_) { /* ignore — best-effort */ }
+    // Let the poll observe the cancellation naturally; the client marks
+    // still-queued files 'cancelled' when it sees the abort.
+  }, [enhanceBatchId]);
+
+  const dismissEnhanceBatch = useCallback(() => {
+    _stopEnhanceBatchPoll();
+    setEnhanceBatchId(null);
+    setEnhanceBatchStatusByFilename(new Map());
+    setEnhanceBatchCounts(null);
+    setEnhanceBatchFinished(false);
+    setEnhanceBatchError(null);
+  }, []);
+
+  const revertEnhancement = useCallback(async (filename) => {
+    if (!filename) throw new Error('filename required');
+    const result = await window.electronAPI.enhancementRevert({
+      jobId:   jobIdRef.current,
+      jobPath: jobPathRef.current,
+      filename,
+    });
+    if (!result || !result.success) {
+      throw new Error((result && result.error) || 'Revert failed');
+    }
+    if (result.sidecar) {
+      setSidecar(result.sidecar);
+      persistedSidecarRef.current = result.sidecar;
+    } else {
+      // Fall back to a full refresh if the handler didn't return a sidecar.
+      try {
+        const loadResult = await window.electronAPI.jobLoad({
+          jobId:   jobIdRef.current,
+          jobPath: jobPathRef.current,
+        });
+        if (loadResult && loadResult.success) {
+          setSidecar(loadResult.sidecar);
+          persistedSidecarRef.current = loadResult.sidecar;
+          setFilenames(loadResult.filenames);
+        }
+      } catch (_) { /* non-fatal */ }
+    }
+  }, []);
+
+  // Stop polling when the drawer unmounts / a new job loads.
+  useEffect(() => () => _stopEnhanceBatchPoll(), []);
+  useEffect(() => {
+    // Job change → clear batch state.
+    _stopEnhanceBatchPoll();
+    setEnhanceBatchId(null);
+    setEnhanceBatchStatusByFilename(new Map());
+    setEnhanceBatchCounts(null);
+    setEnhanceBatchFinished(false);
+    setEnhanceBatchError(null);
+  }, [jobId, jobPath]);
 
   const toggleHold = useCallback(() => {
     setHoldCorrection(h => !h);
@@ -653,5 +861,25 @@ export function useJobReview(jobId, jobPath, ohJobId = null) {
     // Customer Originals (Phase 1)
     openOriginal,
     revealOriginal,
+
+    // Perfectly Clear multi-select (M3)
+    enhanceMultiSelectMode,
+    enhanceSelected,
+    enterEnhanceMultiSelect,
+    exitEnhanceMultiSelect,
+    toggleEnhanceSelected,
+    selectAllForEnhance,
+    clearEnhanceSelected,
+
+    // Perfectly Clear batch state + actions (M3)
+    enhanceBatchId,
+    enhanceBatchStatusByFilename,
+    enhanceBatchCounts,
+    enhanceBatchFinished,
+    enhanceBatchError,
+    startEnhanceBatch,
+    cancelEnhanceBatch,
+    dismissEnhanceBatch,
+    revertEnhancement,
   };
 }

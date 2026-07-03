@@ -210,6 +210,11 @@ export function ThumbnailCard({
   jobArtworkSource = null,    // S3 Artwork Channel M2 — null when job-level lookup hasn't resolved or job is FTP-only
   onOpenOriginal,
   onRevealOriginal,
+  // Perfectly Clear multi-select (M3, 2026-07-03)
+  enhanceMultiSelectMode = false,
+  isEnhanceSelected = false,
+  onToggleEnhanceSelected,      // () => void
+  enhanceStatus = null,         // null | 'queued' | 'processing' | 'enhanced' | 'rejected' | 'timeout' | 'cancelled' | 'error'
 }) {
   const canvasRef = useRef(null);
 
@@ -312,6 +317,35 @@ export function ThumbnailCard({
     if (onToggleReprint) onToggleReprint();
   }
 
+  // Perfectly Clear multi-select checkbox (M3). Same stop-propagation
+  // pattern as the reprint flag: toggling selection does not also change
+  // which image the main preview is showing.
+  function handleToggleEnhanceSelected(e) {
+    e.stopPropagation();
+    if (onToggleEnhanceSelected) onToggleEnhanceSelected();
+  }
+  function handleToggleEnhanceSelectedKey(e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.stopPropagation();
+    e.preventDefault();
+    if (onToggleEnhanceSelected) onToggleEnhanceSelected();
+  }
+
+  // Human-readable label for the per-file PC batch state badge. null when
+  // the card isn't participating in an in-flight batch.
+  const enhanceStatusLabel = (() => {
+    switch (enhanceStatus) {
+      case 'queued':     return 'QUEUED';
+      case 'processing': return 'ENHANCING';
+      case 'enhanced':   return 'DONE';
+      case 'rejected':   return 'REJECTED';
+      case 'timeout':    return 'TIMEOUT';
+      case 'cancelled':  return 'CANCELLED';
+      case 'error':      return 'ERROR';
+      default: return null;
+    }
+  })();
+
   return (
     <div
       onClick={onClick}
@@ -335,6 +369,24 @@ export function ThumbnailCard({
           on click and keydown so toggling the flag does not also change the
           selected image in the main preview. */}
       <div className="jr-badges-tl">
+        {enhanceMultiSelectMode && (
+          <button
+            type="button"
+            onClick={handleToggleEnhanceSelected}
+            onKeyDown={handleToggleEnhanceSelectedKey}
+            role="checkbox"
+            aria-checked={isEnhanceSelected}
+            aria-label={isEnhanceSelected
+              ? `Deselect ${filename} for enhancement`
+              : `Select ${filename} for enhancement`}
+            title={isEnhanceSelected
+              ? 'Click to deselect for Perfectly Clear'
+              : 'Click to select for Perfectly Clear'}
+            className={'jr-card__enh-select' + (isEnhanceSelected ? ' is-on' : '')}
+          >
+            {isEnhanceSelected ? '☑' : '☐'}
+          </button>
+        )}
         <button
           type="button"
           onClick={handleToggleReprint}
@@ -352,6 +404,18 @@ export function ThumbnailCard({
         </button>
         {isModified && <span className="jr-badge jr-badge--mod">MOD</span>}
         {enhanced && <span className="jr-badge jr-badge--ai">AI</span>}
+        {enhanceStatusLabel && (
+          <span
+            className={`jr-badge jr-badge--enh-status jr-badge--enh-status-${enhanceStatus}`}
+            title={
+              image && image.enhancementSource === 'perfectly-clear'
+                ? `Perfectly Clear batch: ${enhanceStatusLabel.toLowerCase()}`
+                : `Enhancement: ${enhanceStatusLabel.toLowerCase()}`
+            }
+          >
+            {enhanceStatusLabel}
+          </span>
+        )}
       </div>
 
       {/* Top-right chip overlay (M3 layout fix, 2026-05-24).

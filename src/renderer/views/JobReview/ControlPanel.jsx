@@ -114,9 +114,330 @@ function HoldToggle({ holdCorrection, onToggleHold }) {
 // affordance. The bulk Flag-all/Clear-all controls in the thumbnail grid
 // header cover the "set every image at once" case.
 
-// ── AI Enhancement panel ──────────────────────────────────────────────────────
+// ── AI Enhancement panel — router ─────────────────────────────────────────────
+//
+// Perfectly Clear (M3, 2026-07-03) overrides the legacy provider surface
+// whenever Jobs scope is enabled + has ≥1 config — matches the main-side
+// `getProvider()` precedence in enhancementManager.js. Disabling PC in
+// Settings makes the legacy Topaz / Pixfizz-AI panel visible again as a
+// fallback, per the M3 decision to keep old providers dormant-but-reachable.
+//
+// The route is decided from `perfectlyClear.jobs.enabled + configs.length`.
+// Config is loaded once on mount; toggling the setting requires a Job Review
+// reopen (mirrors how the legacy panel loads `enhancementProvider` once).
 
-function EnhancementPanel({ selected, jobId, jobPath, onRefreshSidecar }) {
+function EnhancementPanel(props) {
+  const [route, setRoute] = useState(null); // 'perfectly-clear' | 'legacy'
+  const [pcJobs, setPcJobs] = useState(null); // { enabled, autoApplyConfigId, configs: [...] } | null
+
+  useEffect(() => {
+    window.electronAPI.getConfig()
+      .then((cfg) => {
+        const pc = cfg && cfg.perfectlyClear && cfg.perfectlyClear.jobs;
+        setPcJobs(pc || { enabled: false, autoApplyConfigId: null, configs: [] });
+        if (pc && pc.enabled && Array.isArray(pc.configs) && pc.configs.length > 0) {
+          setRoute('perfectly-clear');
+        } else if (pc && pc.enabled) {
+          // Enabled but not configured — surface the not-ready CTA rather
+          // than fall back to the legacy Topaz/Pixfizz-AI UI (operator
+          // clearly wants PC; showing Topaz would be confusing).
+          setRoute('pc-not-configured');
+        } else {
+          setRoute('legacy');
+        }
+      })
+      .catch(() => setRoute('legacy'));
+  }, []);
+
+  if (route === null) return null; // brief boot-time gap; avoids flicker
+  if (route === 'perfectly-clear') {
+    return <PerfectlyClearPanel {...props} pcJobs={pcJobs} />;
+  }
+  if (route === 'pc-not-configured') {
+    return <PerfectlyClearNotConfigured />;
+  }
+  return <LegacyEnhancementPanel {...props} />;
+}
+
+// Mirrors the LegacyEnhancementPanel `not-ready` phase pattern — offers a
+// one-click jump into the AI Enhancement settings subtab where the
+// operator can add a Perfectly Clear config.
+function PerfectlyClearNotConfigured() {
+  return (
+    <div>
+      <SectionLabel>AI Enhancement</SectionLabel>
+      <div className="jr-enh-card">
+        <div className="jr-enh-message">
+          Perfectly Clear is enabled but no channels are configured yet.
+          Add one in Settings → AI Enhancement.
+        </div>
+        <button
+          onClick={() => {
+            window.dispatchEvent(new CustomEvent('ohd:close-job-review'));
+            setTimeout(() => {
+              const settingsTab = document.querySelector('.tab-bar .tab[data-tab="settings"]');
+              if (settingsTab) settingsTab.click();
+              setTimeout(() => {
+                const aiTab = document.querySelector('.settings-subtab[data-subtab="aienhancement"]');
+                if (aiTab) aiTab.click();
+              }, 80);
+            }, 300);
+          }}
+          className="jr-enh-btn jr-enh-btn--secondary"
+        >
+          Open Settings
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── AI Enhancement panel — Perfectly Clear (M3) ───────────────────────────────
+//
+// Replaces the legacy single-image Topaz / Pixfizz-AI panel with a
+// multi-select + Select All flow. One / many / all images can be enhanced
+// via a single QuickServer batch; per-file progress is badged directly on
+// the thumbnail cards (via useJobReview batch state). Revert appears when
+// the selected image is currently PC-enhanced; it restores the pre-PC
+// snapshot without touching crop fields.
+//
+// Not-ready state: PC.jobs disabled or has no configs. Mirrors the
+// Legacy panel's `not-ready` phase — Open Settings button jumps into the
+// AI Enhancement subtab.
+
+function PerfectlyClearPanel({
+  selected,
+  pcJobs,
+  enhanceMultiSelectMode,
+  enhanceSelected,
+  enterEnhanceMultiSelect,
+  exitEnhanceMultiSelect,
+  toggleEnhanceSelected,
+  selectAllForEnhance,
+  clearEnhanceSelected,
+  enhanceBatchId,
+  enhanceBatchCounts,
+  enhanceBatchFinished,
+  enhanceBatchError,
+  startEnhanceBatch,
+  cancelEnhanceBatch,
+  dismissEnhanceBatch,
+  onRevertEnhancement,
+}) {
+  const configs = (pcJobs && pcJobs.configs) || [];
+
+  // Persist last-used config in localStorage so the dropdown defaults to
+  // the operator's most-recent pick instead of always first. Falls back
+  // to the auto-apply hint (which Jobs doesn't currently surface, but
+  // honouring the shape means an operator who set it via /raw config
+  // still gets their intended default), then the first config.
+  const LS_KEY = 'ohd.jobReview.pc.lastConfigId';
+  const initialConfigId = (() => {
+    try {
+      const stored = window.localStorage.getItem(LS_KEY);
+      if (stored && configs.some(c => c.id === stored)) return stored;
+    } catch (_) { /* ignore */ }
+    if (pcJobs && pcJobs.autoApplyConfigId && configs.some(c => c.id === pcJobs.autoApplyConfigId)) {
+      return pcJobs.autoApplyConfigId;
+    }
+    return configs[0] ? configs[0].id : null;
+  })();
+  const [selectedConfigId, setSelectedConfigId] = useState(initialConfigId);
+
+  function onConfigChange(e) {
+    const id = e.target.value;
+    setSelectedConfigId(id);
+    try { window.localStorage.setItem(LS_KEY, id); } catch (_) { /* ignore */ }
+  }
+
+  const batchInFlight = Boolean(enhanceBatchId) && !enhanceBatchFinished;
+  const showBatchSummary = Boolean(enhanceBatchId) && enhanceBatchFinished;
+  const singleFilename = selected?.filename || null;
+
+  async function handleEnhanceThis() {
+    if (!singleFilename) return;
+    try {
+      await startEnhanceBatch({ filenames: [singleFilename], configId: selectedConfigId });
+    } catch (_) { /* error state carried in enhanceBatchError */ }
+  }
+
+  async function handleEnhanceSelected() {
+    const filenames = Array.from(enhanceSelected || []);
+    if (filenames.length === 0) return;
+    try {
+      await startEnhanceBatch({ filenames, configId: selectedConfigId });
+      // Leave multi-select mode active so the operator sees the batch
+      // progress on the cards they picked; they can Exit Multi-Select
+      // manually or dismiss the batch card when done.
+    } catch (_) { /* error state carried in enhanceBatchError */ }
+  }
+
+  async function handleRevert() {
+    if (!singleFilename) return;
+    try { await onRevertEnhancement(singleFilename); } catch (_) { /* silent — surfaced by refresh */ }
+  }
+
+  // Batch-in-flight card. Wins over any other state so the operator
+  // can't accidentally kick a second batch on top.
+  if (batchInFlight) {
+    const counts = enhanceBatchCounts || { queued: 0, enhanced: 0, rejected: 0, timeout: 0, cancelled: 0, error: 0 };
+    const done = counts.enhanced + counts.rejected + counts.timeout + counts.cancelled + counts.error;
+    const total = done + (counts.queued || 0);
+    return (
+      <div>
+        <SectionLabel>AI Enhancement</SectionLabel>
+        <div className="jr-enh-card jr-enh-card--processing">
+          <div className="jr-enh-status jr-enh-status--processing">
+            ⟳ Enhancing via Perfectly Clear…
+          </div>
+          <div className="jr-enh-status-hint">
+            {done} / {total} complete
+            {counts.rejected + counts.timeout + counts.error > 0
+              ? ` — ${counts.rejected + counts.timeout + counts.error} not enhanced`
+              : ''}
+          </div>
+          <button onClick={cancelEnhanceBatch} className="jr-enh-btn jr-enh-btn--cancel">
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <SectionLabel>AI Enhancement</SectionLabel>
+      <div className="jr-enh-card">
+        {/* Config selector — hidden when only one config exists (single-
+            channel operators shouldn't see a redundant one-option select).
+            Persisted last-choice + fallback logic lives in initialConfigId
+            above. */}
+        {configs.length > 1 && (
+          <div className="jr-enh-field">
+            <div className="jr-crop-label">CHANNEL</div>
+            <select
+              value={selectedConfigId || ''}
+              onChange={onConfigChange}
+              className="jr-select"
+            >
+              {configs.map(cfg => (
+                <option key={cfg.id} value={cfg.id}>
+                  {cfg.friendlyName || '(unnamed)'}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        {enhanceBatchError && <div className="jr-enh-error">{enhanceBatchError}</div>}
+
+        {/* Batch-just-finished summary. Sits above the per-image actions
+            so the operator sees "26 done, 2 rejected" before deciding
+            what to do next. Dismiss clears the map + per-card badges. */}
+        {showBatchSummary && enhanceBatchCounts && (
+          <div className="jr-enh-batch-summary">
+            <div className="jr-enh-batch-summary__line">
+              <strong>{enhanceBatchCounts.enhanced}</strong> enhanced
+              {enhanceBatchCounts.rejected > 0 && <> · <strong>{enhanceBatchCounts.rejected}</strong> rejected</>}
+              {enhanceBatchCounts.timeout  > 0 && <> · <strong>{enhanceBatchCounts.timeout}</strong> timed out</>}
+              {enhanceBatchCounts.cancelled > 0 && <> · <strong>{enhanceBatchCounts.cancelled}</strong> cancelled</>}
+              {enhanceBatchCounts.error   > 0 && <> · <strong>{enhanceBatchCounts.error}</strong> errored</>}
+            </div>
+            <button onClick={dismissEnhanceBatch} className="jr-enh-btn jr-enh-btn--secondary">
+              Dismiss
+            </button>
+          </div>
+        )}
+
+        {/* Single-image state: Revert / Re-enhance for PC-enhanced;
+            Enhance for un-enhanced. Multi-select is orthogonal — its
+            controls sit below and stay visible in either state. */}
+        {selected && selected.enhanced && selected.enhancementSource === 'perfectly-clear' ? (
+          <div className="jr-enh-single">
+            <div className="jr-enh-status">
+              ✓ Enhanced via Perfectly Clear
+            </div>
+            <div className="jr-enh-status-hint">
+              Channel: {selected.enhancementModel || '—'}
+            </div>
+            <button onClick={handleEnhanceThis} className="jr-enh-btn jr-enh-btn--primary">
+              Re-Enhance This Image
+            </button>
+            <button onClick={handleRevert} className="jr-enh-btn jr-enh-btn--secondary">
+              Revert to Original
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={handleEnhanceThis}
+            disabled={!singleFilename}
+            className="jr-enh-btn jr-enh-btn--primary"
+          >
+            ✨ Enhance This Image
+          </button>
+        )}
+
+        {/* Multi-select controls. Enter multi-select toggles the checkbox
+            overlay on every card (ThumbnailCard reads enhanceMultiSelectMode);
+            Select All / Clear operate on the enhanceSelected set;
+            "Enhance Selected (n)" fires a batch. Exit clears the set. */}
+        {!enhanceMultiSelectMode ? (
+          <button
+            onClick={enterEnhanceMultiSelect}
+            className="jr-enh-btn jr-enh-btn--secondary"
+          >
+            Select Multiple Images…
+          </button>
+        ) : (
+          <div className="jr-enh-multi">
+            <div className="jr-enh-multi__hint">
+              {enhanceSelected && enhanceSelected.size > 0
+                ? `${enhanceSelected.size} selected`
+                : 'Tick the box on each image to select'}
+            </div>
+            <div className="jr-enh-multi__row">
+              <button
+                onClick={selectAllForEnhance}
+                className="jr-enh-btn jr-enh-btn--secondary"
+              >
+                Select All
+              </button>
+              <button
+                onClick={clearEnhanceSelected}
+                disabled={!enhanceSelected || enhanceSelected.size === 0}
+                className="jr-enh-btn jr-enh-btn--secondary"
+              >
+                Clear
+              </button>
+            </div>
+            <button
+              onClick={handleEnhanceSelected}
+              disabled={!enhanceSelected || enhanceSelected.size === 0}
+              className="jr-enh-btn jr-enh-btn--primary"
+            >
+              Enhance Selected ({enhanceSelected ? enhanceSelected.size : 0})
+            </button>
+            <button
+              onClick={exitEnhanceMultiSelect}
+              className="jr-enh-btn jr-enh-btn--secondary"
+            >
+              Exit Multi-Select
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── AI Enhancement panel — legacy (Topaz / Pixfizz-AI) ────────────────────────
+//
+// Preserved as a fallback for operators who disable Perfectly Clear in
+// settings. The M3 decision was to hide-not-delete the old providers so
+// operators can still fall back if the QuickServer round-trip proves too
+// slow. Behaviour is unchanged from before M3.
+
+function LegacyEnhancementPanel({ selected, jobId, jobPath, onRefreshSidecar }) {
   const [hasKey,          setHasKey]          = useState(false);
   const [provider,        setProvider]        = useState('local');
   const [autoEnhance,     setAutoEnhance]     = useState(false);
@@ -467,6 +788,22 @@ export function ControlSidebar({
   allSizeOptions,
   cropSizeOption,
   onOpenCropEditor,
+  // Perfectly Clear (M3, 2026-07-03)
+  enhanceMultiSelectMode,
+  enhanceSelected,
+  enterEnhanceMultiSelect,
+  exitEnhanceMultiSelect,
+  toggleEnhanceSelected,
+  selectAllForEnhance,
+  clearEnhanceSelected,
+  enhanceBatchId,
+  enhanceBatchCounts,
+  enhanceBatchFinished,
+  enhanceBatchError,
+  startEnhanceBatch,
+  cancelEnhanceBatch,
+  dismissEnhanceBatch,
+  onRevertEnhancement,
 }) {
   const [resetting, setResetting] = useState(false);
 
@@ -530,6 +867,21 @@ export function ControlSidebar({
         jobId={jobId}
         jobPath={jobPath}
         onRefreshSidecar={onRefreshSidecar}
+        enhanceMultiSelectMode={enhanceMultiSelectMode}
+        enhanceSelected={enhanceSelected}
+        enterEnhanceMultiSelect={enterEnhanceMultiSelect}
+        exitEnhanceMultiSelect={exitEnhanceMultiSelect}
+        toggleEnhanceSelected={toggleEnhanceSelected}
+        selectAllForEnhance={selectAllForEnhance}
+        clearEnhanceSelected={clearEnhanceSelected}
+        enhanceBatchId={enhanceBatchId}
+        enhanceBatchCounts={enhanceBatchCounts}
+        enhanceBatchFinished={enhanceBatchFinished}
+        enhanceBatchError={enhanceBatchError}
+        startEnhanceBatch={startEnhanceBatch}
+        cancelEnhanceBatch={cancelEnhanceBatch}
+        dismissEnhanceBatch={dismissEnhanceBatch}
+        onRevertEnhancement={onRevertEnhancement}
       />
     </div>
   );

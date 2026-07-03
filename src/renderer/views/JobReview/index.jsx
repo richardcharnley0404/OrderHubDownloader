@@ -393,6 +393,14 @@ export function JobReviewDrawer({ jobId, jobPath, ohJobId, onClose }) {
     openOriginal, revealOriginal,
     recropFromOriginal,
     applyCropAndSendReprint,
+    // Perfectly Clear (M3, 2026-07-03)
+    enhanceMultiSelectMode, enhanceSelected,
+    enterEnhanceMultiSelect, exitEnhanceMultiSelect,
+    toggleEnhanceSelected, selectAllForEnhance, clearEnhanceSelected,
+    enhanceBatchId, enhanceBatchStatusByFilename,
+    enhanceBatchCounts, enhanceBatchFinished, enhanceBatchError,
+    startEnhanceBatch, cancelEnhanceBatch, dismissEnhanceBatch,
+    revertEnhancement,
   } = useJobReview(jobId, jobPath, ohJobId);
 
   // ── M5b (2026-05-25): batch crop mode routing ─────────────────────────────
@@ -548,6 +556,10 @@ export function JobReviewDrawer({ jobId, jobPath, ohJobId, onClose }) {
             aiQualityThreshold={aiQualityThreshold}
             onOpenOriginal={openOriginal}
             onRevealOriginal={revealOriginal}
+            enhanceMultiSelectMode={enhanceMultiSelectMode}
+            enhanceSelected={enhanceSelected}
+            onToggleEnhanceSelected={toggleEnhanceSelected}
+            enhanceStatusByFilename={enhanceBatchStatusByFilename}
           />
 
           <PreviewArea selected={selected} jobPath={jobPath} />
@@ -570,6 +582,21 @@ export function JobReviewDrawer({ jobId, jobPath, ohJobId, onClose }) {
             allSizeOptions={allSizeOptions}
             cropSizeOption={cropSizeOption}
             onOpenCropEditor={openCropEditor}
+            enhanceMultiSelectMode={enhanceMultiSelectMode}
+            enhanceSelected={enhanceSelected}
+            enterEnhanceMultiSelect={enterEnhanceMultiSelect}
+            exitEnhanceMultiSelect={exitEnhanceMultiSelect}
+            toggleEnhanceSelected={toggleEnhanceSelected}
+            selectAllForEnhance={selectAllForEnhance}
+            clearEnhanceSelected={clearEnhanceSelected}
+            enhanceBatchId={enhanceBatchId}
+            enhanceBatchCounts={enhanceBatchCounts}
+            enhanceBatchFinished={enhanceBatchFinished}
+            enhanceBatchError={enhanceBatchError}
+            startEnhanceBatch={startEnhanceBatch}
+            cancelEnhanceBatch={cancelEnhanceBatch}
+            dismissEnhanceBatch={dismissEnhanceBatch}
+            onRevertEnhancement={revertEnhancement}
           />
         </div>
       )}

@@ -46,6 +46,11 @@ let __ensureOriginalsCalls = [];
 let __sidecarStore = null;         // { sidecar, filenames }
 let __savedSidecars = [];
 
+// Perfectly Clear (M3) — batch stub state.
+let __pcBatchCalls = [];           // [{ config, files, onFileDone, timeoutMs, signal }, …]
+let __pcBatchImpl = null;          // async (opts) => results
+let __pcResultsDefault = null;     // per-file default status (e.g. 'enhanced')
+
 function stubModule(absPath, exports) {
   const resolved = require.resolve(absPath);
   require.cache[resolved] = { id: resolved, filename: resolved, loaded: true, exports };
@@ -142,6 +147,31 @@ stubModule(path.join(ENH, 'topazClient.js'), {
   async testApiKey(_apiKey) { return { valid: true }; },
 });
 
+// Perfectly Clear client stub (M3). By default every file resolves as
+// 'enhanced' after firing the caller's onFileDone callback. Tests can
+// override __pcBatchImpl to simulate rejects, timeouts, cancellations, or
+// per-file errors — the real client's contract is preserved by returning
+// results in the { sourcePath, destPath, status } shape.
+stubModule(path.join(ENH, 'perfectlyClearClient.js'), {
+  async processBatch(opts) {
+    __pcBatchCalls.push(opts);
+    if (typeof __pcBatchImpl === 'function') {
+      return await __pcBatchImpl(opts);
+    }
+    const results = [];
+    for (const f of (opts.files || [])) {
+      const status = __pcResultsDefault || 'enhanced';
+      // Fire the per-file completion callback with a slight yield so a
+      // caller relying on it (e.g. batch flow) still sees the async shape.
+      if (typeof opts.onFileDone === 'function') {
+        await opts.onFileDone({ sourcePath: f.sourcePath, status });
+      }
+      results.push({ sourcePath: f.sourcePath, destPath: f.destPath, status });
+    }
+    return results;
+  },
+});
+
 // Now load the manager — all its require() calls hit the stubs above.
 const enhancementManager = require(path.join(ENH, 'enhancementManager.js'));
 
@@ -167,6 +197,33 @@ function resetStubs() {
   __ensureOriginalsCalls = [];
   __sidecarStore = null;
   __savedSidecars = [];
+  __pcBatchCalls = [];
+  __pcBatchImpl = null;
+  __pcResultsDefault = null;
+}
+
+/**
+ * Common Perfectly Clear config fixture — one channel, enabled for jobs.
+ * Tests that need something more elaborate build their own inline.
+ */
+function pcConfigFixture(overrides = {}) {
+  return {
+    jobs: {
+      enabled: true,
+      autoApplyConfigId: null,
+      configs: [{
+        id:             'cfg-1',
+        friendlyName:   'Studio Enhance',
+        inputFolder:    '/tmp/pc-in',
+        outputFolder:   '/tmp/pc-out',
+        rejectedFolder: '/tmp/pc-rej',
+      }],
+      ...overrides.jobs,
+    },
+    filmScans:   { enabled: false, autoApplyConfigId: null, configs: [] },
+    fileUploads: { enabled: false, autoApplyConfigId: null, configs: [] },
+    ...overrides,
+  };
 }
 
 // =============================================================================
@@ -368,4 +425,279 @@ test("startEnhancement('local'): returns local_* synthetic ID immediately", asyn
     await new Promise(r => setTimeout(r, 20));
   }
   throw new Error('startEnhancement did not converge to succeeded');
+});
+
+// =============================================================================
+// Perfectly Clear (M3, 2026-07-03)
+// =============================================================================
+
+test("getProvider: PC.jobs enabled with ≥1 config overrides enhancementProvider", async () => {
+  resetStubs();
+  __config.enhancementProvider = 'topaz'; // legacy still stored — should be ignored
+  __config.topazApiKey = 'fake-key';
+  __config.perfectlyClear = pcConfigFixture();
+  assert.equal(enhancementManager._getProvider(), 'perfectly-clear');
+});
+
+test("getProvider: PC.jobs disabled falls back to enhancementProvider", async () => {
+  resetStubs();
+  __config.enhancementProvider = 'topaz';
+  __config.topazApiKey = 'fake-key';
+  __config.perfectlyClear = pcConfigFixture({ jobs: { enabled: false, autoApplyConfigId: null, configs: [] } });
+  assert.equal(enhancementManager._getProvider(), 'topaz');
+});
+
+test("getProvider: PC.jobs enabled but no configs falls back to enhancementProvider", async () => {
+  resetStubs();
+  __config.enhancementProvider = 'local';
+  __config.perfectlyClear = pcConfigFixture({ jobs: { enabled: true, autoApplyConfigId: null, configs: [] } });
+  assert.equal(enhancementManager._getProvider(), 'local');
+});
+
+test("enhanceImage('perfectly-clear'): happy path — pre_pc backup + sidecar + MUSIQ scoring", async () => {
+  resetStubs();
+  __config.perfectlyClear = pcConfigFixture();
+  __config.enhancementRescoreAfter = true;
+  __scoreSequence = [
+    { score: 41, modelVersion: 'stub-musiq-v1', error: null }, // before
+    { score: 74, modelVersion: 'stub-musiq-v1', error: null }, // after
+  ];
+  // Client stub: overwrite the cache file with distinct bytes so we can
+  // verify pre_pc.jpg captured the ORIGINAL, not the enhanced content.
+  __pcBatchImpl = async (opts) => {
+    const results = [];
+    for (const f of opts.files) {
+      await fsp.writeFile(f.destPath, Buffer.from('ENHANCED-BYTES'));
+      results.push({ sourcePath: f.sourcePath, destPath: f.destPath, status: 'enhanced' });
+    }
+    return results;
+  };
+
+  const jobPath = await setupJobDir();
+  const originalBytes = fs.readFileSync(path.join(jobPath, 'working', 'test.jpg'));
+
+  const cachePath = await enhancementManager.enhanceImage('PCJOB1', jobPath, 'test.jpg', { configId: 'cfg-1' });
+
+  // 1. Client was called; local + topaz were NOT.
+  assert.equal(__pcBatchCalls.length, 1, 'perfectlyClearClient.processBatch called');
+  assert.equal(__localEnhanceCalls.length, 0);
+  assert.equal(__topazEnhanceCalls.length, 0);
+  assert.equal(__pcBatchCalls[0].config.friendlyName, 'Studio Enhance');
+
+  // 2. Cache file (returned path) now has the enhanced bytes.
+  const cacheBytes = fs.readFileSync(cachePath);
+  assert.deepEqual(cacheBytes, Buffer.from('ENHANCED-BYTES'));
+
+  // 3. Pre-PC backup was created and holds the ORIGINAL bytes (not the
+  //    enhanced ones — critical for revert integrity).
+  const prePcPath = path.join(jobPath, 'cache', 'test_pre_pc.jpg');
+  assert.ok(fs.existsSync(prePcPath), '_pre_pc.jpg backup written');
+  const prePcBytes = fs.readFileSync(prePcPath);
+  assert.deepEqual(prePcBytes, originalBytes, '_pre_pc.jpg captures original working bytes');
+
+  // 4. Working file was updated with the enhanced content.
+  const workingBytes = fs.readFileSync(path.join(jobPath, 'working', 'test.jpg'));
+  assert.deepEqual(workingBytes, Buffer.from('ENHANCED-BYTES'));
+
+  // 5. Sidecar reflects PC provider + MUSIQ scores + preEnhancePath.
+  const final = __savedSidecars[__savedSidecars.length - 1];
+  const img = final.images.find(i => i.filename === 'test.jpg');
+  assert.equal(img.enhanced, true);
+  assert.equal(img.enhancementSource, 'perfectly-clear');
+  assert.equal(img.enhancementModel, 'Studio Enhance');
+  assert.equal(img.provider, 'perfectly-clear');
+  assert.equal(img.pcConfigId, 'cfg-1');
+  assert.equal(img.preEnhancePath, prePcPath);
+  assert.equal(img.scoreBefore, 41);
+  assert.equal(img.scoreAfter, 74);
+  assert.equal(img.scoreModel, 'stub-musiq-v1');
+});
+
+test("enhanceImage('perfectly-clear'): pre-PC backup is first-wins across re-enhances", async () => {
+  resetStubs();
+  __config.perfectlyClear = pcConfigFixture();
+  __config.enhancementRescoreAfter = false;
+  let round = 0;
+  __pcBatchImpl = async (opts) => {
+    round += 1;
+    const tag = `ENHANCED-ROUND-${round}`;
+    const results = [];
+    for (const f of opts.files) {
+      await fsp.writeFile(f.destPath, Buffer.from(tag));
+      results.push({ sourcePath: f.sourcePath, destPath: f.destPath, status: 'enhanced' });
+    }
+    return results;
+  };
+
+  const jobPath = await setupJobDir();
+  const originalBytes = fs.readFileSync(path.join(jobPath, 'working', 'test.jpg'));
+
+  await enhancementManager.enhanceImage('PCJOB2', jobPath, 'test.jpg', { configId: 'cfg-1' });
+  // Re-enhance. The pre_pc backup should still hold the ORIGINAL bytes
+  // (not the round-1 enhanced ones), so a subsequent revert returns to
+  // the operator's true starting point.
+  await enhancementManager.enhanceImage('PCJOB2', jobPath, 'test.jpg', { configId: 'cfg-1' });
+
+  const prePcPath = path.join(jobPath, 'cache', 'test_pre_pc.jpg');
+  const prePcBytes = fs.readFileSync(prePcPath);
+  assert.deepEqual(prePcBytes, originalBytes, 'pre_pc still holds the ORIGINAL bytes after two enhancements');
+
+  const workingBytes = fs.readFileSync(path.join(jobPath, 'working', 'test.jpg'));
+  assert.deepEqual(workingBytes, Buffer.from('ENHANCED-ROUND-2'), 'working reflects the latest enhancement');
+});
+
+test("enhanceImage('perfectly-clear'): rejected verdict throws and leaves sidecar clean", async () => {
+  resetStubs();
+  __config.perfectlyClear = pcConfigFixture();
+  __config.enhancementRescoreAfter = false;
+  __pcBatchImpl = async (opts) => (opts.files || []).map(f => ({
+    sourcePath: f.sourcePath, destPath: f.destPath, status: 'rejected',
+  }));
+
+  const jobPath = await setupJobDir();
+
+  await assert.rejects(
+    () => enhancementManager.enhanceImage('PCJOB3', jobPath, 'test.jpg', { configId: 'cfg-1' }),
+    /rejected/i
+  );
+  assert.equal(__savedSidecars.length, 0, 'no sidecar update on rejected verdict');
+});
+
+test("startBatchEnhancement: mixed verdicts land per-file (enhanced + rejected)", async () => {
+  resetStubs();
+  __config.perfectlyClear = pcConfigFixture();
+  __config.enhancementRescoreAfter = false;
+  __pcBatchImpl = async (opts) => {
+    const results = [];
+    for (let i = 0; i < opts.files.length; i++) {
+      const f = opts.files[i];
+      const status = i === 0 ? 'enhanced' : 'rejected';
+      if (status === 'enhanced') {
+        await fsp.writeFile(f.destPath, Buffer.from(`ENHANCED-${i}`));
+      }
+      if (typeof opts.onFileDone === 'function') {
+        await opts.onFileDone({ sourcePath: f.sourcePath, status });
+      }
+      results.push({ sourcePath: f.sourcePath, destPath: f.destPath, status });
+    }
+    return results;
+  };
+
+  // Two-file job. Seed sidecar so both entries exist.
+  const jobPath = await fsp.mkdtemp(path.join(os.tmpdir(), 'ohd-mgr-test-'));
+  await fsp.mkdir(path.join(jobPath, 'working'));
+  await fsp.writeFile(path.join(jobPath, 'working', 'a.jpg'), Buffer.from('AAA'));
+  await fsp.writeFile(path.join(jobPath, 'working', 'b.jpg'), Buffer.from('BBB'));
+  __sidecarStore = {
+    sidecar: { jobId: 'PCJOB4', version: 1, images: [
+      { filename: 'a.jpg', enhanced: false },
+      { filename: 'b.jpg', enhanced: false },
+    ]},
+    filenames: ['a.jpg', 'b.jpg'],
+  };
+
+  const batchId = await enhancementManager.startBatchEnhancement({
+    jobId: 'PCJOB4', jobPath, filenames: ['a.jpg', 'b.jpg'], configId: 'cfg-1',
+  });
+  assert.match(batchId, /^pc_batch_\d+/);
+
+  // Drain — the client stub is synchronous under await, so the batch
+  // resolves on the next tick.
+  for (let i = 0; i < 50; i++) {
+    const status = await enhancementManager.checkBatchStatus(batchId);
+    if (status.finished) {
+      assert.equal(status.files.length, 2);
+      const byName = new Map(status.files.map(f => [f.filename, f.status]));
+      assert.equal(byName.get('a.jpg'), 'enhanced');
+      assert.equal(byName.get('b.jpg'), 'rejected');
+      assert.equal(status.counts.enhanced, 1);
+      assert.equal(status.counts.rejected, 1);
+
+      // a.jpg sidecar entry is enhanced; b.jpg is not.
+      const final = __savedSidecars[__savedSidecars.length - 1];
+      const a = final.images.find(i => i.filename === 'a.jpg');
+      const b = final.images.find(i => i.filename === 'b.jpg');
+      assert.equal(a.enhanced, true);
+      assert.equal(a.enhancementSource, 'perfectly-clear');
+      assert.equal(b.enhanced || false, false);
+      return;
+    }
+    await new Promise(r => setTimeout(r, 20));
+  }
+  throw new Error('startBatchEnhancement did not converge to finished');
+});
+
+test("revertEnhancement: restores byte-identical working file and clears only enhancement fields", async () => {
+  resetStubs();
+  __config.perfectlyClear = pcConfigFixture();
+  __config.enhancementRescoreAfter = false;
+  __pcBatchImpl = async (opts) => {
+    const results = [];
+    for (const f of opts.files) {
+      await fsp.writeFile(f.destPath, Buffer.from('ENHANCED-BYTES'));
+      results.push({ sourcePath: f.sourcePath, destPath: f.destPath, status: 'enhanced' });
+    }
+    return results;
+  };
+
+  const jobPath = await setupJobDir();
+  const originalBytes = fs.readFileSync(path.join(jobPath, 'working', 'test.jpg'));
+
+  // Pre-populate crop fields so we can verify revert leaves them alone.
+  __sidecarStore = {
+    sidecar: { jobId: 'PCJOB5', version: 1, images: [{
+      filename: 'test.jpg',
+      enhanced: false,
+      cropApplied: true,
+      cropRect:    { x: 0, y: 0, w: 100, h: 100 },
+      croppedPath: '/some/cropped/path.jpg',
+    }]},
+    filenames: ['test.jpg'],
+  };
+
+  await enhancementManager.enhanceImage('PCJOB5', jobPath, 'test.jpg', { configId: 'cfg-1' });
+
+  // Sanity: working now enhanced, crop fields still present.
+  const preRevertSidecar = __savedSidecars[__savedSidecars.length - 1];
+  const preRevertImg = preRevertSidecar.images.find(i => i.filename === 'test.jpg');
+  assert.equal(preRevertImg.enhanced, true);
+  assert.equal(preRevertImg.cropApplied, true, 'crop field preserved through enhancement');
+
+  const result = await enhancementManager.revertEnhancement({
+    jobId: 'PCJOB5', jobPath, filename: 'test.jpg',
+  });
+  assert.equal(result.success, true);
+
+  // Working file is byte-identical to the ORIGINAL.
+  const workingBytes = fs.readFileSync(path.join(jobPath, 'working', 'test.jpg'));
+  assert.deepEqual(workingBytes, originalBytes, 'working restored byte-identical to pre-enhance');
+
+  // Sidecar: enhancement fields stripped; crop fields intact.
+  const finalSidecar = __savedSidecars[__savedSidecars.length - 1];
+  const finalImg = finalSidecar.images.find(i => i.filename === 'test.jpg');
+  assert.equal(finalImg.enhanced, undefined, 'enhanced flag cleared');
+  assert.equal(finalImg.enhancedPath, undefined);
+  assert.equal(finalImg.enhancementSource, undefined);
+  assert.equal(finalImg.enhancementModel, undefined);
+  assert.equal(finalImg.preEnhancePath, undefined);
+  assert.equal(finalImg.enhancedAt, undefined);
+  // Crop fields untouched — the plan calls this out explicitly.
+  assert.equal(finalImg.cropApplied, true, 'cropApplied preserved');
+  assert.deepEqual(finalImg.cropRect, { x: 0, y: 0, w: 100, h: 100 }, 'cropRect preserved');
+  assert.equal(finalImg.croppedPath, '/some/cropped/path.jpg', 'croppedPath preserved');
+});
+
+test("revertEnhancement: throws when image is not currently PC-enhanced", async () => {
+  resetStubs();
+  __config.perfectlyClear = pcConfigFixture();
+  const jobPath = await setupJobDir();
+  // Sidecar has an entry but it's not enhanced.
+  __sidecarStore = {
+    sidecar: { jobId: 'PCJOB6', version: 1, images: [{ filename: 'test.jpg', enhanced: false }] },
+    filenames: ['test.jpg'],
+  };
+  await assert.rejects(
+    () => enhancementManager.revertEnhancement({ jobId: 'PCJOB6', jobPath, filename: 'test.jpg' }),
+    /not currently enhanced/i,
+  );
 });

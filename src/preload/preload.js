@@ -188,6 +188,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   enhancementStatus: (payload) => ipcRenderer.invoke('ohd:enhancement:status', payload),
   enhancementCancel: (payload) => ipcRenderer.invoke('ohd:enhancement:cancel', payload),
 
+  // AI Enhancement — Perfectly Clear batch + revert (M3, 2026-07-03).
+  // batchRun kicks off one processBatch through the shared client for any
+  // subset (one / many / Select All) of a job's images and returns a
+  // synthetic batch ID. Renderer polls batchStatus for per-file states +
+  // counts; batchCancel is cooperative. revert restores the pre-PC snapshot
+  // from /cache/ and strips the enhancement bookkeeping fields (crop
+  // fields left intact).
+  enhancementBatchRun:    (payload) => ipcRenderer.invoke('ohd:enhancement:batchRun',    payload),
+  enhancementBatchStatus: (payload) => ipcRenderer.invoke('ohd:enhancement:batchStatus', payload),
+  enhancementBatchCancel: (payload) => ipcRenderer.invoke('ohd:enhancement:batchCancel', payload),
+  enhancementRevert:      (payload) => ipcRenderer.invoke('ohd:enhancement:revert',      payload),
+
   // Perfectly Clear QuickServer — M1 (2026-07-03). Config read/write goes
   // through the existing getConfig / saveConfig plumbing (perfectlyClear is
   // just another key on the config object). Only the test action needs its
