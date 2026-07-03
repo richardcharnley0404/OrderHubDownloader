@@ -1,6 +1,7 @@
 const Store = require('electron-store');
 const path = require('path');
 const crypto = require('crypto');
+const fs = require('fs');
 
 // Hardcoded OrderHub API base URL (not user-configurable)
 const OH_API_BASE_URL = 'https://nazkcvruighrhpgcarxg.supabase.co/functions/v1/ohd-api';
@@ -32,6 +33,145 @@ function _pathContains(parent, child) {
   // path.relative('C:/foo', 'D:/foo')     = 'D:/foo' (with absolute prefix)
   const rel = path.relative(parent, child);
   return Boolean(rel) && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+// ---------------------------------------------------------------------------
+// Perfectly Clear QuickServer helpers
+// ---------------------------------------------------------------------------
+
+const PC_SCOPES = Object.freeze(['jobs', 'filmScans', 'fileUploads']);
+const PC_SCOPE_LABELS = Object.freeze({
+  jobs:        'Jobs',
+  filmScans:   'Film Scans',
+  fileUploads: 'File Uploads',
+});
+
+function _pcScopeDefault() {
+  return { enabled: false, autoApplyConfigId: null, configs: [] };
+}
+
+/**
+ * Normalise a `perfectlyClear` value into the canonical shape so downstream
+ * validation + persistence can trust the structure. Missing scopes are
+ * defaulted; missing config fields are coerced to strings; `configs` is
+ * always an array; `autoApplyConfigId` is null when it doesn't match an id
+ * in the same scope's configs. Never throws — validation is a separate step.
+ */
+function _sanitisePerfectlyClear(raw) {
+  const src = (raw && typeof raw === 'object') ? raw : {};
+  const out = {};
+  for (const scope of PC_SCOPES) {
+    const scopeSrc = (src[scope] && typeof src[scope] === 'object') ? src[scope] : {};
+    const configsSrc = Array.isArray(scopeSrc.configs) ? scopeSrc.configs : [];
+    const configs = configsSrc
+      .filter((c) => c && typeof c === 'object')
+      .map((c) => ({
+        id:              typeof c.id === 'string' && c.id ? c.id : _genHotFolderId(),
+        friendlyName:    typeof c.friendlyName    === 'string' ? c.friendlyName.trim()    : '',
+        inputFolder:     typeof c.inputFolder     === 'string' ? c.inputFolder.trim()     : '',
+        outputFolder:    typeof c.outputFolder    === 'string' ? c.outputFolder.trim()    : '',
+        rejectedFolder:  typeof c.rejectedFolder  === 'string' ? c.rejectedFolder.trim()  : '',
+      }));
+    const knownIds = new Set(configs.map((c) => c.id));
+    const rawAutoId = scopeSrc.autoApplyConfigId;
+    const autoApplyConfigId = (typeof rawAutoId === 'string' && knownIds.has(rawAutoId)) ? rawAutoId : null;
+    out[scope] = {
+      enabled: Boolean(scopeSrc.enabled),
+      autoApplyConfigId,
+      configs,
+    };
+  }
+  return out;
+}
+
+/**
+ * Validate a sanitised `perfectlyClear` value against the M1 rules:
+ *   - enabled scope needs ≥1 config
+ *   - every config needs friendlyName + all three folders
+ *   - inputFolder unique across ALL scopes' configs
+ *   - outputFolder/rejectedFolder must NOT be path-prefixed by ANY inputFolder
+ *   - all three folders must exist on disk (existence-only, no write probe —
+ *     hot folders often live on SMB and a write probe can be expensive)
+ *
+ * Throws Error with an operator-readable message on the first failure.
+ * A caller that wants "collect all errors" behaviour would extend this;
+ * "fail fast, name the offending row" is the shape we want for M1.
+ *
+ * @param {object} pc - Value returned by _sanitisePerfectlyClear.
+ * @param {object} [opts]
+ * @param {(p: string) => boolean} [opts.existsSync] - Injectable for tests.
+ */
+function _validatePerfectlyClear(pc, opts = {}) {
+  const existsSync = opts.existsSync || fs.existsSync;
+
+  // Pass 1: per-scope shape checks (before uniqueness/prefix so we bail
+  // early on completely-empty rows the operator hasn't finished typing).
+  for (const scope of PC_SCOPES) {
+    const { enabled, configs } = pc[scope];
+    if (enabled && configs.length === 0) {
+      throw new Error(`Perfectly Clear "${PC_SCOPE_LABELS[scope]}" is enabled but has no configurations. Add at least one, or turn the scope off.`);
+    }
+    for (let i = 0; i < configs.length; i++) {
+      const c = configs[i];
+      const rowLabel = `${PC_SCOPE_LABELS[scope]} row ${i + 1}${c.friendlyName ? ` (${c.friendlyName})` : ''}`;
+      if (!c.friendlyName)   throw new Error(`${rowLabel}: friendly name is required.`);
+      if (!c.inputFolder)    throw new Error(`${rowLabel}: input folder is required.`);
+      if (!c.outputFolder)   throw new Error(`${rowLabel}: output folder is required.`);
+      if (!c.rejectedFolder) throw new Error(`${rowLabel}: rejected folder is required.`);
+    }
+  }
+
+  // Pass 2: input-folder uniqueness across all scopes (case-insensitive).
+  // Mirrors QuickServer's own channel rule — two channels can't watch the
+  // same input directory. Enforced across scopes so Jobs and Film Scans
+  // can't accidentally share a channel.
+  const seenInputs = new Map(); // lowercased path → "Scope row N (name)"
+  const allInputs = []; // {lower, original}
+  for (const scope of PC_SCOPES) {
+    for (let i = 0; i < pc[scope].configs.length; i++) {
+      const c = pc[scope].configs[i];
+      const lower = c.inputFolder.toLowerCase();
+      const rowLabel = `${PC_SCOPE_LABELS[scope]} row ${i + 1}${c.friendlyName ? ` (${c.friendlyName})` : ''}`;
+      if (seenInputs.has(lower)) {
+        throw new Error(`${rowLabel}: input folder "${c.inputFolder}" is already used by ${seenInputs.get(lower)}. Each Perfectly Clear config needs its own input folder (QuickServer forbids two channels watching the same directory).`);
+      }
+      seenInputs.set(lower, rowLabel);
+      allInputs.push({ lower, original: c.inputFolder, rowLabel });
+    }
+  }
+
+  // Pass 3: output/rejected must not sit under ANY inputFolder. Prevents
+  // OHD-created inputs from being ingested by the same-or-another channel
+  // as their own output, which would loop the file.
+  for (const scope of PC_SCOPES) {
+    for (let i = 0; i < pc[scope].configs.length; i++) {
+      const c = pc[scope].configs[i];
+      const rowLabel = `${PC_SCOPE_LABELS[scope]} row ${i + 1}${c.friendlyName ? ` (${c.friendlyName})` : ''}`;
+      for (const { lower, original, rowLabel: inputRow } of allInputs) {
+        if (_pathContains(lower, c.outputFolder.toLowerCase())) {
+          throw new Error(`${rowLabel}: output folder "${c.outputFolder}" sits inside input folder "${original}" (${inputRow}). Output must be outside every input to avoid an ingestion loop.`);
+        }
+        if (_pathContains(lower, c.rejectedFolder.toLowerCase())) {
+          throw new Error(`${rowLabel}: rejected folder "${c.rejectedFolder}" sits inside input folder "${original}" (${inputRow}). Rejected must be outside every input to avoid an ingestion loop.`);
+        }
+      }
+    }
+  }
+
+  // Pass 4: existence on disk. Deferred until last so the earlier
+  // structural errors surface first — a folder that doesn't exist is less
+  // useful feedback if the operator hasn't set a friendly name yet.
+  for (const scope of PC_SCOPES) {
+    for (let i = 0; i < pc[scope].configs.length; i++) {
+      const c = pc[scope].configs[i];
+      const rowLabel = `${PC_SCOPE_LABELS[scope]} row ${i + 1}${c.friendlyName ? ` (${c.friendlyName})` : ''}`;
+      for (const [label, folder] of [['input', c.inputFolder], ['output', c.outputFolder], ['rejected', c.rejectedFolder]]) {
+        if (!existsSync(folder)) {
+          throw new Error(`${rowLabel}: ${label} folder "${folder}" does not exist on disk. Create it in QuickServer or on the target share before saving.`);
+        }
+      }
+    }
+  }
 }
 
 // Define configuration schema with defaults
@@ -446,6 +586,30 @@ const schema = {
     type: 'boolean',
     default: true
   },
+  // ─── Perfectly Clear QuickServer integration (M1, 2026-07-03) ──────────────
+  // Single structured key for all three scopes (Jobs, Film Scans, File Uploads)
+  // rather than a dozen flat keys — mirrors the printControllers pattern.
+  // See docs/perfectly-clear-quickserver-implementation-plan.md.
+  //
+  // Per scope:
+  //   enabled            — master toggle; when true, ≥1 config required.
+  //   autoApplyConfigId  — id of the default config to auto-apply. Jobs is
+  //                        manual-only by decision; the field is kept for
+  //                        shape symmetry but never surfaced in the Jobs UI.
+  //   configs[]          — array of { id, friendlyName, inputFolder,
+  //                        outputFolder, rejectedFolder }, matching a
+  //                        QuickServer channel.
+  //
+  // Non-sensitive → rides along in backup-service snapshots automatically
+  // (backup reads the raw config.json; only SECRET_KEYS are stripped).
+  perfectlyClear: {
+    type: 'object',
+    default: {
+      jobs:        { enabled: false, autoApplyConfigId: null, configs: [] },
+      filmScans:   { enabled: false, autoApplyConfigId: null, configs: [] },
+      fileUploads: { enabled: false, autoApplyConfigId: null, configs: [] },
+    }
+  },
   dismissedJobs: {
     type: 'array',
     default: []
@@ -701,6 +865,10 @@ class ConfigService {
       enhancementLocalTileSize: this.store.get('enhancementLocalTileSize'),
       enhancementLocalTileOverlap: this.store.get('enhancementLocalTileOverlap'),
       enhancementRescoreAfter: this.store.get('enhancementRescoreAfter'),
+      // Perfectly Clear QuickServer (M1). Sanitised on read so the renderer
+      // always sees the canonical three-scope shape even if the on-disk value
+      // is missing a scope (e.g. mid-upgrade or hand-edited config.json).
+      perfectlyClear: _sanitisePerfectlyClear(this.store.get('perfectlyClear')),
       // One-shot toast trigger consumed by the renderer; cleared via
       // clearReplicateMigrationToast() once the toast has been shown.
       _migratedFromReplicate: this.store.get('_migratedFromReplicate'),
@@ -978,6 +1146,15 @@ class ConfigService {
     }
     if (typeof config.enhancementRescoreAfter === 'boolean') {
       this.store.set('enhancementRescoreAfter', config.enhancementRescoreAfter);
+    }
+
+    // Perfectly Clear QuickServer settings. hasOwnProperty guard so panels
+    // that don't know about this key (e.g. a Backup restore that only
+    // rewrites the OrderHub API slice) can't silently nuke it.
+    if (Object.prototype.hasOwnProperty.call(config, 'perfectlyClear')) {
+      const sanitised = _sanitisePerfectlyClear(config.perfectlyClear);
+      _validatePerfectlyClear(sanitised);
+      this.store.set('perfectlyClear', sanitised);
     }
 
     // Backup & Restore settings. `_machineId` is intentionally NOT writable from
@@ -1434,4 +1611,9 @@ class ConfigService {
 
 }
 
-module.exports = new ConfigService();
+const configService = new ConfigService();
+// Test hooks — module-scoped helpers exposed for unit tests of the Perfectly
+// Clear validation contract. Production callers go through save() / getAll().
+configService._sanitisePerfectlyClear = _sanitisePerfectlyClear;
+configService._validatePerfectlyClear = _validatePerfectlyClear;
+module.exports = configService;

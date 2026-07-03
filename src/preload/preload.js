@@ -188,6 +188,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   enhancementStatus: (payload) => ipcRenderer.invoke('ohd:enhancement:status', payload),
   enhancementCancel: (payload) => ipcRenderer.invoke('ohd:enhancement:cancel', payload),
 
+  // Perfectly Clear QuickServer — M1 (2026-07-03). Config read/write goes
+  // through the existing getConfig / saveConfig plumbing (perfectlyClear is
+  // just another key on the config object). Only the test action needs its
+  // own IPC because it touches the filesystem at click-time.
+  pcTestConfig: (payload) => ipcRenderer.invoke('ohd:pc:testConfig', payload),
+
   // Phase 1 local-enhancement: ack the post-upgrade migration toast so it
   // doesn't re-show on the next launch.
   clearReplicateMigrationToast: () => ipcRenderer.invoke('ohd:config:clear-replicate-migration-toast'),

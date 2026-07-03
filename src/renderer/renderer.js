@@ -2113,6 +2113,9 @@ function populateForm(config) {
     Number.isFinite(config.enhancementLocalTileOverlap) ? config.enhancementLocalTileOverlap : 16;
   updateEnhancementProviderSections();
 
+  // Perfectly Clear QuickServer (M1)
+  loadPerfectlyClearFromConfig(config);
+
   // Backup & Restore (v1.6+) — guarded `?` chaining because the subtab is
   // appended after the existing form and may not exist on dev builds during
   // a partial rebuild.
@@ -2210,8 +2213,273 @@ function getFormData() {
       backupFolderPath: document.getElementById('backupFolderPath').value.trim(),
       backupIncludeCustomerDirectory: document.getElementById('backupIncludeCustomerDirectory').checked,
     } : {}),
+    // Perfectly Clear QuickServer (M1) — a single structured key.
+    perfectlyClear: readPerfectlyClearFromUI(),
   };
 }
+
+// ===========================================================================
+// Perfectly Clear QuickServer (v1.7.20 M1) — settings list editor
+// ===========================================================================
+// Three scopes (jobs / filmScans / fileUploads). Each scope has an enable
+// flag plus a list of {id, friendlyName, inputFolder, outputFolder,
+// rejectedFolder} configs matching one QuickServer channel. filmScans and
+// fileUploads also carry an autoApplyConfigId picker; jobs is manual-only.
+//
+// The DOM is rendered from an in-memory cache so Add / Remove / autoApply
+// changes stay live without touching the store. Save/Load funnel through
+// getFormData() ↔ populateForm() like every other Settings section.
+// Validation happens in config-service.save(); we don't duplicate it here.
+
+const PC_SCOPES = ['jobs', 'filmScans', 'fileUploads'];
+const PC_SCOPE_LABELS = {
+  jobs: 'Jobs',
+  filmScans: 'Film Scans',
+  fileUploads: 'File Uploads',
+};
+
+let cachedPerfectlyClear = {
+  jobs: { enabled: false, configs: [] },
+  filmScans: { enabled: false, configs: [], autoApplyConfigId: null },
+  fileUploads: { enabled: false, configs: [], autoApplyConfigId: null },
+};
+
+function _pcGenerateId() {
+  return 'pc_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+}
+
+function _pcNormaliseScope(scope, raw) {
+  const out = {
+    enabled: !!(raw && raw.enabled),
+    configs: Array.isArray(raw && raw.configs)
+      ? raw.configs.map((c) => ({
+          id: (c && typeof c.id === 'string' && c.id.trim()) ? c.id.trim() : _pcGenerateId(),
+          friendlyName: (c && typeof c.friendlyName === 'string') ? c.friendlyName : '',
+          inputFolder: (c && typeof c.inputFolder === 'string') ? c.inputFolder : '',
+          outputFolder: (c && typeof c.outputFolder === 'string') ? c.outputFolder : '',
+          rejectedFolder: (c && typeof c.rejectedFolder === 'string') ? c.rejectedFolder : '',
+        }))
+      : [],
+  };
+  if (scope !== 'jobs') {
+    const id = raw && typeof raw.autoApplyConfigId === 'string' ? raw.autoApplyConfigId : null;
+    out.autoApplyConfigId = out.configs.some((c) => c.id === id) ? id : null;
+  }
+  return out;
+}
+
+function loadPerfectlyClearFromConfig(config) {
+  const raw = (config && config.perfectlyClear) || {};
+  cachedPerfectlyClear = {
+    jobs: _pcNormaliseScope('jobs', raw.jobs),
+    filmScans: _pcNormaliseScope('filmScans', raw.filmScans),
+    fileUploads: _pcNormaliseScope('fileUploads', raw.fileUploads),
+  };
+  for (const scope of PC_SCOPES) {
+    const cb = document.getElementById(_pcEnabledId(scope));
+    if (cb) cb.checked = cachedPerfectlyClear[scope].enabled;
+    _pcRenderList(scope);
+  }
+  _pcRefreshAutoApplySelect('filmScans');
+  _pcRefreshAutoApplySelect('fileUploads');
+}
+
+function readPerfectlyClearFromUI() {
+  // Sync cached model from live DOM inputs before serialising.
+  for (const scope of PC_SCOPES) {
+    const cb = document.getElementById(_pcEnabledId(scope));
+    if (cb) cachedPerfectlyClear[scope].enabled = cb.checked;
+    const list = document.getElementById(_pcListId(scope));
+    if (list) {
+      cachedPerfectlyClear[scope].configs = Array.from(
+        list.querySelectorAll('.pc-config-row'),
+      ).map((row) => ({
+        id: row.dataset.pcId,
+        friendlyName: row.querySelector('.pc-friendly-name').value.trim(),
+        inputFolder: row.querySelector('.pc-input-folder').value.trim(),
+        outputFolder: row.querySelector('.pc-output-folder').value.trim(),
+        rejectedFolder: row.querySelector('.pc-rejected-folder').value.trim(),
+      }));
+    }
+    if (scope !== 'jobs') {
+      const sel = document.getElementById(_pcAutoApplyId(scope));
+      cachedPerfectlyClear[scope].autoApplyConfigId = sel && sel.value ? sel.value : null;
+    }
+  }
+  return {
+    jobs: {
+      enabled: cachedPerfectlyClear.jobs.enabled,
+      configs: cachedPerfectlyClear.jobs.configs,
+    },
+    filmScans: {
+      enabled: cachedPerfectlyClear.filmScans.enabled,
+      configs: cachedPerfectlyClear.filmScans.configs,
+      autoApplyConfigId: cachedPerfectlyClear.filmScans.autoApplyConfigId,
+    },
+    fileUploads: {
+      enabled: cachedPerfectlyClear.fileUploads.enabled,
+      configs: cachedPerfectlyClear.fileUploads.configs,
+      autoApplyConfigId: cachedPerfectlyClear.fileUploads.autoApplyConfigId,
+    },
+  };
+}
+
+function _pcEnabledId(scope) {
+  return scope === 'jobs' ? 'pcJobsEnabled'
+    : scope === 'filmScans' ? 'pcFilmScansEnabled'
+    : 'pcFileUploadsEnabled';
+}
+function _pcListId(scope) {
+  return scope === 'jobs' ? 'pcJobsList'
+    : scope === 'filmScans' ? 'pcFilmScansList'
+    : 'pcFileUploadsList';
+}
+function _pcAutoApplyId(scope) {
+  return scope === 'filmScans' ? 'pcFilmScansAutoApply' : 'pcFileUploadsAutoApply';
+}
+
+function _pcRenderList(scope) {
+  const list = document.getElementById(_pcListId(scope));
+  if (!list) return;
+  const configs = cachedPerfectlyClear[scope].configs;
+  if (configs.length === 0) {
+    list.innerHTML = '<p class="empty-list-hint" style="margin:8px 0;color:#888;">No configs. Add one below.</p>';
+    return;
+  }
+  list.innerHTML = configs.map((c, idx) => _pcBuildRow(scope, c, idx)).join('');
+}
+
+function _pcBuildRow(scope, cfg, idx) {
+  const label = PC_SCOPE_LABELS[scope];
+  const safe = (s) => escapeHtml(s || '');
+  return `
+    <div class="pc-config-row" data-pc-id="${safe(cfg.id)}" data-pc-scope="${scope}" style="border:1px solid #ddd;border-radius:6px;padding:12px;margin-bottom:12px;">
+      <div class="form-group">
+        <label>Friendly name</label>
+        <input type="text" class="pc-friendly-name" value="${safe(cfg.friendlyName)}" placeholder="e.g. ${safe(label)} — Portraits">
+      </div>
+      <div class="form-group">
+        <label>Input folder (QuickServer watches this)</label>
+        <div style="display:flex;gap:6px;">
+          <input type="text" class="pc-input-folder" style="flex:1;" value="${safe(cfg.inputFolder)}" placeholder="\\\\server\\qs\\portraits\\input">
+          <button type="button" class="btn-secondary pc-browse" data-pc-field="pc-input-folder">Browse…</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Output folder (QuickServer writes enhanced images here)</label>
+        <div style="display:flex;gap:6px;">
+          <input type="text" class="pc-output-folder" style="flex:1;" value="${safe(cfg.outputFolder)}" placeholder="\\\\server\\qs\\portraits\\output">
+          <button type="button" class="btn-secondary pc-browse" data-pc-field="pc-output-folder">Browse…</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Rejected folder</label>
+        <div style="display:flex;gap:6px;">
+          <input type="text" class="pc-rejected-folder" style="flex:1;" value="${safe(cfg.rejectedFolder)}" placeholder="\\\\server\\qs\\portraits\\rejected">
+          <button type="button" class="btn-secondary pc-browse" data-pc-field="pc-rejected-folder">Browse…</button>
+        </div>
+      </div>
+      <div style="display:flex;gap:6px;justify-content:flex-end;">
+        <button type="button" class="btn-secondary pc-test">Test</button>
+        <button type="button" class="btn-danger pc-remove">Remove</button>
+      </div>
+    </div>
+  `;
+}
+
+function _pcRefreshAutoApplySelect(scope) {
+  if (scope === 'jobs') return;
+  const sel = document.getElementById(_pcAutoApplyId(scope));
+  if (!sel) return;
+  const current = cachedPerfectlyClear[scope].autoApplyConfigId;
+  const configs = cachedPerfectlyClear[scope].configs;
+  const offLabel = scope === 'filmScans'
+    ? 'Off — manual per frame only'
+    : 'Off — upload originals as-is';
+  const opts = ['<option value="">' + offLabel + '</option>'].concat(
+    configs.map((c) => {
+      const name = c.friendlyName || '(unnamed config)';
+      const selected = c.id === current ? ' selected' : '';
+      return `<option value="${escapeHtml(c.id)}"${selected}>${escapeHtml(name)}</option>`;
+    }),
+  );
+  sel.innerHTML = opts.join('');
+}
+
+async function _pcHandleTest(row) {
+  const payload = {
+    inputFolder: row.querySelector('.pc-input-folder').value.trim(),
+    outputFolder: row.querySelector('.pc-output-folder').value.trim(),
+    rejectedFolder: row.querySelector('.pc-rejected-folder').value.trim(),
+  };
+  try {
+    const res = await window.electronAPI.pcTestConfig(payload);
+    if (res && res.ok) {
+      showStatus('Perfectly Clear test succeeded — probe written and cleaned up.', 'success');
+    } else {
+      showStatus('Perfectly Clear test failed: ' + (res && res.error ? res.error : 'unknown error'), 'error');
+    }
+  } catch (err) {
+    showStatus('Perfectly Clear test error: ' + err.message, 'error');
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  // Add-config buttons.
+  document.querySelectorAll('.pc-add-config').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const scope = btn.dataset.pcScope;
+      readPerfectlyClearFromUI(); // capture current edits into cache
+      cachedPerfectlyClear[scope].configs.push({
+        id: _pcGenerateId(),
+        friendlyName: '',
+        inputFolder: '',
+        outputFolder: '',
+        rejectedFolder: '',
+      });
+      _pcRenderList(scope);
+      _pcRefreshAutoApplySelect(scope);
+    });
+  });
+
+  // Delegated Remove / Test / Browse handling on each list container.
+  PC_SCOPES.forEach((scope) => {
+    const list = document.getElementById(_pcListId(scope));
+    if (!list) return;
+    list.addEventListener('click', async (evt) => {
+      const row = evt.target.closest('.pc-config-row');
+      if (!row) return;
+      if (evt.target.matches('.pc-remove')) {
+        const id = row.dataset.pcId;
+        readPerfectlyClearFromUI();
+        cachedPerfectlyClear[scope].configs = cachedPerfectlyClear[scope].configs.filter((c) => c.id !== id);
+        if (scope !== 'jobs' && cachedPerfectlyClear[scope].autoApplyConfigId === id) {
+          cachedPerfectlyClear[scope].autoApplyConfigId = null;
+        }
+        _pcRenderList(scope);
+        _pcRefreshAutoApplySelect(scope);
+      } else if (evt.target.matches('.pc-test')) {
+        await _pcHandleTest(row);
+      } else if (evt.target.matches('.pc-browse')) {
+        const field = evt.target.dataset.pcField;
+        const input = row.querySelector('.' + field);
+        try {
+          const result = await window.electronAPI.selectDirectory();
+          if (result && input) input.value = result;
+        } catch (err) {
+          showStatus('Error selecting directory: ' + err.message, 'error');
+        }
+      }
+    });
+    // Refresh the auto-apply select whenever a friendly name is edited.
+    list.addEventListener('input', (evt) => {
+      if (evt.target.matches('.pc-friendly-name') && scope !== 'jobs') {
+        readPerfectlyClearFromUI();
+        _pcRefreshAutoApplySelect(scope);
+      }
+    });
+  });
+});
 
 // ===========================================================================
 // Order XML Hot Folders (Mode 4) — settings list editor

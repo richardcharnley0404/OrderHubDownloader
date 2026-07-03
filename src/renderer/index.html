@@ -786,6 +786,79 @@
 
           <!-- Sub-tab: AI Enhancement -->
           <div class="settings-subtab-panel" id="subtab-aienhancement">
+            <!--
+              Perfectly Clear QuickServer (v1.7.20 M1 — 2026-07-03).
+              Three scopes: Jobs, Film Scans, File Uploads. Each carries an
+              enable checkbox and a list of {friendlyName, input, output,
+              rejected} configs matching a QuickServer channel. Jobs is
+              manual-only (no auto-apply picker) by decision.
+            -->
+            <fieldset class="panel-section">
+              <legend>Perfectly Clear</legend>
+              <p class="section-desc">Route images through a <a href="https://www.perfectlyclear.com/" class="link-hint" target="_blank" rel="noopener">Perfectly Clear QuickServer</a> hot folder. Each config matches a QuickServer channel (an input folder QuickServer watches, an output folder for enhanced results, and a rejected folder for images it can't process). All three folders must already exist. QuickServer can run on this PC or another one on the network.</p>
+
+              <!-- Jobs -->
+              <div class="pc-scope" data-pc-scope="jobs">
+                <h4 class="pc-scope-title">Jobs (Job Review)</h4>
+                <div class="form-group checkbox-group">
+                  <label>
+                    <input type="checkbox" id="pcJobsEnabled" name="pcJobsEnabled">
+                    <span>Enable Perfectly Clear for Jobs (manual — operator picks from Job Review)</span>
+                  </label>
+                </div>
+                <div class="pc-config-list" id="pcJobsList"></div>
+                <button type="button" class="btn-secondary btn-add-mapping pc-add-config" data-pc-scope="jobs">+ Add Config</button>
+              </div>
+
+              <!-- Film Scans -->
+              <div class="pc-scope" data-pc-scope="filmScans">
+                <h4 class="pc-scope-title">Film Scans</h4>
+                <div class="form-group checkbox-group">
+                  <label>
+                    <input type="checkbox" id="pcFilmScansEnabled" name="pcFilmScansEnabled">
+                    <span>Enable Perfectly Clear for Film Scans</span>
+                  </label>
+                </div>
+                <div class="pc-config-list" id="pcFilmScansList"></div>
+                <button type="button" class="btn-secondary btn-add-mapping pc-add-config" data-pc-scope="filmScans">+ Add Config</button>
+                <div class="form-group" style="margin-top: 12px;">
+                  <label for="pcFilmScansAutoApply">Apply automatically</label>
+                  <select id="pcFilmScansAutoApply" name="pcFilmScansAutoApply">
+                    <option value="">Off — manual per frame only</option>
+                    <!-- Config options rendered by renderer.js -->
+                  </select>
+                  <small class="field-hint">When set, every incoming film scan roll runs through this channel before Film Review.</small>
+                </div>
+              </div>
+
+              <!-- File Uploads -->
+              <div class="pc-scope" data-pc-scope="fileUploads">
+                <h4 class="pc-scope-title">File Uploads</h4>
+                <div class="form-group checkbox-group">
+                  <label>
+                    <input type="checkbox" id="pcFileUploadsEnabled" name="pcFileUploadsEnabled">
+                    <span>Enable Perfectly Clear for File Uploads</span>
+                  </label>
+                </div>
+                <div class="pc-config-list" id="pcFileUploadsList"></div>
+                <button type="button" class="btn-secondary btn-add-mapping pc-add-config" data-pc-scope="fileUploads">+ Add Config</button>
+                <div class="form-group" style="margin-top: 12px;">
+                  <label for="pcFileUploadsAutoApply">Apply automatically</label>
+                  <select id="pcFileUploadsAutoApply" name="pcFileUploadsAutoApply">
+                    <option value="">Off — upload originals as-is</option>
+                  </select>
+                  <small class="field-hint">When set, every uploaded file passes through this channel before landing on S3.</small>
+                </div>
+              </div>
+            </fieldset>
+
+            <!--
+              Legacy AI Enhancement (Pixfizz Real-ESRGAN + Topaz). Hidden by
+              default so operators only see Perfectly Clear. The DOM + handlers
+              stay so `enhancementProvider` can still drive the code path if
+              set by hand (fallback / debugging).
+            -->
+            <div id="legacyEnhancementSection" style="display:none;">
             <fieldset class="panel-section">
               <legend>AI Enhancement</legend>
               <p class="section-desc">Use AI to upscale and enhance print images. Pixfizz AI Enhancement runs on this computer and needs no setup. Topaz is an optional premium cloud upscaler.</p>
@@ -876,6 +949,7 @@
                 <small class="field-hint">Automatically starts enhancement for each image when the Job Review panel is opened.</small>
               </div>
             </fieldset>
+            </div><!-- /#legacyEnhancementSection -->
           </div>
 
           <!-- Sub-tab: Backup & Restore -->

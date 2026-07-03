@@ -2240,6 +2240,59 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
   });
 
   /**
+   * ohd:pc:testConfig  (Perfectly Clear QuickServer — M1)
+   * Payload:  { inputFolder, outputFolder, rejectedFolder }
+   * Returns:  { ok: true } | { ok: false, error: <operator-readable> }
+   *
+   * Checks:
+   *   1. All three folders exist on disk.
+   *   2. inputFolder is writable — via a temp probe file
+   *      `ohd_probe_{ts}.txt`. QuickServer classifies .txt as a
+   *      "skipped" non-image and passes it through to Output; the
+   *      handler makes a best-effort attempt to delete the mirrored
+   *      copy if it materialises (doesn't fail the test if it doesn't).
+   *
+   * No write probe on output/rejected — QuickServer owns those
+   * directories, and permission model on shares typically differs
+   * (OHD writes only to input).
+   */
+  ipcMain.handle('ohd:pc:testConfig', async (_event, payload) => {
+    const p = payload || {};
+    const inputFolder    = typeof p.inputFolder    === 'string' ? p.inputFolder.trim()    : '';
+    const outputFolder   = typeof p.outputFolder   === 'string' ? p.outputFolder.trim()   : '';
+    const rejectedFolder = typeof p.rejectedFolder === 'string' ? p.rejectedFolder.trim() : '';
+
+    if (!inputFolder || !outputFolder || !rejectedFolder) {
+      return { ok: false, error: 'All three folders (input, output, rejected) are required.' };
+    }
+
+    for (const [role, folder] of [['input', inputFolder], ['output', outputFolder], ['rejected', rejectedFolder]]) {
+      if (!fs.existsSync(folder)) {
+        return { ok: false, error: `${role} folder does not exist: ${folder}` };
+      }
+    }
+
+    // Input writable — probe via temp file. .txt tolerated by QuickServer
+    // per its "skipped file" documentation; a copy MAY appear in output.
+    const path = require('path');
+    const probeName = `ohd_probe_${Date.now()}.txt`;
+    const probePath = path.join(inputFolder, probeName);
+    try {
+      await fsPromises.writeFile(probePath, 'ohd perfectly clear probe\n', 'utf8');
+    } catch (err) {
+      return { ok: false, error: `Input folder is not writable: ${err.message}` };
+    }
+    // Clean up the probe. Best-effort — if QuickServer already consumed it
+    // (input side deletion is instantaneous for skipped files on some setups)
+    // that's fine.
+    try { await fsPromises.unlink(probePath); } catch (_) { /* best-effort */ }
+    // Best-effort cleanup of any output mirror.
+    try { await fsPromises.unlink(path.join(outputFolder, probeName)); } catch (_) { /* best-effort */ }
+
+    return { ok: true };
+  });
+
+  /**
    * ohd:enhancement:run
    * Payload:  { jobId, jobPath, filename, model, options }
    * Returns:  { success: true, status: 'started', predictionId }
