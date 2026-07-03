@@ -494,13 +494,15 @@ body.app-theme-dark .fr-pipeline__chip--converting {
   border: 1px solid var(--fr-border);
 }
 .fr-roll-card__status--processing,
-.fr-roll-card__status--converting {
+.fr-roll-card__status--converting,
+.fr-roll-card__status--enhancing {
   background: rgba(50, 197, 255, 0.12);
   color: var(--fr-accent-ink);
   border: 1px solid var(--fr-accent);
 }
 body.app-theme-dark .fr-roll-card__status--processing,
-body.app-theme-dark .fr-roll-card__status--converting {
+body.app-theme-dark .fr-roll-card__status--converting,
+body.app-theme-dark .fr-roll-card__status--enhancing {
   color: var(--fr-accent);
 }
 
@@ -1442,3 +1444,59 @@ body.app-theme-dark .fr-focus-flag-pill strong {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* Perfectly Clear (M4, 2026-07-03) — per-frame styles for FocusedFrame + FrameCell */
+
+.fr-focus-pill--pc {
+  background: rgba(80, 200, 120, 0.15);
+  color: #2b8a4a;
+  border: 1px solid rgba(80, 200, 120, 0.6);
+}
+body.app-theme-dark .fr-focus-pill--pc {
+  color: #7bd39c;
+}
+
+.fr-focus-pc-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 4px;
+}
+.fr-focus-pc-select {
+  font-size: 12px;
+  padding: 4px 6px;
+  border: 1px solid var(--fr-border);
+  border-radius: 4px;
+  background: var(--fr-surface);
+  color: var(--fr-ink);
+  max-width: 180px;
+}
+.fr-focus-pc-error {
+  font-size: 12px;
+  color: var(--fr-red, #d04848);
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* FrameCell PC badge — sits alongside the flag badge. Small mono chip. */
+.fr-pc-badge {
+  position: absolute;
+  bottom: 4px;
+  left: 4px;
+  padding: 1px 5px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  border-radius: 3px;
+  color: #fff;
+  z-index: 2;
+  pointer-events: auto;
+}
+.fr-pc-badge--enhanced { background: #2b8a4a; }
+.fr-pc-badge--rejected { background: var(--fr-red, #d04848); }
+
+/* RollReview stats — PC-enhanced stat colour (green). Rejected reuses --red. */
+.fr-roll-stats__item--pc .fr-roll-stats__value { color: #2b8a4a; }
+body.app-theme-dark .fr-roll-stats__item--pc .fr-roll-stats__value { color: #7bd39c; }

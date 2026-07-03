@@ -328,6 +328,11 @@ class FrameMetadataStore {
           rotationErrorCount: 0,
           flaggedCount: 0,
           reviewedCount: 0,
+          // M4 (2026-07-03) — Perfectly Clear per-frame outcome counts.
+          // Surface in the RollReview summary alongside lowConfidenceCount so
+          // operators can spot mixed batches at a glance.
+          pcEnhancedCount:   0,
+          pcRejectedCount:   0,
           firstSeenAt: rec.createdAt || null,
           lastSeenAt: rec.updatedAt || rec.createdAt || null,
           status: 'ready_for_review',
@@ -348,6 +353,12 @@ class FrameMetadataStore {
       if (flags.length > 0) entry.flaggedCount += 1;
 
       if (rec.reviewStatus === 'reviewed') entry.reviewedCount += 1;
+
+      // Perfectly Clear counts (M4). pcEnhanced / pcRejected are set by the
+      // folder-watch auto-apply step and the per-frame Film Review IPCs; both
+      // default undefined on legacy / non-PC frames.
+      if (rec.pcEnhanced === true) entry.pcEnhancedCount += 1;
+      if (rec.pcRejected === true) entry.pcRejectedCount += 1;
 
       if (rec.createdAt && (!entry.firstSeenAt || rec.createdAt < entry.firstSeenAt)) {
         entry.firstSeenAt = rec.createdAt;

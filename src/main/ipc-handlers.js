@@ -3769,6 +3769,250 @@ ipcMain.handle('ohd:filmReview:delete-roll', async (event, rollIdRaw) => {
 });
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Film Scan — Perfectly Clear per-frame IPC (M4, 2026-07-03)
+// ──────────────────────────────────────────────────────────────────────────────
+//
+// Complements the folder-watch auto-apply path: gives the operator a manual
+// Enhance / Revert action on any focused frame in Film Review. Uses the same
+// shared perfectlyClearClient as auto-apply (one-file processBatch), so the
+// on-disk contract is identical:
+//
+//   Enhance: capture `{storagePath}/pre-enhance/{filename}` if not already
+//            present (first-enhancement-wins), then round-trip the storage
+//            file through QuickServer (sourcePath == destPath), regenerate
+//            the 512px thumbnail, and stamp per-frame metadata.
+//   Revert:  restore the storage file from the pre-enhance/ backup, regen
+//            the thumbnail, and clear the PC metadata (leaves rotation +
+//            operatorFlags fields alone).
+//
+// Concurrency guard: a small in-memory Set tracks frames currently mid-
+// enhance so a second click can't kick a racing batch on the same file.
+// Not persisted — an app restart mid-enhance loses the guard, but the
+// storage file is either the un-touched original or the (fully-written)
+// enhanced version thanks to the client's temp+rename copy-back.
+
+const _pcInFlightFrames = new Set();
+
+/**
+ * Resolve the Perfectly Clear Film Scans config to use for a per-frame call.
+ * Precedence: explicit configId → autoApplyConfigId → first config. Returns
+ * null if the scope is disabled / empty (caller surfaces the operator hint).
+ */
+function _resolveFilmScanPcConfig(configId) {
+  let pc;
+  try { pc = configService.get('perfectlyClear'); } catch (_) { return null; }
+  if (!pc || !pc.filmScans) return null;
+  const scope = pc.filmScans;
+  const configs = Array.isArray(scope.configs) ? scope.configs : [];
+  if (!scope.enabled || configs.length === 0) return null;
+  if (configId) {
+    const explicit = configs.find(c => c && c.id === configId);
+    if (explicit) return explicit;
+  }
+  if (scope.autoApplyConfigId) {
+    const auto = configs.find(c => c && c.id === scope.autoApplyConfigId);
+    if (auto) return auto;
+  }
+  return configs[0];
+}
+
+/**
+ * Regenerate the 512px thumbnail for a frame from the current storage file.
+ * Best-effort — logs on failure, doesn't throw. Mirrors the folder-watch
+ * rotation step's thumbnail call (line ~349 of folder-watch-service.js).
+ */
+async function _regenFilmScanThumbnail(rec) {
+  if (!rec || !rec.thumbnailPath || !rec.originalPath) return;
+  try {
+    const sharp = require('sharp');
+    await sharp(rec.originalPath, { limitInputPixels: false, failOn: 'none' })
+      .resize(512, null, { withoutEnlargement: true, fit: 'inside' })
+      .jpeg({ quality: 85 })
+      .toFile(rec.thumbnailPath);
+  } catch (thumbErr) {
+    logger.logError(`[filmScan] PC thumbnail regen failed for ${rec.frameId}`, thumbErr);
+  }
+}
+
+/**
+ * ohd:filmscan:enhanceFrame  (Perfectly Clear — M4)
+ * Payload:  { frameId, configId? }
+ * Returns:  { ok: true, status: 'enhanced'|'rejected'|'timeout'|'cancelled'|'error',
+ *              frame? }  |  { ok: false, error }
+ *
+ * Blocks until the one-file processBatch returns. The renderer shows a local
+ * spinner while awaiting. Enhanced result: storage file replaced (by the
+ * client), thumbnail regenerated, metadata stamped pcEnhanced. Non-enhanced
+ * result: storage file left untouched, pcRejected stamped.
+ */
+ipcMain.handle('ohd:filmscan:enhanceFrame', async (event, payload = {}) => {
+  const { frameId, configId } = payload;
+  if (!frameId) return { ok: false, error: 'frameId is required' };
+  if (_pcInFlightFrames.has(frameId)) {
+    return { ok: false, error: 'Enhancement already in progress for this frame' };
+  }
+
+  const rec = frameMetadataStore.get(frameId);
+  if (!rec || !rec.originalPath) return { ok: false, error: `Unknown frame ${frameId}` };
+  if (!fs.existsSync(rec.originalPath)) {
+    return { ok: false, error: `Storage file missing on disk: ${rec.originalPath}` };
+  }
+
+  const pcCfg = _resolveFilmScanPcConfig(configId);
+  if (!pcCfg) {
+    return { ok: false, error: 'Perfectly Clear is not configured for Film Scans (Settings → AI Enhancement)' };
+  }
+
+  const storagePath  = path.dirname(rec.originalPath);
+  const filename     = path.basename(rec.originalPath);
+  const preEnhanceDir = path.join(storagePath, 'pre-enhance');
+  const preEnhance   = path.join(preEnhanceDir, filename);
+
+  _pcInFlightFrames.add(frameId);
+  try {
+    // First-enhancement-wins backup so Revert can restore the exact bytes
+    // the frame arrived with (matches the auto-apply pipeline's convention).
+    try { fs.mkdirSync(preEnhanceDir, { recursive: true }); } catch (_) { /* best-effort */ }
+    try {
+      if (!fs.existsSync(preEnhance)) fs.copyFileSync(rec.originalPath, preEnhance);
+    } catch (backupErr) {
+      logger.logError(`[filmScan] PC pre-enhance backup failed for ${frameId}`, backupErr);
+      return { ok: false, error: `Pre-enhance backup failed: ${backupErr.message}` };
+    }
+
+    // Wall-clock timeout: single-file batches still deserve breathing room.
+    // The auto-apply path uses max(5min, 30s × frameCount); for one frame
+    // that's 5 min, which matches per-frame QuickServer expectations.
+    const timeoutMs = 5 * 60 * 1000;
+    let results = [];
+    try {
+      const perfectlyClearClient = require('./enhancement/perfectlyClearClient');
+      results = await perfectlyClearClient.processBatch({
+        config: pcCfg,
+        files:  [{ sourcePath: rec.originalPath, destPath: rec.originalPath }],
+        timeoutMs,
+      });
+    } catch (clientErr) {
+      logger.logError(`[filmScan] PC client threw for ${frameId}`, clientErr);
+      const updated = frameMetadataStore.update(frameId, {
+        pcEnhanced:     false,
+        pcRejected:     true,
+        pcRejectReason: 'error',
+        pcRejectError:  clientErr.message,
+      });
+      return { ok: true, status: 'error', frame: updated, error: clientErr.message };
+    }
+
+    const r = (results && results[0]) || null;
+    if (!r) {
+      return { ok: false, error: 'processBatch returned no result' };
+    }
+
+    if (r.status === 'enhanced') {
+      await _regenFilmScanThumbnail(rec);
+      const updated = frameMetadataStore.update(frameId, {
+        pcEnhanced:     true,
+        pcConfigName:   pcCfg.friendlyName || null,
+        pcConfigId:     pcCfg.id,
+        pcEnhancedAt:   new Date().toISOString(),
+        pcRejected:     false,
+        pcRejectReason: null,
+        pcRejectError:  null,
+      });
+      logger.info(`[filmScan] PC enhance ${frameId} (config="${pcCfg.friendlyName}") — ok`);
+      return { ok: true, status: 'enhanced', frame: updated };
+    }
+
+    const updated = frameMetadataStore.update(frameId, {
+      pcEnhanced:     false,
+      pcRejected:     true,
+      pcRejectReason: r.status,
+      pcRejectError:  r.error || null,
+    });
+    logger.logWarning(`[filmScan] PC enhance ${frameId} → ${r.status}${r.error ? ` (${r.error})` : ''}`);
+    return { ok: true, status: r.status, frame: updated, error: r.error || null };
+  } catch (err) {
+    logger.logError(`[filmScan] enhance-frame failed for ${frameId}`, err);
+    return { ok: false, error: err.message };
+  } finally {
+    _pcInFlightFrames.delete(frameId);
+  }
+});
+
+/**
+ * ohd:filmscan:revertFrame  (Perfectly Clear — M4)
+ * Payload:  { frameId }
+ * Returns:  { ok, frame? } | { ok: false, error }
+ *
+ * Restores the storage file from `{storagePath}/pre-enhance/{filename}`
+ * (byte-identical), regenerates the thumbnail, and clears the pcEnhanced /
+ * pcRejected metadata. Leaves rotation + operatorFlags fields alone —
+ * revert is orthogonal to those, matching the M3 Jobs decision.
+ */
+ipcMain.handle('ohd:filmscan:revertFrame', async (event, payload = {}) => {
+  const { frameId } = payload;
+  if (!frameId) return { ok: false, error: 'frameId is required' };
+  if (_pcInFlightFrames.has(frameId)) {
+    return { ok: false, error: 'Enhancement in progress — wait for it to finish before reverting' };
+  }
+
+  const rec = frameMetadataStore.get(frameId);
+  if (!rec || !rec.originalPath) return { ok: false, error: `Unknown frame ${frameId}` };
+
+  const storagePath  = path.dirname(rec.originalPath);
+  const filename     = path.basename(rec.originalPath);
+  const preEnhance   = path.join(storagePath, 'pre-enhance', filename);
+
+  if (!fs.existsSync(preEnhance)) {
+    return { ok: false, error: `Pre-enhance backup not found — cannot revert (${preEnhance})` };
+  }
+
+  try {
+    // Copy via temp + rename so the storage file is never seen half-written.
+    const tmp = rec.originalPath + '.revert.tmp';
+    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch (_) { /* ignore */ }
+    fs.copyFileSync(preEnhance, tmp);
+    await renameWithRetry(tmp, rec.originalPath);
+
+    await _regenFilmScanThumbnail(rec);
+
+    // Clear PC bookkeeping; leave rotation + operatorFlags alone.
+    const updated = frameMetadataStore.update(frameId, {
+      pcEnhanced:     false,
+      pcConfigName:   null,
+      pcConfigId:     null,
+      pcEnhancedAt:   null,
+      pcRejected:     false,
+      pcRejectReason: null,
+      pcRejectError:  null,
+    });
+    logger.info(`[filmScan] PC revert ${frameId} — restored from pre-enhance/`);
+    return { ok: true, frame: updated };
+  } catch (err) {
+    logger.logError(`[filmScan] revert-frame failed for ${frameId}`, err);
+    return { ok: false, error: err.message };
+  }
+});
+
+/**
+ * ohd:filmscan:enhanceStatus  (Perfectly Clear — M4)
+ * Payload:  { frameId }
+ * Returns:  { ok, inFlight, frame? } | { ok: false, error }
+ *
+ * Lightweight companion to enhanceFrame. Renderer typically shows a local
+ * spinner while awaiting enhanceFrame; enhanceStatus is here for the case
+ * where the operator returns to a panel that had an enhance in flight
+ * (e.g. mid-batch across a panel close). `frame` is the current metadata
+ * so the caller can inspect pcEnhanced / pcRejected without a second call.
+ */
+ipcMain.handle('ohd:filmscan:enhanceStatus', async (event, payload = {}) => {
+  const { frameId } = payload;
+  if (!frameId) return { ok: false, error: 'frameId is required' };
+  const rec = frameMetadataStore.get(frameId);
+  return { ok: true, inFlight: _pcInFlightFrames.has(frameId), frame: rec || null };
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
 // AI Quality Gate (v1.2.0) — held-job IPC
 // ──────────────────────────────────────────────────────────────────────────────
 

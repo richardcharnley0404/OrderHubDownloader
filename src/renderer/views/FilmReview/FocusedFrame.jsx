@@ -51,6 +51,12 @@ function confidenceTone(confidence, hasError) {
   return null;
 }
 
+// Persist last-used PC channel across sessions so operators who work multiple
+// scanner presets don't have to pick the same channel every time. Same LS key
+// convention as Job Review (see ControlPanel.jsx). Falls back to autoApply /
+// first config when the stored id no longer matches any live config.
+const PC_LAST_CFG_LS_KEY = 'ohd.filmReview.pc.lastConfigId';
+
 export function FocusedFrame({
   frame,
   frames,
@@ -60,9 +66,28 @@ export function FocusedFrame({
   onQuickFlag,
   onOpenFlagMenu,
   onRotate,
+  // Perfectly Clear per-frame (M4, 2026-07-03)
+  pcConfigs = [],              // [{id, friendlyName, ...}] — filmScans.configs, may be empty
+  pcAutoApplyConfigId = null,  // fallback default
+  onEnhance,                   // async (frameId, configId) => updatedFrame | null
+  onRevert,                    // async (frameId) => updatedFrame | null
 }) {
   const [thumbUrl,    setThumbUrl]    = useState(null);
   const [thumbFailed, setThumbFailed] = useState(false);
+  // PC per-frame state — plan §4 "frame shows a spinner state meanwhile".
+  // Local to the overlay so the spinner reliably reflects the click, even
+  // if the async main-side handler runs longer than a repaint.
+  const [pcBusy,      setPcBusy]      = useState(false);
+  const [pcError,     setPcError]     = useState(null);
+  // Config picker default: last-used (localStorage), autoApply, or first.
+  const [pcConfigId, setPcConfigId] = useState(() => {
+    try {
+      const stored = window.localStorage.getItem(PC_LAST_CFG_LS_KEY);
+      if (stored && pcConfigs.some(c => c && c.id === stored)) return stored;
+    } catch (_) { /* ignore */ }
+    if (pcAutoApplyConfigId && pcConfigs.some(c => c && c.id === pcAutoApplyConfigId)) return pcAutoApplyConfigId;
+    return pcConfigs[0] ? pcConfigs[0].id : '';
+  });
 
   // Reload the thumbnail whenever the focused frame changes. Clearing
   // thumbUrl first avoids the previous frame's image hanging around while
@@ -143,6 +168,48 @@ export function FocusedFrame({
     onOpenFlagMenu?.(frame, e.currentTarget);
   };
 
+  // Perfectly Clear per-frame actions. Both are blocking calls into main —
+  // renderer shows the spinner via pcBusy while the async promise runs.
+  const pcEnhanced = frame && frame.pcEnhanced === true;
+  const pcRejected = frame && frame.pcRejected === true;
+  const canEnhance = pcConfigs.length > 0 && !pcBusy && !!onEnhance;
+  const canRevert  = pcEnhanced && !pcBusy && !!onRevert;
+
+  const handleEnhance = async (e) => {
+    if (e) e.stopPropagation();
+    if (!canEnhance) return;
+    setPcBusy(true);
+    setPcError(null);
+    // Remember this choice for the next session.
+    try { window.localStorage.setItem(PC_LAST_CFG_LS_KEY, pcConfigId); } catch (_) { /* ignore */ }
+    try {
+      const res = await onEnhance(frame.frameId, pcConfigId);
+      // Parent shape (RollReview.enhanceFrame) surfaces error text via a
+      // second call — for now we react to the res being null/falsy or
+      // carrying an error field.
+      if (res && res.error) setPcError(res.error);
+    } catch (err) {
+      setPcError(err && err.message ? err.message : String(err));
+    } finally {
+      setPcBusy(false);
+    }
+  };
+
+  const handleRevert = async (e) => {
+    if (e) e.stopPropagation();
+    if (!canRevert) return;
+    setPcBusy(true);
+    setPcError(null);
+    try {
+      const res = await onRevert(frame.frameId);
+      if (res && res.error) setPcError(res.error);
+    } catch (err) {
+      setPcError(err && err.message ? err.message : String(err));
+    } finally {
+      setPcBusy(false);
+    }
+  };
+
   return (
     <div className="fr-focus-overlay" role="dialog" aria-modal="true" aria-label={`Frame ${frame.frameIndex + 1}`}>
       <div className="fr-focus-backdrop" onClick={onClose} />
@@ -184,6 +251,28 @@ export function FocusedFrame({
               ⚑ {flags.length}
             </span>
           )}
+
+          {/* Perfectly Clear per-frame status pill. Green when this frame is
+              currently PC-enhanced, red when the last PC pass rejected it or
+              timed out. Both suppressed when no PC pass has run on this
+              frame. Config name comes from pcConfigName metadata (set by
+              folder-watch auto-apply or the enhanceFrame IPC). */}
+          {pcEnhanced && (
+            <span
+              className="fr-focus-pill fr-focus-pill--pc"
+              title={frame.pcConfigName ? `Perfectly Clear channel: ${frame.pcConfigName}` : 'Enhanced via Perfectly Clear'}
+            >
+              ✓ Enhanced (PC)
+            </span>
+          )}
+          {pcRejected && (
+            <span
+              className="fr-focus-pill fr-focus-pill--red"
+              title={frame.pcRejectError || `Perfectly Clear ${frame.pcRejectReason || 'rejected'} — original kept`}
+            >
+              PC {frame.pcRejectReason || 'rejected'}
+            </span>
+          )}
         </div>
 
         <span className="fr-focus-chrome__spacer" />
@@ -218,6 +307,60 @@ export function FocusedFrame({
         >
           ⚑ Flag…
         </button>
+
+        {/* Perfectly Clear per-frame group. Rendered only when PC is
+            configured for Film Scans (otherwise there's nothing to
+            enhance with). Config select hidden when exactly one channel
+            exists — the operator has no choice to make. When >1, the
+            most-recently-used config is pre-selected. Spinner label
+            replaces the button contents while pcBusy so the operator
+            never wonders whether the click registered.
+
+            The uploading button-mode gotcha in RollReview.jsx isn't
+            touched here — Enhance/Revert are per-frame and orthogonal to
+            the roll-level Approve & Upload / Mark reviewed button. */}
+        {pcConfigs.length > 0 && (
+          <div className="fr-focus-pc-group" role="group" aria-label="Perfectly Clear per-frame">
+            {pcConfigs.length > 1 && (
+              <select
+                className="fr-focus-pc-select"
+                value={pcConfigId}
+                onChange={(e) => setPcConfigId(e.target.value)}
+                disabled={pcBusy}
+                aria-label="Perfectly Clear channel"
+              >
+                {pcConfigs.map((c) => (
+                  <option key={c.id} value={c.id}>{c.friendlyName || '(unnamed)'}</option>
+                ))}
+              </select>
+            )}
+            <button
+              type="button"
+              className="fr-chrome__btn"
+              onClick={handleEnhance}
+              disabled={!canEnhance}
+              title={
+                pcBusy ? 'Enhancing…'
+                : pcEnhanced ? 'Re-enhance this frame with Perfectly Clear'
+                : 'Enhance this frame with Perfectly Clear'
+              }
+            >
+              {pcBusy && !pcEnhanced ? '⟳ Enhancing…' : pcEnhanced ? '✨ Re-Enhance' : '✨ Enhance'}
+            </button>
+            {pcEnhanced && (
+              <button
+                type="button"
+                className="fr-chrome__btn"
+                onClick={handleRevert}
+                disabled={!canRevert}
+                title="Revert to the pre-enhance frame"
+              >
+                {pcBusy ? '⟳ Reverting…' : '↺ Revert'}
+              </button>
+            )}
+            {pcError && <span className="fr-focus-pc-error" title={pcError}>⚠ {pcError}</span>}
+          </div>
+        )}
       </header>
 
       <div className="fr-focus-stage">

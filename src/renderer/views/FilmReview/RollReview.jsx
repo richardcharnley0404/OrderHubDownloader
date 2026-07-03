@@ -67,6 +67,28 @@ export function RollReview({ rollId, tweaks, onBack }) {
   const [flashFrame,   setFlashFrame]   = useState(null); // frameId, clears after animation
   const [flagMenu,     setFlagMenu]     = useState(null); // { frame, anchorRect }
   const [focusedFrameId, setFocusedFrameId] = useState(null); // frameId or null
+  // M4 (2026-07-03): Perfectly Clear per-frame — load the Film Scans config
+  // block once so FocusedFrame can render the channel picker + Enhance
+  // button. Empty configs → the group is hidden entirely.
+  const [pcJobsFilm, setPcJobsFilm] = useState({ configs: [], autoApplyConfigId: null });
+  useEffect(() => {
+    let cancelled = false;
+    window.electronAPI.getConfig()
+      .then((cfg) => {
+        if (cancelled) return;
+        const fs = cfg && cfg.perfectlyClear && cfg.perfectlyClear.filmScans;
+        if (fs && Array.isArray(fs.configs) && fs.enabled) {
+          setPcJobsFilm({
+            configs: fs.configs,
+            autoApplyConfigId: fs.autoApplyConfigId || null,
+          });
+        } else {
+          setPcJobsFilm({ configs: [], autoApplyConfigId: null });
+        }
+      })
+      .catch(() => { /* fall through — panel simply hides the PC group */ });
+    return () => { cancelled = true; };
+  }, []);
   // M7-6: Manual-mode upload gating. pendingRotations counts in-flight
   // rotate-frame promises so the Approve & Upload button can be disabled
   // until disk writes have settled — otherwise a rapid R/L spam followed
@@ -155,6 +177,52 @@ export function RollReview({ rollId, tweaks, onBack }) {
     });
     rotateChainRef.current = next;
     return next;
+  }, [patchFrame, flashOnce]);
+
+  // Perfectly Clear per-frame Enhance (M4). Blocks until the main-side
+  // processBatch returns; on success, patch the frame record so the badge
+  // + revert affordance appear immediately without a full refetch.
+  // Returns { error } or null so FocusedFrame can surface the reason
+  // inline instead of throwing.
+  const enhanceFrame = useCallback(async (frameId, configId) => {
+    try {
+      const res = await window.electronAPI.filmScanEnhanceFrame({ frameId, configId });
+      if (!res || !res.ok) {
+        return { error: (res && res.error) || 'Enhancement failed' };
+      }
+      if (res.frame) {
+        patchFrame(res.frame);
+        flashOnce(frameId);
+      }
+      if (res.status && res.status !== 'enhanced') {
+        // Rejected / timeout / cancelled / error — surfaces inline so the
+        // operator sees why the original was kept.
+        return { error: res.error || `Perfectly Clear ${res.status}` };
+      }
+      return null;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn('[filmReview] enhanceFrame failed', err);
+      return { error: err && err.message ? err.message : String(err) };
+    }
+  }, [patchFrame, flashOnce]);
+
+  const revertFrame = useCallback(async (frameId) => {
+    try {
+      const res = await window.electronAPI.filmScanRevertFrame({ frameId });
+      if (!res || !res.ok) {
+        return { error: (res && res.error) || 'Revert failed' };
+      }
+      if (res.frame) {
+        patchFrame(res.frame);
+        flashOnce(frameId);
+      }
+      return null;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn('[filmReview] revertFrame failed', err);
+      return { error: err && err.message ? err.message : String(err) };
+    }
   }, [patchFrame, flashOnce]);
 
   // Quick-flag (F key, hovered frame): add a 'rotation' flag with no note.
@@ -376,6 +444,22 @@ export function RollReview({ rollId, tweaks, onBack }) {
             <div className="fr-roll-stats__value">{roll.rotationErrorCount}</div>
           </div>
         )}
+        {/* Perfectly Clear per-frame outcome counts (M4). Suppressed when
+            zero so a roll that never went through PC stays visually clean.
+            Rejected count is red to mirror the rotation-error stat's
+            "operator-actionable" treatment. */}
+        {roll.pcEnhancedCount > 0 && (
+          <div className="fr-roll-stats__item fr-roll-stats__item--pc">
+            <div className="fr-roll-stats__label">PC enhanced</div>
+            <div className="fr-roll-stats__value">{roll.pcEnhancedCount}</div>
+          </div>
+        )}
+        {roll.pcRejectedCount > 0 && (
+          <div className="fr-roll-stats__item fr-roll-stats__item--red">
+            <div className="fr-roll-stats__label">PC rejected</div>
+            <div className="fr-roll-stats__value">{roll.pcRejectedCount}</div>
+          </div>
+        )}
         <div className="fr-roll-stats__item">
           <div className="fr-roll-stats__label">Flagged</div>
           <div className="fr-roll-stats__value">{roll.flaggedCount}</div>
@@ -540,6 +624,10 @@ export function RollReview({ rollId, tweaks, onBack }) {
             onQuickFlag={quickFlag}
             onOpenFlagMenu={openFlagMenu}
             onRotate={rotateFrame}
+            pcConfigs={pcJobsFilm.configs}
+            pcAutoApplyConfigId={pcJobsFilm.autoApplyConfigId}
+            onEnhance={enhanceFrame}
+            onRevert={revertFrame}
           />
         );
       })()}

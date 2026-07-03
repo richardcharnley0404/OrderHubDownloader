@@ -106,16 +106,42 @@ class FolderWatchService {
 
       // Retention sweep — drop reviewed rolls older than the configured window
       // from the Film Review history. Removes metadata + the thumbnail cache
-      // only; the scan files in the permanent storage folder are NEVER touched.
+      // only; the scan files in the permanent storage folder are NEVER touched
+      // — with one exception (M4): the `{storagePath}/pre-enhance/` folder
+      // Perfectly Clear stashes original bytes into is scoped to the review
+      // lifecycle, so we sweep it here alongside the rest.
+      //
       // Best-effort, once per cycle so the history self-trims as the lab works.
       try {
         const frameMetadataStore = require('./frame-metadata-store');
+        const { isRollPrunable } = frameMetadataStore;
+        const days = Number(config.filmScansRetentionDays);
+        // Capture the storagePath of each roll that WILL be pruned so we can
+        // clean up its pre-enhance/ folder after pruneOldRolls wipes the
+        // roll record. Safe when days is invalid — the filter still evaluates
+        // but produces an empty list.
+        let preEnhanceFolders = [];
+        try {
+          if (Number.isFinite(days) && days > 0) {
+            const cutoffMs = Date.now() - days * 24 * 60 * 60 * 1000;
+            const summaries = frameMetadataStore.listRollsWithSummary();
+            for (const s of summaries) {
+              if (isRollPrunable && isRollPrunable(s, cutoffMs) && s.storagePath) {
+                preEnhanceFolders.push(path.join(s.storagePath, 'pre-enhance'));
+              }
+            }
+          }
+        } catch (_) { /* best-effort */ }
+
         const prunedRolls = frameMetadataStore.pruneOldRolls(config.filmScansRetentionDays);
         if (prunedRolls.length > 0) {
           const { app } = require('electron');
           const thumbsRoot = path.join(app.getPath('userData'), 'thumbnails');
           for (const rollId of prunedRolls) {
             try { this._deleteFolderRecursive(path.join(thumbsRoot, rollId)); } catch (_) { /* best-effort */ }
+          }
+          for (const preDir of preEnhanceFolders) {
+            try { this._deleteFolderRecursive(preDir); } catch (_) { /* best-effort */ }
           }
           logger.info(`filmScans: retention pruned ${prunedRolls.length} old roll(s) from Film Review history`);
         }
@@ -414,6 +440,151 @@ class FolderWatchService {
                     }
                   }
 
+                  // ── M4: Perfectly Clear auto-apply (Film Scans) ─────────
+                  // Runs AFTER rotation/thumbnails and BEFORE the review-gate
+                  // decision below. When enabled + autoApplyConfigId is set,
+                  // batches the roll's storage files through one QuickServer
+                  // channel via the shared perfectlyClearClient. Enhanced
+                  // frames get their storage file replaced in-place (client
+                  // uses temp+rename) and their thumbnail regenerated;
+                  // rejected/timeout frames keep their original.
+                  //
+                  // Pre-enhance backups live under `{storagePath}/pre-enhance/`
+                  // (first-enhancement-wins) so per-frame Revert restores the
+                  // exact rotation-output that PC saw.
+                  //
+                  // Timeout / cancel treated as review-escalation signals so a
+                  // dead QuickServer can never wedge the pipeline: the roll
+                  // enters review with whatever enhanced frames landed.
+                  let pcRejectedCount = 0;
+                  let pcTimedOut      = false;
+                  let pcEnhancedCount = 0;
+                  let pcEnhanceStartedIso = null;
+                  let pcEnhancedIso       = null;
+                  const pcCfg = (() => {
+                    const pc = config.perfectlyClear && config.perfectlyClear.filmScans;
+                    if (!pc || !pc.enabled || !pc.autoApplyConfigId) return null;
+                    const configs = Array.isArray(pc.configs) ? pc.configs : [];
+                    return configs.find(c => c && c.id === pc.autoApplyConfigId) || null;
+                  })();
+                  if (pcCfg && imageFiles.length > 0) {
+                    pcEnhanceStartedIso = new Date().toISOString();
+                    try {
+                      frameMetadataStore.updateRoll(rollId, {
+                        processingStatus: 'enhancing',
+                        timeline: { ...(frameMetadataStore.getRoll(rollId)?.timeline || {}), pcEnhanceStartedAt: pcEnhanceStartedIso },
+                      });
+                      emitRollUpdate(rollId);
+                    } catch (_) { /* best-effort */ }
+
+                    // Stage pre-enhance/ backups (first-enhancement-wins).
+                    const preEnhanceDir = path.join(storagePath, 'pre-enhance');
+                    try { fs.mkdirSync(preEnhanceDir, { recursive: true }); } catch (_) { /* best-effort */ }
+                    const files = [];
+                    for (const imageFile of imageFiles) {
+                      const src = path.join(storagePath, imageFile);
+                      const pre = path.join(preEnhanceDir, imageFile);
+                      try {
+                        if (!fs.existsSync(pre)) fs.copyFileSync(src, pre);
+                      } catch (backupErr) {
+                        // If we can't backup, don't send this frame — revert
+                        // would be impossible. Log and skip.
+                        logger.logError(`filmScans: PC pre-enhance backup failed for ${imageFile} — skipping enhancement for this frame`, backupErr);
+                        continue;
+                      }
+                      // TIF in, TIF out — QuickServer preserves the extension,
+                      // so sourcePath == destPath == storage file.
+                      files.push({ sourcePath: src, destPath: src });
+                    }
+
+                    if (files.length === 0) {
+                      // Nothing stageable → skip enhancement entirely.
+                      try {
+                        frameMetadataStore.updateRoll(rollId, { processingStatus: null });
+                        emitRollUpdate(rollId);
+                      } catch (_) { /* best-effort */ }
+                    } else {
+                      // Wall-clock timeout — plan §1: max(5 min, 30 s × frameCount).
+                      const timeoutMs = Math.max(5 * 60 * 1000, 30 * 1000 * files.length);
+                      logger.info(`filmScans: ${rollId} PC enhance starting (config="${pcCfg.friendlyName}", files=${files.length}, timeoutMs=${timeoutMs})`);
+
+                      let pcResults = [];
+                      try {
+                        const perfectlyClearClient = require('../enhancement/perfectlyClearClient');
+                        pcResults = await perfectlyClearClient.processBatch({
+                          config: pcCfg,
+                          files,
+                          timeoutMs,
+                        });
+                      } catch (pcErr) {
+                        // Client-level throw — treat every file as errored so
+                        // we still fall through to review gate + defer.
+                        logger.logError(`filmScans: PC processBatch threw for ${rollId} — continuing with originals`, pcErr);
+                        pcResults = files.map(f => ({ sourcePath: f.sourcePath, destPath: f.destPath, status: 'timeout', error: pcErr.message }));
+                        pcTimedOut = true;
+                      }
+
+                      // Per-file: enhanced → regen thumbnail + stamp metadata;
+                      // rejected/timeout → keep original + stamp pcRejected.
+                      const sharpForPc = require('sharp');
+                      for (const r of pcResults) {
+                        const imageFile = path.basename(r.sourcePath);
+                        const frameIdx  = imageFiles.indexOf(imageFile);
+                        if (frameIdx < 0) continue;
+                        const frameId = `${rollId}_${frameIdx}`;
+                        if (r.status === 'enhanced') {
+                          pcEnhancedCount += 1;
+                          const rec = frameMetadataStore.get(frameId);
+                          if (rec && rec.thumbnailPath) {
+                            try {
+                              await sharpForPc(r.destPath, { limitInputPixels: false, failOn: 'none' })
+                                .resize(512, null, { withoutEnlargement: true, fit: 'inside' })
+                                .jpeg({ quality: 85 })
+                                .toFile(rec.thumbnailPath);
+                            } catch (thumbErr) {
+                              logger.logError(`filmScans: PC thumbnail regen failed for ${imageFile}`, thumbErr);
+                            }
+                          }
+                          frameMetadataStore.update(frameId, {
+                            pcEnhanced:     true,
+                            pcConfigName:   pcCfg.friendlyName || null,
+                            pcConfigId:     pcCfg.id,
+                            pcEnhancedAt:   new Date().toISOString(),
+                            pcRejected:     false,
+                            pcRejectReason: null,
+                          });
+                        } else {
+                          pcRejectedCount += 1;
+                          if (r.status === 'timeout' || r.status === 'cancelled') pcTimedOut = true;
+                          frameMetadataStore.update(frameId, {
+                            pcEnhanced:     false,
+                            pcRejected:     true,
+                            pcRejectReason: r.status,
+                            pcRejectError:  r.error || null,
+                          });
+                        }
+                      }
+
+                      pcEnhancedIso = new Date().toISOString();
+                      try {
+                        // Clear 'enhancing' immediately so the UI reflects the
+                        // batch end even before recordRoll below writes the
+                        // full record. recordRoll is a full-replace, so the
+                        // pcEnhancedAt stamp itself is added into the timeline
+                        // block passed to recordRoll (a few lines further down).
+                        frameMetadataStore.updateRoll(rollId, {
+                          processingStatus: null,
+                          timeline: { ...(frameMetadataStore.getRoll(rollId)?.timeline || {}), pcEnhancedAt: pcEnhancedIso },
+                        });
+                        emitRollUpdate(rollId);
+                      } catch (_) { /* best-effort */ }
+                      logger.info(`filmScans: ${rollId} PC enhance complete — enhanced=${pcEnhancedCount}, rejected=${pcRejectedCount}, timedOut=${pcTimedOut}`);
+                      if (pcTimedOut) {
+                        logger.logWarning(`filmScans: ${rollId} PC timeout/cancel — escalating to review regardless of review mode`);
+                      }
+                    }
+                  }
+
                   // M7: write a roll-level record so the Film Review panel and
                   // the deferred-upload IPC have the upload context they need.
                   //
@@ -425,6 +596,12 @@ class FolderWatchService {
                   //   'never'  — Auto: uploadStatus left unset; Step 3 below
                   //              stamps 'uploaded'/'failed'.
                   //
+                  // M4: PC additions — pcTimedOut forces review escalation
+                  // regardless of mode (dead QuickServer can never wedge the
+                  // pipeline); pcRejectedCount participates in Smart Check
+                  // like lowConfCount / rotErrorCount so mixed batches surface
+                  // to the operator.
+                  //
                   // M8-3: the provisional record (created at detection) was
                   // keyed by folder.name (the watch-folder basename). The real
                   // rollId is path.basename(storagePath) — usually identical,
@@ -434,11 +611,11 @@ class FolderWatchService {
                   // the provisional one so it doesn't linger as a ghost
                   // "processing" card forever.
                   const reviewMode = config.filmScanReviewMode || 'never';
-                  const smartTriggered = reviewMode === 'smart' && (lowConfCount > 0 || rotErrorCount > 0);
-                  const deferUpload = reviewMode === 'always' || smartTriggered;
+                  const smartTriggered = reviewMode === 'smart' && (lowConfCount > 0 || rotErrorCount > 0 || pcRejectedCount > 0);
+                  const deferUpload = reviewMode === 'always' || smartTriggered || pcTimedOut;
                   if (reviewMode === 'smart') {
                     logger.info(
-                      `filmScans: ${rollId} smart-check — lowConf=${lowConfCount} rotErr=${rotErrorCount} → ${deferUpload ? 'pending review' : 'auto upload'}`
+                      `filmScans: ${rollId} smart-check — lowConf=${lowConfCount} rotErr=${rotErrorCount} pcRej=${pcRejectedCount} → ${deferUpload ? 'pending review' : 'auto upload'}`
                     );
                   }
                   // Rotation + thumbnail pass complete — stamp it for the timeline.
@@ -457,6 +634,12 @@ class FolderWatchService {
                         stableAt:   tStableIso,
                         copiedAt:   tCopiedIso,
                         rotatedAt:  tRotatedIso,
+                        // M4: PC stamps only present when PC ran on this roll.
+                        // recordRoll is a full-replace, so we must fold them
+                        // into the same timeline object rather than relying on
+                        // the earlier updateRoll's write to survive.
+                        ...(pcEnhanceStartedIso ? { pcEnhanceStartedAt: pcEnhanceStartedIso } : {}),
+                        ...(pcEnhancedIso       ? { pcEnhancedAt:       pcEnhancedIso       } : {}),
                       },
                     });
                     if (rollId !== folder.name) {
@@ -866,6 +1049,16 @@ class FolderWatchService {
     const frameMetadataStore = require('./frame-metadata-store');
     const rec = frameMetadataStore.getRoll(rollId);
     if (!rec) return;
+
+    // M4 ordering guard: a roll mid-Perfectly-Clear enhancement is not safe
+    // to upload — the storage files may be part-replaced. Defensive belt+
+    // braces on top of the fact that the pipeline never sets both
+    // uploadStatus:'uploading' AND processingStatus:'enhancing', so this
+    // branch only fires if something upstream set them out of order.
+    if (rec.processingStatus === 'enhancing') {
+      logger.logWarning(`filmScans: refusing to upload ${rollId} — still enhancing (processingStatus='enhancing')`);
+      return;
+    }
 
     const storagePath = rec.storagePath;
     if (!storagePath || !fs.existsSync(storagePath)) {

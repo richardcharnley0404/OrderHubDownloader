@@ -177,6 +177,27 @@ export function FrameCell({
           </span>
         )}
 
+        {/* Perfectly Clear per-frame badge (M4). pcEnhanced wins over
+            pcRejected — a frame that was re-enhanced after a prior reject
+            is currently enhanced. Both fields default undefined so legacy
+            / non-PC frames render nothing. */}
+        {frame.pcEnhanced && (
+          <span
+            className="fr-pc-badge fr-pc-badge--enhanced"
+            title={frame.pcConfigName ? `Enhanced via Perfectly Clear (${frame.pcConfigName})` : 'Enhanced via Perfectly Clear'}
+          >
+            PC
+          </span>
+        )}
+        {!frame.pcEnhanced && frame.pcRejected && (
+          <span
+            className="fr-pc-badge fr-pc-badge--rejected"
+            title={frame.pcRejectError || `Perfectly Clear ${frame.pcRejectReason || 'rejected'} — original kept`}
+          >
+            PC ×
+          </span>
+        )}
+
         {selectable && (
           <button
             type="button"

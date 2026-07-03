@@ -77,6 +77,10 @@ function rollStage(r) {
   if (r.processingStatus === 'detected')   return 'watching';
   if (r.processingStatus === 'processing') return 'processing';
   if (r.processingStatus === 'converting') return 'converting';
+  // M4 (2026-07-03): Perfectly Clear auto-apply stage. Sits alongside
+  // 'converting' as a rotation/thumbnails-complete-but-not-yet-uploaded
+  // sub-state so the pipeline card + counts stay honest.
+  if (r.processingStatus === 'enhancing')  return 'enhancing';
   if (r.uploadStatus === 'uploading')      return 'uploading';
   if (r.uploadStatus === 'pending')        return 'pending';
   if (r.uploadStatus === 'failed')         return 'failed';
@@ -87,6 +91,7 @@ const PIPELINE_STAGES = [
   { key: 'watching',   label: 'Watching' },
   { key: 'processing', label: 'Processing' },
   { key: 'converting', label: 'Converting' },
+  { key: 'enhancing',  label: 'Enhancing' },
   { key: 'uploading',  label: 'Uploading' },
   { key: 'pending',    label: 'Awaiting approval' },
   { key: 'failed',     label: 'Failed' },
@@ -94,21 +99,21 @@ const PIPELINE_STAGES = [
 
 function PipelineStatus({ rolls }) {
   const { counts, active } = useMemo(() => {
-    const counts = { watching: 0, processing: 0, converting: 0, uploading: 0, pending: 0, failed: 0 };
+    const counts = { watching: 0, processing: 0, converting: 0, enhancing: 0, uploading: 0, pending: 0, failed: 0 };
     let active = null;
     for (const r of rolls) {
       const stage = rollStage(r);
       if (!stage) continue;
       counts[stage] += 1;
       // Serial pipeline → at most one roll is actively in-flight at a time.
-      if (!active && (stage === 'processing' || stage === 'converting' || stage === 'uploading')) {
+      if (!active && (stage === 'processing' || stage === 'converting' || stage === 'enhancing' || stage === 'uploading')) {
         active = { id: r.rollId, stage };
       }
     }
     return { counts, active };
   }, [rolls]);
 
-  const activeCount  = counts.processing + counts.converting + counts.uploading;
+  const activeCount  = counts.processing + counts.converting + counts.enhancing + counts.uploading;
   const waiting      = counts.watching + counts.pending;
   const outstanding  = activeCount + waiting;
   const total        = outstanding + counts.failed;
@@ -144,7 +149,10 @@ function PipelineStatus({ rolls }) {
 
       {active && (
         <div className="fr-pipeline__now" title="The pipeline processes one roll at a time">
-          {active.stage === 'uploading' ? 'Uploading' : active.stage === 'converting' ? 'Converting' : 'Processing'} <strong>{active.id}</strong>
+          {active.stage === 'uploading' ? 'Uploading'
+            : active.stage === 'converting' ? 'Converting'
+            : active.stage === 'enhancing' ? 'Enhancing'
+            : 'Processing'} <strong>{active.id}</strong>
         </div>
       )}
     </div>
@@ -372,12 +380,15 @@ function RollCard({ roll, onOpen, onDeleted, onApproved }) {
   const provisionalLabel =
     roll.processingStatus === 'processing' ? 'Processing'
     : roll.processingStatus === 'converting' ? 'Converting'
+    : roll.processingStatus === 'enhancing' ? 'Enhancing'
     : roll.processingStatus === 'detected' ? 'Watching' : null;
   const provisionalClass =
     roll.processingStatus === 'processing'
       ? 'fr-roll-card__status fr-roll-card__status--processing'
       : roll.processingStatus === 'converting'
       ? 'fr-roll-card__status fr-roll-card__status--converting'
+      : roll.processingStatus === 'enhancing'
+      ? 'fr-roll-card__status fr-roll-card__status--enhancing'
       : 'fr-roll-card__status fr-roll-card__status--watching';
 
   const statusLabel = isReviewed ? 'Reviewed' : 'Ready';
@@ -567,6 +578,8 @@ function RollCard({ roll, onOpen, onDeleted, onApproved }) {
             ? 'Rotating frames and generating thumbnails…'
             : roll.processingStatus === 'converting'
             ? 'Converting TIFFs to JPEG…'
+            : roll.processingStatus === 'enhancing'
+            ? 'Running Perfectly Clear on frames…'
             : 'Waiting for the watchguard timer before processing.'}
         </div>
       ) : (

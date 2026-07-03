@@ -244,6 +244,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   filmReviewApproveRoll:      (rollId)                 => ipcRenderer.invoke('ohd:filmReview:approve-roll', rollId),
   filmReviewDeleteRoll:       (rollId)                 => ipcRenderer.invoke('ohd:filmReview:delete-roll',  rollId),
   filmReviewGetTweaks:        ()                       => ipcRenderer.invoke('ohd:filmReview:get-tweaks'),
+
+  // Perfectly Clear per-frame — Film Scans (M4, 2026-07-03).
+  // enhanceFrame blocks until the one-file processBatch returns; the
+  // renderer shows a local spinner meanwhile. revertFrame restores the
+  // pre-enhance/ backup and clears the PC metadata. enhanceStatus is a
+  // lightweight query for the in-flight case when reopening a panel.
+  filmScanEnhanceFrame:  (payload) => ipcRenderer.invoke('ohd:filmscan:enhanceFrame',  payload),
+  filmScanRevertFrame:   (payload) => ipcRenderer.invoke('ohd:filmscan:revertFrame',   payload),
+  filmScanEnhanceStatus: (payload) => ipcRenderer.invoke('ohd:filmscan:enhanceStatus', payload),
   filmReviewSetTweak:         (key, value)             => ipcRenderer.invoke('ohd:filmReview:set-tweak',  { key, value }),
   onFilmReviewRollProcessed:  (callback) =>
     ipcRenderer.on('ohd:filmReview:roll-processed', (event, data) => callback(data)),
