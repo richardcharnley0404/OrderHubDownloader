@@ -973,6 +973,22 @@ class FolderWatchService {
           this._deleteFolderRecursive(watchPath);
           logger.info(`fileUploads: deleted ${folder.name} from watch folder`);
 
+          // ── M5: Perfectly Clear auto-apply (File Uploads) ───────
+          // Runs AFTER stability + copy-to-storage and BEFORE S3
+          // upload. Enabled + autoApplyConfigId → batch every image
+          // in the storage folder through one QuickServer channel
+          // via the shared perfectlyClearClient. Enhanced files
+          // replace their storage bytes in-place (client uses
+          // temp+rename); rejected/timeout files keep their originals
+          // and warn to Activity Log — there is no review surface,
+          // so the policy is "upload what QuickServer returns".
+          // Disabled scope (or no autoApplyConfigId) is a strict
+          // no-op — the storage folder is untouched. A dead
+          // QuickServer must NEVER wedge the file-uploads pipeline,
+          // so the wall-clock timeout is max(5 min, 30 s × count)
+          // and any client-level throw falls back to originals.
+          await this._runFileUploadsPerfectlyClear(folder.name, storagePath, config);
+
           const s3Config = this._buildS3Config(config, null);
           if (s3Config) {
             const result = await s3Service.uploadFolder(storagePath, s3Prefix, s3Config, (progress) => {
@@ -1002,6 +1018,137 @@ class FolderWatchService {
     }
 
     return summary;
+  }
+
+  /**
+   * M5: File Uploads Perfectly Clear auto-apply step. Extracted from the
+   * per-folder loop above so the disabled-scope no-op is a plain early
+   * return and the batch/reject/timeout accounting has room to breathe.
+   *
+   * Contract:
+   *   - Disabled scope OR no autoApplyConfigId OR no matching config
+   *     → return without touching storage. Strict no-op.
+   *   - Enhanced files: bytes replaced in-place by the client
+   *     (temp+rename). Rejected / timeout / cancelled files: original
+   *     bytes untouched, per-file warning to Activity Log.
+   *   - Client-level throw: fall back to originals for every file,
+   *     log an error, and RESOLVE (do NOT rethrow) — the outer
+   *     per-folder try/catch below must still reach the S3 upload
+   *     step. A dead QuickServer can never wedge this pipeline.
+   *
+   * Duplicate basenames within one storage folder (possible when the
+   * user drops a nested structure with same-named files in different
+   * subdirs) cannot round-trip through a single flat batch subfolder,
+   * so we deduplicate: first-occurrence wins, later duplicates upload
+   * as originals with a warning. Rare in practice for file uploads.
+   */
+  async _runFileUploadsPerfectlyClear(folderName, storagePath, config) {
+    const pc = config.perfectlyClear && config.perfectlyClear.fileUploads;
+    if (!pc || !pc.enabled || !pc.autoApplyConfigId) return;
+    const configs = Array.isArray(pc.configs) ? pc.configs : [];
+    const pcCfg = configs.find(c => c && c.id === pc.autoApplyConfigId) || null;
+    if (!pcCfg) return;
+
+    // Recursively enumerate image files under the storage folder.
+    // File uploads can include subdirs (s3-service walks recursively at
+    // upload time), so we mirror that here rather than only top-level
+    // files. QuickServer channel formats supported: JPEG, PNG, TIFF.
+    const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.tif', '.tiff']);
+    const walk = (dir, out) => {
+      let entries;
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch (_) {
+        return out;
+      }
+      for (const entry of entries) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          walk(full, out);
+        } else if (entry.isFile()) {
+          const ext = path.extname(entry.name).toLowerCase();
+          if (IMAGE_EXTS.has(ext)) out.push(full);
+        }
+      }
+      return out;
+    };
+    const imagePaths = walk(storagePath, []);
+    if (imagePaths.length === 0) return;
+
+    // Deduplicate by basename — perfectlyClearClient throws if a batch
+    // contains two files with the same basename (its batch subfolder is
+    // flat under Input). First occurrence enhances; later duplicates
+    // upload as originals with a warning.
+    const seen = new Set();
+    const files = [];
+    for (const p of imagePaths) {
+      const base = path.basename(p);
+      if (seen.has(base)) {
+        logger.logWarning(
+          `fileUploads: ${folderName} PC — duplicate basename '${base}' in a subfolder — uploading this copy as original`
+        );
+        continue;
+      }
+      seen.add(base);
+      files.push({ sourcePath: p, destPath: p });
+    }
+    if (files.length === 0) return;
+
+    // Wall-clock timeout: mirror M4's formula. The floor covers a
+    // single-file batch (QuickServer startup latency) and the linear
+    // term covers larger drops without blowing past a reasonable ceiling.
+    const timeoutMs = Math.max(5 * 60 * 1000, 30 * 1000 * files.length);
+    logger.info(
+      `fileUploads: ${folderName} PC enhance starting ` +
+      `(config="${pcCfg.friendlyName}", files=${files.length}, timeoutMs=${timeoutMs})`
+    );
+
+    let pcResults = [];
+    try {
+      const perfectlyClearClient = require('../enhancement/perfectlyClearClient');
+      pcResults = await perfectlyClearClient.processBatch({
+        config: pcCfg,
+        files,
+        timeoutMs,
+      });
+    } catch (pcErr) {
+      // A client-level throw is a systemic failure (bad config, staging
+      // I/O error, etc.). Fall back to originals for every file so the
+      // outer S3 upload step still runs; the pipeline must never wedge.
+      logger.logError(
+        `fileUploads: ${folderName} PC processBatch threw — continuing with originals`,
+        pcErr
+      );
+      logger.logWarning(
+        `fileUploads: ${folderName} PC unavailable — uploading ${files.length} file(s) as originals`
+      );
+      return;
+    }
+
+    let enhCount = 0;
+    let rejCount = 0;
+    let toCount = 0;
+    for (const r of pcResults) {
+      const base = path.basename(r.sourcePath);
+      if (r.status === 'enhanced') {
+        enhCount++;
+      } else if (r.status === 'timeout' || r.status === 'cancelled') {
+        toCount++;
+        logger.logWarning(
+          `fileUploads: ${folderName} PC ${r.status} for ${base} — uploading original`
+        );
+      } else {
+        rejCount++;
+        logger.logWarning(
+          `fileUploads: ${folderName} PC rejected ${base} — uploading original` +
+          (r.error ? ` (${r.error})` : '')
+        );
+      }
+    }
+    logger.info(
+      `fileUploads: ${folderName} PC enhance complete — ` +
+      `enhanced=${enhCount}, rejected=${rejCount}, timeout=${toCount}`
+    );
   }
 
   // Best-effort emit of the Film Review roll-processed event (class-level twin
