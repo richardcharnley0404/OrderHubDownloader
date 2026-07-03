@@ -735,6 +735,12 @@ async function startBatchEnhancement({ jobId, jobPath, filenames, configId, time
       } else {
         st.status = status; // 'rejected' | 'timeout' | 'cancelled'
         if (error) st.error = error;
+        // Per-file operator-readable line so a mixed batch is diagnosable
+        // from the Activity Log without a debugger. The IPC handler already
+        // logs the batch start; the finally block below logs the summary.
+        logger.logWarning(
+          `pc: job ${jobId} — ${filename} ${status}` + (error ? ` (${error})` : '')
+        );
       }
     },
   })
@@ -751,6 +757,21 @@ async function startBatchEnhancement({ jobId, jobPath, filenames, configId, time
     })
     .finally(() => {
       batchState.finished = true;
+      // Operator-readable batch-finish summary. The client emits a
+      // `pc: batch ohd_…` finish line, but that identifier is internal
+      // and can't be tied back to a job at a glance — this line closes
+      // that loop against the same jobId that the IPC handler's start
+      // line used.
+      const counts = { enhanced: 0, rejected: 0, timeout: 0, cancelled: 0, error: 0, queued: 0 };
+      for (const [, st] of batchState.files) {
+        if (counts[st.status] !== undefined) counts[st.status] += 1;
+      }
+      logger.info(
+        `pc: job ${jobId} batch complete (config="${batchState.friendlyName}", ` +
+        `enhanced=${counts.enhanced}, rejected=${counts.rejected}, ` +
+        `timeout=${counts.timeout}, cancelled=${counts.cancelled}, ` +
+        `error=${counts.error})`
+      );
     });
 
   return batchId;
@@ -843,6 +864,7 @@ async function revertEnhancement({ jobId, jobPath, filename }) {
   });
   const nextSidecar = { ...sidecar, images: updatedImages };
   await saveSidecar(nextSidecar, jobPath);
+  logger.info(`pc: job ${jobId} — reverted ${filename} to pre-enhance snapshot`);
   return { success: true, sidecar: nextSidecar };
 }
 

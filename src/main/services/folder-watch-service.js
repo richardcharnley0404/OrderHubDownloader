@@ -562,6 +562,14 @@ class FolderWatchService {
                             pcRejectReason: r.status,
                             pcRejectError:  r.error || null,
                           });
+                          // Per-frame operator-readable line so a mixed
+                          // batch is diagnosable from the Activity Log
+                          // without opening Film Review. The summary line
+                          // below still gives the aggregate counts.
+                          logger.logWarning(
+                            `filmScans: ${rollId} PC ${r.status} for ${imageFile} — kept original` +
+                            (r.error ? ` (${r.error})` : '')
+                          );
                         }
                       }
 
