@@ -36,6 +36,16 @@ class JobDownloadService {
    *             localPath?: string, manifestPath?: string, fileCount?: number }}
    */
   checkLocalFiles(job) {
+    // Belt-and-braces: Film Development jobs have no artwork to check;
+    // their `roll_XXX.zip` payload is a scan-instruction manifest that
+    // must never be downloaded, opened, or received-marked. The primary
+    // filter in job-service.getLocalJobs already stops them from
+    // reaching the poll loop; this guard covers any direct call from
+    // ipc-handlers or from a devtools poke.
+    if (job && job.is_film_development) {
+      return { found: false, hasFiles: false, hasManifest: false };
+    }
+
     const downloadDirectory = configService.get('downloadDirectory');
     if (!downloadDirectory) {
       return { found: false, hasFiles: false, hasManifest: false };

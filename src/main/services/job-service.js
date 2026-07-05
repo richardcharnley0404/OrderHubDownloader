@@ -204,6 +204,16 @@ class JobService {
       artwork_source: apiJob.artwork_source || null,
       locations: apiJob.locations || [],
 
+      // Film Development Auto Assignment (2026-07-04). Film-dev jobs are
+      // hidden from the operator queue and consumed by the film-scan
+      // auto-assign matcher; they never route to a printer, never
+      // download artwork, and never get marked received. twin_checks is
+      // coerced to string[] because OrderHub sends numerics unquoted.
+      is_film_development: Boolean(apiJob.is_film_development),
+      twin_checks: Array.isArray(apiJob.twin_checks)
+        ? apiJob.twin_checks.map(v => String(v))
+        : [],
+
       // OHD-managed status (not from API)
       _status: 'pending'
     };
@@ -480,13 +490,28 @@ class JobService {
   }
 
   /**
-   * Get locally cached jobs
+   * Get locally cached jobs.
+   *
+   * Film Development jobs (`is_film_development: true`) are filtered out
+   * here — this is the single choke point for `jobs:getAll` and every
+   * `jobs:updated` renderer emit, so they never surface in the operator
+   * queue. The film-scan auto-assign matcher consumes them via
+   * `getFilmDevelopmentJobs()` instead.
    */
   getLocalJobs() {
     return {
-      jobs: this.jobs,
+      jobs: this.jobs.filter(j => !j || !j.is_film_development),
       lastFetchTime: this.lastFetchTime
     };
+  }
+
+  /**
+   * Return only Film Development jobs from the local cache. Consumed by
+   * the film-scan-auto-assign matcher. Order does not matter; the
+   * matcher walks twin_checks per job.
+   */
+  getFilmDevelopmentJobs() {
+    return this.jobs.filter(j => j && j.is_film_development);
   }
 
   /**

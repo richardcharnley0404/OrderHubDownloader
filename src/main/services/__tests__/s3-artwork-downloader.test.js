@@ -101,6 +101,31 @@ function jobPathOf(downloadDir, job) {
 
 // ── Pure-logic tests ─────────────────────────────────────────────────────────
 
+test('Guard rail: is_film_development job → no downloads, no folders created', async (t) => {
+  const downloadDir = await makeTempDir();
+  t.after(async () => { await fs.rm(downloadDir, { recursive: true, force: true }); });
+
+  // Give it a normally-download-worthy artwork_files list so we can prove
+  // the film-dev short-circuit fires BEFORE any download attempt.
+  const job = makeJob({
+    id: 'JOB-FD',
+    order_id: 'ORD-FD',
+    order_number: 'PX-FD',
+    artwork_files: [
+      makeArtworkFile({ id: 'ffffffff-1111-2222-3333-444444444444', file_name: 'roll_001.zip', file_url: 'http://example.invalid/roll' }),
+    ],
+  });
+  job.is_film_development = true;
+
+  const result = await newDownloader().downloadJobArtwork(job, downloadDir);
+  assert.deepEqual(result, { downloaded: [], skipped: [], failed: [] },
+    'film-dev short-circuit returns empty result — no download attempts');
+
+  // No job folder was created (short-circuit fires before mkdir).
+  const jobPath = jobPathOf(downloadDir, job);
+  assert.equal(fssync.existsSync(jobPath), false, 'no artwork folder for film-dev jobs');
+});
+
 test('Pure: collision rule renames second file with __id8 suffix', async (t) => {
   const downloadDir = await makeTempDir();
   const srv = await startTestServer(new Map([

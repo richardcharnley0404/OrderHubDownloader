@@ -488,6 +488,15 @@ function createS3ArtworkDownloader(deps = {}) {
       return result; // no-op: nothing to fetch
     }
 
+    // Belt-and-braces: Film Development jobs list a scan-instruction
+    // manifest (`roll_XXX.zip`) in artwork_files[] that OHD must NEVER
+    // download or open. The primary filter in job-service.getLocalJobs
+    // means the polling loop never calls us with these; this guard
+    // covers any future direct caller.
+    if (job.is_film_development) {
+      return result;
+    }
+
     // Defensive: OrderHub filters artwork_source:'none' server-side per the
     // brief. Log loudly if it ever surfaces here so the contract drift is
     // visible — but proceed (the downloader just iterates artwork_files[],

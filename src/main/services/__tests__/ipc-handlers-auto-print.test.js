@@ -217,6 +217,23 @@ function makeFolderCopyRoute(overrides = {}) {
 // DPOF dispatch — catch handler (the central regression test)
 // ─────────────────────────────────────────────────────────────────────────
 
+test('auto-print guard rail: is_film_development job is skipped — no route lookup, no dispatch, no update', async () => {
+  // Belt-and-braces: getLocalJobs already hides film-dev jobs, but the
+  // in-loop guard must also fire so a direct in-memory injection can't
+  // accidentally route a film-dev job.
+  resetState();
+  __jobs = [makeJob({ id: 'JOB-FD', is_film_development: true })];
+  __controllers = [{ id: 'CTRL-1', autoprint: true, type: 'noritsu' }];
+  __routeForJob = makeDpofRoute();
+  __dispatchBehavior = 'success';
+
+  await _runAutoPrint();
+
+  assert.equal(__dispatchCalls.length, 0, 'no dispatch attempted');
+  assert.equal(__updateCalls.length, 0, 'no updateJobLocally calls — nothing to update');
+});
+
+
 test('auto-print catch: a generic dispatch throw flips job to error + sets _errorMessage', async () => {
   resetState();
   __jobs = [makeJob()];

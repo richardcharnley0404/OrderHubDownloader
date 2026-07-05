@@ -2718,6 +2718,12 @@ async function runAutoPrint() {
 
     for (const job of jobs) {
       if (job._status !== 'received' && job._status !== 'pending') continue;
+      // Belt-and-braces: film-dev jobs are already filtered out by
+      // getLocalJobs, but a future direct caller (or a stale in-memory
+      // list) could bypass that. Auto-print must NEVER route a film-dev
+      // job — they have no artwork, no controller mapping, and no
+      // print destination.
+      if (job.is_film_development) continue;
       if (job.created_at && new Date(job.created_at) < cutoff) continue;
 
       // Awaiting-manifest gate. Files have arrived but the .json manifest

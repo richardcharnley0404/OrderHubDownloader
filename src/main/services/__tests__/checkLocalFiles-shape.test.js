@@ -67,6 +67,15 @@ test('downloadDirectory unset → { found:false, hasFiles:false, hasManifest:fal
   assert.deepEqual(r, { found: false, hasFiles: false, hasManifest: false });
 });
 
+test('is_film_development job → short-circuits BEFORE downloadDirectory check', async () => {
+  // Guard rail: film-dev jobs must never touch the artwork folder. This
+  // returns identical shape to the other short-circuits — no localPath,
+  // no manifestPath — because there is nothing on disk to point at.
+  __downloadDirectory = '/nonexistent/downloadDir'; // wouldn't matter — never read
+  const r = jobDownloadService.checkLocalFiles({ ...JOB, is_film_development: true });
+  assert.deepEqual(r, { found: false, hasFiles: false, hasManifest: false });
+});
+
 test('order folder missing → { found:false, hasFiles:false, hasManifest:false } + paths', async (t) => {
   const ws = await makeWorkspace();
   t.after(() => fs.rmSync(ws.root, { recursive: true, force: true }));
