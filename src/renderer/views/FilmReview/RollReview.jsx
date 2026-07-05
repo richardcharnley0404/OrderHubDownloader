@@ -371,6 +371,25 @@ export function RollReview({ rollId, tweaks, onBack }) {
     onBack?.();
   }, [rollId, onBack]);
 
+  // M5 (Film Development Auto Assignment): explicit operator override
+  // for a reviewed-but-unmatched held roll. Confirms first because it
+  // bypasses the whole two-gate rule.
+  const onUploadUnmatched = useCallback(() => {
+    if (!window.confirm(
+      'Upload this roll to S3 without a matching Film Development job?\n\n' +
+      'Use this only when you are sure the job will never arrive (walk-in, ' +
+      'mis-scanned twin check, etc.).'
+    )) return;
+    setUploadError(null);
+    Promise.resolve()
+      .then(() => window.electronAPI.filmReviewUploadUnmatched(rollId))
+      .catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn('[filmReview] upload-unmatched IPC rejected', err);
+      });
+    onBack?.();
+  }, [rollId, onBack]);
+
   const onOpenFolder = useCallback(async () => {
     try {
       await window.electronAPI.filmReviewOpenFolder(rollId);
@@ -497,9 +516,48 @@ export function RollReview({ rollId, tweaks, onBack }) {
             //   'failed'   → Prior upload failed: Retry upload.
             //   'uploaded' shouldn't render here (M7-7 filters it from the list),
             //              but we fall through to the reviewed-disabled state.
+            //
+            // M5 (Film Development Auto Assignment): a pending roll with
+            // awaitingAssignment stamped is held by the two-gate feature.
+            //   Gate A (reviewPassed) open → primary is Approve & Upload
+            //     (same as legacy 'pending'), but the IPC returns
+            //     heldForMatch:true if Gate B is still open, so the panel
+            //     will pop back and the roll stays pending.
+            //   Gate A closed, Gate B open (Awaiting job match) → primary
+            //     is a disabled "Waiting for job match…" indicator and a
+            //     secondary "Upload without job match" override appears
+            //     next to it.
             const us = roll.uploadStatus;
             const rotating = pendingRotations > 0;
             const isInFlight = uploading || us === 'uploading';
+            const isAutoAssignHeld = us === 'pending' && roll.awaitingAssignment === true;
+            const gateAOpen        = isAutoAssignHeld && roll.reviewPassed !== true;
+            const gateBOpen        = isAutoAssignHeld && !roll.matchedJobId;
+            const awaitingMatch    = isAutoAssignHeld && !gateAOpen && gateBOpen;
+
+            if (awaitingMatch) {
+              return (
+                <>
+                  <button
+                    type="button"
+                    className="fr-chrome__btn fr-chrome__btn--primary"
+                    disabled
+                    title="Waiting for a Film Development job with a matching Twin Check ID"
+                  >
+                    Waiting for job match…
+                  </button>
+                  <button
+                    type="button"
+                    className="fr-chrome__btn"
+                    onClick={onUploadUnmatched}
+                    disabled={rotating || isInFlight}
+                    title="Force-upload this roll without a matching job (walk-in / mis-scanned twin)"
+                  >
+                    Upload without job match
+                  </button>
+                </>
+              );
+            }
 
             if (us === 'pending' || us === 'failed' || us === 'uploading') {
               const label = isInFlight

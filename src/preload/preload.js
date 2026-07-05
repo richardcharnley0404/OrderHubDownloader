@@ -242,6 +242,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   filmReviewDeleteFrame:      (frameId)                => ipcRenderer.invoke('ohd:filmReview:delete-frame', frameId),
   filmReviewDeleteFrames:     (frameIds)               => ipcRenderer.invoke('ohd:filmReview:delete-frames', frameIds),
   filmReviewApproveRoll:      (rollId)                 => ipcRenderer.invoke('ohd:filmReview:approve-roll', rollId),
+  // Film Development Auto Assignment (M5): explicit operator override
+  // for a reviewed-but-unmatched held roll (walk-in / typo in twin
+  // check). See ipc-handlers.js for the preconditions.
+  filmReviewUploadUnmatched:  (rollId)                 => ipcRenderer.invoke('ohd:filmReview:upload-unmatched', rollId),
   filmReviewDeleteRoll:       (rollId)                 => ipcRenderer.invoke('ohd:filmReview:delete-roll',  rollId),
   filmReviewGetTweaks:        ()                       => ipcRenderer.invoke('ohd:filmReview:get-tweaks'),
 

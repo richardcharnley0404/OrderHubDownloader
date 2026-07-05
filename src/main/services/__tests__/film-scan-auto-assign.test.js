@@ -303,6 +303,75 @@ test('runMatchCycle: two-gate — match arrives before approval → stamped but 
   assert.equal(stamp.patch.matchedJobId, 'JOB-A');
 });
 
+test('runMatchCycle: two-gate — approval flips reviewPassed, subsequent match cycle uploads', async () => {
+  // Simulates the "approval-before-match" ordering: operator approves a
+  // roll BEFORE its film-dev job has arrived from OrderHub. The
+  // approve-roll IPC would stamp reviewPassed:true and then invoke the
+  // matcher; when the job later arrives, the next match cycle finds
+  // both gates open and uploads.
+  resetState();
+  seedHeldRoll('1847', { reviewPassed: false });
+  // No matching job yet — first cycle is a no-op.
+  let result = await filmScanAutoAssign.runMatchCycle({
+    filmScanAutoAssignEnabled: true,
+  }, stubLogger);
+  assert.equal(result.matched, 0);
+  assert.equal(result.uploaded, 0);
+
+  // Simulate approve-roll: flip Gate A on the roll record.
+  __rolls.set('1847', { ...__rolls.get('1847'), reviewPassed: true });
+
+  // Job arrives; matcher fires. Now Gate B fills in AND Gate A is
+  // already true → both gates → upload.
+  seedJob({ id: 'JOB-A', twin_checks: ['1847'] });
+  result = await filmScanAutoAssign.runMatchCycle({
+    filmScanAutoAssignEnabled: true,
+  }, stubLogger);
+  assert.equal(result.matched, 1);
+  assert.equal(result.uploaded, 1);
+  assert.equal(__uploadCalls.length, 1);
+});
+
+test('runMatchCycle: match then approval flips gate → next cycle uploads (both orderings end uploaded exactly once)', async () => {
+  // Same end state as the previous test but reached through the
+  // opposite ordering: match arrives first, THEN approval. Locks in
+  // that only one upload fires no matter which gate flipped first.
+  resetState();
+  seedHeldRoll('1847', { reviewPassed: false });
+  seedJob({ id: 'JOB-A', twin_checks: ['1847'] });
+
+  // Cycle 1: matches but Gate A is open → no upload, roll stays held.
+  let result = await filmScanAutoAssign.runMatchCycle({
+    filmScanAutoAssignEnabled: true,
+  }, stubLogger);
+  assert.equal(result.matched, 1);
+  assert.equal(result.uploaded, 0);
+  assert.equal(__uploadCalls.length, 0);
+
+  // Simulate approve-roll flipping Gate A. Real approve-roll would then
+  // invoke the matcher immediately; we mirror that with a second cycle.
+  __rolls.set('1847', { ...__rolls.get('1847'), reviewPassed: true });
+  result = await filmScanAutoAssign.runMatchCycle({
+    filmScanAutoAssignEnabled: true,
+  }, stubLogger);
+
+  // The second cycle re-matches the same twin (matchedJobId being
+  // pre-set doesn't stop the match — it's the awaitingAssignment flag
+  // that guards re-upload; that flag gets cleared before the first
+  // upload fires). So we expect exactly one upload total.
+  assert.equal(__uploadCalls.length, 1, 'exactly one upload total');
+
+  // And a third cycle after the upload finishes finds the roll no
+  // longer in the held set (awaitingAssignment:false), so it doesn't
+  // re-match or re-upload.
+  __rolls.set('1847', { ...__rolls.get('1847'), awaitingAssignment: false, uploadStatus: 'uploaded' });
+  result = await filmScanAutoAssign.runMatchCycle({
+    filmScanAutoAssignEnabled: true,
+  }, stubLogger);
+  assert.equal(result.held, 0, 'roll left the held set after upload');
+  assert.equal(__uploadCalls.length, 1, 'still exactly one upload');
+});
+
 test('runMatchCycle: two rolls sharing one twin → only first fires (twin consumed)', async () => {
   resetState();
   seedHeldRoll('1847');

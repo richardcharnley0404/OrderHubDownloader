@@ -402,12 +402,36 @@ function RollCard({ roll, onOpen, onDeleted, onApproved }) {
   // mid-upload; 'uploaded' rolls usually fall out of the "Ready" filter via
   // status='reviewed' so this is mostly visible under the "All" filter.
   const us = roll.uploadStatus;
-  const uploadBadge =
-    us === 'pending'   ? { label: 'Awaiting approval', cls: 'fr-roll-card__upload fr-roll-card__upload--pending' } :
-    us === 'uploading' ? { label: 'Uploading…',         cls: 'fr-roll-card__upload fr-roll-card__upload--uploading' } :
-    us === 'failed'    ? { label: 'Upload failed',      cls: 'fr-roll-card__upload fr-roll-card__upload--failed' } :
-    us === 'uploaded'  ? { label: 'Uploaded',           cls: 'fr-roll-card__upload fr-roll-card__upload--uploaded' } :
-    null;
+  // M5 (Film Development Auto Assignment): three refined labels for
+  // pending rolls held by the auto-assign feature. Gate A is
+  // reviewPassed, Gate B is matchedJobId. The plain 'Awaiting approval'
+  // label is still used for legacy pending rolls (Manual/Smart-flagged
+  // without auto-assign).
+  const isAutoAssignHeld = us === 'pending' && roll.awaitingAssignment === true;
+  const hasMatch         = !!roll.matchedJobId;
+  const gateA            = roll.reviewPassed === true;
+  const matchedLabelBase = roll.matchedJobNumber || roll.matchedOrderNumber || '';
+  const matchedLabelTail = matchedLabelBase ? ` (${matchedLabelBase})` : '';
+  let uploadBadge = null;
+  if (isAutoAssignHeld) {
+    if (!gateA && !hasMatch) {
+      uploadBadge = { label: 'Awaiting review', cls: 'fr-roll-card__upload fr-roll-card__upload--pending' };
+    } else if (gateA && !hasMatch) {
+      uploadBadge = { label: 'Awaiting job match', cls: 'fr-roll-card__upload fr-roll-card__upload--pending' };
+    } else if (!gateA && hasMatch) {
+      uploadBadge = { label: `Matched — awaiting review${matchedLabelTail}`, cls: 'fr-roll-card__upload fr-roll-card__upload--pending' };
+    } else {
+      // Both gates passed but no upload flip yet — very brief transient.
+      uploadBadge = { label: `Matched${matchedLabelTail}`, cls: 'fr-roll-card__upload fr-roll-card__upload--pending' };
+    }
+  } else {
+    uploadBadge =
+      us === 'pending'   ? { label: 'Awaiting approval', cls: 'fr-roll-card__upload fr-roll-card__upload--pending' } :
+      us === 'uploading' ? { label: 'Uploading…',         cls: 'fr-roll-card__upload fr-roll-card__upload--uploading' } :
+      us === 'failed'    ? { label: 'Upload failed',      cls: 'fr-roll-card__upload fr-roll-card__upload--failed' } :
+      us === 'uploaded'  ? { label: 'Uploaded',           cls: 'fr-roll-card__upload fr-roll-card__upload--uploaded' } :
+      null;
+  }
 
   const onKeyDown = (e) => {
     if (isProvisional) return;

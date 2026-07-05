@@ -389,6 +389,18 @@ class FrameMetadataStore {
         processingStatus: rollRec ? rollRec.processingStatus || null : null,
         detectedAt:      rollRec ? rollRec.detectedAt      : undefined,
         timeline:        rollRec ? rollRec.timeline        : undefined,
+        // Film Development Auto Assignment (M3-M5) — surface only when
+        // the roll actually carries the fields. Legacy rolls (pre-feature
+        // toggle) yield undefined and the panel treats that as "no
+        // auto-assign tracking" — same as pre-M3 behaviour.
+        awaitingAssignment: rollRec ? rollRec.awaitingAssignment : undefined,
+        reviewPassed:       rollRec ? rollRec.reviewPassed       : undefined,
+        matchedJobId:       rollRec ? rollRec.matchedJobId       : undefined,
+        matchedJobNumber:   rollRec ? rollRec.matchedJobNumber   : undefined,
+        matchedOrderId:     rollRec ? rollRec.matchedOrderId     : undefined,
+        matchedOrderNumber: rollRec ? rollRec.matchedOrderNumber : undefined,
+        matchedTwinCheck:   rollRec ? rollRec.matchedTwinCheck   : undefined,
+        matchedAt:          rollRec ? rollRec.matchedAt          : undefined,
       };
     });
 

@@ -3590,6 +3590,49 @@ ipcMain.handle('ohd:filmReview:approve-roll', async (event, rollIdRaw) => {
     }
 
     const config = configService.getAll();
+
+    // M5: two-gate integration for Film Development Auto Assignment.
+    // A roll with awaitingAssignment:true was held at Step 3 by the
+    // auto-assign feature; the operator's approval closes Gate A
+    // (reviewPassed), but upload only proceeds when Gate B
+    // (matchedJobId) is also set. If Gate B is still open we stamp
+    // reviewPassed:true, mark the roll reviewed (so it leaves the
+    // "Ready to review" filter), keep uploadStatus:'pending', and
+    // return heldForMatch:true so the renderer can show "Approved —
+    // awaiting job match" instead of an upload result. Then we kick a
+    // match cycle immediately in case the job is already cached.
+    // Rolls without awaitingAssignment (feature off, or held pre-
+    // toggle) fall through to the legacy approve-and-upload path
+    // byte-identically.
+    if (roll.awaitingAssignment && config.filmScanAutoAssignEnabled) {
+      if (!roll.matchedJobId) {
+        frameMetadataStore.updateRoll(rollId, { reviewPassed: true });
+        try { frameMetadataStore.markRollReviewed(rollId); } catch (_) { /* best-effort */ }
+        emitFilmReviewRollUpdate(rollId);
+        logger.info(`[filmReview] approve-roll ${rollId}: Gate A passed, awaiting job match`);
+        try {
+          const filmScanAutoAssign = require('./services/film-scan-auto-assign');
+          await filmScanAutoAssign.runMatchCycle(config, logger);
+        } catch (matchErr) {
+          logger.logError('[filmReview] approve-roll: post-approval match cycle threw', matchErr);
+        }
+        // The match cycle above may have flipped the roll to 'uploaded'
+        // (job was already cached). Report both cases distinctly.
+        const post = frameMetadataStore.getRoll(rollId) || {};
+        if (post.uploadStatus === 'uploaded') {
+          return { ok: true, uploaded: post.uploadedCount || 0, total: post.uploadedTotal || 0 };
+        }
+        return { ok: true, heldForMatch: true };
+      }
+      // Both gates now pass — proceed to the S3 upload path below,
+      // clearing awaitingAssignment so no concurrent match cycle can
+      // race to re-upload the same roll.
+      frameMetadataStore.updateRoll(rollId, {
+        reviewPassed:       true,
+        awaitingAssignment: false,
+      });
+    }
+
     const s3Config = folderWatchService._buildS3Config(config, roll.locationId);
     if (!s3Config) {
       return { ok: false, error: 'S3 is not configured (check Connection settings)' };
@@ -3647,6 +3690,66 @@ ipcMain.handle('ohd:filmReview:approve-roll', async (event, rollIdRaw) => {
     logger.logError('[filmReview] approve-roll failed', err);
     try { frameMetadataStore.updateRoll(rollId, { uploadStatus: 'failed', uploadError: msg }); } catch (_) { /* ignored */ }
     emitFilmReviewRollUpdate(rollId);
+    return { ok: false, error: msg };
+  }
+});
+
+/**
+ * ohd:filmReview:upload-unmatched  (Film Development Auto Assignment — M5)
+ * Payload:  rollId (string) or { rollId }
+ * Returns:  { ok: true, uploaded, total } | { ok: false, error }
+ *
+ * Explicit operator override for the two-gate rule: force-upload a
+ * reviewed roll whose Gate B (matchedJobId) never got filled in — the
+ * usual walk-in / mis-scanned / typo-in-twin-check case. Without this
+ * there is no escape hatch for a held roll whose job never arrives.
+ *
+ * Preconditions:
+ *   - Roll must exist and have awaitingAssignment:true (feature-off or
+ *     legacy rolls should use the normal approve-roll path).
+ *   - matchedJobId must NOT be set. If it is, the operator should use
+ *     approve-roll instead — the match already exists.
+ *
+ * Effect: stamps reviewPassed:true, clears awaitingAssignment, and
+ * hands off to _uploadRollFromStorage which reuses the same retry
+ * chain + markRollReviewed hook the auto-triggered upload uses.
+ */
+ipcMain.handle('ohd:filmReview:upload-unmatched', async (event, rollIdRaw) => {
+  const rollId = typeof rollIdRaw === 'string' ? rollIdRaw : (rollIdRaw && rollIdRaw.rollId);
+  if (!rollId) return { ok: false, error: 'rollId is required' };
+
+  try {
+    const roll = frameMetadataStore.getRoll(rollId);
+    if (!roll) return { ok: false, error: `No roll record found for ${rollId}` };
+    if (!roll.awaitingAssignment) {
+      return { ok: false, error: 'This roll is not held by Auto Assignment — use Approve instead.' };
+    }
+    if (roll.matchedJobId) {
+      return { ok: false, error: 'This roll has a matched job — use Approve instead.' };
+    }
+
+    const config = configService.getAll();
+    // Clear both gates so the upload path runs unconditionally and the
+    // matcher can never race back in and try to fire it a second time.
+    frameMetadataStore.updateRoll(rollId, {
+      reviewPassed:       true,
+      awaitingAssignment: false,
+    });
+    logger.info(`[filmReview] upload-unmatched ${rollId}: operator override — bypassing match`);
+    await folderWatchService._uploadRollFromStorage(rollId, config);
+
+    // Read post-upload state so we can report an accurate outcome.
+    const post = frameMetadataStore.getRoll(rollId) || {};
+    if (post.uploadStatus === 'uploaded') {
+      return { ok: true, uploaded: true };
+    }
+    return {
+      ok: false,
+      error: post.uploadError || 'Upload did not complete — check Activity Log.',
+    };
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    logger.logError('[filmReview] upload-unmatched failed', err);
     return { ok: false, error: msg };
   }
 });
