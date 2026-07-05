@@ -40,10 +40,17 @@ let __pcResults = null;     // ({config, files, timeoutMs}) => Promise<results[]
 let __pcCalls   = [];       // captured processBatch args
 let __sharpWrites = [];     // captured .toFile() destinations (for thumbnail assertions)
 
+// Per-file userData sandbox so this test file's electron-store JSON (rolls,
+// frames) can't race with any other test file that also stubs
+// electron.app.getPath to a tempdir. Without this the parallel npm test
+// run intermittently drops writes when two processes hit
+// os.tmpdir()/frame-metadata.json at once.
+const __userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ohd-pcfilm-ud-'));
+
 Module.prototype.require = function (req) {
   if (req === 'electron') {
     return {
-      app: { getPath: (_key) => os.tmpdir() },
+      app: { getPath: (_key) => __userDataDir },
       BrowserWindow: { getAllWindows: () => [] },
     };
   }

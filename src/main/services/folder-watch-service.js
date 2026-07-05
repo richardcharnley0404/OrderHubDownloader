@@ -620,7 +620,18 @@ class FolderWatchService {
                   // "processing" card forever.
                   const reviewMode = config.filmScanReviewMode || 'never';
                   const smartTriggered = reviewMode === 'smart' && (lowConfCount > 0 || rotErrorCount > 0 || pcRejectedCount > 0);
-                  const deferUpload = reviewMode === 'always' || smartTriggered || pcTimedOut;
+                  // Film Development Auto Assignment (M3) — two-gate model.
+                  // Gate A (reviewPassed): trivially true when the review mode
+                  // wouldn't have held the roll AND PC didn't time out; false
+                  // when the roll would otherwise be held for operator review.
+                  // Gate B (matchedJobId): filled in later by the matcher.
+                  // A roll defers at Step 3 when EITHER gate is still open —
+                  // review hold or auto-assign hold. Both gates must pass
+                  // before upload fires.
+                  const reviewHold  = reviewMode === 'always' || smartTriggered || pcTimedOut;
+                  const autoAssignOn = Boolean(config.filmScanAutoAssignEnabled);
+                  const deferUpload = reviewHold || autoAssignOn;
+                  const reviewPassed = !reviewHold;
                   if (reviewMode === 'smart') {
                     logger.info(
                       `filmScans: ${rollId} smart-check — lowConf=${lowConfCount} rotErr=${rotErrorCount} pcRej=${pcRejectedCount} → ${deferUpload ? 'pending review' : 'auto upload'}`
@@ -637,6 +648,22 @@ class FolderWatchService {
                       uploadError: null,
                       uploadedAt: null,
                       processingStatus: null,
+                      // M3: two-gate stamps. Only present when auto-assign
+                      // is enabled — feature-off installs never see them,
+                      // preserving byte-for-byte behaviour for legacy
+                      // deployments. Gate A (reviewPassed) is set from the
+                      // review-hold branch above; Gate B (matchedJobId)
+                      // starts null and is filled in by the matcher.
+                      ...(autoAssignOn ? {
+                        awaitingAssignment: true,
+                        reviewPassed,
+                        matchedJobId:       null,
+                        matchedJobNumber:   null,
+                        matchedOrderId:     null,
+                        matchedOrderNumber: null,
+                        matchedTwinCheck:   null,
+                        matchedAt:          null,
+                      } : {}),
                       timeline: {
                         detectedAt: tDetectedIso,
                         stableAt:   tStableIso,
@@ -748,7 +775,16 @@ class FolderWatchService {
             // uploads here. The decision was made above when writing the roll
             // record — re-derive it here so this branch can also handle the AI-
             // off case (no `deferUpload` in scope unless rotation ran).
+            //
+            // M3 (Film Development Auto Assignment): when auto-assign is on,
+            // every roll defers at Step 3 regardless of review mode — the
+            // matcher (Gate B) or a subsequent operator approval (Gate A)
+            // will trigger the actual upload via _uploadRollFromStorage.
+            // With rotation OFF there is no roll record yet, so we write a
+            // minimal one here so the matcher can find it in listRollsWithSummary.
+            // Legacy paths (auto-assign off) are unchanged byte-for-byte.
             let shouldDefer = false;
+            const autoAssignOnStep3 = Boolean(config.filmScanAutoAssignEnabled);
             if (config.filmScanRotationEnabled) {
               const rm = config.filmScanReviewMode || 'never';
               if (rm === 'always') {
@@ -763,6 +799,42 @@ class FolderWatchService {
                   shouldDefer = !!(rec && rec.uploadStatus === 'pending');
                 } catch (_) { /* fail-open */ }
               }
+              // Auto-assign forces defer even when the review mode wouldn't —
+              // Gate B has to pass before we upload.
+              if (autoAssignOnStep3) shouldDefer = true;
+            } else if (autoAssignOnStep3) {
+              // Rotation-off + auto-assign-on: no roll record exists yet.
+              // Write a minimal one so the matcher can enumerate this roll
+              // via listRollsWithSummary + trigger _uploadRollFromStorage
+              // on match. There is no review surface here, so Gate A
+              // (reviewPassed) is trivially true.
+              const rollId = path.basename(storagePath);
+              try {
+                require('./frame-metadata-store').recordRoll(rollId, {
+                  storagePath,
+                  locationId,
+                  s3Prefix,
+                  uploadStatus:       'pending',
+                  uploadError:        null,
+                  uploadedAt:         null,
+                  processingStatus:   null,
+                  awaitingAssignment: true,
+                  reviewPassed:       true,
+                  matchedJobId:       null,
+                  matchedJobNumber:   null,
+                  matchedOrderId:     null,
+                  matchedOrderNumber: null,
+                  matchedTwinCheck:   null,
+                  matchedAt:          null,
+                  timeline: { detectedAt: tDetectedIso, stableAt: tStableIso, copiedAt: tCopiedIso },
+                });
+              } catch (recErr) {
+                logger.logError(`filmScans: failed to write minimal roll record for auto-assign hold ${rollId}`, recErr);
+              }
+              // Nudge the Film Review panel so the held-for-match roll
+              // appears immediately rather than after the next scan tick.
+              this._emitFilmReviewRoll(rollId);
+              shouldDefer = true;
             }
 
             if (shouldDefer) {

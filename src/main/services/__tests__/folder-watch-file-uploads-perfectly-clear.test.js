@@ -38,10 +38,14 @@ let __s3Calls   = [];     // captured uploadFolder invocations
 let __warnings  = [];     // captured logger.logWarning messages
 let __errors    = [];     // captured logger.logError messages
 
+// Per-file userData sandbox — see the same block in
+// folder-watch-perfectly-clear.test.js for the rationale.
+const __userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ohd-pcupload-ud-'));
+
 Module.prototype.require = function (req) {
   if (req === 'electron') {
     return {
-      app: { getPath: (_key) => os.tmpdir() },
+      app: { getPath: (_key) => __userDataDir },
       BrowserWindow: { getAllWindows: () => [] },
     };
   }
