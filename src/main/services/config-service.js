@@ -355,6 +355,16 @@ const schema = {
     type: 'boolean',
     default: false
   },
+  // Film Development Auto Assignment Mode. When enabled every scan roll is
+  // held at Step 3 (S3 upload) until a Film Development job with a matching
+  // Twin Check ID arrives from OrderHub, at which point the matcher uploads
+  // it automatically. Wholly inert when false — no code path changes for
+  // existing installs. Requires job polling to be reachable (matcher does
+  // its own direct fetchJobs when pollingEnabled is off).
+  filmScanAutoAssignEnabled: {
+    type: 'boolean',
+    default: false
+  },
   // AI Quality Gate (v1.2.0) — flag-gated, default OFF.
   // When ON, every image in every Mode-1 job is scored by MUSIQ before the
   // job is dispatched. Jobs with any image scoring below the threshold are
@@ -829,6 +839,7 @@ class ConfigService {
       filmScanRotationModelPath: this.store.get('filmScanRotationModelPath'),
       filmScanRotationDebugLog: this.store.get('filmScanRotationDebugLog'),
       filmScanReviewMode: this.store.get('filmScanReviewMode'),
+      filmScanAutoAssignEnabled: this.store.get('filmScanAutoAssignEnabled'),
       // AI Quality Gate
       aiQualityEnabled: this.store.get('aiQualityEnabled'),
       aiQualityMode: this.store.get('aiQualityMode'),
@@ -1049,6 +1060,9 @@ class ConfigService {
       if (mode === 'never' || mode === 'smart' || mode === 'always') {
         this.store.set('filmScanReviewMode', mode);
       }
+    }
+    if (Object.prototype.hasOwnProperty.call(config, 'filmScanAutoAssignEnabled')) {
+      this.store.set('filmScanAutoAssignEnabled', Boolean(config.filmScanAutoAssignEnabled));
     }
 
     // Save File Uploads settings

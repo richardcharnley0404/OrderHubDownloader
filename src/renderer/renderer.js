@@ -2047,6 +2047,11 @@ function populateForm(config) {
     : 'never';
   const reviewRadio = document.getElementById('filmScanReviewMode_' + reviewMode);
   if (reviewRadio) reviewRadio.checked = true;
+  // Film Development Auto Assignment Mode — independent of AI Rotation:
+  // works even with rotation off (a minimal roll record is stamped at the
+  // hold step). Default false; loading a legacy config yields false too.
+  const autoAssignEl = document.getElementById('filmScanAutoAssignEnabled');
+  if (autoAssignEl) autoAssignEl.checked = !!config.filmScanAutoAssignEnabled;
   updateFilmScanRotationEnableState();
 
   // AI Quality Gate (v1.2.0)
@@ -2175,6 +2180,7 @@ function getFormData() {
       const v = checked ? checked.value : 'never';
       return (v === 'smart' || v === 'always') ? v : 'never';
     })(),
+    filmScanAutoAssignEnabled: document.getElementById('filmScanAutoAssignEnabled')?.checked || false,
     // AI Quality Gate (v1.2.0)
     aiQualityEnabled:    document.getElementById('aiQualityEnabled')?.checked || false,
     aiQualityThreshold:  parseInt(document.getElementById('aiQualityThreshold')?.value, 10) || 50,
