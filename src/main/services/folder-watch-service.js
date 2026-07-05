@@ -1008,6 +1008,19 @@ class FolderWatchService {
         logger.logError('filmScans: error scanning watch folder', error);
       }
 
+      // M4: run one film-scan auto-assign match cycle after every
+      // _processFilmScans pass. A roll may have just landed in the held
+      // state (awaitingAssignment:true) this cycle and the matcher wants
+      // to catch it immediately rather than wait for the next poll. Safe
+      // when the feature is off (matcher no-ops on the config flag), and
+      // safe if the matcher itself throws (it catches internally).
+      try {
+        const filmScanAutoAssign = require('./film-scan-auto-assign');
+        await filmScanAutoAssign.runMatchCycle(config, logger);
+      } catch (matcherErr) {
+        logger.logError('filmScans: auto-assign match cycle threw', matcherErr);
+      }
+
       return summary;
     } finally {
       this._filmScanProcessing = false;

@@ -341,6 +341,21 @@ class PollingService {
     } catch (error) {
       logger.logError('Polling: error polling jobs', error);
     }
+
+    // M4: run one film-scan auto-assign match cycle after every job poll.
+    // A newly-arrived film-dev job may match a roll that's already held,
+    // so the matcher wants to catch it on the same tick rather than
+    // waiting for the film-scans timer. Safe when the feature is off
+    // (matcher no-ops on the config flag). Never throws to the caller.
+    try {
+      const config = configService.getAll();
+      if (config.filmScanAutoAssignEnabled) {
+        const filmScanAutoAssign = require('./film-scan-auto-assign');
+        await filmScanAutoAssign.runMatchCycle(config, logger);
+      }
+    } catch (matcherErr) {
+      logger.logError('Polling: auto-assign match cycle threw', matcherErr);
+    }
   }
 
   /**
