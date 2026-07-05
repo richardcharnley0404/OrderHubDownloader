@@ -1,3 +1,18 @@
+## Unreleased
+
+### New: Film Development Auto Assignment Mode
+Labs running Film Development can now let OHD hold every scan roll at the S3-upload step and only upload when a Film Development job with a matching Twin Check ID has arrived from OrderHub. Turn it on with the new **Auto Assignment Mode** checkbox in Settings → Film Scans; off by default so existing installs behave exactly as before.
+
+- **Hold + match:** A new roll waits at the "Awaiting job match" pill on the Film Review card. When a matching film-dev job appears, OHD stamps the match on the roll and uploads it automatically. Match is by Twin Check ID: the roll folder name and the job's `twin_checks[]` are compared on digits only, so a zero-padded folder like `00001847_1` matches a twin check of `1847`.
+- **Two-gate rule with review modes:** Auto Assignment stacks with Manual / Smart Check review. Whichever event happens second (operator approval, or matching job) is what actually kicks off the upload. If a job arrives before the operator has approved a Manual-mode roll, the card shows **"Matched — awaiting review"** with the job number so the operator knows which job they're clearing.
+- **"Upload without job match" override:** Reviewed rolls whose job never arrives (walk-in scans, mis-scanned twin check, typo in a twin check on the OrderHub side) get an explicit escape hatch in the Roll Review header — a confirm-required "Upload without job match" button next to the disabled "Waiting for job match…" primary action.
+- **Film-dev jobs never touch the operator queue:** `is_film_development` jobs are filtered out of the Jobs grid, the auto-print dispatcher, the S3 artwork downloader, and the received-files check. OHD never marks a film-dev job received and never calls the job-status API for it — OrderHub owns the assignment.
+- **Works with polling off:** Film-scan-only PCs (job polling disabled) still get matches. When Auto Assignment is on and an OrderHub API key is configured, the film-scans timer fetches film-dev jobs directly on each match cycle. The fetch has no side effects — no artwork download, no received-marking, no status sync.
+- **Dead-QuickServer safety carries over:** the roll upload uses the existing storage-side retry chain (3 attempts, 30s→90s backoff), so a network blip while an auto-matched roll is going up doesn't wedge anything.
+
+### Fixed: Intermittent test-suite failures under parallel execution
+`npm test` occasionally reported spurious failures in the folder-watch integration tests because three of them share an on-disk electron-store JSON file when run in parallel. Each test file now uses its own sandbox userData directory, and the top-level test runner switches to serial file execution. Zero effect on the app; the test suite is now deterministic (13 s vs 5 s parallel, worth the trade for reliability).
+
 ## v1.7.19 - 2026-07-01
 
 ### New: Set ignored options straight from the Assign Channel modal
