@@ -877,12 +877,13 @@ class FolderWatchService {
                 const BACKOFFS_MS = [30_000, 90_000]; // gap between attempts
                 let result;
                 let attempt = 0;
+                const manifestExtra = this._buildFilmScanManifestExtra(rollId);
                 while (attempt < MAX_ATTEMPTS) {
                   attempt += 1;
                   try {
                     result = await s3Service.uploadFolder(storagePath, s3Prefix, s3Config, (progress) => {
                       logger.info(`filmScans: ${progress.message}`);
-                    });
+                    }, manifestExtra);
                   } catch (uploadError) {
                     const totalFiles = require('fs').readdirSync(storagePath).length;
                     logger.logError(`filmScans: uploadFolder threw unexpectedly for ${folder.name} (attempt ${attempt}/${MAX_ATTEMPTS})`, uploadError);
@@ -1244,6 +1245,33 @@ class FolderWatchService {
     );
   }
 
+  /**
+   * Build the film-scan completion-manifest extras from a roll record. When
+   * auto-assign has stamped a match on the roll (matchedJobId set), return an
+   * object of snake_case keys the s3-service will shallow-merge into the
+   * manifest JSON so OrderHub can record the upload against the correct job
+   * and twin check. When there's no match, return null so the manifest stays
+   * byte-identical to the pre-feature format.
+   */
+  _buildFilmScanManifestExtra(rollId) {
+    try {
+      const frameMetadataStore = require('./frame-metadata-store');
+      const rec = frameMetadataStore.getRoll(rollId);
+      if (!rec || !rec.matchedJobId) return null;
+      return {
+        twin_check:    rec.matchedTwinCheck,
+        job_id:        rec.matchedJobId,
+        job_number:    rec.matchedJobNumber,
+        order_id:      rec.matchedOrderId,
+        order_number:  rec.matchedOrderNumber,
+        matched_at:    rec.matchedAt,
+        auto_assigned: true,
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
   // Best-effort emit of the Film Review roll-processed event (class-level twin
   // of the per-cycle emitRollUpdate closure, for use outside _processFilmScans).
   _emitFilmReviewRoll(rollId) {
@@ -1330,12 +1358,13 @@ class FolderWatchService {
     const BACKOFFS_MS = [30_000, 90_000];
     let result;
     let attempt = 0;
+    const manifestExtra = this._buildFilmScanManifestExtra(rollId);
     while (attempt < MAX_ATTEMPTS) {
       attempt += 1;
       try {
         result = await s3Service.uploadFolder(storagePath, s3Prefix, s3Config, (progress) => {
           logger.info(`filmScans: (resume) ${progress.message}`);
-        });
+        }, manifestExtra);
       } catch (uploadError) {
         const totalFiles = fs.readdirSync(storagePath).length;
         logger.logError(`filmScans: (resume) uploadFolder threw for ${rollId} (attempt ${attempt}/${MAX_ATTEMPTS})`, uploadError);

@@ -37,18 +37,23 @@ class S3Service {
    * @param {string}   s3Prefix         - e.g. 'film-scans/LOC1/' (trailing slash)
    * @param {object}   credentials
    * @param {Function} [progressCallback]
+   * @param {object}   [manifestExtra]  - shallow-merged into the completion
+   *                                      manifest JSON AFTER the built-in
+   *                                      fields (built-ins win on collision).
+   *                                      Used by film-scan uploads to carry
+   *                                      matched job / twin-check context.
    * @returns {Promise<{ uploaded: number, failed: number, total: number }>}
    */
-  async uploadFolder(localFolderPath, s3Prefix, credentials, progressCallback) {
+  async uploadFolder(localFolderPath, s3Prefix, credentials, progressCallback, manifestExtra = null) {
     if (credentials.provider === 'amazon') {
-      return this._uploadFolderAmazon(localFolderPath, s3Prefix, credentials, progressCallback);
+      return this._uploadFolderAmazon(localFolderPath, s3Prefix, credentials, progressCallback, manifestExtra);
     }
-    return this._uploadFolderPixfizz(localFolderPath, s3Prefix, credentials, progressCallback);
+    return this._uploadFolderPixfizz(localFolderPath, s3Prefix, credentials, progressCallback, manifestExtra);
   }
 
   // ── Pixfizz (pre-signed URL) path ───────────────────────────────────────────
 
-  async _uploadFolderPixfizz(localFolderPath, s3Prefix, credentials, progressCallback) {
+  async _uploadFolderPixfizz(localFolderPath, s3Prefix, credentials, progressCallback, manifestExtra = null) {
     const folderName = path.basename(localFolderPath);
     const S3_EXCLUDED_EXTENSIONS = ['.thm', '.txt'];
     const files = this._getAllFiles(localFolderPath)
@@ -141,7 +146,7 @@ class S3Service {
     // Always written, regardless of upload errors, so OH always knows the folder exists.
     try {
       const { name: manifestName, buffer: manifestBuffer } =
-        this._buildManifestPayload(folderName, files, failed);
+        this._buildManifestPayload(folderName, files, failed, manifestExtra);
 
       const manifestDescriptor = {
         name:     manifestName,
@@ -341,7 +346,7 @@ class S3Service {
     }
   }
 
-  async _uploadFolderAmazon(localFolderPath, s3Prefix, credentials, progressCallback) {
+  async _uploadFolderAmazon(localFolderPath, s3Prefix, credentials, progressCallback, manifestExtra = null) {
     const client = this._createAmazonClient(credentials);
     const S3_EXCLUDED_EXTENSIONS = ['.thm', '.txt'];
     const folderName = path.basename(localFolderPath);
@@ -393,7 +398,7 @@ class S3Service {
       // Errors here are swallowed so they never affect the reported result.
       try {
         const { name: manifestName, buffer: manifestBuffer } =
-          this._buildManifestPayload(folderName, files, failed);
+          this._buildManifestPayload(folderName, files, failed, manifestExtra);
         const manifestKey = `${s3Prefix}${folderName}/${manifestName}`;
 
         await client.send(new PutObjectCommand({
@@ -494,16 +499,22 @@ class S3Service {
    * @param {string}   folderName
    * @param {string[]} files     - all files included in the upload (pre-filter)
    * @param {number}   failed    - count of file-level failures
+   * @param {object}   [manifestExtra] - optional caller-supplied fields
+   *                                     (snake_case) shallow-merged AFTER the
+   *                                     built-in fields. Built-in fields
+   *                                     always win on key collision so
+   *                                     folder/total_files/etc. can never be
+   *                                     overwritten.
    * @returns {{ name: string, buffer: Buffer }}
    */
-  _buildManifestPayload(folderName, files, failed) {
+  _buildManifestPayload(folderName, files, failed, manifestExtra = null) {
     const { app } = require('electron');
     const tiffExts = new Set(['.tif', '.tiff']);
     const jpegExts = new Set(['.jpg', '.jpeg']);
     const tiffCount = files.filter(f => tiffExts.has(path.extname(f).toLowerCase())).length;
     const jpgCount  = files.filter(f => jpegExts.has(path.extname(f).toLowerCase())).length;
 
-    const body = JSON.stringify({
+    const builtIn = {
       folder:       folderName,
       total_files:  files.length,
       tiff_count:   tiffCount,
@@ -511,11 +522,18 @@ class S3Service {
       errors:       failed,
       completed_at: new Date().toISOString(),
       ohd_version:  app.getVersion()
-    });
+    };
+
+    // Merge extras AFTER built-ins so built-in keys always win on collision.
+    // Null-safe: any non-object (null, undefined, string, array) skips merging.
+    let payload = builtIn;
+    if (manifestExtra && typeof manifestExtra === 'object' && !Array.isArray(manifestExtra)) {
+      payload = { ...manifestExtra, ...builtIn };
+    }
 
     return {
       name:   `${folderName}.json`,
-      buffer: Buffer.from(body, 'utf8')
+      buffer: Buffer.from(JSON.stringify(payload), 'utf8')
     };
   }
 
