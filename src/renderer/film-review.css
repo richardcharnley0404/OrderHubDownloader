@@ -564,6 +564,26 @@ body.app-theme-dark .fr-roll-card__status--enhancing {
   color: var(--fr-green);
 }
 
+/* Persistent twin/match tag — visible on every roll that carries a
+   matchedTwinCheck, including after upload/reviewed. Sits alongside the
+   upload badge in the status row so the operator can see at a glance which
+   twin (and, on hover, which job/order) a completed roll went to. Muted
+   neutral styling — not a state, just an identifier. */
+.fr-roll-card__twin {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fr-ink-dim);
+  border: 1px solid var(--fr-ink-faint);
+  background: transparent;
+  white-space: nowrap;
+}
+
 /* Delete affordance on each roll card. Sits at the right of the status row
    (margin-left: auto pushes it). Subtle by default — the destructive red is
    only revealed on hover so a casual hover over the card doesn't scream
@@ -662,6 +682,45 @@ body.app-theme-dark .fr-roll-card__status--enhancing {
 .fr-roll-card__stat--muted .fr-roll-card__stat-value { color: var(--fr-ink-faint); }
 
 /* ─── Roll Review — stats header & filter chips ──────────────────────── */
+
+/* Match/twin-check header line rendered above the stats block on the
+   RollReview detail view. Compact one-liner, subtle by default — surfaces
+   the auto-assign match (Job / Twin / Order) or the awaiting-match state
+   without stealing focus from the actionable button cluster in the stats
+   row. Only rendered when the roll has a match or is awaiting one. */
+.fr-roll-matchbar {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--fr-s3);
+  padding: 6px 10px;
+  margin: 0 0 var(--fr-s3);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--fr-ink-dim);
+  background: var(--fr-amber-weak, rgba(255, 176, 32, 0.08));
+  border: 1px solid var(--fr-amber, #b07a00);
+}
+.fr-roll-matchbar--matched {
+  color: var(--fr-ink);
+  background: transparent;
+  border-color: var(--fr-ink-faint);
+}
+.fr-roll-matchbar__label {
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  font-size: 11px;
+  color: var(--fr-ink-faint);
+}
+.fr-roll-matchbar__value {
+  font-family: var(--fr-mono);
+  color: var(--fr-ink);
+}
+.fr-roll-matchbar__sep {
+  color: var(--fr-ink-faint);
+  padding: 0 4px;
+}
 
 .fr-roll-stats {
   display: flex;

@@ -440,8 +440,52 @@ export function RollReview({ rollId, tweaks, onBack }) {
   // S3 the gallery is already built from what was sent.
   const canDeleteFrames = roll.uploadStatus !== 'uploaded' && roll.uploadStatus !== 'uploading';
 
+  // Film Development Auto Assignment — header banner showing the matched
+  // job / twin check (auto_assigned rolls) or the awaiting-match state.
+  // Only rendered when there's something to show; a roll with no match
+  // (Manual mode, File Uploads, feature off) sees no banner at all.
+  const matchbar = (() => {
+    if (roll.matchedJobId) {
+      const jobLabel   = roll.matchedJobNumber || roll.matchedJobId;
+      const orderLabel = roll.matchedOrderNumber || null;
+      return (
+        <div
+          className="fr-roll-matchbar fr-roll-matchbar--matched"
+          title={`Auto-assigned${roll.matchedAt ? ` at ${new Date(roll.matchedAt).toLocaleString()}` : ''}`}
+        >
+          <span className="fr-roll-matchbar__label">Matched →</span>
+          <span className="fr-roll-matchbar__value">Job {jobLabel}</span>
+          {roll.matchedTwinCheck && (
+            <>
+              <span className="fr-roll-matchbar__sep">·</span>
+              <span className="fr-roll-matchbar__value">Twin {roll.matchedTwinCheck}</span>
+            </>
+          )}
+          {orderLabel && (
+            <>
+              <span className="fr-roll-matchbar__sep">·</span>
+              <span className="fr-roll-matchbar__value">Order {orderLabel}</span>
+            </>
+          )}
+        </div>
+      );
+    }
+    if (roll.awaitingAssignment && !roll.matchedJobId) {
+      return (
+        <div
+          className="fr-roll-matchbar"
+          title="Waiting for a Film Development job with a matching Twin Check ID"
+        >
+          <span className="fr-roll-matchbar__label">Awaiting job match</span>
+        </div>
+      );
+    }
+    return null;
+  })();
+
   return (
     <div className="fr-body">
+      {matchbar}
       <div className="fr-roll-stats">
         <div className="fr-roll-stats__item">
           <div className="fr-roll-stats__label">Frames</div>

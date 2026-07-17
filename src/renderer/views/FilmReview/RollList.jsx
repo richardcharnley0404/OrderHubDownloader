@@ -562,6 +562,17 @@ function RollCard({ roll, onOpen, onDeleted, onApproved }) {
                 {uploadBadge.label}
               </span>
             )}
+            {roll.matchedTwinCheck && (
+              <span
+                className="fr-roll-card__twin"
+                title={[
+                  roll.matchedJobNumber   ? `Job ${roll.matchedJobNumber}`     : null,
+                  roll.matchedOrderNumber ? `Order ${roll.matchedOrderNumber}` : null,
+                ].filter(Boolean).join(' · ') || `Twin ${roll.matchedTwinCheck}`}
+              >
+                Twin {roll.matchedTwinCheck}
+              </span>
+            )}
             <span className="fr-roll-card__actions">
               {us === 'pending' && (
                 <button
