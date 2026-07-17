@@ -1,4 +1,7 @@
-## Unreleased
+## v1.7.20 - 2026-07-17
+
+### New: Film-scan completion manifest carries matched twin-check + job context
+When a film-scan roll uploads via Auto Assignment (or is later approved manually with a match already stamped), the per-folder completion manifest OHD writes to S3 now includes the matched **twin check**, job number, order number and match timestamp alongside the existing file counts. OrderHub reads these fields to record the upload against the correct twin check — the "Scanned" badge on OrderHub's **Twin Checking** tab now lights up automatically when OHD finishes uploading. Rolls with no match (Manual mode without Auto Assignment, File Uploads folders) still get the exact same pre-feature manifest shape, so nothing else is affected. The Film Review UI also gains a persistent **Twin {…}** pill on each roll card and a matched-job header line on the roll detail view, so operators can see at a glance which twin/job a completed roll went to — and rolls held awaiting a job now show an explicit "Awaiting job match" banner in the detail view too.
 
 ### New: Film Development Auto Assignment Mode
 Labs running Film Development can now let OHD hold every scan roll at the S3-upload step and only upload when a Film Development job with a matching Twin Check ID has arrived from OrderHub. Turn it on with the new **Auto Assignment Mode** checkbox in Settings → Film Scans; off by default so existing installs behave exactly as before.
