@@ -3644,11 +3644,17 @@ ipcMain.handle('ohd:filmReview:approve-roll', async (event, rollIdRaw) => {
     frameMetadataStore.updateRoll(rollId, { uploadStatus: 'uploading', uploadError: null });
     emitFilmReviewRollUpdate(rollId);
 
+    // Carry the matched job / twin-check context into the completion manifest
+    // (same block the auto/auto-assign upload paths write) so OrderHub can
+    // record the upload against the correct job and twin check. Null when the
+    // roll has no match, keeping the manifest byte-identical to the legacy shape.
+    const manifestExtra = folderWatchService._buildFilmScanManifestExtra(rollId);
+
     let result;
     try {
       result = await s3Service.uploadFolder(roll.storagePath, roll.s3Prefix, s3Config, (progress) => {
         logger.info(`[filmReview] approve-roll ${rollId}: ${progress.message}`);
-      });
+      }, manifestExtra);
     } catch (uploadErr) {
       const msg = uploadErr && uploadErr.message ? uploadErr.message : String(uploadErr);
       logger.logError(`[filmReview] approve-roll: uploadFolder threw for ${rollId}`, uploadErr);
