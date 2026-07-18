@@ -1,3 +1,8 @@
+## v1.7.21 - 2026-07-18
+
+### Changed: Film Development Phase 1 — ambiguous twin-check match guard
+Film Development Phase 1: ambiguous twin-check match guard in the auto-assign matcher. When two live film-dev jobs expose the same normalised twin check, the matcher now leaves the roll held for manual resolution rather than guessing (previous behaviour was arbitrary last-wins). The operator sees a warning line naming both jobs so the collision is easy to reconcile.
+
 ## v1.7.20 - 2026-07-17
 
 ### New: Film-scan completion manifest carries matched twin-check + job context
