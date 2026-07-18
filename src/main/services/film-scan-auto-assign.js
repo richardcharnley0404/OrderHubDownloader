@@ -119,19 +119,34 @@ async function runMatchCycle(config, logger) {
       return { held: heldRolls.length, matched: 0, uploaded: 0 };
     }
 
-    // Build a twin-check → job index. Later jobs overwrite earlier ones
-    // when they share a twin check — that's the "second job for the same
-    // twin" edge case; last-wins is arbitrary but consistent.
+    // Build a twin-check → job index. If two distinct LIVE film-dev jobs
+    // map to the same normalised code we refuse to guess: drop the code
+    // from the index and remember the collision so the match loop can
+    // skip any roll that hits it and log a clear ambiguity warning.
     const jobByTwin = new Map();
+    const ambiguousTwins = new Map(); // norm → Set of contributing job ids
     for (const job of filmDevJobs) {
       if (!Array.isArray(job.twin_checks)) continue;
       for (const twin of job.twin_checks) {
         const norm = _normalise(twin);
         if (!norm) continue;
-        jobByTwin.set(norm, { job, twin });
+        const collision = ambiguousTwins.get(norm);
+        if (collision) {
+          collision.add(job.id);
+          continue;
+        }
+        const existing = jobByTwin.get(norm);
+        if (existing && existing.job.id !== job.id) {
+          ambiguousTwins.set(norm, new Set([existing.job.id, job.id]));
+          jobByTwin.delete(norm);
+          continue;
+        }
+        if (!existing) jobByTwin.set(norm, { job, twin });
       }
     }
-    if (jobByTwin.size === 0) return { held: heldRolls.length, matched: 0, uploaded: 0 };
+    if (jobByTwin.size === 0 && ambiguousTwins.size === 0) {
+      return { held: heldRolls.length, matched: 0, uploaded: 0 };
+    }
 
     let matched = 0;
     let uploaded = 0;
@@ -147,6 +162,13 @@ async function runMatchCycle(config, logger) {
     for (const roll of heldRolls) {
       const rollNorm = _normalise(roll.rollId);
       if (!rollNorm) continue;
+      if (ambiguousTwins.has(rollNorm)) {
+        const jobIds = Array.from(ambiguousTwins.get(rollNorm)).sort();
+        log.logWarning && log.logWarning(
+          `filmScans: auto-assign — ambiguous twin match: code ${rollNorm} on jobs ${jobIds.join(',')} — not auto-assigning roll ${roll.rollId}`
+        );
+        continue;
+      }
       const hit = jobByTwin.get(rollNorm);
       if (!hit) continue;
       if (twinsConsumed.has(rollNorm)) continue;

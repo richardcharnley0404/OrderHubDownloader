@@ -402,6 +402,58 @@ test('runMatchCycle: two twins on one job → first matching roll uploads (rest 
   assert.deepEqual(rollsUploaded, ['1847', '2053']);
 });
 
+test('runMatchCycle: two jobs share one normalised twin → roll skipped, ambiguity warned, no upload', async () => {
+  // Two distinct LIVE film-dev jobs both expose a twin that normalises
+  // to "1847". The matcher must NOT guess — the roll is left held for
+  // manual resolution and the operator sees a clear warning naming both
+  // jobs.
+  resetState();
+  seedHeldRoll('1847');
+  seedJob({ id: 'JOB-A', job_name: 'PXDEMO-AAA-1', twin_checks: ['1847'] });
+  seedJob({ id: 'JOB-B', job_name: 'PXDEMO-BBB-1', twin_checks: ['00001847'] });
+
+  const result = await filmScanAutoAssign.runMatchCycle({
+    filmScanAutoAssignEnabled: true,
+  }, stubLogger);
+
+  assert.equal(result.matched, 0, 'ambiguous twin blocks assignment');
+  assert.equal(result.uploaded, 0);
+  assert.equal(__uploadCalls.length, 0);
+  assert.equal(__rollUpdateCalls.length, 0, 'no metadata written for ambiguous match');
+  assert.ok(
+    __logs.warn.some(l => /ambiguous twin match: code 1847 on jobs JOB-A,JOB-B/.test(l)),
+    'operator sees ambiguity warning naming both jobs'
+  );
+  // Roll remains held so the operator can resolve manually.
+  const roll = __rolls.get('1847');
+  assert.equal(roll.uploadStatus, 'pending');
+  assert.equal(roll.awaitingAssignment, true);
+});
+
+test('runMatchCycle: single-match roll still fires when a *different* twin is ambiguous', async () => {
+  // Ambiguity on one code must not poison unrelated matches in the same
+  // cycle — the "2053" roll should still upload cleanly.
+  resetState();
+  seedHeldRoll('1847');
+  seedHeldRoll('2053');
+  seedJob({ id: 'JOB-A', twin_checks: ['1847'] });
+  seedJob({ id: 'JOB-B', twin_checks: ['00001847'] });
+  seedJob({ id: 'JOB-C', twin_checks: ['2053'] });
+
+  const result = await filmScanAutoAssign.runMatchCycle({
+    filmScanAutoAssignEnabled: true,
+  }, stubLogger);
+
+  assert.equal(result.matched, 1, 'only the unambiguous roll matches');
+  assert.equal(result.uploaded, 1);
+  assert.equal(__uploadCalls.length, 1);
+  assert.equal(__uploadCalls[0].rollId, '2053');
+  assert.ok(
+    __logs.warn.some(l => /ambiguous twin match: code 1847/.test(l)),
+    'ambiguity on 1847 still logged'
+  );
+});
+
 test('runMatchCycle: no matching twin → matched:0, no updates, no upload', async () => {
   resetState();
   seedHeldRoll('9999');
