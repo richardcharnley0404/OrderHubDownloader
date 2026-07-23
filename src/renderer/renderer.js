@@ -1472,7 +1472,12 @@ function openAssignModal(job, route) {
     modal.dataset.dpMediaFrom          = mediaOptionEntry ? (mediaOptionEntry.value || '') : '';
   } else {
     // Clear DPOF inputs
-    document.getElementById('assignChannelNumber').value = '';
+    const chanInput = document.getElementById('assignChannelNumber');
+    chanInput.value = '';
+    chanInput.setCustomValidity('');
+    const printSizeInput = document.getElementById('assignPrintSizeCode');
+    printSizeInput.value = '';
+    printSizeInput.setCustomValidity('');
     document.getElementById('assignSkipAutoPrint').checked = false;
   }
 
@@ -1685,8 +1690,10 @@ function openAssignModal(job, route) {
       }
     } else {
       // ── DPOF flow: create a new permanent channel mapping ─────────────────
-      const channelInput  = document.getElementById('assignChannelNumber');
-      const channelNumber = parseInt(channelInput.value, 10);
+      const channelInput   = document.getElementById('assignChannelNumber');
+      const channelNumber  = parseInt(channelInput.value, 10);
+      const printSizeInput = document.getElementById('assignPrintSizeCode');
+      const printSizeCode  = (printSizeInput.value || '').trim();
 
       if (!channelNumber || channelNumber < 1) {
         channelInput.focus();
@@ -1695,6 +1702,14 @@ function openAssignModal(job, route) {
         return;
       }
       channelInput.setCustomValidity('');
+
+      if (!printSizeCode) {
+        printSizeInput.focus();
+        printSizeInput.setCustomValidity('Print Size Code is required — it sets the print size for this product code.');
+        printSizeInput.reportValidity();
+        return;
+      }
+      printSizeInput.setCustomValidity('');
 
       saveBtn.disabled    = true;
       saveBtn.textContent = 'Saving...';
@@ -1713,6 +1728,7 @@ function openAssignModal(job, route) {
           productCode,
           options:       jobOptions,   // Array<{name,value}> — match this job's options
           channelNumber,
+          printSizeCode,
           skipAutoPrint,
         });
 
