@@ -353,23 +353,30 @@ test('backfill: empty channelMappings → sets flag and does nothing else', () =
 
 // ── Hardening: PSL-output equivalence + non-WxH refusal ──────────────────────
 
-test('backfill equivalence lock: bare WxH resolves to the SAME PSL string before and after backfill', () => {
-  // This is the whole point of the migration — it must be a no-op at the
-  // point where the value hits the printer. If resolvePrintSizeCode's
-  // pre-fill and post-fill outputs ever diverge for a bare-WxH size, that
-  // means the follow-up commit will silently change what a mapping
-  // resolves to when it drops the legacy fallback, and we've just
-  // re-introduced the class of regression this whole plan is meant to
-  // prevent.
-  const legacyMapping     = { printSizeCode: '',    size: '8x8' };
-  const backfilledMapping = { printSizeCode: '8x8', size: '8x8' };
+test('backfill equivalence lock: after backfill, PSL equals what the pre-step-3 legacy fallback used to emit', () => {
+  // Historical contract we are protecting: before step 3, a mapping with
+  //   printSizeCode: '', size: '8x8'
+  // resolved via resolvePrintSizeCode's blank branch to `NML -PSIZE "8x8"`.
+  // Step 3 removed that fallback; without the step-2 backfill running
+  // first the same mapping would suddenly resolve to '' and every job
+  // routed through it would fail the dispatch gate. The plan's commit
+  // order (backfill first, fallback removal second) is what makes that
+  // transition invisible at the printer — this test pins that invariant.
+  __seed({
+    orderControllers: [NORITSU_CTRL],
+    channelMappings: [
+      { id: 'cm-1', controllerId: 'ctrl-noritsu', printSizeCode: '', size: '8x8' },
+    ],
+  });
 
+  backfillLegacyPrintSizeCode();
+
+  const [m] = __storeData.channelMappings;
   assert.equal(
-    resolvePrintSizeCode(legacyMapping),
-    resolvePrintSizeCode(backfilledMapping),
-    'legacy fallback and backfilled printSizeCode must emit byte-identical PSL for bare WxH',
+    resolvePrintSizeCode(m),
+    'NML -PSIZE "8x8"',
+    'post-migration PSL must equal what the pre-step-3 legacy `size` fallback used to emit — the whole point of running the backfill before removing the fallback',
   );
-  assert.equal(resolvePrintSizeCode(legacyMapping), 'NML -PSIZE "8x8"');
 });
 
 

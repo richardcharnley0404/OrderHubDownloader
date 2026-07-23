@@ -60,20 +60,27 @@ function isBareWxH(value) {
  * so all callers emit valid PSL values.
  *
  * Resolution rules:
- *   - Blank → fall back to legacy `mapping.size` (wrapped) or `'KG'`.
+ *   - Blank → return `''` (empty). The caller's dispatch-time gate
+ *     (print-service.js sendViaDPOFRouted) surfaces this as an operator-
+ *     actionable error. Previously this branch silently fell back to
+ *     `NML -PSIZE "<mapping.size>"` or `'KG'`; both defaults were removed
+ *     so a mis-/un-configured mapping can't quietly print at the wrong
+ *     size. The step-2 backfill migration copied bare-WxH legacy `size`
+ *     values into `printSizeCode` so that removal is safe for existing
+ *     installs. Save-time validation (see `validateDPOFPrintSizeCode` and
+ *     the `ohd:routing:save-channel-mapping` IPC handler) prevents new
+ *     blank mappings from being persisted.
  *   - Matches bare WxH (whitespace and Unicode × tolerated) → wrap as
  *     `NML -PSIZE "<W>x<H>"`, normalising Unicode × → ASCII x.
  *   - Anything else (standard codes, pre-formatted NML strings) → pass
  *     through unchanged.
  *
  * @param {object} mapping - Channel mapping with `printSizeCode` and (legacy) `size`.
- * @returns {string} The value to emit after `PRT PSL=`.
+ * @returns {string} The value to emit after `PRT PSL=`, or `''` if unset.
  */
 function resolvePrintSizeCode(mapping) {
   const raw = (mapping.printSizeCode || '').trim();
-  if (!raw) {
-    return mapping.size ? `NML -PSIZE "${mapping.size}"` : 'KG';
-  }
+  if (!raw) return '';
   if (isBareWxH(raw)) {
     const normalised = raw.replace(/\s+/g, '').replace(/×/g, 'x');
     return `NML -PSIZE "${normalised}"`;
@@ -998,10 +1005,55 @@ function migrateFromPrintControllerStore() {
 
 // Controller types that do NOT consult `size` / `printSizeCode` at all. The
 // backfill below is DPOF/Noritsu-only; every other type derives its print
-// size from its own dedicated fields.
+// size from its own dedicated fields. Shared by the save-time validator
+// (`validateDPOFPrintSizeCode`) so the two lists can't drift apart.
 const NON_DPOF_CONTROLLER_TYPES = new Set([
   'darkroompro', 'fujijobmaker', 'frontline', 'folder_copy', 'pdf_copy',
 ]);
+
+/**
+ * Save-time validation for `printSizeCode` on DPOF/Noritsu channel
+ * mappings. For a DPOF-family controller, either `printSizeCode` or the
+ * legacy `size` field must be non-blank — otherwise the dispatch gate in
+ * print-service will reject every job routed through this mapping and the
+ * operator will only see it at print time. Fail here so it can be fixed
+ * before the mapping is persisted.
+ *
+ * Scope: mappings whose controller type is NOT one of the non-DPOF types
+ * (darkroompro / fujijobmaker / frontline / folder_copy / pdf_copy).
+ * Non-DPOF types get their size from their own dedicated fields and are
+ * validated elsewhere (or don't need a print size at all).
+ *
+ * Covers both the modal save path AND the CSV import path — both go
+ * through `ohd:routing:save-channel-mapping`, so this is the single
+ * server-side chokepoint.
+ *
+ * Called from `ipc-handlers.js` alongside the Fuji-specific validator.
+ *
+ * @param {object}  mapping        - The channel mapping being saved.
+ * @param {string=} controllerType - Type of the parent controller (from
+ *                                   routingService.getControllers()), or
+ *                                   '' if the controller is unknown.
+ * @returns {{ valid: true }
+ *          | { valid: false, error: string }}
+ */
+function validateDPOFPrintSizeCode(mapping, controllerType) {
+  if (NON_DPOF_CONTROLLER_TYPES.has(String(controllerType || ''))) {
+    return { valid: true };
+  }
+  const raw = mapping
+    ? String((mapping.printSizeCode != null ? mapping.printSizeCode : '')
+             || (mapping.size != null         ? mapping.size         : ''))
+        .trim()
+    : '';
+  if (!raw) {
+    return {
+      valid: false,
+      error: 'Print Size Code is required — it sets the print size for this product code.',
+    };
+  }
+  return { valid: true };
+}
 
 /**
  * One-time backfill: copy legacy `mapping.size` into `mapping.printSizeCode`
@@ -1117,6 +1169,7 @@ module.exports = {
   getRoutingHeldProcesses,
   migrateFromPrintControllerStore,
   backfillLegacyPrintSizeCode,
+  validateDPOFPrintSizeCode,
   stripDeprecatedConfigJsonKeys,
   // Controllers
   getControllers,

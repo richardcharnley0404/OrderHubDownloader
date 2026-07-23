@@ -80,6 +80,7 @@ const fakeRoutingService = {
   // Startup-time methods called from setupIpcHandlers
   migrateFromPrintControllerStore: () => {},
   backfillLegacyPrintSizeCode: () => {},
+  validateDPOFPrintSizeCode: () => ({ valid: true }),
   stripDeprecatedConfigJsonKeys: () => {},
 };
 

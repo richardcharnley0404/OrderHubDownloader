@@ -5699,6 +5699,7 @@ document.getElementById('cmSaveBtn').addEventListener('click', async () => {
     if (!batchCode) { alert('Batch code is required for Frontline controllers.'); return; }
   } else if (!isDarkroomProCtrl) {
     if (isNaN(channelNumber) || channelNumber < 1) { alert('Channel number must be a positive integer.'); return; }
+    if (!printSizeCode)                            { alert('Print Size Code is required — it sets the print size for this product code.'); return; }
   }
 
   const options = [];

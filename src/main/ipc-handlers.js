@@ -1210,6 +1210,21 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
           mapping.printCode   = normalized.printCode;
           mapping.surface     = normalized.surface;
           mapping.surfaceCode = normalized.surfaceCode;
+        } else if (parentCtrl) {
+          // DPOF/Noritsu family — printSizeCode is now mandatory. See
+          // routing-service.validateDPOFPrintSizeCode for the scope
+          // (non-DPOF controller types are a no-op). Covers both the
+          // modal save path and the CSV import path — both go through
+          // this IPC handler.
+          const dpofCheck = routingService.validateDPOFPrintSizeCode(mapping, parentCtrl.type);
+          if (!dpofCheck.valid) {
+            logger.logWarning('[routing] save-channel-mapping rejected — DPOF print-size validation', {
+              controllerId: mapping.controllerId,
+              productCode:  mapping.productCode,
+              error:        dpofCheck.error,
+            });
+            return { success: false, error: dpofCheck.error };
+          }
         }
       }
 

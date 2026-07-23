@@ -47,15 +47,28 @@ const { resolvePrintSizeCode } = require(
 );
 
 
-test('resolvePrintSizeCode: blank → KG default', () => {
-  assert.equal(resolvePrintSizeCode({ printSizeCode: '' }),    'KG');
-  assert.equal(resolvePrintSizeCode({ printSizeCode: null }),  'KG');
-  assert.equal(resolvePrintSizeCode({}),                       'KG');
-  assert.equal(resolvePrintSizeCode({ printSizeCode: '   ' }), 'KG');
+test('resolvePrintSizeCode: blank → empty string (no fallback to KG)', () => {
+  // The blank-branch fallback to 'KG' was removed in step 3 of the
+  // mandatory-print-size plan. A blank/whitespace printSizeCode now
+  // returns '' so the step-1 dispatch gate in print-service fires with
+  // an operator-actionable error instead of silently printing at KG.
+  // Save-time validation prevents new blank mappings from being persisted;
+  // the step-2 backfill migration cleaned up existing installs.
+  assert.equal(resolvePrintSizeCode({ printSizeCode: '' }),    '');
+  assert.equal(resolvePrintSizeCode({ printSizeCode: null }),  '');
+  assert.equal(resolvePrintSizeCode({}),                       '');
+  assert.equal(resolvePrintSizeCode({ printSizeCode: '   ' }), '');
 });
 
-test('resolvePrintSizeCode: blank + legacy size field → wrapped', () => {
-  assert.equal(resolvePrintSizeCode({ size: '4x6' }), 'NML -PSIZE "4x6"');
+test('resolvePrintSizeCode: blank + legacy size field → empty string (legacy fallback removed)', () => {
+  // Previously a blank printSizeCode with a populated `size` returned
+  // `NML -PSIZE "<size>"`. That fallback was removed in step 3; the
+  // step-2 backfill has already copied bare-WxH legacy sizes into
+  // `printSizeCode` so this path only fires now for mappings that
+  // were mis-configured (non-WxH legacy value the backfill skipped) or
+  // never touched at all.
+  assert.equal(resolvePrintSizeCode({ size: '4x6' }), '');
+  assert.equal(resolvePrintSizeCode({ size: 'KG'  }), '');
 });
 
 test('resolvePrintSizeCode: standard short code passes through', () => {
