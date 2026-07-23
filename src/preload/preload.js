@@ -263,6 +263,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   filmScanEnhanceFrame:  (payload) => ipcRenderer.invoke('ohd:filmscan:enhanceFrame',  payload),
   filmScanRevertFrame:   (payload) => ipcRenderer.invoke('ohd:filmscan:revertFrame',   payload),
   filmScanEnhanceStatus: (payload) => ipcRenderer.invoke('ohd:filmscan:enhanceStatus', payload),
+  // 2026-07-23 — operator "Reset enhancement" for a roll wedged at
+  // processingStatus:'enhancing'. Aborts a live in-flight batch when
+  // one is running; falls through to sweep-style cleanup when the
+  // record is a phantom. Returns { success, wasLive, error? }.
+  filmScansResetEnhancement: (rollId) => ipcRenderer.invoke('ohd:filmScans:reset-enhancement', rollId),
   filmReviewSetTweak:         (key, value)             => ipcRenderer.invoke('ohd:filmReview:set-tweak',  { key, value }),
   onFilmReviewRollProcessed:  (callback) =>
     ipcRenderer.on('ohd:filmReview:roll-processed', (event, data) => callback(data)),

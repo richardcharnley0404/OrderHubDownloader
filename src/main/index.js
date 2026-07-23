@@ -72,6 +72,22 @@ if (!gotTheLock) {
 
     // Start polling if any mode is configured and enabled
     const config = configService.getAll();
+
+    // 2026-07-23 — Perfectly Clear enhancement recovery. Any roll left at
+    // processingStatus:'enhancing' from a previous session is by
+    // definition NOT backed by a live batch in this fresh process, so
+    // sweep it into review before the polling service starts. Runs
+    // BEFORE pollingService.start() so a wedge-recovered roll is in the
+    // panel by the time the first film-scans cycle fires. Best-effort;
+    // failures never block startup — the roll would just remain
+    // 'enhancing' until the next launch (or an operator reset).
+    try {
+      const folderWatchService = require('./services/folder-watch-service');
+      await folderWatchService.sweepStaleEnhancingRolls();
+    } catch (err) {
+      logger.logError('filmScans: startup enhancement sweep threw', err);
+    }
+
     const anyModeEnabled = (config.pollingEnabled && configService.isConfigured()) ||
       config.filmScansEnabled || config.fileUploadsEnabled || config.orderXmlEnabled;
     if (anyModeEnabled) {

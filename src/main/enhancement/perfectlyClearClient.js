@@ -79,8 +79,50 @@ const logger        = require('../services/logger');
 
 const DEFAULT_POLL_INTERVAL_MS = 1500;
 const DEFAULT_TIMEOUT_MS       = 5 * 60 * 1000;
+// 2026-07-23 — bound any single I/O op (readdir / stat / copy-back). A
+// hung SMB share must not be able to consume the whole batch's remaining
+// wall-clock via one stuck syscall. Callers can override.
+const DEFAULT_PER_OP_TIMEOUT_MS = 30 * 1000;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Marker error raised when `_withDeadline` fires. Callers can distinguish
+ * a genuine I/O failure from "the syscall never came back in time" and
+ * decide how to escalate. Keeps the error message actionable in logs.
+ */
+class DeadlineError extends Error {
+  constructor(op, ms) {
+    super(`pc: ${op} deadline (${ms} ms) exceeded`);
+    this.name    = 'DeadlineError';
+    this.op      = op;
+    this.timeout = ms;
+  }
+}
+
+/**
+ * Race a promise against a timeout. If `promise` doesn't settle within
+ * `ms`, the returned promise rejects with a DeadlineError. `ms <= 0`
+ * disables the deadline (returns the promise unchanged). Used to
+ * guarantee the batch loop can't wedge on a hung fs op on an SMB share.
+ *
+ * Note: this does NOT cancel the underlying promise — Node fs ops
+ * aren't cancellable. It just stops us waiting for it. In practice the
+ * underlying handle unblocks eventually and its resolution is discarded.
+ */
+function _withDeadline(promise, ms, op = 'op') {
+  if (!Number.isFinite(ms) || ms <= 0) return promise;
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new DeadlineError(op, ms)), ms);
+    // unref so a stuck deadline handle doesn't hold the event loop open
+    // past app shutdown when the underlying op is the only thing pending.
+    if (typeof t.unref === 'function') t.unref();
+    promise.then(
+      (v) => { clearTimeout(t); resolve(v); },
+      (e) => { clearTimeout(t); reject(e); },
+    );
+  });
+}
 
 /**
  * Return a short, filesystem-safe machine tag for use in batch subfolder
@@ -107,33 +149,45 @@ function _makeBatchName() {
   return `ohd_${_machineTag()}_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
 }
 
-async function _copyViaTemp(srcPath, dstPath) {
+async function _copyViaTemp(srcPath, dstPath, deadlineMs) {
   const tmpName = path.basename(dstPath) +
     '.tmp_' + process.pid + '_' + crypto.randomBytes(3).toString('hex');
   const tmpPath = path.join(path.dirname(dstPath), tmpName);
-  await fs.copyFile(srcPath, tmpPath);
   try {
-    await fs.rename(tmpPath, dstPath);
+    // 2026-07-23 — copyFile can hang on a wedged SMB share. Bound it so
+    // one stuck file can't consume the whole remaining wall clock.
+    await _withDeadline(fs.copyFile(srcPath, tmpPath), deadlineMs, 'copyFile');
+    await _withDeadline(fs.rename(tmpPath, dstPath),   deadlineMs, 'rename');
   } catch (err) {
-    // If rename fails for any reason, clean up the stray temp file so we
-    // don't leave garbage in the caller's folder.
-    try { await fs.unlink(tmpPath); } catch (_) { /* ignore */ }
+    // Any failure (deadline, rename error, copy error) → clean up the
+    // stray temp file so we don't litter the caller's folder. Best-effort
+    // cleanup uses its own tight deadline so cleanup itself can't hang.
+    try {
+      await _withDeadline(fs.unlink(tmpPath), Math.min(5000, deadlineMs || 5000), 'unlink');
+    } catch (_) { /* ignore — stale temp files are cosmetic vs. the batch's outcome */ }
     throw err;
   }
 }
 
-async function _statFile(p) {
+async function _statFile(p, deadlineMs) {
   try {
-    const st = await fs.stat(p);
+    const st = await _withDeadline(fs.stat(p), deadlineMs, 'stat');
     return st.isFile() ? st : null;
   } catch (_) {
+    // Deadline or genuine stat failure — both mean "not observable this
+    // poll" from the caller's perspective. Next poll will retry.
     return null;
   }
 }
 
-async function _bestEffortRemove(dir) {
+async function _bestEffortRemove(dir, deadlineMs) {
   try {
-    await fs.rm(dir, { recursive: true, force: true });
+    // 2026-07-23 — the batch's happy-path cleanup runs against the same
+    // SMB share that just hosted a potentially-slow QuickServer. Bound
+    // it so a hung rm can't hold the whole processBatch open past its
+    // deadline. Errors (including DeadlineError) are swallowed exactly
+    // as before — cleanup is best-effort by contract.
+    await _withDeadline(fs.rm(dir, { recursive: true, force: true }), deadlineMs, 'rm');
   } catch (err) {
     try {
       logger.logWarning && logger.logWarning(`pc: cleanup failed for ${dir}: ${err.message}`);
@@ -181,6 +235,10 @@ async function processBatch(opts = {}) {
     onFileDone,
     signal,
     pollIntervalMs,
+    // 2026-07-23 — per-op deadline (readdir / stat / copyFile / rename /
+    // unlink). Bounds recovery time when a hot-folder share hangs.
+    // Undefined / non-positive → use DEFAULT_PER_OP_TIMEOUT_MS.
+    perOpTimeoutMs,
   } = opts;
 
   if (!config || !config.inputFolder || !config.outputFolder || !config.rejectedFolder) {
@@ -193,6 +251,7 @@ async function processBatch(opts = {}) {
 
   const pollMs   = (Number.isFinite(pollIntervalMs) && pollIntervalMs > 0) ? pollIntervalMs : DEFAULT_POLL_INTERVAL_MS;
   const wallMs   = (Number.isFinite(timeoutMs)      && timeoutMs      > 0) ? timeoutMs      : DEFAULT_TIMEOUT_MS;
+  const perOpMs  = (Number.isFinite(perOpTimeoutMs) && perOpTimeoutMs > 0) ? perOpTimeoutMs : DEFAULT_PER_OP_TIMEOUT_MS;
   const friendly = config.friendlyName || '(unnamed)';
 
   const batchName        = _makeBatchName();
@@ -237,11 +296,11 @@ async function processBatch(opts = {}) {
   const startedAt = Date.now();
 
   // 1. Stage all input files (temp + rename) before any polling starts.
-  await fs.mkdir(batchInputDir, { recursive: true });
+  await _withDeadline(fs.mkdir(batchInputDir, { recursive: true }), perOpMs, 'mkdir');
   try {
     for (const r of records) {
       const finalPath = path.join(batchInputDir, r.inputName);
-      await _copyViaTemp(r.sourcePath, finalPath);
+      await _copyViaTemp(r.sourcePath, finalPath, perOpMs);
     }
   } catch (err) {
     try {
@@ -249,9 +308,9 @@ async function processBatch(opts = {}) {
     } catch (_) { /* ignore */ }
     // Nothing has been reported to onFileDone yet, so let the caller see the
     // raw error. Still clean up whatever we may have created.
-    await _bestEffortRemove(batchInputDir);
-    await _bestEffortRemove(batchOutputDir);
-    await _bestEffortRemove(batchRejectedDir);
+    await _bestEffortRemove(batchInputDir,    perOpMs);
+    await _bestEffortRemove(batchOutputDir,   perOpMs);
+    await _bestEffortRemove(batchRejectedDir, perOpMs);
     throw err;
   }
 
@@ -261,9 +320,9 @@ async function processBatch(opts = {}) {
       r.status = 'cancelled';
       _safeCallback(onFileDone, { sourcePath: r.sourcePath, status: 'cancelled' });
     }
-    await _bestEffortRemove(batchInputDir);
-    await _bestEffortRemove(batchOutputDir);
-    await _bestEffortRemove(batchRejectedDir);
+    await _bestEffortRemove(batchInputDir,    perOpMs);
+    await _bestEffortRemove(batchOutputDir,   perOpMs);
+    await _bestEffortRemove(batchRejectedDir, perOpMs);
     return records.map(_toResult);
   }
 
@@ -284,8 +343,11 @@ async function processBatch(opts = {}) {
   async function pollOnce() {
     let outEntries = [];
     let rejEntries = [];
-    try { outEntries = await fs.readdir(batchOutputDir);   } catch (_) { outEntries = []; }
-    try { rejEntries = await fs.readdir(batchRejectedDir); } catch (_) { rejEntries = []; }
+    // 2026-07-23 — bound each readdir. On SMB / dead-share the sync can
+    // hang forever; a DeadlineError just means "nothing new observable
+    // this poll", which is indistinguishable from the empty-folder case.
+    try { outEntries = await _withDeadline(fs.readdir(batchOutputDir),   perOpMs, 'readdir(output)');   } catch (_) { outEntries = []; }
+    try { rejEntries = await _withDeadline(fs.readdir(batchRejectedDir), perOpMs, 'readdir(rejected)'); } catch (_) { rejEntries = []; }
 
     // Output — matching files with a stable signature get copied out and
     // marked 'enhanced'.
@@ -293,21 +355,25 @@ async function processBatch(opts = {}) {
       const record = recordByName.get(name);
       if (!record || record.status !== 'pending') continue;
       const filePath = path.join(batchOutputDir, name);
-      const st = await _statFile(filePath);
+      const st = await _statFile(filePath, perOpMs);
       if (!st) continue;
       const sig = { size: st.size, mtimeMs: st.mtimeMs };
       const prev = record.lastOutputSig;
       if (prev && prev.size === sig.size && prev.mtimeMs === sig.mtimeMs) {
         // Stable — consume it.
         try {
-          await fs.mkdir(path.dirname(record.destPath), { recursive: true });
-          await _copyViaTemp(filePath, record.destPath);
+          await _withDeadline(fs.mkdir(path.dirname(record.destPath), { recursive: true }), perOpMs, 'mkdir(dest)');
+          await _copyViaTemp(filePath, record.destPath, perOpMs);
           markDone(record, 'enhanced');
         } catch (err) {
           // Copy-back failed — surface as a per-file 'rejected' with an error
           // message so the caller can keep working with the original. This
           // is a client-side failure, not a QuickServer verdict, so we log
-          // it distinctly.
+          // it distinctly. DeadlineError bubbles through the same path so
+          // a hung SMB during copy-back doesn't wedge the batch — the file
+          // is rejected with a clear "deadline exceeded" message and the
+          // stray temp file in the destination is cleaned up by
+          // _copyViaTemp's finally-block-equivalent.
           try {
             logger.logError && logger.logError(
               `pc: batch ${batchName} copy-back failed for ${name} → ${record.destPath}`, err);
@@ -325,7 +391,7 @@ async function processBatch(opts = {}) {
       const record = recordByName.get(name);
       if (!record || record.status !== 'pending') continue;
       const filePath = path.join(batchRejectedDir, name);
-      const st = await _statFile(filePath);
+      const st = await _statFile(filePath, perOpMs);
       if (!st) continue;
       const sig = { size: st.size, mtimeMs: st.mtimeMs };
       const prev = record.lastRejectedSig;
@@ -346,7 +412,25 @@ async function processBatch(opts = {}) {
       if (aborted) break;
       if (Date.now() - startedAt >= wallMs) break;
 
-      await pollOnce();
+      // 2026-07-23 — race the whole pollOnce against the remaining wall
+      // clock. Per-op deadlines above bound individual syscalls; this is
+      // the belt that stops any residual work (async gaps, unref'd
+      // handles, JS spins) from carrying the batch past its deadline.
+      // A DeadlineError here just means "cut this poll short and let the
+      // outer while check terminate the batch" — we already log the error
+      // detail as a warning so operators can see what stalled.
+      const remainingBeforePoll = Math.max(0, wallMs - (Date.now() - startedAt));
+      try {
+        await _withDeadline(pollOnce(), remainingBeforePoll, 'pollOnce');
+      } catch (err) {
+        try {
+          logger.logWarning && logger.logWarning(
+            `pc: batch ${batchName} pollOnce cut short: ${err.message}`
+          );
+        } catch (_) { /* logger stub */ }
+        // Fall through — the outer wall-clock check on the next iteration
+        // will terminate the batch immediately.
+      }
       if (pending === 0) break;
       if (aborted) break;
       if (Date.now() - startedAt >= wallMs) break;
@@ -365,9 +449,9 @@ async function processBatch(opts = {}) {
     if (signal) {
       try { signal.removeEventListener('abort', onAbort); } catch (_) { /* ignore */ }
     }
-    await _bestEffortRemove(batchInputDir);
-    await _bestEffortRemove(batchOutputDir);
-    await _bestEffortRemove(batchRejectedDir);
+    await _bestEffortRemove(batchInputDir,    perOpMs);
+    await _bestEffortRemove(batchOutputDir,   perOpMs);
+    await _bestEffortRemove(batchRejectedDir, perOpMs);
   }
 
   const counts = {
@@ -400,7 +484,10 @@ function _toResult(r) {
 
 module.exports = {
   processBatch,
+  DeadlineError,
   // Test-only handles — not part of the public API.
   _makeBatchName,
   _machineTag,
+  _withDeadline,
+  DEFAULT_PER_OP_TIMEOUT_MS,
 };

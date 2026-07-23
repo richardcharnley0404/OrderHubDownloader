@@ -370,6 +370,11 @@ export function RollList({ refreshKey, onOpenRoll }) {
 function RollCard({ roll, onOpen, onDeleted, onApproved }) {
   const [deleting,  setDeleting]  = useState(false);
   const [approving, setApproving] = useState(false);
+  // 2026-07-23 — local pending state for "Reset enhancement". The IPC
+  // aborts the live in-flight batch (or does phantom cleanup); either
+  // way the ohd:filmReview:roll-processed event drives the re-fetch,
+  // so we only need a spinner label while we're awaiting the call.
+  const [resetting, setResetting] = useState(false);
   const isReviewed = roll.status === 'reviewed';
 
   // M8-3: provisional rolls (detected/processing) have no frames yet — they
@@ -526,6 +531,38 @@ function RollCard({ roll, onOpen, onDeleted, onApproved }) {
     }
   };
 
+  // 2026-07-23 — Reset enhancement affordance. Only rendered on a roll
+  // whose processingStatus is 'enhancing'. Aborts a live batch (or
+  // cleans up a phantom) via the IPC. Card is inert (isProvisional) so
+  // no card-open bubbling risk, but stopPropagation for parity with the
+  // delete/approve handlers. No confirm() — this IS the operator's
+  // recovery escape hatch and one click is fine.
+  const isEnhancing = roll.processingStatus === 'enhancing';
+  const onResetEnhancementClick = async (e) => {
+    e.stopPropagation();
+    if (!isEnhancing || resetting) return;
+    setResetting(true);
+    try {
+      const res = await window.electronAPI.filmScansResetEnhancement(roll.rollId);
+      if (!res || !res.success) {
+        window.alert(`Couldn't reset enhancement: ${res?.error || 'unknown error'}`);
+      }
+      // No optimistic UI update — the ohd:filmReview:roll-processed
+      // event fires from the main side (either directly, via the
+      // sweep-style patch, or once the cancelled batch's continuation
+      // recordRoll runs) and the parent's refreshKey bump re-fetches.
+    } catch (err) {
+      window.alert(`Couldn't reset enhancement: ${err?.message || String(err)}`);
+    } finally {
+      setResetting(false);
+    }
+  };
+  const onResetEnhancementKeyDown = (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.stopPropagation();
+    }
+  };
+
   // Non-clickable provisional cards: no role=button, no tabIndex, no onClick.
   // Keeps assistive tech from announcing them as actionable, and the cursor
   // styling in CSS makes the inert state obvious to mouse users.
@@ -616,6 +653,22 @@ function RollCard({ roll, onOpen, onDeleted, onApproved }) {
             : roll.processingStatus === 'enhancing'
             ? 'Running Perfectly Clear on frames…'
             : 'Waiting for the watchguard timer before processing.'}
+          {isEnhancing && (
+            <>
+              {' '}
+              <button
+                type="button"
+                className="fr-roll-card__reset-enhancement"
+                onClick={onResetEnhancementClick}
+                onKeyDown={onResetEnhancementKeyDown}
+                disabled={resetting}
+                title="Abort the Perfectly Clear batch for this roll and move it to review with whatever it has (enhanced where available, originals otherwise)."
+                aria-label={`Reset enhancement for roll ${roll.rollId}`}
+              >
+                {resetting ? 'Resetting…' : 'Reset enhancement'}
+              </button>
+            </>
+          )}
         </div>
       ) : (
         <div className="fr-roll-card__stats">

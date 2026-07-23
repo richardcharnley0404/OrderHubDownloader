@@ -490,3 +490,153 @@ test('stability polling: consumer waits until a file is stable across 2 polls', 
     await fsp.rm(destDir, { recursive: true, force: true });
   }
 });
+
+// ─── Hard-deadline contract (2026-07-23) ────────────────────────────────────
+//
+// Guarantees processBatch cannot hang indefinitely even when the QuickServer
+// hot folder lives on a dead SMB share. Two mechanisms working together:
+//   1. Per-op deadline (perOpTimeoutMs) around every fs op (readdir, stat,
+//      copyFile, rename, unlink). A single stuck syscall can't consume
+//      the whole remaining wall clock.
+//   2. Wall-clock deadline (timeoutMs) — enforced not just between polls
+//      but around each pollOnce() invocation, so any residual work in the
+//      poll loop can't carry the batch past the deadline.
+
+const { _withDeadline, DeadlineError, DEFAULT_PER_OP_TIMEOUT_MS } = perfectlyClearClient;
+
+test('_withDeadline: resolves the wrapped promise when it settles in time', async () => {
+  const v = await _withDeadline(Promise.resolve(42), 500, 'fast');
+  assert.equal(v, 42);
+});
+
+test('_withDeadline: rejects with DeadlineError when the promise never settles', async () => {
+  const forever = new Promise(() => {});
+  await assert.rejects(
+    () => _withDeadline(forever, 25, 'never'),
+    (err) => err instanceof DeadlineError && err.op === 'never' && err.timeout === 25,
+  );
+});
+
+test('_withDeadline: propagates the underlying rejection unchanged when the promise fails fast', async () => {
+  const boom = Promise.reject(new Error('boom'));
+  await assert.rejects(() => _withDeadline(boom, 500, 'op'), /boom/);
+});
+
+test('_withDeadline: ms <= 0 disables the deadline (returns the raw promise)', async () => {
+  // Confirmed via a non-primitive proof: a slow-but-not-forever promise
+  // resolves normally, and the DeadlineError is never surfaced.
+  const slow = new Promise((r) => setTimeout(() => r('done'), 40));
+  const v = await _withDeadline(slow, 0, 'disabled');
+  assert.equal(v, 'done');
+});
+
+test('DEFAULT_PER_OP_TIMEOUT_MS is exposed and finite (contract lock)', () => {
+  assert.ok(Number.isFinite(DEFAULT_PER_OP_TIMEOUT_MS));
+  assert.ok(DEFAULT_PER_OP_TIMEOUT_MS > 0);
+});
+
+test('hard wall-clock deadline: batch resolves within timeoutMs even with aggressive per-op cap starving observations', async () => {
+  __config = { _machineId: 'test-machine' };
+  const ch = await makeChannel('hardclock');
+  // No fake mover — QuickServer "never responds". With perOpTimeoutMs:1
+  // every fs.readdir / fs.stat inside pollOnce deadline-fires (indistinguishable
+  // from an empty folder), so the batch has zero observation opportunities
+  // and must ride the wall clock to termination.
+  const destDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'ohd-pc-dst-'));
+  try {
+    const src = await makeSourceFile('stuck.jpg', 'stuck-bytes');
+    const dst = path.join(destDir, 'stuck.jpg');
+
+    const t0 = Date.now();
+    const results = await processBatch({
+      config:         ch.config,
+      files:          [{ sourcePath: src, destPath: dst }],
+      timeoutMs:      300,
+      perOpTimeoutMs: 1,
+      pollIntervalMs: TEST_POLL_MS,
+    });
+    const elapsed = Date.now() - t0;
+
+    assert.equal(results.length, 1);
+    assert.equal(results[0].status, 'timeout',
+      'unaccounted file resolves as "timeout" — never leaves the batch pending');
+    // The batch MUST have resolved close to the wall-clock deadline. Slack
+    // covers the input-staging copyFile (which itself has a per-op deadline
+    // of 1 ms but the file is tiny + local so it still lands fast), plus
+    // finally-block cleanup and the last poll-loop iteration. Ceiling is
+    // generous but still MUCH tighter than what a hung SMB share would
+    // produce without the deadline.
+    assert.ok(elapsed < 3000, `batch must resolve near timeoutMs; took ${elapsed}ms`);
+    assert.equal(fs.existsSync(dst), false, 'destPath left untouched on timeout');
+  } finally {
+    await ch.cleanup();
+    await fsp.rm(destDir, { recursive: true, force: true });
+  }
+});
+
+test('per-op deadline on input staging: staging copyFile deadline surfaces as a client-level throw (not a wedge)', async () => {
+  __config = { _machineId: 'test-machine' };
+  const ch = await makeChannel('stagedead');
+  const destDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'ohd-pc-dst-'));
+
+  try {
+    // Point at a nonexistent source so copyFile fails fast. This exercises
+    // the input-staging catch path with per-op deadlines active; the batch
+    // must throw (per contract — no records reported yet) rather than hang.
+    // A hung readdir / copyFile on a dead SMB is the field scenario; the
+    // synthetic ENOENT here proves the error path itself isn't gated by
+    // the wall clock.
+    const src = path.join(destDir, 'does-not-exist.jpg');
+    const dst = path.join(destDir, 'landing.jpg');
+
+    const t0 = Date.now();
+    await assert.rejects(
+      () => processBatch({
+        config:         ch.config,
+        files:          [{ sourcePath: src, destPath: dst }],
+        timeoutMs:      10_000,
+        perOpTimeoutMs: 50,
+        pollIntervalMs: TEST_POLL_MS,
+      }),
+      /ENOENT|no such file|failed/i,
+    );
+    const elapsed = Date.now() - t0;
+    assert.ok(elapsed < 2000, `staging error must surface fast, not ride the wall clock; took ${elapsed}ms`);
+  } finally {
+    await ch.cleanup();
+    await fsp.rm(destDir, { recursive: true, force: true });
+  }
+});
+
+test('copy-back stray temp cleanup: no ".tmp_<pid>_<rand>" files left in the destination folder when the batch succeeds normally', async () => {
+  // Regression lock. The _copyViaTemp cleanup path (unlink of the temp
+  // file on any failure — deadline, rename error, copy error) is invisible
+  // on the happy path but must not accidentally start leaving temp files
+  // behind either. Assert the destination has ONLY the expected output
+  // after a successful batch.
+  __config = { _machineId: 'test-machine' };
+  const ch = await makeChannel('nolitter');
+  const qs = startFakeQuickServer(ch.config, () => 'output');
+  const destDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'ohd-pc-dst-'));
+  try {
+    const src = await makeSourceFile('clean.jpg', 'clean-bytes');
+    const dst = path.join(destDir, 'clean.jpg');
+
+    const results = await processBatch({
+      config:         ch.config,
+      files:          [{ sourcePath: src, destPath: dst }],
+      timeoutMs:      5000,
+      pollIntervalMs: TEST_POLL_MS,
+    });
+    assert.equal(results[0].status, 'enhanced');
+
+    const leftInDest = await fsp.readdir(destDir);
+    const strayTemps = leftInDest.filter((n) => n.includes('.tmp_'));
+    assert.deepEqual(strayTemps, [],
+      `destination MUST NOT contain stray temp files; saw: ${JSON.stringify(leftInDest)}`);
+  } finally {
+    qs.stop();
+    await ch.cleanup();
+    await fsp.rm(destDir, { recursive: true, force: true });
+  }
+});

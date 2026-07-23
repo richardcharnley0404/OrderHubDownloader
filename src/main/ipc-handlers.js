@@ -3916,6 +3916,31 @@ ipcMain.handle('ohd:filmReview:delete-roll', async (event, rollIdRaw) => {
   }
 });
 
+/**
+ * ohd:filmScans:reset-enhancement  (2026-07-23)
+ *
+ * Operator-triggered "Skip / Reset enhancement" for a roll currently
+ * showing as enhancing in the Film Scans panel. Aborts a live in-flight
+ * batch via AbortController (the folder-watch continuation then falls
+ * through its existing cancel path → uploadStatus:'pending'). When the
+ * roll is stuck at 'enhancing' with no live batch (phantom / crash-
+ * recovered), does the same recovery patch the startup sweep does.
+ *
+ * Payload: string rollId  OR  { rollId }
+ * Returns: { success: boolean, wasLive: boolean, error?: string }
+ */
+ipcMain.handle('ohd:filmScans:reset-enhancement', async (event, payload) => {
+  const rollId = typeof payload === 'string' ? payload : (payload && payload.rollId);
+  if (!rollId) return { success: false, wasLive: false, error: 'rollId is required' };
+  try {
+    return await folderWatchService.resetEnhancingRoll(rollId);
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    logger.logError('[filmScans] reset-enhancement threw', err, { rollId });
+    return { success: false, wasLive: false, error: msg };
+  }
+});
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Film Scan — Perfectly Clear per-frame IPC (M4, 2026-07-03)
 // ──────────────────────────────────────────────────────────────────────────────

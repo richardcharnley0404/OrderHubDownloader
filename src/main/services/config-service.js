@@ -620,6 +620,25 @@ const schema = {
       fileUploads: { enabled: false, autoApplyConfigId: null, configs: [] },
     }
   },
+  // 2026-07-23 lab-safety additions — never let the film-scan pipeline wedge
+  // in processingStatus:'enhancing' when QuickServer is slow, dead, or
+  // misconfigured. Both default null so behaviour is unchanged for existing
+  // installs: null → perfectlyClearClient falls back to its derived
+  // per-batch wall-clock (max 5 min, 30 s × frame count) and to a 30 s
+  // per-op cap.
+  //   perfectlyClearFilmScanTimeoutMs: per-batch wall clock override
+  //   perfectlyClearFilmScanPerOpTimeoutMs: cap on any single I/O op
+  //     (readdir, stat, copy-back). Bounds recovery time when a hot folder
+  //     share hangs, so a single stuck file can't consume the whole
+  //     remaining wall clock.
+  perfectlyClearFilmScanTimeoutMs: {
+    type: ['number', 'null'],
+    default: null
+  },
+  perfectlyClearFilmScanPerOpTimeoutMs: {
+    type: ['number', 'null'],
+    default: null
+  },
   dismissedJobs: {
     type: 'array',
     default: []
@@ -880,6 +899,9 @@ class ConfigService {
       // always sees the canonical three-scope shape even if the on-disk value
       // is missing a scope (e.g. mid-upgrade or hand-edited config.json).
       perfectlyClear: _sanitisePerfectlyClear(this.store.get('perfectlyClear')),
+      // Lab-safety overrides for film-scan enhancement (2026-07-23).
+      perfectlyClearFilmScanTimeoutMs:      this.store.get('perfectlyClearFilmScanTimeoutMs'),
+      perfectlyClearFilmScanPerOpTimeoutMs: this.store.get('perfectlyClearFilmScanPerOpTimeoutMs'),
       // One-shot toast trigger consumed by the renderer; cleared via
       // clearReplicateMigrationToast() once the toast has been shown.
       _migratedFromReplicate: this.store.get('_migratedFromReplicate'),

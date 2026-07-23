@@ -57,6 +57,13 @@ class FolderWatchService {
     this.lastSummary = { filmScans: null, fileUploads: null };
     this._filmScanProcessing = false;
     this._resumedUploads = false;
+    // 2026-07-23 — In-process registry of the currently-running film-scan
+    // Perfectly Clear batch, if any. Held here (not per-cycle) so a
+    // startup sweep AND an operator-triggered reset can both consult it
+    // and, if the roll is live, abort via the AbortController rather
+    // than clobbering a genuine enhance.
+    //   { rollId, abortController, startedAt } | null
+    this._activeFilmScanBatch = null;
   }
 
   async processAll() {
@@ -504,9 +511,36 @@ class FolderWatchService {
                         emitRollUpdate(rollId);
                       } catch (_) { /* best-effort */ }
                     } else {
-                      // Wall-clock timeout — plan §1: max(5 min, 30 s × frameCount).
-                      const timeoutMs = Math.max(5 * 60 * 1000, 30 * 1000 * files.length);
-                      logger.info(`filmScans: ${rollId} PC enhance starting (config="${pcCfg.friendlyName}", files=${files.length}, timeoutMs=${timeoutMs})`);
+                      // 2026-07-23 — timeout is configurable. When
+                      // `perfectlyClearFilmScanTimeoutMs` is a positive
+                      // number, use it verbatim; otherwise fall back to
+                      // the M4 derived formula max(5 min, 30 s × frames).
+                      // Same for per-op cap — configurable, defaults to
+                      // the client's DEFAULT_PER_OP_TIMEOUT_MS. A
+                      // legitimately slow but working QuickServer can
+                      // raise the ceiling; the point is that it can never
+                      // hang forever, not that it must be short.
+                      const cfgTimeoutMs = Number(config.perfectlyClearFilmScanTimeoutMs);
+                      const timeoutMs    = Number.isFinite(cfgTimeoutMs) && cfgTimeoutMs > 0
+                        ? cfgTimeoutMs
+                        : Math.max(5 * 60 * 1000, 30 * 1000 * files.length);
+                      const cfgPerOpMs   = Number(config.perfectlyClearFilmScanPerOpTimeoutMs);
+                      const perOpTimeoutMs = Number.isFinite(cfgPerOpMs) && cfgPerOpMs > 0
+                        ? cfgPerOpMs
+                        : undefined; // client picks its default
+                      logger.info(`filmScans: ${rollId} PC enhance starting (config="${pcCfg.friendlyName}", files=${files.length}, timeoutMs=${timeoutMs}${perOpTimeoutMs ? `, perOpMs=${perOpTimeoutMs}` : ''})`);
+
+                      // 2026-07-23 — register this batch so a startup
+                      // sweep or an operator "Reset enhancement" IPC can
+                      // abort it via signal rather than clobbering a
+                      // genuine in-flight enhance. Cleared in finally
+                      // regardless of outcome (throw, success, cancel).
+                      const abortController = new AbortController();
+                      this._activeFilmScanBatch = {
+                        rollId,
+                        abortController,
+                        startedAt: Date.now(),
+                      };
 
                       let pcResults = [];
                       try {
@@ -515,6 +549,8 @@ class FolderWatchService {
                           config: pcCfg,
                           files,
                           timeoutMs,
+                          perOpTimeoutMs,
+                          signal: abortController.signal,
                         });
                       } catch (pcErr) {
                         // Client-level throw — treat every file as errored so
@@ -522,6 +558,13 @@ class FolderWatchService {
                         logger.logError(`filmScans: PC processBatch threw for ${rollId} — continuing with originals`, pcErr);
                         pcResults = files.map(f => ({ sourcePath: f.sourcePath, destPath: f.destPath, status: 'timeout', error: pcErr.message }));
                         pcTimedOut = true;
+                      } finally {
+                        // Clear registry BEFORE the per-file loop below so a
+                        // concurrent reset for this roll (edge case) sees
+                        // "not live" and takes the phantom-cleanup path.
+                        if (this._activeFilmScanBatch && this._activeFilmScanBatch.rollId === rollId) {
+                          this._activeFilmScanBatch = null;
+                        }
                       }
 
                       // Per-file: enhanced → regen thumbnail + stamp metadata;
@@ -589,6 +632,21 @@ class FolderWatchService {
                       logger.info(`filmScans: ${rollId} PC enhance complete — enhanced=${pcEnhancedCount}, rejected=${pcRejectedCount}, timedOut=${pcTimedOut}`);
                       if (pcTimedOut) {
                         logger.logWarning(`filmScans: ${rollId} PC timeout/cancel — escalating to review regardless of review mode`);
+                      }
+                      // 2026-07-23 — when the whole batch produced ZERO
+                      // enhanced results and at least one file was sent,
+                      // that's a strong signal that QuickServer isn't
+                      // watching this input folder, isn't running, or is
+                      // configured for a different channel. Naming the
+                      // folder in the log gives the operator (or Claude
+                      // in a next session) an actionable diagnostic
+                      // without needing to open PC's own logs.
+                      if (pcEnhancedCount === 0 && files.length > 0) {
+                        logger.logWarning(
+                          `filmScans: ${rollId} PC batch produced zero enhanced frames ` +
+                          `(files=${files.length}, rejected=${pcRejectedCount}). ` +
+                          `Check QuickServer is watching "${pcCfg.inputFolder}" and hasn't stalled or misrouted this channel.`
+                        );
                       }
                     }
                   }
@@ -1281,6 +1339,213 @@ class FolderWatchService {
         if (w && !w.isDestroyed()) w.webContents.send('ohd:filmReview:roll-processed', { rollId });
       }
     } catch (_) { /* best-effort */ }
+  }
+
+  // ── PC enhancement recovery (2026-07-23) ───────────────────────────────
+  //
+  // Two lab-safety mechanisms so a Perfectly Clear enhance can never
+  // permanently wedge a roll at processingStatus:'enhancing':
+  //
+  //   sweepStaleEnhancingRolls()  — runs once at startup. Every roll in
+  //     'enhancing' at boot time is by definition NOT backed by a live
+  //     in-process batch (this process just started). Belt-and-braces
+  //     guard: only clear entries whose pcEnhanceStartedAt is stale
+  //     against the configured PC timeout (or missing entirely), so a
+  //     hypothetical second OHD instance racing against a shared
+  //     electron-store can't clobber a genuinely-live enhance from that
+  //     other process.
+  //
+  //   resetEnhancingRoll(rollId)  — operator-triggered from the Film
+  //     Scans UI ("Reset enhancement" button on an enhancing roll).
+  //     Aborts a live in-flight batch via AbortController; the client's
+  //     cancel path falls back into the existing pcTimedOut branch and
+  //     the roll escalates to review naturally. When the roll is stuck
+  //     at 'enhancing' but no live batch is registered (phantom state,
+  //     e.g. a sweep raced ahead), does the same cleanup as the sweep.
+  //
+  // Both converge on the same recovered-roll state:
+  //   - processingStatus: null (badge stops showing "Enhancing")
+  //   - uploadStatus: 'pending' when the roll record has a storagePath,
+  //     'failed' with an explanatory error otherwise (crash pre-recordRoll:
+  //     the S3 metadata is missing so no automatic upload is possible).
+  //   - timeline: { ...prev, pcRecoveredAt, pcRecoveredReason }
+  // Either way the roll ends up visible in Film Review, and 'pending'
+  // guarantees no silent auto-upload can ever fire on a recovered roll —
+  // matching the existing pcTimedOut-escalates-regardless-of-mode rule.
+
+  /**
+   * On startup, sweep frameMetadataStore.rolls for any roll left in
+   * processingStatus:'enhancing' that (a) is not backed by a live
+   * in-process batch (always the case at startup — the registry was
+   * just constructed empty) and (b) has a stale-or-missing
+   * pcEnhanceStartedAt timestamp. Each qualifying roll is cleared and
+   * escalated to review. Best-effort — never throws.
+   *
+   * @param {object} [options]
+   * @param {number} [options.now]  now-ms override (tests)
+   * @returns {Promise<{swept: string[], skipped: string[]}>}
+   */
+  async sweepStaleEnhancingRolls({ now } = {}) {
+    const frameMetadataStore = require('./frame-metadata-store');
+    const nowMs = Number.isFinite(now) ? now : Date.now();
+    const swept   = [];
+    const skipped = [];
+
+    let rollsMap;
+    try {
+      // No listRolls-with-processingStatus API; read the raw dict off the
+      // underlying store. Legacy stores (pre-M4) have no processingStatus
+      // key on any roll so the filter yields the empty set — cheap no-op.
+      rollsMap = frameMetadataStore.store.get('rolls', {}) || {};
+    } catch (err) {
+      logger.logError('filmScans: sweepStaleEnhancingRolls could not read rolls store', err);
+      return { swept, skipped };
+    }
+
+    // Resolve the same timeout the PC block would have used for the
+    // staleness cut-off. Prefer the explicit config override so a lab
+    // running a slower QuickServer doesn't false-recover a genuinely
+    // live enhance; fall back to a conservative floor (the derived
+    // formula's minimum) when no config value is set.
+    const cfg = configService.getAll();
+    const cfgTimeoutMs = Number(cfg.perfectlyClearFilmScanTimeoutMs);
+    const stalenessMs  = Number.isFinite(cfgTimeoutMs) && cfgTimeoutMs > 0
+      ? cfgTimeoutMs
+      : 5 * 60 * 1000;
+
+    for (const rollId of Object.keys(rollsMap)) {
+      const rec = rollsMap[rollId];
+      if (!rec || rec.processingStatus !== 'enhancing') continue;
+
+      // Never clobber a batch this process is actually running. On
+      // startup this is trivially empty, but the method is safe to
+      // call at any time (e.g. after a crash-recovery mid-session).
+      if (this._activeFilmScanBatch && this._activeFilmScanBatch.rollId === rollId) {
+        skipped.push(rollId);
+        continue;
+      }
+
+      // Staleness guard. Missing/unparseable → treat as maximally stale
+      // (a crashed process before the timestamp was written is a valid
+      // recovery target). Present and younger than the timeout → skip.
+      const startedIso = rec.timeline && rec.timeline.pcEnhanceStartedAt;
+      const startedMs  = startedIso ? Date.parse(startedIso) : NaN;
+      const ageMs      = Number.isFinite(startedMs) ? (nowMs - startedMs) : Number.POSITIVE_INFINITY;
+      if (Number.isFinite(startedMs) && ageMs < stalenessMs) {
+        skipped.push(rollId);
+        continue;
+      }
+
+      const hasStoragePath = !!rec.storagePath;
+      const recoveredIso   = new Date().toISOString();
+      const patch = {
+        processingStatus: null,
+        // 'pending' forces the roll into review even in Auto ('never')
+        // mode — matches the existing pcTimedOut-escalates-regardless-of-mode
+        // rule so a wedge-recovered roll never silently auto-uploads.
+        // If the crash landed BEFORE recordRoll() wrote storagePath /
+        // locationId / s3Prefix, the upload plumbing is missing and
+        // 'pending' would fail when the operator clicked Approve —
+        // surface that as 'failed' with an actionable error message so
+        // the operator sees the honest state, not a mysterious later
+        // upload failure.
+        uploadStatus: hasStoragePath ? 'pending' : 'failed',
+        ...(hasStoragePath ? {} : { uploadError: 'Recovered from wedged enhancement; roll data incomplete — please re-scan or delete this roll.' }),
+        timeline: {
+          ...(rec.timeline || {}),
+          pcRecoveredAt: recoveredIso,
+          pcRecoveredReason: Number.isFinite(startedMs) ? 'stale-enhancing-on-startup' : 'enhancing-without-timestamp',
+        },
+      };
+
+      try {
+        frameMetadataStore.updateRoll(rollId, patch);
+        this._emitFilmReviewRoll(rollId);
+        swept.push(rollId);
+        logger.logWarning(
+          `filmScans: recovered wedged roll ${rollId} from processingStatus:'enhancing' ` +
+          `(age=${Number.isFinite(ageMs) ? Math.round(ageMs / 1000) + 's' : 'unknown'}, ` +
+          `uploadStatus='${patch.uploadStatus}', hasStoragePath=${hasStoragePath})`
+        );
+      } catch (err) {
+        logger.logError(`filmScans: sweepStaleEnhancingRolls failed to patch ${rollId}`, err);
+      }
+    }
+
+    if (swept.length > 0) {
+      logger.info(`filmScans: startup enhancement sweep recovered ${swept.length} roll(s)${skipped.length ? `, skipped ${skipped.length} still-live` : ''}`);
+    }
+    return { swept, skipped };
+  }
+
+  /**
+   * Operator-triggered "Skip / Reset enhancement" for a roll currently
+   * showing as enhancing. Aborts the live batch when in-process; falls
+   * back to the sweep's recovery patch when the state is a phantom
+   * (roll in 'enhancing' but no batch registered — sweep already
+   * cleared it, or a stale record from a previous crash the startup
+   * sweep hasn't seen yet).
+   *
+   * @param {string} rollId
+   * @returns {Promise<{success: boolean, wasLive: boolean, error?: string}>}
+   */
+  async resetEnhancingRoll(rollId) {
+    if (!rollId || typeof rollId !== 'string') {
+      return { success: false, wasLive: false, error: 'rollId is required' };
+    }
+
+    // Live-batch branch. Aborting the controller causes the client to
+    // return status:'cancelled' for every remaining record; the folder-
+    // watch PC block already treats 'cancelled' as pcTimedOut → the roll
+    // escalates to review through the normal recordRoll path with
+    // uploadStatus:'pending' AND storagePath / locationId / s3Prefix
+    // properly filled in. So this branch does NOT need to touch the
+    // sidecar itself — the natural continuation is authoritative.
+    if (this._activeFilmScanBatch && this._activeFilmScanBatch.rollId === rollId) {
+      try {
+        this._activeFilmScanBatch.abortController.abort();
+        logger.logWarning(`filmScans: operator reset enhancement for ${rollId} — aborting live batch`);
+        return { success: true, wasLive: true };
+      } catch (err) {
+        return { success: false, wasLive: true, error: err && err.message ? err.message : String(err) };
+      }
+    }
+
+    // Phantom branch. Sidecar shows 'enhancing' but no batch is
+    // running. Do the same cleanup patch the sweep does, without the
+    // staleness guard (operator intent is authoritative here — they've
+    // decided the roll is stuck).
+    const frameMetadataStore = require('./frame-metadata-store');
+    const rec = frameMetadataStore.getRoll(rollId);
+    if (!rec) {
+      return { success: false, wasLive: false, error: `roll ${rollId} not found` };
+    }
+    if (rec.processingStatus !== 'enhancing') {
+      return { success: false, wasLive: false, error: `roll ${rollId} is not enhancing (status=${rec.processingStatus || 'null'})` };
+    }
+
+    const hasStoragePath = !!rec.storagePath;
+    const recoveredIso   = new Date().toISOString();
+    try {
+      frameMetadataStore.updateRoll(rollId, {
+        processingStatus: null,
+        uploadStatus: hasStoragePath ? 'pending' : 'failed',
+        ...(hasStoragePath ? {} : { uploadError: 'Recovered from wedged enhancement; roll data incomplete — please re-scan or delete this roll.' }),
+        timeline: {
+          ...(rec.timeline || {}),
+          pcRecoveredAt: recoveredIso,
+          pcRecoveredReason: 'operator-reset-phantom',
+        },
+      });
+      this._emitFilmReviewRoll(rollId);
+      logger.logWarning(
+        `filmScans: operator reset enhancement for ${rollId} — phantom cleanup ` +
+        `(uploadStatus='${hasStoragePath ? 'pending' : 'failed'}', hasStoragePath=${hasStoragePath})`
+      );
+      return { success: true, wasLive: false };
+    } catch (err) {
+      return { success: false, wasLive: false, error: err && err.message ? err.message : String(err) };
+    }
   }
 
   /**

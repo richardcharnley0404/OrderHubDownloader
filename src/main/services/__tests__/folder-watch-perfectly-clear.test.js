@@ -469,3 +469,231 @@ test('ordering guard: _uploadRollFromStorage refuses to upload a roll whose proc
   assert.notEqual(rec.uploadStatus, 'uploading', 'guard prevented the upload flip');
   assert.notEqual(rec.uploadStatus, 'uploaded');
 });
+
+// ─── PC recovery (2026-07-23) ────────────────────────────────────────────────
+//
+// Startup sweep + operator reset. Together these guarantee a roll can never
+// permanently wedge at processingStatus:'enhancing' — a wedge-recovered roll
+// self-heals on next launch, and the operator can force it live via the
+// Film Scans UI without editing files.
+
+test('sweep: clears a stale enhancing roll with storagePath → uploadStatus="pending"', async () => {
+  resetSharedState();
+  __config = { perfectlyClearFilmScanTimeoutMs: 60_000 };
+  const rollId = 'ROLL-STALE';
+  const staleStartedAt = new Date(Date.now() - 10 * 60 * 1000).toISOString(); // 10 min ago
+  frameMetadataStore.updateRoll(rollId, {
+    processingStatus: 'enhancing',
+    storagePath: '/tmp/some-storage/ROLL-STALE',
+    locationId: 'loc-1',
+    s3Prefix: 'film-scans/loc-1/',
+    timeline: { pcEnhanceStartedAt: staleStartedAt },
+  });
+
+  const res = await folderWatchService.sweepStaleEnhancingRolls();
+
+  assert.equal(res.swept.length, 1, 'exactly one roll swept');
+  assert.equal(res.swept[0], rollId);
+  const patched = frameMetadataStore.getRoll(rollId);
+  assert.equal(patched.processingStatus, null, 'processingStatus cleared');
+  assert.equal(patched.uploadStatus, 'pending', 'uploadStatus forced to pending — review even in Auto mode');
+  assert.equal(patched.uploadError, undefined, 'no uploadError when storagePath is present');
+  assert.ok(patched.timeline.pcRecoveredAt, 'timeline.pcRecoveredAt stamped');
+  assert.equal(patched.timeline.pcRecoveredReason, 'stale-enhancing-on-startup');
+});
+
+test('sweep: fresh enhancing roll (within timeout) is NOT swept — belt-and-braces guard against a live batch', async () => {
+  resetSharedState();
+  __config = { perfectlyClearFilmScanTimeoutMs: 60 * 60 * 1000 }; // 1 h
+  const rollId = 'ROLL-FRESH';
+  const freshStartedAt = new Date(Date.now() - 2 * 60 * 1000).toISOString(); // 2 min ago
+  frameMetadataStore.updateRoll(rollId, {
+    processingStatus: 'enhancing',
+    storagePath: '/tmp/storage/ROLL-FRESH',
+    timeline: { pcEnhanceStartedAt: freshStartedAt },
+  });
+
+  const res = await folderWatchService.sweepStaleEnhancingRolls();
+
+  assert.equal(res.swept.length, 0, 'no rolls swept');
+  assert.equal(res.skipped.length, 1);
+  assert.equal(res.skipped[0], rollId);
+  const untouched = frameMetadataStore.getRoll(rollId);
+  assert.equal(untouched.processingStatus, 'enhancing', 'still enhancing — guard held');
+  assert.equal(untouched.uploadStatus, undefined);
+});
+
+test('sweep: enhancing roll with MISSING pcEnhanceStartedAt is treated as maximally stale and swept', async () => {
+  resetSharedState();
+  __config = { perfectlyClearFilmScanTimeoutMs: 60_000 };
+  const rollId = 'ROLL-NO-TIMESTAMP';
+  frameMetadataStore.updateRoll(rollId, {
+    processingStatus: 'enhancing',
+    storagePath: '/tmp/storage/ROLL-NO-TIMESTAMP',
+    // No timeline.pcEnhanceStartedAt.
+  });
+
+  const res = await folderWatchService.sweepStaleEnhancingRolls();
+
+  assert.equal(res.swept.length, 1);
+  const rec = frameMetadataStore.getRoll(rollId);
+  assert.equal(rec.processingStatus, null);
+  assert.equal(rec.uploadStatus, 'pending');
+  assert.equal(rec.timeline.pcRecoveredReason, 'enhancing-without-timestamp');
+});
+
+test('sweep: enhancing roll WITHOUT storagePath → uploadStatus="failed" with actionable error message (edge case b)', async () => {
+  resetSharedState();
+  __config = { perfectlyClearFilmScanTimeoutMs: 60_000 };
+  const rollId = 'ROLL-INCOMPLETE';
+  const staleStartedAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  frameMetadataStore.updateRoll(rollId, {
+    processingStatus: 'enhancing',
+    // storagePath deliberately absent — crash before recordRoll() ran.
+    timeline: { pcEnhanceStartedAt: staleStartedAt },
+  });
+
+  const res = await folderWatchService.sweepStaleEnhancingRolls();
+
+  assert.equal(res.swept.length, 1);
+  const rec = frameMetadataStore.getRoll(rollId);
+  assert.equal(rec.processingStatus, null);
+  assert.equal(rec.uploadStatus, 'failed',
+    'no storagePath → surface the honest failure state so the operator sees it, not a mysterious later upload failure');
+  assert.match(rec.uploadError, /re-scan or delete/i,
+    'error message names the recovery action');
+});
+
+test('sweep: rolls in other processingStatus states (converting/processing) are left alone', async () => {
+  resetSharedState();
+  __config = { perfectlyClearFilmScanTimeoutMs: 60_000 };
+  frameMetadataStore.updateRoll('ROLL-CONV',  { processingStatus: 'converting', storagePath: '/tmp/x' });
+  frameMetadataStore.updateRoll('ROLL-PROC',  { processingStatus: 'processing', storagePath: '/tmp/x' });
+  frameMetadataStore.updateRoll('ROLL-DONE',  { processingStatus: null, storagePath: '/tmp/x', uploadStatus: 'uploaded' });
+
+  const res = await folderWatchService.sweepStaleEnhancingRolls();
+
+  assert.equal(res.swept.length, 0);
+  assert.equal(frameMetadataStore.getRoll('ROLL-CONV').processingStatus, 'converting');
+  assert.equal(frameMetadataStore.getRoll('ROLL-PROC').processingStatus, 'processing');
+  assert.equal(frameMetadataStore.getRoll('ROLL-DONE').uploadStatus,     'uploaded');
+});
+
+test('sweep: skips a roll whose in-process batch is currently registered (live-batch guard)', async () => {
+  resetSharedState();
+  __config = { perfectlyClearFilmScanTimeoutMs: 60_000 };
+  const rollId = 'ROLL-LIVE';
+  const staleStartedAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  frameMetadataStore.updateRoll(rollId, {
+    processingStatus: 'enhancing',
+    storagePath: '/tmp/live',
+    timeline: { pcEnhanceStartedAt: staleStartedAt },
+  });
+  // Manually seed the registry as if a batch were live.
+  const controller = new AbortController();
+  folderWatchService._activeFilmScanBatch = { rollId, abortController: controller, startedAt: Date.now() };
+  try {
+    const res = await folderWatchService.sweepStaleEnhancingRolls();
+    assert.equal(res.swept.length, 0, 'live-registry match → not swept');
+    assert.equal(res.skipped.length, 1);
+    assert.equal(frameMetadataStore.getRoll(rollId).processingStatus, 'enhancing');
+  } finally {
+    folderWatchService._activeFilmScanBatch = null;
+  }
+});
+
+test('resetEnhancingRoll: phantom (no live batch, no storagePath) → success + uploadStatus="failed"', async () => {
+  resetSharedState();
+  const rollId = 'ROLL-PHANTOM';
+  frameMetadataStore.updateRoll(rollId, {
+    processingStatus: 'enhancing',
+    // No storagePath — mid-enhance crash before recordRoll.
+    timeline: { pcEnhanceStartedAt: new Date().toISOString() },
+  });
+
+  const res = await folderWatchService.resetEnhancingRoll(rollId);
+
+  assert.equal(res.success, true);
+  assert.equal(res.wasLive, false, 'phantom branch reports wasLive=false');
+  const rec = frameMetadataStore.getRoll(rollId);
+  assert.equal(rec.processingStatus, null);
+  assert.equal(rec.uploadStatus, 'failed');
+  assert.match(rec.uploadError, /re-scan or delete/i);
+  assert.equal(rec.timeline.pcRecoveredReason, 'operator-reset-phantom');
+});
+
+test('resetEnhancingRoll: phantom WITH storagePath → success + uploadStatus="pending"', async () => {
+  resetSharedState();
+  const rollId = 'ROLL-PHANTOM-OK';
+  frameMetadataStore.updateRoll(rollId, {
+    processingStatus: 'enhancing',
+    storagePath: '/tmp/storage/ROLL-PHANTOM-OK',
+    timeline: { pcEnhanceStartedAt: new Date().toISOString() },
+  });
+
+  const res = await folderWatchService.resetEnhancingRoll(rollId);
+
+  assert.equal(res.success, true);
+  assert.equal(res.wasLive, false);
+  const rec = frameMetadataStore.getRoll(rollId);
+  assert.equal(rec.uploadStatus, 'pending');
+  assert.equal(rec.uploadError, undefined);
+});
+
+test('resetEnhancingRoll: live batch → aborts the AbortController (wasLive=true)', async () => {
+  resetSharedState();
+  const rollId = 'ROLL-LIVE-RESET';
+  const controller = new AbortController();
+  folderWatchService._activeFilmScanBatch = { rollId, abortController: controller, startedAt: Date.now() };
+  try {
+    const res = await folderWatchService.resetEnhancingRoll(rollId);
+
+    assert.equal(res.success, true);
+    assert.equal(res.wasLive, true);
+    assert.equal(controller.signal.aborted, true, 'signal aborted');
+  } finally {
+    folderWatchService._activeFilmScanBatch = null;
+  }
+});
+
+test('resetEnhancingRoll: unknown roll → success:false + error', async () => {
+  resetSharedState();
+  const res = await folderWatchService.resetEnhancingRoll('NO-SUCH-ROLL');
+  assert.equal(res.success, false);
+  assert.match(res.error, /not found/i);
+});
+
+test('resetEnhancingRoll: rejects non-string rollId', async () => {
+  resetSharedState();
+  const res = await folderWatchService.resetEnhancingRoll(null);
+  assert.equal(res.success, false);
+});
+
+test('zero-enhanced diagnostic: WARN logged when the batch produces no enhanced frames, naming the input folder', async () => {
+  resetSharedState();
+  const { watch, storage } = makeWorkspace();
+  __config = baseFilmConfig(watch, storage, { perfectlyClear: pcConfigFixture() });
+
+  const rollName = 'ROLL-NO-ENHANCE';
+  seedRoll(watch, rollName, { 'a.jpg': Buffer.from('A'), 'b.jpg': Buffer.from('B') });
+
+  // Every file rejected — nothing enhanced.
+  __pcResults = async (opts) => opts.files.map((f) => ({
+    sourcePath: f.sourcePath, destPath: f.destPath, status: 'rejected',
+  }));
+
+  // Capture logger.logWarning calls.
+  const warnings = [];
+  const loggerModule = require(path.join(SVC, 'logger.js'));
+  const origWarn = loggerModule.logWarning;
+  loggerModule.logWarning = (msg) => { warnings.push(String(msg)); };
+  try {
+    await folderWatchService._processFilmScans(__config);
+  } finally {
+    loggerModule.logWarning = origWarn;
+  }
+
+  const hit = warnings.find((w) => /produced zero enhanced frames/.test(w));
+  assert.ok(hit, `expected a zero-enhanced diagnostic; got warnings: ${JSON.stringify(warnings)}`);
+  assert.match(hit, /\/tmp\/pc-in/, 'input folder is named in the warning so the operator has a lead');
+});
