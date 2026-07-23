@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { bestFitOrientation } from '../../../shared/cropRectMath.js';
 
 /**
  * src/renderer/views/JobReview/CropEditor.jsx
@@ -233,6 +234,12 @@ export function CropEditor({
                             // so ManualCropMode can track + apply imperatively on Enter
   onImgLoadedChange,        // optional (boolean) => void; signals image-loaded state for
                             // ManualCropMode's Approve gate
+  onNaturalSize,            // optional (w, h) => void; emits the POST-rotation effective
+                            // natural dims once the image loads (and again if
+                            // imageRotation flips 0↔90↔180↔270). ManualCropMode uses this
+                            // to compute the per-image best-fit orientation for the toggle
+                            // + controlledOrientation without having to load the image
+                            // itself (2026-07-23 per-image best-fit feature).
   controlledOrientation, // optional 'portrait'|'landscape' — when present, overrides the
                          // internal orientationOverride state so ManualCropMode can drive
                          // the toggle from outside in hideOwnChrome mode
@@ -294,8 +301,19 @@ export function CropEditor({
   // per-image orientation toggle in hideOwnChrome mode). Falls
   // through to the internal state for the standard-drawer caller.
   const effectiveOrientationOverride = controlledOrientation || orientationOverride;
+  // 2026-07-23 — per-image best-fit orientation. When no external override
+  // is in play (fresh image, no saved rect, no operator toggle) AND the
+  // target is non-square AND the source's natural dims are known, seed
+  // orientation from the SOURCE image's aspect rather than the target's,
+  // so a landscape photo defaults to a landscape 4×6 box on load without
+  // an operator flip. Square targets and pre-load frames still fall back
+  // to the target's natural orientation (toggle is suppressed for square
+  // anyway; pre-load path is transient — first onLoad triggers a re-render).
+  const targetOrientation = baseAspect >= 1 ? 'landscape' : 'portrait';
   const orientation = effectiveOrientationOverride
-    ?? (baseAspect >= 1 ? 'landscape' : 'portrait');
+    ?? (isSquare || !naturalSize.w
+        ? targetOrientation
+        : bestFitOrientation(naturalSize.w, naturalSize.h, targetOrientation));
   const aspectRatio = orientation === 'landscape'
     ? Math.max(baseAspect, 1 / baseAspect)
     : Math.min(baseAspect, 1 / baseAspect);
@@ -403,6 +421,17 @@ export function CropEditor({
   useEffect(() => {
     if (typeof onImgLoadedChange === 'function') onImgLoadedChange(imgLoaded);
   }, [imgLoaded, onImgLoadedChange]);
+  // 2026-07-23 — emit POST-rotation effective natural dims to the parent
+  // so ManualCropMode can resolve the per-image toggle without loading
+  // the image again itself. Fires on initial load AND every time
+  // imageRotation flips (the effect above swaps naturalSize accordingly).
+  // Primitive deps (naturalSize.w/.h) so an object-identity change on
+  // naturalSize doesn't spuriously re-fire.
+  useEffect(() => {
+    if (typeof onNaturalSize !== 'function') return;
+    if (!naturalSize.w || !naturalSize.h) return;
+    onNaturalSize(naturalSize.w, naturalSize.h);
+  }, [naturalSize.w, naturalSize.h, onNaturalSize]);
 
   // ── Canvas size matches its container ────────────────────────────────────
 

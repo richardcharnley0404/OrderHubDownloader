@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useReducer } from 'react';
 import { CropEditor } from './CropEditor.jsx';
 import { CropThumbRail } from './CropThumbRail.jsx';
+import { bestFitOrientation } from '../../../shared/cropRectMath.js';
 
 /**
  * src/renderer/views/JobReview/ManualCropMode.jsx
@@ -361,21 +362,13 @@ export default function ManualCropMode({
   });
   const [stageImgLoaded, setStageImgLoaded] = useState(false);
 
-  // Session-level orientation memory (Manual Crop redesign UX, 2026-06-02).
-  // Initializes from the target size's natural orientation when sizeOption
-  // resolves; sticky thereafter — only operator toggles change it. Persists
-  // across image navigation so working through a 36-image roll stays in
-  // one orientation by default. Per-image pendingOrientation still wins
-  // when set (operator can deliberately flip a single image and the rest
-  // of the queue follows their LATEST choice, not the initial default).
-  const [sessionOrientation, setSessionOrientation] = useState(null);
-  useEffect(() => {
-    if (!sizeOption || sessionOrientation !== null) return;
-    // Square targets (w === h) fall through to landscape — the toggle is
-    // suppressed in CropStage for square anyway.
-    const targetIsLandscape = (sizeOption.w / sizeOption.h) >= 1;
-    setSessionOrientation(targetIsLandscape ? 'landscape' : 'portrait');
-  }, [sizeOption, sessionOrientation]);
+  // 2026-07-23 — Per-image natural-size cache. Populated by CropEditor's
+  // onNaturalSize callback for whichever image is on the stage; used by
+  // CropStage to seed the toggle's per-image best-fit orientation
+  // (auto-orientation feature). Replaces the pre-2026-07-23 sessionOrientation
+  // memory: orientation is now purely per-image — a toggle on one image
+  // NEVER propagates to others. See docs/manual-crop-best-fit-orientation.md.
+  const [naturalByFilename, setNaturalByFilename] = useState({});
 
   // ── Refs for unmount-time flush ──────────────────────────────────────────
   const perImageStateRef = useRef(perImageState);
@@ -486,11 +479,23 @@ export default function ManualCropMode({
 
   const setOrientation = useCallback((orientation) => {
     if (!currentFilename) return;
-    // Lift to session so subsequent images inherit this orientation by
-    // default; also persist to the current image's pendingOrientation so
-    // explicit choices survive into the sidecar via Approve.
-    setSessionOrientation(orientation);
+    // 2026-07-23 — pure per-image dispatch. Deliberately does NOT
+    // propagate to session/other images; each image auto-orients from
+    // its own aspect via naturalByFilename + bestFitOrientation.
     dispatch({ type: 'UPDATE_ORIENTATION', filename: currentFilename, orientation });
+  }, [currentFilename]);
+
+  // Stable per-image onNaturalSize callback fed into CropEditor. Fires
+  // once per image visit (and again on rotation flip). Bound to the
+  // currently-mounted stage image so we never write a race-condition
+  // entry against the wrong filename.
+  const onStageNaturalSize = useCallback((w, h) => {
+    if (!currentFilename) return;
+    setNaturalByFilename((prev) => {
+      const existing = prev[currentFilename];
+      if (existing && existing.w === w && existing.h === h) return prev;
+      return { ...prev, [currentFilename]: { w, h } };
+    });
   }, [currentFilename]);
 
   // ── CropEditor → reducer bridge ──────────────────────────────────────────
@@ -526,6 +531,19 @@ export default function ManualCropMode({
     const rect = st.pendingCropRect;
     if (!isValidRect(rect)) return;
 
+    // 2026-07-23 — resolve the per-image orientation that shaped this
+    // rect so the sidecar records reality. Priority mirrors approveAll:
+    // operator's explicit pendingOrientation → best-fit from the natural
+    // size (cached by onStageNaturalSize when the image loaded) → derive
+    // from the rect's own w/h. sizeOption may be null pre-resolve; guard
+    // for that even though the Approve button is gated on !targetSizeReady.
+    const targetOrient = sizeOption && (sizeOption.w / sizeOption.h) >= 1 ? 'landscape' : 'portrait';
+    const natural = naturalByFilename[filename] || null;
+    const resolvedOrientation = st.pendingOrientation
+      ?? (natural
+          ? bestFitOrientation(natural.w, natural.h, targetOrient)
+          : bestFitOrientation(rect.w, rect.h, targetOrient));
+
     dispatch({ type: 'APPLY_START', filename });
     try {
       const result = await window.electronAPI.jobCropImage({
@@ -537,6 +555,7 @@ export default function ManualCropMode({
         darkroomSize:     null,
         ohJobId,
         cropRotation:     st.pendingRotation || 0,
+        cropOrientation:  resolvedOrientation,
         // Re-cropping an already-approved image must source from the
         // pristine /originals/<filename>, not /working/ which holds
         // the previous crop's output. 'originals' is also safe for
@@ -560,7 +579,7 @@ export default function ManualCropMode({
     } catch (err) {
       dispatch({ type: 'APPLY_ERROR', filename, error: err && err.message ? err.message : String(err) });
     }
-  }, [currentImage, ohJobId, onBatchApplied, selectedIndex]);
+  }, [currentImage, ohJobId, onBatchApplied, selectedIndex, sizeOption, naturalByFilename]);
 
   // ── Keyboard handlers (document-level) ──────────────────────────────────
   useEffect(() => {
@@ -640,7 +659,8 @@ export default function ManualCropMode({
     setApproveAllErrors([]);
     const errors = [];
 
-    const targetAspect = sizeOption.w / sizeOption.h;
+    const targetAspect      = sizeOption.w / sizeOption.h;
+    const targetOrientation = targetAspect >= 1 ? 'landscape' : 'portrait';
 
     for (const img of candidates) {
       const filename = img.filename;
@@ -659,8 +679,8 @@ export default function ManualCropMode({
         continue;
       }
 
-      let rect = isValidRect(st.pendingCropRect) ? st.pendingCropRect : null;
-      let pendingOrientation = st.pendingOrientation || (targetAspect >= 1 ? 'landscape' : 'portrait');
+      let rect                = isValidRect(st.pendingCropRect) ? st.pendingCropRect : null;
+      let resolvedOrientation = st.pendingOrientation || null; // fill in below when we have dims
 
       if (!rect) {
         // Auto-fit at target aspect against the pristine /originals/ source.
@@ -683,9 +703,17 @@ export default function ManualCropMode({
           errors.push({ filename, error: 'image has zero dimensions' });
           continue;
         }
-        // Effective aspect respects orientation (square sizes fall through
-        // to landscape — toggle is suppressed in CropStage for square).
-        const effAspect = pendingOrientation === 'landscape'
+        // 2026-07-23 per-image best-fit. Operator's pendingOrientation
+        // wins; otherwise auto-pick from THIS image's own aspect, falling
+        // back to the target's natural orientation for square sources.
+        // No cross-image propagation.
+        if (!resolvedOrientation) {
+          resolvedOrientation = bestFitOrientation(dims.w, dims.h, targetOrientation);
+        }
+        // Effective aspect respects the resolved orientation (square
+        // sizes fall through to landscape — toggle is suppressed in
+        // CropStage for square).
+        const effAspect = resolvedOrientation === 'landscape'
           ? Math.max(targetAspect, 1 / targetAspect)
           : Math.min(targetAspect, 1 / targetAspect);
         const { w: iw, h: ih } = dims;
@@ -703,6 +731,12 @@ export default function ManualCropMode({
           x: Math.round(cx), y: Math.round(cy),
           w: Math.round(cw), h: Math.round(ch),
         };
+      } else if (!resolvedOrientation) {
+        // Operator has a pending rect but never set pendingOrientation
+        // explicitly — derive orientation from the rect's own shape so
+        // the sidecar records what actually got applied. Square rect
+        // falls back to targetOrientation.
+        resolvedOrientation = bestFitOrientation(rect.w, rect.h, targetOrientation);
       }
 
       dispatch({ type: 'APPLY_START', filename });
@@ -716,6 +750,10 @@ export default function ManualCropMode({
           darkroomSize:     null,
           ohJobId,
           cropRotation:     st.pendingRotation || 0,
+          // 2026-07-23 — persist the per-image orientation that actually
+          // shaped this crop so the sidecar records reality even for
+          // fresh images (no self-heal-from-rect-shape needed later).
+          cropOrientation:  resolvedOrientation,
           sourceFrom:       'originals',
         });
         if (result && result.success) {
@@ -852,12 +890,13 @@ export default function ManualCropMode({
             sizeOption={sizeOption}
             targetSizeReady={targetSizeReady}
             state={currentState}
-            sessionOrientation={sessionOrientation}
+            naturalSize={currentFilename ? (naturalByFilename[currentFilename] || null) : null}
             selectedIndex={selectedIndex}
             totalCount={totalCount}
             stageImgLoaded={stageImgLoaded}
             onCropRectChange={onCropRectChange}
             onImgLoadedChange={setStageImgLoaded}
+            onNaturalSize={onStageNaturalSize}
             onRotate={rotateBy}
             onSetOrientation={setOrientation}
             onApproveAndAdvance={approveAndAdvance}
@@ -927,21 +966,27 @@ function ManualCropTopBar({ targetSize, approvedCount, totalCount, onExit, exitD
 
 function CropStage({
   image, jobPath, sizeOption, targetSizeReady, state,
-  sessionOrientation,
+  naturalSize,
   selectedIndex, totalCount, stageImgLoaded,
-  onCropRectChange, onImgLoadedChange,
+  onCropRectChange, onImgLoadedChange, onNaturalSize,
   onRotate, onSetOrientation, onApproveAndAdvance, onNavigate,
   onDiscard, onRestore, onApproveAll, isApprovingAll, approveAllEnabled,
 }) {
   const baseAspect = sizeOption ? sizeOption.w / sizeOption.h : 1;
   const isSquare   = !sizeOption || Math.abs(baseAspect - 1) < 0.001;
-  // Resolution chain (first non-null wins):
-  //   per-image override → operator deliberately set THIS image
-  //   session orientation → operator's last toggle (sticky across nav)
-  //   target's natural orientation → initial default before any toggle
+  // 2026-07-23 — per-image best-fit resolution chain (first non-null wins):
+  //   pendingOrientation → operator deliberately flipped THIS image
+  //   bestFit(naturalSize, targetOrientation) → THIS image's own aspect
+  //   targetOrientation → transient fallback before dims are known
+  //                       (square targets stay here since the toggle is
+  //                        suppressed anyway).
+  // No cross-image propagation — sessionOrientation was retired 2026-07-23
+  // so a flip on image N never leaks onto N+1.
+  const targetOrientation = baseAspect >= 1 ? 'landscape' : 'portrait';
   const orientation = state.pendingOrientation
-    ?? sessionOrientation
-    ?? (baseAspect >= 1 ? 'landscape' : 'portrait');
+    ?? (naturalSize
+        ? bestFitOrientation(naturalSize.w, naturalSize.h, targetOrientation)
+        : targetOrientation);
 
   const rotation = state.pendingRotation || 0;
   const rotationLabel = rotation === 0 ? null
@@ -1043,6 +1088,7 @@ function CropStage({
           folderName="originals"
           onCropRectChange={onCropRectChange}
           onImgLoadedChange={onImgLoadedChange}
+          onNaturalSize={onNaturalSize}
           onApply={() => {}}
           onCancel={() => {}}
         />

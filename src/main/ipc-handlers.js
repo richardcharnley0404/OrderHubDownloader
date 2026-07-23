@@ -1712,9 +1712,19 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
 
   /**
    * ohd:job:batch-crop-apply  (M5b — 2026-05-25)
-   * Payload:  { jobPath, sidecar, filenames, fractionalRect, orientation,
-   *             channelMappingId?, darkroomSize?, ohJobId? }
+   * Payload:  { jobPath, sidecar, filenames, fractionalSpec, sizeOption, orientation,
+   *             perImageOrientations?, channelMappingId?, darkroomSize?, ohJobId?,
+   *             sourceFrom? }
    * Returns:  { success, sidecar, succeeded:[], failed:[], skipped:[], aborted? }
+   *
+   * 2026-07-23 — orientation now accepts 'portrait' | 'landscape' | 'auto'.
+   * With 'auto' the batch driver picks each image's crop-box orientation
+   * from its own source aspect (bestFitOrientation), falling back to the
+   * target size's orientation for square sources. An optional
+   * perImageOrientations map ({ [filename]: 'portrait'|'landscape' })
+   * overrides auto per file — the sidecar's persisted cropOrientation
+   * always records the RESOLVED value, never the top-level 'auto' literal.
+   * See docs/manual-crop-best-fit-orientation.md.
    *
    * Loops the M5a crop primitive over `filenames`, computing the per-image
    * pixel rect from `fractionalRect` × that image's source dimensions.

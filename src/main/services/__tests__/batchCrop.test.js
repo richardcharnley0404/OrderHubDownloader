@@ -1460,3 +1460,212 @@ test('M5d (2026-06-02): sourceFrom=originals reads /originals/<filename>, not /w
     + 'A blue-dominant pixel means the primitive wrote to /originals/ — '
     + 'the contract is read-only on /originals/, write-only to /working/.');
 });
+
+// ─── Auto-orientation (2026-07-23) ──────────────────────────────────────────
+//
+// applyBatchCrop is currently dormant from the renderer (ManualCropMode's
+// approveAll went per-image in the 2026-06-02 redesign), but the batch
+// driver still needs to honour the new orientation:'auto' contract for
+// future callers. bestFitOrientation itself has direct unit tests in
+// src/shared/__tests__/cropRectMath.test.js — these five cases lock the
+// integration: per-image resolution, override map, square-target
+// invariance, and the pre-existing explicit-orientation regression.
+
+test('auto orientation: landscape source (6000×4000) + landscape 4×6 target → cropOrientation="landscape" persisted, rect at landscape aspect', async (t) => {
+  const dl = await makeTempDir();
+  t.after(() => fs.rm(dl, { recursive: true, force: true }));
+  const ctx = await setupManualBatchJob(dl, {
+    images: [{ filename: 'land.jpg', width: 6000, height: 4000 }],
+  });
+
+  const result = await applyBatchCrop({
+    jobPath:        ctx.jobPath,
+    sidecar:        ctx.sidecar,
+    filenames:      ['land.jpg'],
+    fractionalSpec: { centerX: 0.5, centerY: 0.5, scale: 1.0 },
+    sizeOption:     { id: 'cm_4x6', w: 4, h: 6, label: '4×6"' },
+    orientation:    'auto',
+    deps:           { logger: silentLogger },
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(result.succeeded.length, 1);
+
+  const onDisk = JSON.parse(await fs.readFile(ctx.sidecarPath, 'utf8'));
+  const entry = onDisk.images[0];
+  assert.equal(entry.cropOrientation, 'landscape',
+    'auto orientation on landscape source must persist as "landscape" — not the top-level "auto" literal');
+  // Landscape 4×6 (effAspect 1.5) on 6000×4000 source:
+  //   maxFitW = min(6000, 4000×1.5) = min(6000, 6000) = 6000
+  //   maxFitH = 6000 / 1.5 = 4000. scale=1 → 6000×4000. Full frame.
+  assert.equal(entry.cropRect.w, 6000);
+  assert.equal(entry.cropRect.h, 4000);
+});
+
+test('auto orientation: portrait source (4000×6000) + 4×6 target → cropOrientation="portrait" persisted, rect at portrait aspect', async (t) => {
+  const dl = await makeTempDir();
+  t.after(() => fs.rm(dl, { recursive: true, force: true }));
+  const ctx = await setupManualBatchJob(dl, {
+    images: [{ filename: 'port.jpg', width: 4000, height: 6000 }],
+  });
+
+  const result = await applyBatchCrop({
+    jobPath:        ctx.jobPath,
+    sidecar:        ctx.sidecar,
+    filenames:      ['port.jpg'],
+    fractionalSpec: { centerX: 0.5, centerY: 0.5, scale: 1.0 },
+    sizeOption:     { id: 'cm_4x6', w: 4, h: 6, label: '4×6"' },
+    orientation:    'auto',
+    deps:           { logger: silentLogger },
+  });
+
+  assert.equal(result.success, true);
+  const onDisk = JSON.parse(await fs.readFile(ctx.sidecarPath, 'utf8'));
+  const entry = onDisk.images[0];
+  assert.equal(entry.cropOrientation, 'portrait');
+  // Portrait 4×6 (effAspect 4/6 ≈ 0.667) on 4000×6000:
+  //   maxFitW = min(4000, 6000×0.667) = min(4000, 4000) = 4000
+  //   maxFitH = 4000 / 0.667 = 6000. scale=1 → 4000×6000. Full frame.
+  assert.equal(entry.cropRect.w, 4000);
+  assert.equal(entry.cropRect.h, 6000);
+});
+
+test('auto orientation: mixed batch — landscape + portrait sources produce independent per-image orientations', async (t) => {
+  const dl = await makeTempDir();
+  t.after(() => fs.rm(dl, { recursive: true, force: true }));
+  const ctx = await setupManualBatchJob(dl, {
+    images: [
+      { filename: 'land.jpg', width: 800, height: 400 }, // 2:1 landscape
+      { filename: 'port.jpg', width: 400, height: 800 }, // 1:2 portrait
+      { filename: 'sq.jpg',   width: 500, height: 500 }, // square → fallback to targetOrientation
+    ],
+  });
+
+  const result = await applyBatchCrop({
+    jobPath:        ctx.jobPath,
+    sidecar:        ctx.sidecar,
+    filenames:      ['land.jpg', 'port.jpg', 'sq.jpg'],
+    fractionalSpec: { centerX: 0.5, centerY: 0.5, scale: 1.0 },
+    // Non-square target so targetOrientation is well-defined (4/6 < 1 → 'portrait').
+    sizeOption:     { id: 'cm_4x6', w: 4, h: 6, label: '4×6"' },
+    orientation:    'auto',
+    deps:           { logger: silentLogger },
+  });
+
+  assert.equal(result.success, true);
+  const onDisk = JSON.parse(await fs.readFile(ctx.sidecarPath, 'utf8'));
+  const byName = Object.fromEntries(onDisk.images.map((e) => [e.filename, e]));
+  assert.equal(byName['land.jpg'].cropOrientation, 'landscape', 'landscape source → landscape');
+  assert.equal(byName['port.jpg'].cropOrientation, 'portrait',  'portrait  source → portrait');
+  // Square source falls back to targetOrientation. sizeOption 4×6 has w/h < 1
+  // so targetOrientation is 'portrait'.
+  assert.equal(byName['sq.jpg'].cropOrientation, 'portrait',
+    'square source under auto must fall back to the target size\'s orientation (portrait for 4×6)');
+});
+
+test('auto orientation: per-image override map wins over auto for the explicit filenames', async (t) => {
+  const dl = await makeTempDir();
+  t.after(() => fs.rm(dl, { recursive: true, force: true }));
+  const ctx = await setupManualBatchJob(dl, {
+    images: [
+      { filename: 'land.jpg',    width: 800, height: 400 }, // would auto → landscape
+      { filename: 'landflip.jpg', width: 800, height: 400 }, // operator flipped → portrait
+    ],
+  });
+
+  const result = await applyBatchCrop({
+    jobPath:        ctx.jobPath,
+    sidecar:        ctx.sidecar,
+    filenames:      ['land.jpg', 'landflip.jpg'],
+    fractionalSpec: { centerX: 0.5, centerY: 0.5, scale: 1.0 },
+    sizeOption:     { id: 'cm_4x6', w: 4, h: 6, label: '4×6"' },
+    orientation:    'auto',
+    perImageOrientations: { 'landflip.jpg': 'portrait' },
+    deps:           { logger: silentLogger },
+  });
+
+  assert.equal(result.success, true);
+  const onDisk = JSON.parse(await fs.readFile(ctx.sidecarPath, 'utf8'));
+  const byName = Object.fromEntries(onDisk.images.map((e) => [e.filename, e]));
+  assert.equal(byName['land.jpg'].cropOrientation,     'landscape',
+    'no override entry → auto resolves to landscape for a landscape source');
+  assert.equal(byName['landflip.jpg'].cropOrientation, 'portrait',
+    'perImageOrientations entry MUST win over auto — operator-flipped choice is authoritative');
+});
+
+test('auto orientation: square target is orientation-invariant — every source crops square regardless of source aspect', async (t) => {
+  const dl = await makeTempDir();
+  t.after(() => fs.rm(dl, { recursive: true, force: true }));
+  const ctx = await setupManualBatchJob(dl, {
+    images: [
+      { filename: 'wide.jpg', width: 800, height: 400 },
+      { filename: 'tall.jpg', width: 400, height: 800 },
+      { filename: 'sq.jpg',   width: 500, height: 500 },
+    ],
+  });
+
+  const result = await applyBatchCrop({
+    jobPath:        ctx.jobPath,
+    sidecar:        ctx.sidecar,
+    filenames:      ['wide.jpg', 'tall.jpg', 'sq.jpg'],
+    fractionalSpec: { centerX: 0.5, centerY: 0.5, scale: 1.0 },
+    sizeOption:     { id: 'cm_8x8', w: 8, h: 8, label: '8×8"' },
+    orientation:    'auto',
+    deps:           { logger: silentLogger },
+  });
+
+  assert.equal(result.success, true);
+  // Every crop must be square — effectiveAspect returns 1 for square
+  // targets regardless of the resolved orientation string.
+  for (const fn of ['wide.jpg', 'tall.jpg', 'sq.jpg']) {
+    const meta = await sharp(path.join(ctx.jobPath, 'working', fn)).metadata();
+    assert.equal(meta.width, meta.height,
+      `${fn}: square target must produce square crop under orientation:'auto' — regression lock`);
+  }
+});
+
+test('auto orientation: explicit "landscape" / "portrait" top-level orientation still validates + still applies (non-auto regression lock)', async (t) => {
+  const dl = await makeTempDir();
+  t.after(() => fs.rm(dl, { recursive: true, force: true }));
+  const ctx = await setupManualBatchJob(dl, {
+    images: [{ filename: 'x.jpg', width: 200, height: 150 }],
+  });
+
+  const result = await applyBatchCrop({
+    jobPath:        ctx.jobPath,
+    sidecar:        ctx.sidecar,
+    filenames:      ['x.jpg'],
+    fractionalSpec: { centerX: 0.5, centerY: 0.5, scale: 1.0 },
+    sizeOption:     { id: 'cm_4x6', w: 4, h: 6, label: '4×6"' },
+    // Pre-2026-07-23 behaviour — explicit orientation, no perImage map.
+    orientation:    'landscape',
+    deps:           { logger: silentLogger },
+  });
+
+  assert.equal(result.success, true);
+  const onDisk = JSON.parse(await fs.readFile(ctx.sidecarPath, 'utf8'));
+  assert.equal(onDisk.images[0].cropOrientation, 'landscape',
+    'explicit non-auto orientation must round-trip verbatim into cropOrientation');
+});
+
+test('auto orientation: invalid perImageOrientations (array instead of object) rejected at validation', async (t) => {
+  const dl = await makeTempDir();
+  t.after(() => fs.rm(dl, { recursive: true, force: true }));
+  const ctx = await setupManualBatchJob(dl, {
+    images: [{ filename: 'x.jpg', width: 200, height: 150 }],
+  });
+
+  const result = await applyBatchCrop({
+    jobPath:        ctx.jobPath,
+    sidecar:        ctx.sidecar,
+    filenames:      ['x.jpg'],
+    fractionalSpec: { centerX: 0.5, centerY: 0.5, scale: 1.0 },
+    sizeOption:     { id: 'cm_4x6', w: 4, h: 6, label: '4×6"' },
+    orientation:    'auto',
+    perImageOrientations: ['bad', 'array'],
+    deps:           { logger: silentLogger },
+  });
+
+  assert.equal(result.success, false);
+  assert.match(result.error, /perImageOrientations/);
+});

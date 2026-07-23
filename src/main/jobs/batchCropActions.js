@@ -391,7 +391,18 @@ async function _applyCropToSingleImage(opts) {
  * @param {object} opts.sidecar
  * @param {string[]} opts.filenames    - subset to process (renderer-decided)
  * @param {{x,y,w,h}} opts.fractionalRect - image-relative fractions
- * @param {'portrait'|'landscape'} opts.orientation
+ * @param {'portrait'|'landscape'|'auto'} opts.orientation
+ *   'auto' (2026-07-23): per-image best-fit. For each file the driver
+ *   picks 'landscape' when meta.width > meta.height, 'portrait' when
+ *   meta.width < meta.height, and falls back to the target size's own
+ *   orientation for square sources (so square-target behaviour is
+ *   unchanged). An explicit entry in `perImageOrientations` always wins.
+ * @param {Object<string,'portrait'|'landscape'>} [opts.perImageOrientations]
+ *   Optional per-filename override map. Set for images the operator
+ *   explicitly flipped so their choice survives 'auto' resolution.
+ *   Ignored when orientation is 'portrait' / 'landscape' (top-level
+ *   already uniform), except that a bad map value silently falls back
+ *   to the top-level orientation.
  * @param {string|null} [opts.channelMappingId]
  * @param {string|null} [opts.darkroomSize]
  * @param {string|number|null} [opts.ohJobId]
@@ -421,6 +432,7 @@ async function applyBatchCrop(opts) {
     // (square targets give square crops regardless of source aspect).
     fractionalSpec,
     orientation,
+    perImageOrientations = null,
     sizeOption,
     channelMappingId = null,
     darkroomSize     = null,
@@ -443,13 +455,21 @@ async function applyBatchCrop(opts) {
       || !['centerX', 'centerY', 'scale'].every((k) => Number.isFinite(fractionalSpec[k]))) {
     return { success: false, error: 'fractionalSpec must be { centerX, centerY, scale } with finite numbers', succeeded: [], failed: [], skipped: [] };
   }
-  if (orientation !== 'portrait' && orientation !== 'landscape') {
-    return { success: false, error: 'orientation must be "portrait" or "landscape"', succeeded: [], failed: [], skipped: [] };
+  if (orientation !== 'portrait' && orientation !== 'landscape' && orientation !== 'auto') {
+    return { success: false, error: 'orientation must be "portrait", "landscape", or "auto"', succeeded: [], failed: [], skipped: [] };
+  }
+  if (perImageOrientations != null
+      && (typeof perImageOrientations !== 'object' || Array.isArray(perImageOrientations))) {
+    return { success: false, error: 'perImageOrientations, when provided, must be a plain object keyed by filename', succeeded: [], failed: [], skipped: [] };
   }
   if (!sizeOption || !Number.isFinite(sizeOption.w) || !Number.isFinite(sizeOption.h)
       || sizeOption.w <= 0 || sizeOption.h <= 0) {
     return { success: false, error: 'sizeOption with positive w/h is required', succeeded: [], failed: [], skipped: [] };
   }
+  // Compute once — the target size's natural orientation is the fallback
+  // for auto-mode when a source image is square (and the fallback we hand
+  // to bestFitOrientation so callers get a valid string even at edges).
+  const targetOrientation = (sizeOption.w / sizeOption.h) >= 1 ? 'landscape' : 'portrait';
 
   let sharp;
   if (deps.sharp) {
@@ -527,16 +547,30 @@ async function applyBatchCrop(opts) {
     }
 
     let pixelRect;
+    let resolvedOrientation;
     try {
       const meta = await sharp(sourcePath).metadata();
+      // 2026-07-23: resolve per-image orientation. Explicit entry in
+      // perImageOrientations wins (operator-flipped image, decision 1).
+      // Otherwise 'auto' → bestFit(meta dims) with targetOrientation
+      // as square-source fallback; 'portrait'/'landscape' → verbatim.
+      // For a square TARGET this is orientation-invariant anyway
+      // (effectiveAspect returns 1 regardless), so the square-target
+      // case is preserved without a special branch here.
+      // eslint-disable-next-line global-require
+      const { specToPixelRect, bestFitOrientation } = require('../../shared/cropRectMath');
+      const explicit = perImageOrientations && perImageOrientations[filename];
+      resolvedOrientation = (explicit === 'portrait' || explicit === 'landscape')
+        ? explicit
+        : (orientation === 'auto'
+            ? bestFitOrientation(meta.width, meta.height, targetOrientation)
+            : orientation);
       // 2026-05-25: compute per-image pixel rect from the
       // FractionalSpec via specToPixelRect, which honours the TARGET
-      // aspect (sizeOption + orientation). Output rect's pixel
-      // dimensions always match target aspect — square targets give
-      // square crops regardless of source image aspect.
-      // eslint-disable-next-line global-require
-      const { specToPixelRect } = require('../../shared/cropRectMath');
-      pixelRect = specToPixelRect(fractionalSpec, sizeOption, orientation, meta.width, meta.height);
+      // aspect (sizeOption + resolvedOrientation). Output rect's
+      // pixel dimensions always match target aspect — square targets
+      // give square crops regardless of source image aspect.
+      pixelRect = specToPixelRect(fractionalSpec, sizeOption, resolvedOrientation, meta.width, meta.height);
       if (!pixelRect) {
         throw new Error('specToPixelRect returned null — invalid spec or image dimensions');
       }
@@ -568,7 +602,10 @@ async function applyBatchCrop(opts) {
       channelMappingId,
       darkroomSize,
       ohJobId,
-      cropOrientation: orientation,
+      // 2026-07-23: persist the RESOLVED per-image orientation, not the
+      // top-level value — so the sidecar records what was actually
+      // applied even when orientation === 'auto'.
+      cropOrientation: resolvedOrientation,
       cropSource:      'batch',
       cropAppliedAt:   batchAppliedAt,
       sourceFrom,

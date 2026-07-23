@@ -140,14 +140,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
   jobRecropFromOriginal: (payload) => ipcRenderer.invoke('ohd:job:recrop-from-original', payload),
 
   // Manual Cropping M5b (2026-05-25) — batch crop for manual-source jobs.
-  // Payload: { jobPath, sidecar, filenames, fractionalRect: {x,y,w,h},
-  //            orientation: 'portrait'|'landscape',
+  // Payload: { jobPath, sidecar, filenames, fractionalSpec, sizeOption,
+  //            orientation: 'portrait'|'landscape'|'auto',
+  //            perImageOrientations?: { [filename]: 'portrait'|'landscape' },
   //            channelMappingId?, darkroomSize?, ohJobId?,
   //            sourceFrom?: 'working'|'originals' }
   // Returns: { success, sidecar, succeeded, failed, skipped, aborted? }
   // Manual Crop redesign (2026-06-02): sourceFrom default 'working' preserves
   // M5b semantics; 'originals' (set by ManualCropMode's Apply Default to All)
   // sources every target image from /originals/<filename>.
+  // 2026-07-23: orientation:'auto' + perImageOrientations enable per-image
+  // best-fit crop-box orientation for the (currently dormant from renderer)
+  // batch driver — the persisted cropOrientation is the resolved per-image
+  // value, never the top-level 'auto' literal. See
+  // docs/manual-crop-best-fit-orientation.md.
   jobBatchCropApply:  (payload) => ipcRenderer.invoke('ohd:job:batch-crop-apply', payload),
 
   // Manual Crop redesign (2026-06-01) — persist in-progress per-image crop

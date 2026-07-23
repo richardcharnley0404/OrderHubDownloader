@@ -70,6 +70,29 @@
  * conversion happens at apply time via specToPixelRect.
  */
 
+/**
+ * Best-fit crop-box orientation for a source image against a non-square
+ * target. Landscape source → 'landscape'; portrait source → 'portrait';
+ * square source (or invalid dims) → `fallback` (the caller's target
+ * orientation, so the toggle stays consistent for square sources on
+ * non-square targets and orientation-invariant behaviour on square
+ * targets is preserved).
+ *
+ * Used by CropEditor to seed a fresh image's crop box, by ManualCropMode
+ * to compute the per-image toggle state (no cross-image propagation),
+ * and by applyBatchCrop when `orientation:'auto'`.
+ *
+ * @param {number} w  source natural width
+ * @param {number} h  source natural height
+ * @param {'portrait'|'landscape'} [fallback='landscape']  used for square / invalid dims
+ * @returns {'portrait'|'landscape'}
+ */
+function bestFitOrientation(w, h, fallback = 'landscape') {
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return fallback;
+  if (w === h) return fallback;
+  return w > h ? 'landscape' : 'portrait';
+}
+
 function effectiveAspect(sizeOption, orientation) {
   if (!sizeOption || !Number.isFinite(sizeOption.w) || !Number.isFinite(sizeOption.h)
       || sizeOption.w <= 0 || sizeOption.h <= 0) {
@@ -244,6 +267,7 @@ function resizeSpecFromHandle({
 }
 
 module.exports = {
+  bestFitOrientation,
   effectiveAspect,
   maxFitAreaFraction,
   minScaleForArea,
