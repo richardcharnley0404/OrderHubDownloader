@@ -5500,6 +5500,14 @@ function renderChannelMappings(mappings, controllers) {
         .filter(Boolean)
     );
 
+    // Controller types that don't consult `printSizeCode` — same list as
+    // routing-service.NON_DPOF_CONTROLLER_TYPES. Only DPOF-family rows
+    // get the "no print size" warning badge (non-DPOF types don't have
+    // the field at all).
+    const NON_DPOF_TYPES = new Set(['darkroompro', 'fujijobmaker', 'frontline', 'folder_copy', 'pdf_copy']);
+    const ctrlType     = ctrl && ctrl.type ? String(ctrl.type) : '';
+    const isDpofFamily = !NON_DPOF_TYPES.has(ctrlType);
+
     for (const mapping of ctrlMappings) {
       const optionsHtml = (mapping.options || [])
         .map(o => {
@@ -5517,6 +5525,15 @@ function renderChannelMappings(mappings, controllers) {
       const infoDiv = document.createElement('div');
       infoDiv.className = 'channel-mapping-info';
       const isFrontlineMapping = ctrl && ctrl.type === 'frontline';
+      // Blank printSizeCode on a DPOF-family mapping gets an amber
+      // warning chip instead of the empty size span — flags historical
+      // mappings the step-2 backfill couldn't fill (non-WxH legacy
+      // values). Non-DPOF types render unchanged.
+      const printSizeHtml = mapping.printSizeCode
+        ? `<span class="channel-mapping-options">${escapeHtml(mapping.printSizeCode)}</span>`
+        : (isDpofFamily
+            ? `<span class="badge badge-warning" title="No Print Size Code configured — jobs routed here will fail at dispatch. Edit to set the Print Size Code.">⚠ No print size</span>`
+            : '');
       infoDiv.innerHTML =
         `<span class="channel-mapping-product">${escapeHtml(mapping.productCode)}</span>` +
         (optionsHtml ? `<span class="channel-mapping-options">${optionsHtml}</span>` : '') +
@@ -5524,7 +5541,7 @@ function renderChannelMappings(mappings, controllers) {
           ? `<span class="channel-mapping-channel">→ ${escapeHtml(mapping.batchCode || '(no batch code)')}</span>` +
             (mapping.sortString ? `<span class="channel-mapping-options">${escapeHtml(mapping.sortString)}</span>` : '')
           : `<span class="channel-mapping-channel">→ Ch ${mapping.channelNumber}</span>` +
-            (mapping.printSizeCode ? `<span class="channel-mapping-options">${escapeHtml(mapping.printSizeCode)}</span>` : '')) +
+            printSizeHtml) +
         (mapping.skipAutoPrint ? `<span class="channel-mapping-options" title="This channel is excluded from Auto Print">skip auto-print</span>` : '');
 
       const actionsDiv = document.createElement('div');
