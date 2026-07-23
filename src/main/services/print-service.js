@@ -244,8 +244,11 @@ class PrintService {
       throw new Error(`Job ${job.id} not found in order manifest. Manifest has ${manifest.jobs ? manifest.jobs.length : 0} jobs.`);
     }
 
-    if (Array.isArray(jobManifest.images) && jobManifest.images.some(img => !img.size)) {
-      throw new Error('Cannot print — size is missing on one or more images. Check product configuration in Pixfizz Core.');
+    if (!route.printSizeCode || String(route.printSizeCode).trim() === '') {
+      throw new Error(
+        `No print size configured for product "${job.product_code || '(none)'}". ` +
+        `Set the Print Size Code on this product's channel mapping in Settings → Routing.`
+      );
     }
 
     const enhancedMap    = await this._getEnhancedPathMap(jobFolderName, jobFolderPath);

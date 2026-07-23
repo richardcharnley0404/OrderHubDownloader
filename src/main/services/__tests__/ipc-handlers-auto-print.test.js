@@ -253,19 +253,27 @@ test('auto-print catch: a generic dispatch throw flips job to error + sets _erro
 });
 
 
-test('auto-print catch: missing-size throw (the print-service:236 contract) propagates verbatim', async () => {
-  // Pins down the v1.3.2 fix-B contract: when the polling-service's
-  // receive-time missing-size check is gone, the canonical missing-size
-  // validation lives at print-service.js:236 and surfaces here. The
-  // operator-friendly text must reach the job's _errorMessage so the
-  // renderer's warning-state UI shows what's actually wrong.
+test('auto-print catch: missing-print-size throw (the print-service DPOF mapping gate) propagates verbatim', async () => {
+  // Pins down the mapping-based print-size gate: when a job's resolved
+  // route has no printSizeCode (blank / unconfigured channel mapping),
+  // the print-service throws with an actionable, product-code-aware
+  // message. The operator-friendly text must reach the job's
+  // _errorMessage so the renderer's warning-state UI shows what's
+  // actually wrong.
+  //
+  // Replaces the earlier "size is missing on one or more images" gate,
+  // which read the upstream manifest's img.size — vestigial, since the
+  // DPOF size actually emitted to the printer comes from
+  // route.printSizeCode (resolved by routing-service from the product's
+  // channel mapping). See docs/orderhub-mandatory-print-size-plan.md §3.1.
   resetState();
   __jobs = [makeJob()];
   __controllers = [{ id: 'CTRL-1', autoprint: true, type: 'noritsu' }];
   __routeForJob = makeDpofRoute();
   __dispatchBehavior = 'throw';
   __dispatchError = new Error(
-    'Cannot print — size is missing on one or more images. Check product configuration in Pixfizz Core.'
+    'No print size configured for product "TestProduct". ' +
+    'Set the Print Size Code on this product\'s channel mapping in Settings → Routing.'
   );
 
   await _runAutoPrint();
@@ -273,7 +281,7 @@ test('auto-print catch: missing-size throw (the print-service:236 contract) prop
   const update = __updateCalls.find((c) => c.jobId === 'JOB-1');
   assert.ok(update);
   assert.equal(update.updates._status, 'error');
-  assert.match(update.updates._errorMessage, /size is missing/);
+  assert.match(update.updates._errorMessage, /No print size configured/);
 });
 
 
