@@ -79,6 +79,7 @@ const fakeRoutingService = {
   resolvePrintSizeCode: () => 'KG',
   // Startup-time methods called from setupIpcHandlers
   migrateFromPrintControllerStore: () => {},
+  backfillLegacyPrintSizeCode: () => {},
   stripDeprecatedConfigJsonKeys: () => {},
 };
 

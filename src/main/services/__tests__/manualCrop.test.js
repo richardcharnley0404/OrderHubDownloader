@@ -109,6 +109,7 @@ stubInCache(path.join(SVC, 'routing-service.js'),                   {
   resolveRoute: () => null,
   // setupIpcHandlers invokes these at top level on every load.
   migrateFromPrintControllerStore: () => {},
+  backfillLegacyPrintSizeCode:     () => {},
   stripDeprecatedConfigJsonKeys:   () => {},
 });
 stubInCache(path.join(SVC, 's3-service.js'),                        {});

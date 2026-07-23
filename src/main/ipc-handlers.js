@@ -108,6 +108,14 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
   // into the new routing-service data structures on first startup.
   routingService.migrateFromPrintControllerStore();
 
+  // One-time backfill: copy legacy `mapping.size` into `mapping.printSizeCode`
+  // for DPOF/Noritsu channel mappings whose printSizeCode is blank, so the
+  // legacy-`size` fallback in resolvePrintSizeCode can be dropped in a
+  // follow-up commit without changing what any mapping resolves to. Runs
+  // AFTER the print-controller-store migration so it sees any mappings
+  // freshly copied out of the old store on this same startup.
+  routingService.backfillLegacyPrintSizeCode();
+
   // One-time cleanup: remove the now-deprecated routing keys from config.json
   // (orderControllers, processControllerMappings, channelMappings, ...).
   // Routing data lives exclusively in routing.json since the store split, but

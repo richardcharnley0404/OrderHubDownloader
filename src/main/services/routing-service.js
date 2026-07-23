@@ -33,6 +33,19 @@ const store = new Store({ name: 'routing' });
 
 // ── Print Size Code resolution ────────────────────────────────────────────────
 
+// Bare WxH shape — e.g. "4x6", "8 x 10", "4.5x6.5", "8×8", "8X8". These
+// need to be wrapped as `NML -PSIZE "<W>x<H>"` (with whitespace stripped
+// and Unicode × normalised to ASCII x) before Noritsu will accept them.
+// Exported via `isBareWxH` so the legacy-`size` backfill uses the SAME
+// detection as read-time resolution — otherwise the two can drift apart
+// and a backfilled mapping could resolve to a different PSL string than
+// the legacy fallback did.
+const BARE_WXH_PATTERN = /^\s*\d+(?:\.\d+)?\s*[x×]\s*\d+(?:\.\d+)?\s*$/i;
+
+function isBareWxH(value) {
+  return BARE_WXH_PATTERN.test(String(value == null ? '' : value));
+}
+
 /**
  * Resolve a channel mapping's print size code into the exact value emitted as
  * `PRT PSL=...` in the DPOF .mrk file.
@@ -48,7 +61,7 @@ const store = new Store({ name: 'routing' });
  *
  * Resolution rules:
  *   - Blank → fall back to legacy `mapping.size` (wrapped) or `'KG'`.
- *   - Matches `^<W>x<H>$` (whitespace and Unicode × tolerated) → wrap as
+ *   - Matches bare WxH (whitespace and Unicode × tolerated) → wrap as
  *     `NML -PSIZE "<W>x<H>"`, normalising Unicode × → ASCII x.
  *   - Anything else (standard codes, pre-formatted NML strings) → pass
  *     through unchanged.
@@ -61,7 +74,7 @@ function resolvePrintSizeCode(mapping) {
   if (!raw) {
     return mapping.size ? `NML -PSIZE "${mapping.size}"` : 'KG';
   }
-  if (/^\s*\d+(?:\.\d+)?\s*[x×]\s*\d+(?:\.\d+)?\s*$/i.test(raw)) {
+  if (isBareWxH(raw)) {
     const normalised = raw.replace(/\s+/g, '').replace(/×/g, 'x');
     return `NML -PSIZE "${normalised}"`;
   }
@@ -981,6 +994,119 @@ function migrateFromPrintControllerStore() {
   }
 }
 
+// ── Legacy `size` → `printSizeCode` backfill ─────────────────────────────────
+
+// Controller types that do NOT consult `size` / `printSizeCode` at all. The
+// backfill below is DPOF/Noritsu-only; every other type derives its print
+// size from its own dedicated fields.
+const NON_DPOF_CONTROLLER_TYPES = new Set([
+  'darkroompro', 'fujijobmaker', 'frontline', 'folder_copy', 'pdf_copy',
+]);
+
+/**
+ * One-time backfill: copy legacy `mapping.size` into `mapping.printSizeCode`
+ * for DPOF/Noritsu channel mappings whose `printSizeCode` is blank AND
+ * whose legacy `size` is a bare WxH shape (e.g. "4x6", "8 x 10", "8×8").
+ *
+ * Historically Noritsu mappings carried a bare `size` which
+ * `resolvePrintSizeCode` wrapped as `NML -PSIZE "<W>x<H>"` at read time via a
+ * legacy-`size` fallback. The modern schema treats `printSizeCode` as the
+ * single source of truth and a follow-up commit will drop that fallback
+ * (along with the `'KG'` default). This backfill copies bare-WxH legacy
+ * values into `printSizeCode` verbatim so existing mappings keep resolving
+ * to the same PSL string after the fallback goes away — `resolvePrintSizeCode`
+ * already wraps bare WxH values, so no pre-wrapping is needed here.
+ *
+ * Why bare-WxH only: `resolvePrintSizeCode` guarantees byte-identical output
+ * before-and-after backfill ONLY when the legacy `size` matches the shape
+ * `isBareWxH` recognises. For any other legacy value (e.g. a short code like
+ * "KG" that was mis-stored in the `size` field), the two paths would diverge:
+ *   legacy fallback →  `NML -PSIZE "KG"`   (wraps whatever's in `size`)
+ *   backfilled path →  `KG`                (pass-through for non-WxH input)
+ * Backfilling a non-WxH legacy value would therefore silently change what the
+ * printer receives — the exact regression this commit is meant to prevent.
+ * Such mappings are left blank instead so the step-1 dispatch gate fires with
+ * a clear message; a per-mapping warning is logged so operators (and the
+ * step-4 routing-list badge) can flag them for manual fixing.
+ *
+ * Scope: mappings whose controller type is NOT one of
+ *   darkroompro / fujijobmaker / frontline / folder_copy / pdf_copy
+ * — those types don't consult either field. Mappings pointing at an unknown
+ * controllerId are treated as DPOF-shaped (type defaults to ''), which
+ * matches what `resolvePrintSizeCode` does at runtime.
+ *
+ * Mappings that already have a `printSizeCode` are left untouched. Mappings
+ * with neither `printSizeCode` nor legacy `size` are left blank — the
+ * step-1 dispatch gate covers those the same way as the skipped non-WxH ones.
+ *
+ * Idempotent: guarded by `_backfill_print_size_v1` in the routing store.
+ * A second run also finds nothing to backfill even if the flag is cleared,
+ * because the eligibility condition (blank `printSizeCode` + bare-WxH
+ * `size`) is false for every mapping after the first pass.
+ *
+ * Called once at application start from ipc-handlers.js after
+ * `migrateFromPrintControllerStore` so the backfill sees any freshly-
+ * migrated mappings.
+ */
+function backfillLegacyPrintSizeCode() {
+  if (store.get('_backfill_print_size_v1', false)) return;
+
+  try {
+    const controllers = store.get('orderControllers', []);
+    const mappings    = store.get('channelMappings',  []);
+
+    const controllerTypeById = new Map(
+      controllers.map(c => [c.id, c && c.type ? String(c.type) : ''])
+    );
+
+    let backfilled    = 0;
+    let skippedNonWxH = 0;
+    const nextMappings = mappings.map(m => {
+      const type = controllerTypeById.get(m.controllerId) || '';
+      if (NON_DPOF_CONTROLLER_TYPES.has(type)) return m;
+
+      const existing = String(m.printSizeCode || '').trim();
+      if (existing) return m;
+
+      const legacy = String(m.size || '').trim();
+      if (!legacy) return m;
+
+      if (!isBareWxH(legacy)) {
+        // Non-WxH legacy value — see docblock. Warn per mapping so the
+        // operator can find and fix it (the entry also lands in error.log
+        // via winston's error-level split... actually logWarning is warn-
+        // level, which stays in app.log). Keep the log key names stable —
+        // the step-4 routing-list badge will grep for these.
+        skippedNonWxH++;
+        logger.logWarning('routing-service: legacy channel-mapping size is not WxH — not backfilled', {
+          channelMappingId: m.id,
+          controllerId:     m.controllerId,
+          productCode:      m.productCode || '',
+          legacySize:       legacy,
+        });
+        return m;
+      }
+
+      backfilled++;
+      return { ...m, printSizeCode: legacy };
+    });
+
+    if (backfilled > 0) {
+      store.set('channelMappings', nextMappings);
+    }
+    store.set('_backfill_print_size_v1', true);
+
+    logger.info('routing-service: printSizeCode backfill complete', {
+      backfilled,
+      skippedNonWxH,
+      totalMappings: mappings.length,
+    });
+  } catch (err) {
+    logger.logError('routing-service: printSizeCode backfill failed', err);
+    // Do NOT set the flag so it retries next startup
+  }
+}
+
 // ── Exports ───────────────────────────────────────────────────────────────────
 
 module.exports = {
@@ -990,6 +1116,7 @@ module.exports = {
   optionsMatchWithIgnore,
   getRoutingHeldProcesses,
   migrateFromPrintControllerStore,
+  backfillLegacyPrintSizeCode,
   stripDeprecatedConfigJsonKeys,
   // Controllers
   getControllers,
