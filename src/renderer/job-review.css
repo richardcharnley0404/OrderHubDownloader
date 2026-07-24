@@ -525,6 +525,105 @@
   border-color: var(--app-red);
 }
 
+/* ─── Score dot (2026-07-24 UI-standardisation) ─────────────────────────
+   Compact colour-coded dot used in place of the .jr-score pill on the
+   standard ThumbnailCard (bottom-right corner) and in the manual
+   CropThumbRail (top-LEFT — opposite the state glyph at top-right so
+   both stay readable). Same threshold/error tooltip logic as .jr-score
+   (both consume computeScoreDisplay from ScoreBadge.jsx).
+   - Neutral dot: subtle contrast against the thumb.
+   - --sub variant reuses the same red token as .jr-score--sub so a
+     red score in the strip and a red dot in the grid match.
+*/
+.jr-score-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
+  pointer-events: auto;
+}
+.jr-score-dot--sub {
+  background: var(--app-red);
+  border-color: var(--app-red);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+/* Standard-grid slot — positioned like the pill it replaced (same
+   bottom-right corner) so nothing else on the card needs to move. */
+.jr-card .jr-score-dot {
+  position: absolute;
+  bottom: var(--app-s2);
+  right: var(--app-s2);
+}
+/* Manual-rail slot — top-left, opposite the state glyph badge which
+   lives at top-right. Padding is 4px to match the state badge's
+   4px offset so both corners feel visually anchored. */
+.jr-crop-rail-thumb__score {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  line-height: 0;
+  z-index: 1;
+}
+
+/* ─── Image info strip (2026-07-24 UI-standardisation) ──────────────────
+   Horizontal single-line strip rendered directly beneath the main
+   preview image in both review modes. The single info anchor for the
+   currently-selected image: filename + AI Quality score (via the shared
+   ScoreBadge) + compact state chips (Flagged / Cropped / Enhanced) that
+   render only when applicable.
+*/
+.jr-info-strip {
+  display: flex;
+  align-items: center;
+  gap: var(--app-s3);
+  padding: var(--app-s2) var(--app-s3);
+  border-top: 1px solid var(--app-border-subtle);
+  background: var(--app-surface);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.jr-info-strip__filename {
+  font-family: var(--app-mono);
+  font-weight: 600;
+  color: var(--app-ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+/* When the strip hosts the pill form of the score, unpin it from
+   absolute positioning (which .jr-score defaults to for the pre-strip
+   in-thumbnail placement) so it sits inline with the filename + chips. */
+.jr-info-strip .jr-score {
+  position: static;
+  bottom: auto;
+  right: auto;
+  flex: 0 0 auto;
+}
+.jr-info-strip__chips {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--app-s2);
+  flex: 0 0 auto;
+}
+.jr-info-strip__chip {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: #fff;
+}
+.jr-info-strip__chip--reprint  { background: var(--app-red); }
+.jr-info-strip__chip--cropped  { background: var(--app-brand-green); }
+.jr-info-strip__chip--enhanced { background: var(--app-purple-ai); }
+
 /* ─── Customer Originals (Phase 1) ───────────────────────────────────── */
 
 /* Small thumbnail + two action icons rendered at the bottom-left of the

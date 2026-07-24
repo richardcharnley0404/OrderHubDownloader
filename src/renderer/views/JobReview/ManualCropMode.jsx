@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useReducer } from 'react';
 import { CropEditor } from './CropEditor.jsx';
 import { CropThumbRail } from './CropThumbRail.jsx';
+import { ImageInfoStrip } from './ImageInfoStrip.jsx';
 import { bestFitOrientation } from '../../../shared/cropRectMath.js';
 
 /**
@@ -321,6 +322,12 @@ export default function ManualCropMode({
   images,
   jobPath,
   ohJobId,
+  // 2026-07-24 UI-standardisation — passed through to the ImageInfoStrip
+  // below the CropStage preview and to CropThumbRail's per-thumb ScoreDot.
+  // Threshold is owned by useJobReview in index.jsx; the manual view was
+  // already receiving the same images array with per-frame aiQuality
+  // blocks, this prop just gives it the operator's current threshold.
+  aiQualityThreshold,
   onBatchApplied,
   onExit,
   onSentToPrint,
@@ -880,6 +887,7 @@ export default function ManualCropMode({
           selectedIndex={selectedIndex}
           perImageState={perImageState}
           targetSizeReady={targetSizeReady}
+          aiQualityThreshold={aiQualityThreshold}
           onSelect={setSelectedIndex}
         />
 
@@ -890,6 +898,7 @@ export default function ManualCropMode({
             sizeOption={sizeOption}
             targetSizeReady={targetSizeReady}
             state={currentState}
+            aiQualityThreshold={aiQualityThreshold}
             naturalSize={currentFilename ? (naturalByFilename[currentFilename] || null) : null}
             selectedIndex={selectedIndex}
             totalCount={totalCount}
@@ -966,6 +975,7 @@ function ManualCropTopBar({ targetSize, approvedCount, totalCount, onExit, exitD
 
 function CropStage({
   image, jobPath, sizeOption, targetSizeReady, state,
+  aiQualityThreshold,
   naturalSize,
   selectedIndex, totalCount, stageImgLoaded,
   onCropRectChange, onImgLoadedChange, onNaturalSize,
@@ -1013,8 +1023,12 @@ function CropStage({
     <div className="jr-crop-stage">
       <header className="jr-crop-stage__topbar">
         <div className="jr-crop-stage__title">
+          {/* Filename lives in the ImageInfoStrip below the CropEditor now
+              (2026-07-24 UI-standardisation) — same info anchor in both
+              review modes. This top-bar keeps just the counter + status
+              badges + rotation label, alongside the orientation and
+              rotation controls to the right. */}
           <span className="jr-focused-counter">{selectedIndex + 1} / {totalCount}</span>
-          <span className="jr-focused-filename" title={image.filename}>{image.filename}</span>
           {state.cropAppliedOnDisk && !state.modifiedSinceApproval && (
             <span className="jr-focused-cropped-badge" title="Approved on disk">approved</span>
           )}
@@ -1093,6 +1107,13 @@ function CropStage({
           onCancel={() => {}}
         />
       </div>
+
+      {/* 2026-07-24 UI-standardisation — same info anchor as the
+          standard mode carries under its main preview. Sits between
+          the CropEditor and the per-image error / footer so filename
+          + AI score + state chips are always in the operator's eye
+          line while they crop. */}
+      <ImageInfoStrip image={image} aiQualityThreshold={aiQualityThreshold} />
 
       {/* Per-image error strip — only renders when state.applyError is
           set. Footer below stays a clean 5-button row otherwise. */}

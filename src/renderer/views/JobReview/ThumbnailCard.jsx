@@ -1,4 +1,5 @@
 import { useRef, useEffect, useState } from 'react';
+import { ScoreDot } from './ScoreBadge.jsx';
 
 /**
  * src/renderer/views/JobReview/ThumbnailCard.jsx
@@ -149,52 +150,12 @@ function drawPlaceholder(ctx, w, h) {
   ctx.stroke();
 }
 
-// ── Sub-components ────────────────────────────────────────────────────────────
-
-/**
- * Per-image AI Quality score pill, bottom-right corner of the thumbnail.
- *
- *   - unscored (no aiQuality block, or scored:false)  → render nothing
- *   - errored  (aiQuality.error populated)            → "n/a" + tooltip with error
- *   - scored, above threshold                         → white text on dark pill
- *   - scored, below threshold                         → red text + red border
- *
- * Tooltip carries the calibration context: scored timestamp, model version,
- * mode at score time, threshold at score time.
- */
-function ScoreBadge({ aiQuality, threshold }) {
-  if (!aiQuality || !aiQuality.scored) return null;
-
-  const hasError = !!aiQuality.error;
-  const score = typeof aiQuality.score === 'number' ? aiQuality.score : null;
-  const subThreshold = !hasError && score !== null && score < threshold;
-  const display = hasError || score === null ? 'n/a' : score.toFixed(1);
-
-  // Tooltip — newline-separated lines via the title attribute (browsers
-  // render \n as line breaks in native tooltips).
-  const tipLines = [];
-  if (hasError) tipLines.push(`Error: ${aiQuality.error}`);
-  if (aiQuality.scoredAt) {
-    try {
-      tipLines.push(`Scored: ${new Date(aiQuality.scoredAt).toLocaleString()}`);
-    } catch { /* ignore parse failure */ }
-  }
-  if (aiQuality.modelVersion) tipLines.push(`Model: ${aiQuality.modelVersion}`);
-  if (aiQuality.modeAtScoreTime) tipLines.push(`Mode: ${aiQuality.modeAtScoreTime}`);
-  if (aiQuality.thresholdAtScoreTime != null) {
-    tipLines.push(`Threshold at scoring: ${aiQuality.thresholdAtScoreTime}`);
-  }
-  const tooltip = tipLines.join('\n');
-
-  return (
-    <div
-      title={tooltip}
-      className={'jr-score' + (subThreshold ? ' jr-score--sub' : '')}
-    >
-      {display}
-    </div>
-  );
-}
+// The per-image AI Quality score element was extracted to
+// ./ScoreBadge.jsx on 2026-07-24 (UI-standardisation). Both this card and
+// the new below-preview ImageInfoStrip render it via that shared module so
+// the threshold / error / tooltip logic has a single source of truth. This
+// card renders the compact <ScoreDot>; the strip renders the numeric
+// <ScoreBadge> pill.
 
 // ── ThumbnailCard ─────────────────────────────────────────────────────────────
 
@@ -433,7 +394,7 @@ export function ThumbnailCard({
           pointer-events on the container is set to none in CSS so the
           chips don't intercept card-select clicks; each child re-enables
           its own pointer events for tooltips. */}
-      {(qtyCurrent !== qtyOriginal || showNotFinalisedTag || showCopiesTag) && (
+      {(qtyCurrent !== qtyOriginal || showNotFinalisedTag || showCopiesTag || showSourceTag) && (
         <div className="jr-card__chip-overlay">
           {qtyCurrent !== qtyOriginal && (
             <span className="jr-badge jr-badge--qty">×{qtyCurrent}</span>
@@ -454,11 +415,23 @@ export function ThumbnailCard({
               ×{copies} copies
             </span>
           )}
+          {showSourceTag && (
+            <span
+              className={`jr-source-tag jr-source-tag--${artworkSource}`}
+              title={`This file's source (${artworkSource}) differs from the job's source (${jobArtworkSource})`}
+            >
+              {sourceTagLabel}
+            </span>
+          )}
         </div>
       )}
 
-      {/* Bottom-right AI Quality score pill */}
-      <ScoreBadge aiQuality={aiQuality} threshold={aiQualityThreshold} />
+      {/* Bottom-right AI Quality score dot. Compact colour-coded dot
+          (green/neutral vs red sub-threshold) — the numeric score now
+          lives in the ImageInfoStrip below the main preview. Grid stays
+          scannable for low-scoring frames without the numeric noise on
+          every card. Same tooltip metadata as before via ScoreBadge.jsx. */}
+      <ScoreDot aiQuality={aiQuality} threshold={aiQualityThreshold} />
 
       {/* Customer Originals (Phase 1).
           Rendered only when the manifest gave us a path — pre-feature
@@ -509,26 +482,11 @@ export function ThumbnailCard({
         </div>
       )}
 
-      {/* Filename strip — bottom-left under the canvas. Holds the
-          filename and (when mixed-source) the M2 source tag. The two
-          M3 chips ("Not finalised" warning and "×N copies") used to
-          live here too but were colliding with the bottom-right AI
-          score badge on long filenames (NOT FINA… truncation).
-          Layout-fix 2026-05-24 moved them up to the top-right
-          .jr-card__chip-overlay block above; this strip is now
-          warning-free (the source tag is identification, not
-          warning, per the layout-fix brief). */}
-      <div className="jr-card__label">
-        <span className="jr-card__filename" title={filename}>{filename}</span>
-        {showSourceTag && (
-          <span
-            className={`jr-source-tag jr-source-tag--${artworkSource}`}
-            title={`This file's source (${artworkSource}) differs from the job's source (${jobArtworkSource})`}
-          >
-            {sourceTagLabel}
-          </span>
-        )}
-      </div>
+      {/* Filename strip removed 2026-07-24 as part of the UI-standardisation
+          pass. Filename now lives in ImageInfoStrip below the main preview —
+          same anchor in both review modes. Source tag moved up into the
+          chip-overlay block above (still surfaces only when this file's
+          source differs from the job's; still identification, not warning). */}
 
     </div>
   );

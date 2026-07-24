@@ -1,4 +1,5 @@
 import { useRef, useEffect, useState, useMemo } from 'react';
+import { ScoreDot } from './ScoreBadge.jsx';
 
 /**
  * src/renderer/views/JobReview/CropThumbRail.jsx
@@ -42,6 +43,10 @@ export function CropThumbRail({
   selectedIndex,
   perImageState,
   targetSizeReady,
+  // 2026-07-24 UI-standardisation — forwarded into each CropRailThumb's
+  // ScoreDot so scanning for low-scoring frames works identically in
+  // both review modes' thumbnail views.
+  aiQualityThreshold,
   onSelect,
 }) {
   const scrollRef = useRef(null);
@@ -72,6 +77,7 @@ export function CropThumbRail({
             jobPath={jobPath}
             state={perImageState[img.filename] || {}}
             targetSizeReady={targetSizeReady}
+            aiQualityThreshold={aiQualityThreshold}
             isSelected={idx === selectedIndex}
             onClick={() => onSelect(idx)}
           />
@@ -84,7 +90,7 @@ export function CropThumbRail({
   );
 }
 
-function CropRailThumb({ image, jobPath, state, targetSizeReady, isSelected, onClick }) {
+function CropRailThumb({ image, jobPath, state, targetSizeReady, aiQualityThreshold, isSelected, onClick }) {
   const src = `file:///${jobPath.replace(/\\/g, '/')}/working/${image.filename}`;
   const [naturalDims, setNaturalDims] = useState(null);
 
@@ -192,6 +198,14 @@ function CropRailThumb({ image, jobPath, state, targetSizeReady, isSelected, onC
         aria-hidden="true"
       >
         {badgeGlyph}
+      </div>
+      {/* 2026-07-24 UI-standardisation — AI Quality dot in the top-LEFT
+          corner (opposite the state glyph at top-right) so scanning for
+          low-scoring frames works in the manual rail identically to the
+          standard grid. Never overlaps the state badge. Renders nothing
+          for unscored images (same rule as the standard grid dot). */}
+      <div className="jr-crop-rail-thumb__score">
+        <ScoreDot aiQuality={image.aiQuality} threshold={aiQualityThreshold} />
       </div>
       <div className="jr-crop-rail-thumb__name" title={image.filename}>
         {image.filename}

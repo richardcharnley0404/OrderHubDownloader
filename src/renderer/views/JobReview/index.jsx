@@ -4,6 +4,7 @@ import { ThumbnailGrid } from './ThumbnailGrid.jsx';
 import { ControlSidebar } from './ControlPanel.jsx';
 import { CropEditor } from './CropEditor.jsx';
 import ManualCropMode from './ManualCropMode.jsx';
+import { ImageInfoStrip } from './ImageInfoStrip.jsx';
 // M5b (2026-05-25): shared trigger predicate — same module the main side
 // uses for defensive logging, so renderer + main agree on which jobs
 // enter batch crop mode.
@@ -525,6 +526,7 @@ export function JobReviewDrawer({ jobId, jobPath, ohJobId, onClose }) {
           images={images}
           jobPath={jobPath}
           ohJobId={ohJobId}
+          aiQualityThreshold={aiQualityThreshold}
           onBatchApplied={replaceSidecar}
           onExit={() => setUserOverride('standard')}
           onSentToPrint={onClose}
@@ -563,6 +565,10 @@ export function JobReviewDrawer({ jobId, jobPath, ohJobId, onClose }) {
           />
 
           <PreviewArea selected={selected} jobPath={jobPath} />
+          {/* Single info anchor for the selected image — visible in
+              BOTH review modes (identical component in ManualCropMode's
+              CropStage). Renders nothing when nothing is selected. */}
+          <ImageInfoStrip image={selected} aiQualityThreshold={aiQualityThreshold} />
 
           {/* Reprint section was removed from the sidebar on 2026-05-18,
               so reprintCount / onToggleReprint are no longer passed in. */}
