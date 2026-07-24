@@ -1,3 +1,34 @@
+## v1.7.22 - 2026-07-24
+
+Correctness (print size) + lab-safety (film-scan pipeline) release. Full details in
+`docs/RELEASE-NOTES-1.7.22.md`.
+
+### Changed: Print size is now mandatory and product-code driven
+DPOF dispatch no longer relies on the upstream manifest's `img.size` field (which S3-delivered jobs set to `null` by design). The channel mapping's `printSizeCode` is now the single source of truth. Historical mappings without a size are backfilled from the legacy `size` field; new mappings must carry a `printSizeCode` at save time in both the Settings routing editor and the per-job Assign Channel modal. Unmapped or blank-size DPOF mappings surface with a "No print size" chip in the routing list so the lab can fix them before a job hits them. The silent `'KG'` fallback is gone — a mis-configured mapping now fails at dispatch with an actionable "No print size configured for product X" message rather than printing at the wrong size.
+
+### New: Best-fit crop-box orientation in Job Review
+Fresh crop boxes now default to the source image's aspect (landscape source → landscape 4×6 box; portrait → portrait), not the target size's. Per-image only — a manual Portrait/Landscape flip sets that image's orientation and does not propagate. Approve All auto-orients each image by its own shape; already-approved crops keep their existing orientation. Square target sizes are unaffected. Same behaviour in the standard grid and the manual crop rail. Dropped a lot of unnecessary per-image flipping in mixed-orientation rolls.
+
+### Changed: Job Review preview top bar (filename + AI quality score)
+Both review modes (standard grid + manual crop stage) now show filename and AI quality score in a thin top bar directly above the main preview image. Score digits are dark ink on a light surface for readability in both themes; sub-threshold shows a thick red border but the digits stay legible (the previous red-text-on-red styling was unreadable). Thumbnails keep their compact colour-coded score dot for at-a-glance scanning. Score tooltip trimmed to `Score: N.N` (errored: `Score: n/a — <reason>`); model/mode/threshold/timestamp lines dropped.
+
+### New: Lab-safe Perfectly Clear enhancement (never wedges a roll)
+A film-scan roll can no longer permanently wedge at `processingStatus:'enhancing'` when Perfectly Clear QuickServer is slow, dead, or misconfigured.
+- **Startup stale-sweep:** any roll left in `'enhancing'` from a prior session is cleared into review on next launch, with a staleness guard so a genuinely-live enhance from another process can't be clobbered.
+- **Operator "Reset enhancement" button** on enhancing rolls in the Film Scans UI — aborts the live batch via AbortController and escalates the roll to review with whatever it has (enhanced where available, originals otherwise). No operator file-editing required.
+- **Authoritative hard timeout:** every fs op inside the Perfectly Clear client is deadline-bounded, plus each poll cycle races against the remaining wall clock. A hung SMB share cannot wedge the batch past its timeout. Timeout and per-op cap are configurable (`perfectlyClearFilmScanTimeoutMs`, `perfectlyClearFilmScanPerOpTimeoutMs`) — null defaults preserve prior behaviour.
+- **Zero-enhanced diagnostic:** a batch that produces no enhanced frames logs a WARN naming the QuickServer input folder so a misconfigured or offline channel is obvious from the activity log.
+
+### Fixed: Transient 502 on presign no longer poisons a film-scan roll
+A single transient HTTP 502 from the OrderHub presign endpoint could permanently fail one file per roll, poisoning the completion manifest (`errors > 0`) and having OrderHub reject the whole roll — requiring a manual delete-and-re-upload in OH. The upload path now absorbs the blip at every layer:
+- **Presign retry:** transport errors, HTTP 429, and HTTP 5xx retried up to 4 attempts with `[1s/3s/7s]` backoff + jitter. 4xx (non-429) throws fast — auth errors don't get better with retries.
+- **PUT retry:** broadened from network-only to also retry PUT 5xx and 429, 4× attempts with matching backoffs.
+- **Second-pass sweeps:** after the per-file loop, up to 2 additional sweeps over only the still-failed files with a 2s wait between. Catches "gateway flapped during the batch" cases. Widened consecutive-failure early-abort to count 5xx/429 alongside network errors so a persistent 502 wave aborts fast instead of grinding every file's retry ladder.
+- **`failed_files[]` in the manifest:** per-file `{name, sub_path, reason}` records alongside the existing `errors` count. Reasons truncated to the first line + 120 chars so an HTML 502 body can't bloat the manifest.
+- **Self-heal for previously-failed rolls:** the film-scans cycle now re-attempts both `'uploading'` and `'failed'` rolls every tick, rate-limited to one retry per 10 minutes per roll. Combined with the inner retries, a transient blip cannot permanently kill a roll — worst case is a 10-minute delay before automatic recovery.
+- **Concurrent-upload guard:** in-process guard on `_uploadRollFromStorage` prevents two callers (main-poll auto-assign + film-scans self-heal + operator IPC) from starting two concurrent uploads of the same roll when their state guards race.
+- Outer roll-level retry trimmed from 3× `[30s, 90s]` to 2× `[15s]` now that inner layers absorb transient blips.
+
 ## v1.7.21 - 2026-07-18
 
 ### Changed: Film Development Phase 1 — ambiguous twin-check match guard
