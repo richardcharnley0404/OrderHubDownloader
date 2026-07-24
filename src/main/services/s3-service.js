@@ -60,93 +60,162 @@ class S3Service {
       .filter(f => !S3_EXCLUDED_EXTENSIONS.includes(path.extname(f).toLowerCase()));
 
     if (files.length === 0) {
-      return { uploaded: 0, failed: 0, total: 0 };
+      return { uploaded: 0, failed: 0, total: 0, failedFiles: [] };
     }
 
     // The OH API uses a folder token ('film-scans', 'file-uploads', etc.) rather than
     // full S3 keys. Extract it from the leading segment of s3Prefix.
     const s3Folder = s3Prefix.split('/')[0]; // e.g. 'film-scans' or 'file-uploads'
 
+    // 2026-07-24 — track failed files (name + short reason) rather than
+    // a bare count. The array is the source of truth for the second-pass
+    // retry AND populates the manifest's failed_files[]. Each entry:
+    //   { filePath, name, sub_path, reason }
     let uploaded = 0;
-    let failed = 0;
+    const uploadedSet = new Set();  // absolute filePath → skip in later passes
+    let failedFiles = [];           // rewritten per pass; final value goes to manifest
 
-    // Early-abort guard: if the network is clearly down, bail out of the batch
-    // after a couple of consecutive network failures instead of grinding through
-    // every remaining file (each burning its full timeout). The roll-level retry
-    // and the startup resume re-attempt the whole roll later.
-    const NETWORK_ERR = /(socket hang up|ECONNRESET|ECONNREFUSED|ENETUNREACH|ENETDOWN|EHOSTUNREACH|EAI_AGAIN|ETIMEDOUT|timed out|network stalled|Request timeout)/i;
+    // Early-abort guard: if presign / S3 keeps returning transient failures
+    // (network drop, or a struggling gateway returning 502/503 nonstop),
+    // bail out of the batch after N consecutive transient failures instead
+    // of grinding every remaining file through its full retry ladder. The
+    // 10-min self-heal picks up the roll for another try later.
+    // 2026-07-24 widened: HTTP 5xx / 429 responses count toward the abort
+    // budget too — the previous version only counted low-level network
+    // errors, so a persistent 502 wave burned through every file's retry
+    // ladder before falling out.
     const NET_ABORT = 2;
-    let consecutiveNetFails = 0;
-    let aborted = false;
 
-    try {
-      for (const filePath of files) {
-        // Build descriptor for this single file.
-        // sub_path = folderName[/relativeDir] so the server reconstructs the full key as:
-        //   {s3Folder}/{locationId}/{sub_path}/{name}
-        const relPath = path.relative(localFolderPath, filePath).replace(/\\/g, '/');
-        const name = path.basename(relPath);
-        const relDir = path.dirname(relPath);
-        const sub_path = relDir === '.' ? folderName : `${folderName}/${relDir}`;
-        const stat = fs.statSync(filePath);
-        const apiDescriptor = { name, folder: s3Folder, sub_path, size: stat.size, type: this._getContentType(filePath) };
+    // Reason truncator — HTML error bodies from 502 pages would bloat the
+    // manifest otherwise.
+    const reason = (err) => this._truncateReason(err);
 
-        // Request a fresh pre-signed URL for this file immediately before uploading.
-        let presignEntry;
-        try {
-          const presigned = await presignService.getPresignedUrls([apiDescriptor], credentials.locationId || null);
-          presignEntry = presigned[0];
-        } catch (error) {
-          failed++;
-          logger.logError(`Failed to obtain pre-signed URL for ${name}`, error);
-          if (NETWORK_ERR.test((error && error.message) || '')) {
-            if (++consecutiveNetFails >= NET_ABORT) { aborted = true; break; }
-          } else {
-            consecutiveNetFails = 0;
-          }
-          continue;
-        }
+    // Single-file try. Returns { ok: true } on success, { ok: false, err,
+    // transient: bool } on failure. Doesn't touch outer counters — the
+    // caller (loop below) manages uploaded/failedFiles/consecutive.
+    const tryOne = async (filePath) => {
+      const relPath  = path.relative(localFolderPath, filePath).replace(/\\/g, '/');
+      const name     = path.basename(relPath);
+      const relDir   = path.dirname(relPath);
+      const sub_path = relDir === '.' ? folderName : `${folderName}/${relDir}`;
+      const stat     = fs.statSync(filePath);
+      const desc     = { name, folder: s3Folder, sub_path, size: stat.size, type: this._getContentType(filePath) };
 
-        if (!presignEntry || !presignEntry.upload_url) {
-          failed++;
-          logger.logWarning(`presignService returned no URL for ${name}`, { name, sub_path, size: stat.size, type: apiDescriptor.type });
-          continue;
-        }
+      let presignEntry;
+      try {
+        const presigned = await presignService.getPresignedUrls([desc], credentials.locationId || null);
+        presignEntry = presigned[0];
+      } catch (err) {
+        return { ok: false, name, sub_path, err, transient: this._isTransientPresignError(err) };
+      }
+      if (!presignEntry || !presignEntry.upload_url) {
+        return { ok: false, name, sub_path, err: new Error('presignService returned no URL'), transient: false };
+      }
+      try {
+        await this._uploadWithRetry(filePath, presignEntry.upload_url, presignEntry.s3_key || name);
+        return { ok: true, name, sub_path, relPath };
+      } catch (err) {
+        return { ok: false, name, sub_path, err, transient: this._isTransientPutError(err) };
+      }
+    };
 
-        try {
-          await this._uploadWithRetry(filePath, presignEntry.upload_url, presignEntry.s3_key || name);
+    // Run one full pass over `passFiles`. Mutates `uploaded` / `uploadedSet`
+    // and returns the pass's failedFiles[] plus an `aborted` flag.
+    const runPass = async (passFiles, passLabel) => {
+      let consecutiveTransientFails = 0;
+      let aborted = false;
+      const passFailed = [];
+      for (const filePath of passFiles) {
+        if (uploadedSet.has(filePath)) continue;  // belt (never should be in passFiles)
+        const r = await tryOne(filePath);
+        if (r.ok) {
           uploaded++;
-          consecutiveNetFails = 0;
+          uploadedSet.add(filePath);
+          consecutiveTransientFails = 0;
           if (progressCallback) {
-            progressCallback({ message: `Uploaded ${uploaded}/${files.length}: ${relPath}`, status: 'uploading' });
+            progressCallback({ message: `Uploaded ${uploaded}/${files.length}: ${r.relPath} (${passLabel})`, status: 'uploading' });
           }
-        } catch (error) {
-          failed++;
-          logger.logError(`Failed to upload ${presignEntry.s3_key || name} after retries`, error);
-          if (NETWORK_ERR.test((error && error.message) || '')) {
-            if (++consecutiveNetFails >= NET_ABORT) { aborted = true; break; }
+        } else {
+          logger.logError(`Failed to upload ${r.sub_path}/${r.name} (${passLabel})`, r.err);
+          passFailed.push({ filePath, name: r.name, sub_path: r.sub_path, reason: reason(r.err) });
+          if (r.transient) {
+            if (++consecutiveTransientFails >= NET_ABORT) { aborted = true; break; }
           } else {
-            consecutiveNetFails = 0;
+            consecutiveTransientFails = 0;
           }
         }
       }
-
+      // If aborted early, treat every un-attempted file in this pass as
+      // failed too, so the final state accurately reflects "nothing else
+      // got uploaded this pass".
       if (aborted) {
-        failed = files.length - uploaded;
-        logger.logWarning(`filmScans: aborted upload of ${folderName} — network appears down (${NET_ABORT} consecutive failures); ${uploaded}/${files.length} uploaded. Will retry the whole roll.`);
+        const attempted = new Set(passFailed.map((f) => f.filePath));
+        for (const filePath of passFiles) {
+          if (uploadedSet.has(filePath)) continue;
+          if (attempted.has(filePath)) continue;
+          passFailed.push({
+            filePath,
+            name: path.basename(filePath),
+            sub_path: (() => {
+              const rel = path.relative(localFolderPath, filePath).replace(/\\/g, '/');
+              const dir = path.dirname(rel);
+              return dir === '.' ? folderName : `${folderName}/${dir}`;
+            })(),
+            reason: `not attempted — pass aborted after ${NET_ABORT} consecutive transient failures`,
+          });
+        }
+      }
+      return { passFailed, aborted };
+    };
+
+    // Initial pass — every file.
+    try {
+      const first = await runPass(files, 'pass 1');
+      failedFiles = first.passFailed;
+      if (first.aborted) {
+        logger.logWarning(`filmScans: pass 1 of ${folderName} aborted early — ${NET_ABORT} consecutive transient failures. ${uploaded}/${files.length} uploaded so far.`);
       }
     } catch (outerError) {
-      // Unexpected error outside per-file handling (e.g. fs failure mid-loop).
-      // Treat all remaining files as failed and fall through to manifest write.
-      failed = files.length - uploaded;
-      logger.logError(`filmScans: unexpected error during upload loop for ${folderName} — falling through to manifest`, outerError);
+      // Unexpected non-per-file error (e.g. fs failure enumerating).
+      logger.logError(`filmScans: unexpected error during pass 1 for ${folderName}`, outerError);
+      // Synthesize failedFiles for every not-yet-uploaded so the manifest
+      // still records the failure list.
+      failedFiles = files
+        .filter((fp) => !uploadedSet.has(fp))
+        .map((filePath) => ({
+          filePath,
+          name: path.basename(filePath),
+          sub_path: folderName,
+          reason: reason(outerError),
+        }));
     }
+
+    // Second-pass retries. Up to 2 additional sweeps over ONLY the still-
+    // failed files, with a short wait between. Handles the "gateway
+    // flapped during the batch" case where the per-file retry couldn't
+    // outrun the blip but a 2-second breath is enough.
+    const SECOND_PASS_ATTEMPTS = 2;
+    const SECOND_PASS_WAIT_MS  = 2000;
+    for (let pass = 2; pass <= 1 + SECOND_PASS_ATTEMPTS; pass++) {
+      if (failedFiles.length === 0) break;
+      const stillFailed = failedFiles.map((f) => f.filePath);
+      logger.info(`filmScans: pass ${pass} — retrying ${stillFailed.length} still-failed file(s) after ${SECOND_PASS_WAIT_MS} ms`);
+      await new Promise(r => setTimeout(r, SECOND_PASS_WAIT_MS));
+      const next = await runPass(stillFailed, `pass ${pass}`);
+      failedFiles = next.passFailed;
+      if (next.aborted) {
+        logger.logWarning(`filmScans: pass ${pass} of ${folderName} aborted early — persistent transient failures. Deferring to 10-min self-heal.`);
+        break;
+      }
+    }
+
+    const failed = failedFiles.length;
 
     // ── Manifest ─────────────────────────────────────────────────────────────
     // Always written, regardless of upload errors, so OH always knows the folder exists.
     try {
       const { name: manifestName, buffer: manifestBuffer } =
-        this._buildManifestPayload(folderName, files, failed, manifestExtra);
+        this._buildManifestPayload(folderName, files, failedFiles, manifestExtra);
 
       const manifestDescriptor = {
         name:     manifestName,
@@ -162,7 +231,7 @@ class S3Service {
       if (manifestEntry && manifestEntry.upload_url) {
         await this._uploadBufferViaPresignedUrl(manifestBuffer, 'application/json', manifestEntry.upload_url);
         if (failed > 0) {
-          logger.logWarning(`filmScans: manifest written with ${failed} error(s) for folder ${folderName} — lab must re-upload after deleting in OH`);
+          logger.logWarning(`filmScans: manifest written with ${failed} error(s) for folder ${folderName} — 10-min self-heal will re-attempt the still-failed files`);
         } else {
           logger.info(`filmScans: manifest uploaded — ${manifestName}`);
         }
@@ -174,7 +243,25 @@ class S3Service {
       logger.logError('filmScans: failed to upload manifest', manifestError);
     }
 
-    return { uploaded, failed, total: files.length };
+    return { uploaded, failed, total: files.length, failedFiles };
+  }
+
+  /**
+   * Classify a caught presign error as transient (worth retrying at
+   * higher levels / counting toward early-abort budget). Mirrors
+   * presignService.isRetryableOutcome — for messages produced by
+   * getPresignedUrls after its own retry ladder gave up.
+   */
+  _isTransientPresignError(err) {
+    const msg = err && err.message ? err.message : '';
+    const httpMatch = msg.match(/HTTP (\d{3})/);
+    if (httpMatch) {
+      const status = Number(httpMatch[1]);
+      if (status === 429) return true;
+      if (status >= 500 && status < 600) return true;
+      return false;
+    }
+    return /(socket hang up|ECONNRESET|ECONNREFUSED|ENETUNREACH|ENETDOWN|EHOSTUNREACH|EAI_AGAIN|ETIMEDOUT|timed out|network stalled|Request timeout)/i.test(msg);
   }
 
   /**
@@ -221,20 +308,20 @@ class S3Service {
   }
 
   /**
-   * Wrap _uploadFileViaPresignedUrl with a tight retry on transient network
-   * failures ("socket hang up", ECONNRESET, ETIMEDOUT, EPIPE, EAI_AGAIN,
-   * Upload request timed out). Avoids wasting the roll-level retry — which
-   * re-uploads the entire batch — on a single-file blip.
+   * Wrap _uploadFileViaPresignedUrl with retries on transient failures.
+   * Transient = network errors (socket hang up, ECONNRESET, ETIMEDOUT,
+   * EPIPE, EAI_AGAIN, "timed out") OR HTTP 429 (throttle) OR HTTP 5xx
+   * (server-side / gateway). Non-transient HTTP responses (4xx except
+   * 429) throw immediately because more attempts won't fix a 403.
    *
-   * Three attempts with 2s → 5s backoff. HTTP 4xx/5xx errors are NOT
-   * retried at this layer (a 403 from a bad presigned URL won't get better
-   * with more attempts); the caller's roll-level retry will pick those up
-   * if needed.
+   * 4 attempts with backoffs [1s, 3s, 7s] + up to 500 ms jitter per
+   * wait — matches the presign layer's rhythm so a bad blip that
+   * hits both is handled at roughly the same cadence.
    */
   async _uploadWithRetry(filePath, presignedUrl, label) {
-    const MAX_ATTEMPTS = 3;
-    const BACKOFFS_MS = [2_000, 5_000];
-    const TRANSIENT = /(socket hang up|ECONNRESET|ETIMEDOUT|EPIPE|EAI_AGAIN|timed out)/i;
+    const MAX_ATTEMPTS = 4;
+    const BACKOFFS_MS  = [1_000, 3_000, 7_000];
+    const JITTER_MS    = 500;
     let lastErr;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       try {
@@ -245,14 +332,48 @@ class S3Service {
         return;
       } catch (err) {
         lastErr = err;
-        const transient = TRANSIENT.test(err && err.message ? err.message : '');
+        const transient = this._isTransientPutError(err);
         if (!transient || attempt === MAX_ATTEMPTS) throw err;
-        const wait = BACKOFFS_MS[attempt - 1];
-        logger.logWarning(`s3: ${label} attempt ${attempt}/${MAX_ATTEMPTS} failed transiently (${err.message}), retrying in ${wait / 1000}s`);
+        const wait = BACKOFFS_MS[attempt - 1] + Math.floor(Math.random() * JITTER_MS);
+        logger.logWarning(`s3: ${label} attempt ${attempt}/${MAX_ATTEMPTS} failed transiently (${err.message}), retrying in ${wait} ms`);
         await new Promise(r => setTimeout(r, wait));
       }
     }
     throw lastErr;
+  }
+
+  /**
+   * Classify a caught PUT error as transient (worth retrying) or fatal
+   * (throw fast). Error messages produced by _uploadFileViaPresignedUrl
+   * have the shape "Upload failed: HTTP {N} — …" so we parse the status
+   * with a small regex. Anything without a parsable status falls back to
+   * the network-error regex.
+   */
+  _isTransientPutError(err) {
+    const msg = err && err.message ? err.message : '';
+    const httpMatch = msg.match(/HTTP (\d{3})/);
+    if (httpMatch) {
+      const status = Number(httpMatch[1]);
+      if (status === 429) return true;
+      if (status >= 500 && status < 600) return true;
+      return false; // 4xx (non-429) — fatal
+    }
+    return /(socket hang up|ECONNRESET|ETIMEDOUT|EPIPE|EAI_AGAIN|timed out|network stalled)/i.test(msg);
+  }
+
+  /**
+   * Truncate an error message for storage in the manifest's failed_files[]
+   * entries. Servers sometimes return a full HTML body on 502 — that
+   * would bloat the manifest JSON needlessly. Take the first line only
+   * (drop everything past \n) and cap at `max` chars, appending "…" on
+   * truncation.
+   */
+  _truncateReason(err, max = 120) {
+    let s = (err && err.message ? err.message : String(err || 'unknown')).trim();
+    const nl = s.indexOf('\n');
+    if (nl !== -1) s = s.slice(0, nl).trim();
+    if (s.length > max) s = s.slice(0, max - 1).trimEnd() + '…';
+    return s;
   }
 
   /**
@@ -353,7 +474,11 @@ class S3Service {
     const files = this._getAllFiles(localFolderPath)
       .filter(f => !S3_EXCLUDED_EXTENSIONS.includes(path.extname(f).toLowerCase()));
     let uploaded = 0;
-    let failed = 0;
+    // 2026-07-24 — track per-file failures like the Pixfizz path so both
+    // providers write a manifest with the same failed_files[] shape. The
+    // AWS SDK has its own built-in retry ladder, so no second-pass here.
+    const failedFiles = [];
+    const reason = (err) => this._truncateReason(err);
 
     try {
       try {
@@ -382,23 +507,41 @@ class S3Service {
               progressCallback({ message: `Uploaded ${uploaded}/${files.length}: ${relativePath}`, status: 'uploading' });
             }
           } catch (error) {
-            failed++;
+            failedFiles.push({
+              name:     path.basename(relativePath),
+              sub_path: path.dirname(relativePath) === '.' ? folderName : `${folderName}/${path.dirname(relativePath)}`,
+              reason:   reason(error),
+            });
             logger.logError(`Failed to upload ${s3Key}`, error);
           }
         }
       } catch (outerError) {
         // Mirror Pixfizz semantics: even an unexpected error mid-loop must not
         // skip the manifest write — OH relies on it to know the folder is done.
-        failed = files.length - uploaded;
+        const alreadyAccountedFor = new Set(failedFiles.map((f) => `${f.sub_path}/${f.name}`));
+        for (const filePath of files) {
+          const relativePath = path.relative(localFolderPath, filePath).replace(/\\/g, '/');
+          const name = path.basename(relativePath);
+          const sub_path = path.dirname(relativePath) === '.' ? folderName : `${folderName}/${path.dirname(relativePath)}`;
+          const key = `${sub_path}/${name}`;
+          if (alreadyAccountedFor.has(key)) continue;
+          // Uploaded ones are neither in failedFiles nor should be added here;
+          // approximate by only synthesising failures for files beyond the
+          // current uploaded count.
+          if (uploaded > 0 && files.indexOf(filePath) < uploaded) continue;
+          failedFiles.push({ name, sub_path, reason: reason(outerError) });
+        }
         logger.logError(`amazon: unexpected error during upload loop for ${folderName} — falling through to manifest`, outerError);
       }
+
+      const failed = failedFiles.length;
 
       // ── Manifest ──────────────────────────────────────────────────────────
       // Mandatory for OH ingest. Always written, regardless of upload errors.
       // Errors here are swallowed so they never affect the reported result.
       try {
         const { name: manifestName, buffer: manifestBuffer } =
-          this._buildManifestPayload(folderName, files, failed, manifestExtra);
+          this._buildManifestPayload(folderName, files, failedFiles, manifestExtra);
         const manifestKey = `${s3Prefix}${folderName}/${manifestName}`;
 
         await client.send(new PutObjectCommand({
@@ -417,7 +560,7 @@ class S3Service {
         logger.logError('amazon: failed to upload manifest', manifestError);
       }
 
-      return { uploaded, failed, total: files.length };
+      return { uploaded, failed, total: files.length, failedFiles };
     } finally {
       client.destroy();
     }
@@ -507,12 +650,39 @@ class S3Service {
    *                                     overwritten.
    * @returns {{ name: string, buffer: Buffer }}
    */
-  _buildManifestPayload(folderName, files, failed, manifestExtra = null) {
+  /**
+   * @param {string}   folderName
+   * @param {string[]} files
+   * @param {number|Array<{name, sub_path?, reason}>} failedOrFailedFiles
+   *   Either a bare failure count (back-compat with older callers), or
+   *   the full array of failed-file records. When an array is passed,
+   *   `errors` is derived from its length and the array is written
+   *   verbatim into `failed_files`. When a number is passed,
+   *   `failed_files` is an empty array (no per-file detail available).
+   * @param {object}   [manifestExtra]
+   * @returns {{ name: string, buffer: Buffer }}
+   */
+  _buildManifestPayload(folderName, files, failedOrFailedFiles, manifestExtra = null) {
     const { app } = require('electron');
     const tiffExts = new Set(['.tif', '.tiff']);
     const jpegExts = new Set(['.jpg', '.jpeg']);
     const tiffCount = files.filter(f => tiffExts.has(path.extname(f).toLowerCase())).length;
     const jpgCount  = files.filter(f => jpegExts.has(path.extname(f).toLowerCase())).length;
+
+    // Normalise: number → derive empty array; array → derive count from it.
+    let failedFiles = [];
+    let failed = 0;
+    if (Array.isArray(failedOrFailedFiles)) {
+      failedFiles = failedOrFailedFiles.map((f) => ({
+        name:     f && f.name ? String(f.name) : 'unknown',
+        // sub_path is optional — omit when the caller didn't set it.
+        ...(f && f.sub_path ? { sub_path: String(f.sub_path) } : {}),
+        reason:   f && f.reason ? String(f.reason) : 'unknown',
+      }));
+      failed = failedFiles.length;
+    } else if (Number.isFinite(failedOrFailedFiles)) {
+      failed = failedOrFailedFiles;
+    }
 
     const builtIn = {
       folder:       folderName,
@@ -520,6 +690,12 @@ class S3Service {
       tiff_count:   tiffCount,
       jpg_count:    jpgCount,
       errors:       failed,
+      // 2026-07-24 — per-file failure detail so OrderHub can diagnose which
+      // files broke without opening the OHD log. Always present; empty
+      // array on a clean run so consumers can key off length interchangeably
+      // with `errors`. Reasons are pre-truncated (~120 chars) upstream so
+      // this can't blow up the JSON size on an HTML 502 body.
+      failed_files: failedFiles,
       completed_at: new Date().toISOString(),
       ohd_version:  app.getVersion()
     };

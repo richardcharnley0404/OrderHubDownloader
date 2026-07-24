@@ -156,16 +156,17 @@ class FolderWatchService {
         logger.logWarning('filmScans: retention prune failed', { error: pruneErr.message });
       }
 
-      // One-time-per-launch: resume any upload interrupted by a crash / network
-      // hang in a previous session (roll left stuck at uploadStatus:'uploading').
-      // Files are safe in storage, so we just re-run the upload.
-      if (!this._resumedUploads) {
-        this._resumedUploads = true;
-        try {
-          await this._resumeInterruptedUploads(config);
-        } catch (resumeErr) {
-          logger.logWarning('filmScans: resume interrupted uploads failed', { error: resumeErr.message });
-        }
+      // 2026-07-24 — run every cycle (was once-per-launch). Two categories:
+      //   - Rolls stuck at 'uploading' from a prior crash/hang → resume.
+      //   - Rolls at 'failed' → self-heal, rate-limited to 10 min per roll
+      //     via lastUploadRetryAt so a broken roll doesn't spam the API.
+      // The rate-limit lives inside _resumeInterruptedUploads and covers
+      // both branches, so calling every cycle is safe (an in-flight upload
+      // that just began has lastUploadRetryAt < 10 min → skipped).
+      try {
+        await this._resumeInterruptedUploads(config);
+      } catch (resumeErr) {
+        logger.logWarning('filmScans: resume interrupted uploads failed', { error: resumeErr.message });
       }
 
       const watchFolder = config.filmScansWatchFolder;
@@ -1549,22 +1550,59 @@ class FolderWatchService {
   }
 
   /**
-   * On startup, re-attempt any roll stuck at uploadStatus:'uploading'. Normal
-   * flow never leaves a roll there — it only persists if a prior upload was
-   * interrupted (network hang, crash, force-quit). Runs once per launch.
+   * Re-attempt uploads for two categories of stuck rolls:
+   *
+   *   1. uploadStatus:'uploading' — normal flow never leaves a roll
+   *      here; only persists if a prior upload was interrupted
+   *      (network hang, crash, force-quit). Always retried.
+   *
+   *   2. uploadStatus:'failed'  — 2026-07-24 self-heal. Instead of
+   *      needing an operator to manually re-try a poisoned roll,
+   *      the film-scans cycle re-attempts on its own with a 10-minute
+   *      rate-limit (via lastUploadRetryAt) so we don't hammer a
+   *      genuinely-broken roll every minute. Combined with the inner
+   *      presign / PUT / second-pass retries this means a transient
+   *      blip (502 wave, brief SMB hiccup) can never permanently kill
+   *      a roll — worst case is a 10-minute delay before automatic
+   *      recovery.
+   *
+   *      Recovery depends on the OrderHub server treating a re-emitted
+   *      manifest at the same S3 key as authoritative (i.e. an errors:0
+   *      re-write supersedes a prior errors:1). See the plan doc for
+   *      the open question on server-side ingest semantics.
+   *
+   * Called on startup AND on every film-scans polling cycle.
    */
   async _resumeInterruptedUploads(config) {
     if (!config.filmScanRotationEnabled) return; // roll records only exist then
     const frameMetadataStore = require('./frame-metadata-store');
-    let stuck = [];
+    const FAILED_RETRY_MIN_INTERVAL_MS = 10 * 60 * 1000; // 10 min rate-limit for 'failed' rolls
+    const nowMs = Date.now();
+
+    let candidates = [];
     try {
-      stuck = frameMetadataStore.listRollsWithSummary().filter(r => r.uploadStatus === 'uploading');
+      candidates = frameMetadataStore.listRollsWithSummary().filter((r) => {
+        if (r.uploadStatus !== 'uploading' && r.uploadStatus !== 'failed') return false;
+        // Rate-limit both branches so we don't re-fire on an in-flight upload
+        // (uploading rolls have a freshly-stamped lastUploadRetryAt), and don't
+        // hammer a genuinely-broken failed roll every cycle.
+        const rec = frameMetadataStore.getRoll(r.rollId);
+        const lastMs = rec && rec.lastUploadRetryAt ? Date.parse(rec.lastUploadRetryAt) : NaN;
+        if (!Number.isFinite(lastMs)) return true; // never retried before → try now
+        return (nowMs - lastMs) >= FAILED_RETRY_MIN_INTERVAL_MS;
+      });
     } catch (_) {
       return;
     }
-    if (stuck.length === 0) return;
-    logger.logWarning(`filmScans: resuming ${stuck.length} interrupted upload(s) left from a previous session`);
-    for (const r of stuck) {
+    if (candidates.length === 0) return;
+
+    const stuckCount  = candidates.filter((r) => r.uploadStatus === 'uploading').length;
+    const failedCount = candidates.filter((r) => r.uploadStatus === 'failed').length;
+    logger.logWarning(
+      `filmScans: retrying upload for ${candidates.length} roll(s) ` +
+      `— ${stuckCount} interrupted, ${failedCount} previously-failed (self-heal, min ${FAILED_RETRY_MIN_INTERVAL_MS / 60000} min interval)`
+    );
+    for (const r of candidates) {
       try {
         await this._uploadRollFromStorage(r.rollId, config);
       } catch (err) {
@@ -1612,15 +1650,26 @@ class FolderWatchService {
       return;
     }
 
+    // 2026-07-24 — stamp lastUploadRetryAt so the 10-min self-heal in
+    // _resumeInterruptedUploads doesn't re-fire before this attempt
+    // has had a chance to complete (or to fail with a fresh error).
     frameMetadataStore.updateRoll(rollId, {
       uploadStatus: 'uploading',
       uploadError: null,
+      lastUploadRetryAt: new Date().toISOString(),
       timeline: { ...((rec.timeline) || {}), uploadStartedAt: new Date().toISOString() },
     });
     this._emitFilmReviewRoll(rollId);
 
-    const MAX_ATTEMPTS = 3;
-    const BACKOFFS_MS = [30_000, 90_000];
+    // 2026-07-24 — outer roll-level retry trimmed from 3× (30s/90s) to
+    // 2× (15s) now that presign / PUT / second-pass retries at the
+    // inner layers absorb most transient blips. Each outer attempt
+    // re-uploads the whole folder (uploadFolder rescans localFolderPath),
+    // so shrinking the ladder avoids grinding through already-succeeded
+    // files a third time. Rolls that still fail after both attempts
+    // fall to the 10-minute self-heal in _resumeInterruptedUploads.
+    const MAX_ATTEMPTS = 2;
+    const BACKOFFS_MS = [15_000];
     let result;
     let attempt = 0;
     const manifestExtra = this._buildFilmScanManifestExtra(rollId);

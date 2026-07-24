@@ -3,6 +3,32 @@ const http = require('http');
 const configService = require('./config-service');
 const logger = require('./logger');
 
+// 2026-07-24 — transient-failure retry. Presign is idempotent (returns
+// URLs, no server-side state mutation), so retrying on 5xx / 429 /
+// network errors is safe. 4 attempts total with backoffs; 4xx (except
+// 429) throws fast because they don't get better with retries.
+const RETRY_BACKOFFS_MS = [1000, 3000, 7000];  // waits BEFORE attempts 2,3,4
+const RETRY_JITTER_MS   = 500;
+
+/**
+ * A transient response is one where retrying might work: transport-layer
+ * errors (socket hang up, ECONNRESET, timeouts) OR HTTP 429 (throttling)
+ * OR HTTP 5xx (server-side / gateway). Exported so callers who compose
+ * their own error-handling (folder-watch's consecutive-failure early
+ * abort) can classify errors the same way.
+ *
+ * @param {{ transportError?: Error, statusCode?: number }} outcome
+ */
+function isRetryableOutcome(outcome) {
+  if (!outcome) return false;
+  if (outcome.transportError) return true;
+  const s = outcome.statusCode;
+  if (!Number.isFinite(s)) return false;
+  if (s === 429) return true;
+  if (s >= 500 && s < 600) return true;
+  return false;
+}
+
 /**
  * Requests pre-signed S3 upload URLs from the OrderHub API.
  * IBM S3 credentials live only on the OH server — OHD never sees them.
@@ -56,34 +82,98 @@ class PresignService {
       files: fileDescriptors.map(f => ({ name: f.name, folder: f.folder, sub_path: f.sub_path, size: f.size, type: f.type }))
     });
 
-    const response = await this._httpRequest('POST', url, apiKey, body, extraHeaders);
+    // 2026-07-24 — retry loop over transient failures. Each iteration
+    // returns an "outcome" (transport error, or HTTP-level parse
+    // result); isRetryableOutcome decides whether to try again. Non-
+    // retryable outcomes (2xx success OR 4xx-non-429) fall through
+    // immediately with either the parsed result or a thrown error.
+    const MAX_ATTEMPTS = RETRY_BACKOFFS_MS.length + 1;
+    let lastOutcome = null;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const outcome = await this._attemptPresign(url, apiKey, body, extraHeaders);
+      lastOutcome = outcome;
 
-    // Always log the raw response body in the message string so it appears in the
-    // log file regardless of how the logger formats metadata.
+      if (outcome.results) {
+        // 2xx and JSON parsed OK — done, whether attempt 1 or the last one.
+        if (attempt > 1) {
+          logger.info(`presignService: succeeded on attempt ${attempt}/${MAX_ATTEMPTS}`);
+        }
+        return outcome.results;
+      }
+
+      const retryable = isRetryableOutcome(outcome);
+      if (!retryable || attempt === MAX_ATTEMPTS) {
+        // Either non-retryable (4xx / non-transient) OR out of attempts.
+        // Throw the accumulated error message.
+        throw new Error(outcome.errorMessage);
+      }
+
+      const wait = RETRY_BACKOFFS_MS[attempt - 1] + Math.floor(Math.random() * RETRY_JITTER_MS);
+      const label = outcome.transportError
+        ? `network: ${outcome.transportError.message || outcome.transportError}`
+        : `HTTP ${outcome.statusCode}`;
+      logger.logWarning(`presignService: attempt ${attempt}/${MAX_ATTEMPTS} transient failure (${label}), retrying in ${wait} ms`);
+      await new Promise(r => setTimeout(r, wait));
+    }
+
+    // Unreachable — the loop either returns or throws — but keep an
+    // explicit throw so the type-inference (and future editors) can't
+    // misread the fall-through.
+    throw new Error(lastOutcome ? lastOutcome.errorMessage : 'Presign request failed');
+  }
+
+  /**
+   * Single presign attempt. NEVER throws; always resolves with an
+   * outcome object:
+   *   { results, statusCode }              — 2xx + valid JSON
+   *   { errorMessage, statusCode }         — HTTP-level failure (4xx/5xx or 2xx with success:false or JSON parse fail)
+   *   { errorMessage, transportError }     — socket / DNS / timeout
+   *
+   * The retry loop above uses `results` (success) vs `transportError`
+   * / `statusCode` (isRetryableOutcome) to decide next action.
+   */
+  async _attemptPresign(url, apiKey, body, extraHeaders) {
+    let response;
+    try {
+      response = await this._httpRequest('POST', url, apiKey, body, extraHeaders);
+    } catch (err) {
+      return {
+        transportError: err,
+        errorMessage:   `Presign request failed: ${err && err.message ? err.message : String(err)}`,
+      };
+    }
+
+    // Always log the raw response body in the message string so it appears in
+    // the log file regardless of how the logger formats metadata.
     logger.info(
       `presignService: response HTTP ${response.statusCode} — ${response.body.substring(0, 500)}`
     );
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw new Error(
-        `Presign request failed: HTTP ${response.statusCode} — ${response.body.substring(0, 300)}`
-      );
+      return {
+        statusCode:   response.statusCode,
+        errorMessage: `Presign request failed: HTTP ${response.statusCode} — ${response.body.substring(0, 300)}`,
+      };
     }
 
     let data;
     try {
       data = JSON.parse(response.body);
     } catch {
-      throw new Error(`Presign response was not valid JSON: ${response.body.substring(0, 200)}`);
+      // Non-retryable — 2xx with an unparseable body is a server bug, not a blip.
+      return {
+        statusCode:   response.statusCode,
+        errorMessage: `Presign response was not valid JSON: ${response.body.substring(0, 200)}`,
+      };
     }
 
     // Some endpoints return { success: false, error: "..." } with a 200 status.
-    // Treat this as a hard error so it surfaces in logs rather than silently
-    // yielding zero URLs.
+    // Non-retryable — the server is telling us the request itself was bad.
     if (data.success === false) {
-      throw new Error(
-        `Presign API error: ${data.error || data.message || JSON.stringify(data).substring(0, 200)}`
-      );
+      return {
+        statusCode:   response.statusCode,
+        errorMessage: `Presign API error: ${data.error || data.message || JSON.stringify(data).substring(0, 200)}`,
+      };
     }
 
     // Normalise field names: API returns { uploads: [...] } with file_name/file_key per entry
@@ -94,10 +184,10 @@ class PresignService {
       expires_in: r.expires_in
     }));
 
-    logger.info(`presignService: received ${results.length}/${fileDescriptors.length} pre-signed URL(s)`, {
+    logger.info(`presignService: received ${results.length}/${body.files.length} pre-signed URL(s)`, {
       returned: results.map(r => ({ name: r.name, s3_key: r.s3_key }))
     });
-    return results; // [{ name, upload_url, s3_key, expires_in }]
+    return { results, statusCode: response.statusCode };
   }
 
   /**
@@ -188,4 +278,8 @@ class PresignService {
   }
 }
 
-module.exports = new PresignService();
+const presignServiceSingleton = new PresignService();
+module.exports = presignServiceSingleton;
+// 2026-07-24 — exports for callers/tests that need the transient classifier.
+module.exports.isRetryableOutcome = isRetryableOutcome;
+module.exports.RETRY_BACKOFFS_MS  = RETRY_BACKOFFS_MS;

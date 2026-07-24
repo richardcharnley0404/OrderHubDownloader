@@ -54,6 +54,8 @@ test('_buildManifestPayload: base manifest — no manifestExtra keeps the pre-fe
   assert.equal(body.tiff_count,  2);
   assert.equal(body.jpg_count,   2);
   assert.equal(body.errors,      0);
+  // 2026-07-24 — always present, empty on clean.
+  assert.deepEqual(body.failed_files, []);
   assert.equal(body.ohd_version, '9.9.9-test');
   assert.ok(typeof body.completed_at === 'string' && body.completed_at.length > 0);
 
@@ -68,7 +70,7 @@ test('_buildManifestPayload: base manifest — undefined manifestExtra == null (
   const { buffer } = s3Service._buildManifestPayload('R', files, 0);
   const body = decode(buffer);
   assert.deepEqual(Object.keys(body).sort(), [
-    'completed_at', 'errors', 'folder', 'jpg_count', 'ohd_version', 'tiff_count', 'total_files',
+    'completed_at', 'errors', 'failed_files', 'folder', 'jpg_count', 'ohd_version', 'tiff_count', 'total_files',
   ]);
 });
 
@@ -150,7 +152,7 @@ test('_buildManifestPayload: null manifestExtra is ignored (no crash, base shape
   const { buffer } = s3Service._buildManifestPayload('R', ['/x/a.tif'], 0, null);
   const body = decode(buffer);
   assert.equal(body.folder, 'R');
-  assert.equal(Object.keys(body).length, 7);
+  assert.equal(Object.keys(body).length, 8);
 });
 
 test('_buildManifestPayload: non-object manifestExtra (string / array) is ignored', () => {
@@ -158,13 +160,55 @@ test('_buildManifestPayload: non-object manifestExtra (string / array) is ignore
   const arrBody = decode(s3Service._buildManifestPayload('R', ['/x/a.tif'], 0, ['a', 'b']).buffer);
   assert.equal(strBody.folder, 'R');
   assert.equal(arrBody.folder, 'R');
-  assert.equal(Object.keys(strBody).length, 7);
-  assert.equal(Object.keys(arrBody).length, 7);
+  assert.equal(Object.keys(strBody).length, 8);
+  assert.equal(Object.keys(arrBody).length, 8);
 });
 
 test('_buildManifestPayload: empty-object manifestExtra produces the base shape', () => {
   const { buffer } = s3Service._buildManifestPayload('R', ['/x/a.tif'], 0, {});
   const body = decode(buffer);
-  assert.equal(Object.keys(body).length, 7);
+  assert.equal(Object.keys(body).length, 8);
   assert.equal(body.folder, 'R');
+});
+
+// ── failed_files (2026-07-24) ────────────────────────────────────────────────
+
+test('_buildManifestPayload: failed_files populated when caller passes the array; errors derived from length', () => {
+  const files = ['/x/a.tif', '/x/b.tif', '/x/c.jpg'];
+  const failedFiles = [
+    { name: 'a.tif', sub_path: 'ROLL/subA', reason: 'Presign request failed: HTTP 502 — Bad Gateway' },
+    { name: 'c.jpg',                        reason: 'Upload failed: HTTP 500 — internal error' },
+  ];
+  const { buffer } = s3Service._buildManifestPayload('ROLL', files, failedFiles);
+  const body = decode(buffer);
+
+  assert.equal(body.errors, 2, 'errors is derived from failedFiles.length');
+  assert.equal(body.failed_files.length, 2);
+  assert.equal(body.failed_files[0].name, 'a.tif');
+  assert.equal(body.failed_files[0].sub_path, 'ROLL/subA');
+  assert.match(body.failed_files[0].reason, /HTTP 502/);
+  assert.equal(body.failed_files[1].name, 'c.jpg');
+  assert.equal(body.failed_files[1].sub_path, undefined, 'sub_path omitted when caller does not supply it');
+});
+
+test('_buildManifestPayload: number-argument back-compat still works (errors count only, empty failed_files)', () => {
+  // Older callers pass a bare count. Assert the manifest still shapes
+  // correctly so we can migrate them at leisure without breaking anything.
+  const { buffer } = s3Service._buildManifestPayload('R', ['/x/a.tif'], 3);
+  const body = decode(buffer);
+  assert.equal(body.errors, 3);
+  assert.deepEqual(body.failed_files, []);
+});
+
+test('_buildManifestPayload: failed_files entries coerce non-string fields safely (defensive)', () => {
+  const { buffer } = s3Service._buildManifestPayload('R', ['/x/a.tif'], [
+    { /* nothing */ },
+    { name: 42, reason: { obj: true } },
+  ]);
+  const body = decode(buffer);
+  assert.equal(body.errors, 2);
+  assert.equal(body.failed_files[0].name, 'unknown');
+  assert.equal(body.failed_files[0].reason, 'unknown');
+  assert.equal(body.failed_files[1].name, '42');
+  assert.equal(body.failed_files[1].reason, '[object Object]');
 });
