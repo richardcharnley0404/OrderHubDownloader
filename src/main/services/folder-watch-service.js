@@ -57,6 +57,17 @@ class FolderWatchService {
     this.lastSummary = { filmScans: null, fileUploads: null };
     this._filmScanProcessing = false;
     this._resumedUploads = false;
+    // 2026-07-24 — authoritative in-process guard against concurrent uploads
+    // of the same roll. _filmScanProcessing only prevents the film-scans
+    // cycle from re-entering itself; but _uploadRollFromStorage is ALSO
+    // called from pollJobs (auto-assign match cycle, on the main polling
+    // timer — separate timer, no shared guard) and from the operator's
+    // "upload-unmatched" IPC. Two callers arriving on the same roll at
+    // the same tick would each start their own upload — this Set makes
+    // the second one no-op. Entries are added on entry to
+    // _uploadRollFromStorage and removed in a `finally` so a crash
+    // mid-upload doesn't leak a permanent stuck entry.
+    this._uploadingRolls = new Set();
     // 2026-07-23 — In-process registry of the currently-running film-scan
     // Perfectly Clear batch, if any. Held here (not per-cycle) so a
     // startup sweep AND an operator-triggered reset can both consult it
@@ -1621,6 +1632,17 @@ class FolderWatchService {
     const rec = frameMetadataStore.getRoll(rollId);
     if (!rec) return;
 
+    // 2026-07-24 — concurrent-upload guard. Cheap check BEFORE the
+    // expensive work so the second caller in a race no-ops cleanly.
+    // The state / rate-limit guards elsewhere are timestamp-based and
+    // can be read stale by two callers arriving on independent timers
+    // (main-poll auto-assign + film-scans self-heal, for example);
+    // this in-process Set is authoritative regardless.
+    if (this._uploadingRolls.has(rollId)) {
+      logger.info(`filmScans: skipping ${rollId} — an upload is already in flight in this process`);
+      return;
+    }
+
     // M4 ordering guard: a roll mid-Perfectly-Clear enhancement is not safe
     // to upload — the storage files may be part-replaced. Defensive belt+
     // braces on top of the fact that the pipeline never sets both
@@ -1649,6 +1671,15 @@ class FolderWatchService {
       logger.logWarning(`filmScans: cannot resume upload for ${rollId} — S3 not configured`);
       return;
     }
+
+    // 2026-07-24 — mark this roll as in-flight IN THIS PROCESS. Any
+    // concurrent caller (main-poll auto-assign, film-scans self-heal,
+    // operator IPC) that arrives on the same roll while we're mid-upload
+    // will hit the has(rollId) guard at the top of this method and
+    // no-op. Removal is finally-guarded so a throw mid-upload doesn't
+    // leak a permanent stuck entry.
+    this._uploadingRolls.add(rollId);
+    try {
 
     // 2026-07-24 — stamp lastUploadRetryAt so the 10-min self-heal in
     // _resumeInterruptedUploads doesn't re-fire before this attempt
@@ -1707,6 +1738,11 @@ class FolderWatchService {
       logger.info(`filmScans: (resume) upload complete for ${rollId}`);
     }
     this._emitFilmReviewRoll(rollId);
+    } finally {
+      // Always release the in-process lock so a subsequent legitimate
+      // retry (via self-heal, auto-assign, or IPC) can pick this roll up.
+      this._uploadingRolls.delete(rollId);
+    }
   }
 
   _getDateSubfolder() {
