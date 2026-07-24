@@ -4,7 +4,7 @@ import { ThumbnailGrid } from './ThumbnailGrid.jsx';
 import { ControlSidebar } from './ControlPanel.jsx';
 import { CropEditor } from './CropEditor.jsx';
 import ManualCropMode from './ManualCropMode.jsx';
-import { ImageInfoStrip } from './ImageInfoStrip.jsx';
+import { ScoreBadge } from './ScoreBadge.jsx';
 // M5b (2026-05-25): shared trigger predicate — same module the main side
 // uses for defensive logging, so renderer + main agree on which jobs
 // enter batch crop mode.
@@ -564,11 +564,23 @@ export function JobReviewDrawer({ jobId, jobPath, ohJobId, onClose }) {
             enhanceStatusByFilename={enhanceBatchStatusByFilename}
           />
 
-          <PreviewArea selected={selected} jobPath={jobPath} />
-          {/* Single info anchor for the selected image — visible in
-              BOTH review modes (identical component in ManualCropMode's
-              CropStage). Renders nothing when nothing is selected. */}
-          <ImageInfoStrip image={selected} aiQualityThreshold={aiQualityThreshold} />
+          {/* 2026-07-24 refinement — wrap PreviewArea in a flex-column
+              so a thin top bar with filename + AI score sits directly
+              ABOVE the main preview image (was rendering as a strip
+              beside it because .jr-body is a flex row). Matches the
+              placement of the manual mode's CropStage topbar so the
+              two modes now show the same info in the same eye line. */}
+          <div className="jr-preview-col">
+            {selected && (
+              <div className="jr-preview-topbar">
+                <span className="jr-focused-filename" title={selected.filename}>
+                  {selected.filename}
+                </span>
+                <ScoreBadge aiQuality={selected.aiQuality} threshold={aiQualityThreshold} />
+              </div>
+            )}
+            <PreviewArea selected={selected} jobPath={jobPath} />
+          </div>
 
           {/* Reprint section was removed from the sidebar on 2026-05-18,
               so reprintCount / onToggleReprint are no longer passed in. */}

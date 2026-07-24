@@ -503,26 +503,32 @@
 .jr-badge--enh-status-cancelled  { background: rgba(0, 0, 0, 0.6); }
 .jr-badge--enh-status-error      { background: var(--app-red); }
 
-/* AI Quality score pill — bottom-right */
+/* AI Quality score box (2026-07-24 refinement).
+   Used in the preview top bar in BOTH review modes — standard's new
+   .jr-preview-topbar and manual's .jr-crop-stage__topbar. Rendered
+   inline via flex, no absolute positioning. Digits are high-contrast
+   dark ink on the theme surface so they read clearly in both light
+   and dark modes. Sub-threshold cue is a thick red border only — the
+   digits stay dark ink. Padding is tuned so the border-width change
+   (1px → 2px) doesn't shift the box's overall height. */
 .jr-score {
-  position: absolute;
-  bottom: var(--app-s2);
-  right: var(--app-s2);
-  background: rgba(0, 0, 0, 0.65);
-  color: #fff;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: var(--app-surface);
+  color: var(--app-ink);
+  border: 1px solid var(--app-border-strong);
   border-radius: 3px;
-  padding: 1px 6px;
-  font-size: 10px;
+  padding: 1px 8px;
+  font-size: 12px;
   font-family: var(--app-mono);
-  letter-spacing: 0.03em;
+  font-weight: 700;
   line-height: 1.5;
-  font-weight: 600;
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
   pointer-events: auto;
 }
 .jr-score--sub {
-  color: var(--app-red);
   border-color: var(--app-red);
+  border-width: 2px;
+  padding: 0 7px;
 }
 
 /* ─── Score dot (2026-07-24 UI-standardisation) ─────────────────────────
@@ -568,61 +574,38 @@
   z-index: 1;
 }
 
-/* ─── Image info strip (2026-07-24 UI-standardisation) ──────────────────
-   Horizontal single-line strip rendered directly beneath the main
-   preview image in both review modes. The single info anchor for the
-   currently-selected image: filename + AI Quality score (via the shared
-   ScoreBadge) + compact state chips (Flagged / Cropped / Enhanced) that
-   render only when applicable.
-*/
-.jr-info-strip {
+/* ─── Preview column + top bar (2026-07-24 refinement) ──────────────────
+   .jr-body is a flex ROW → ThumbnailGrid | preview | ControlSidebar.
+   The preview column is now a flex COLUMN so a thin top bar can sit
+   ABOVE the main preview image (was rendering beside it under the
+   previous ImageInfoStrip design). The top bar carries filename + AI
+   score box — matching the placement of the manual mode's
+   .jr-crop-stage__topbar so both modes anchor identical info in the
+   same eye line. min-width:0 lets the column shrink inside its parent
+   flex row and prevents long filenames from blowing out the layout. */
+.jr-preview-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+.jr-preview-topbar {
   display: flex;
   align-items: center;
   gap: var(--app-s3);
   padding: var(--app-s2) var(--app-s3);
-  border-top: 1px solid var(--app-border-subtle);
+  border-bottom: 1px solid var(--app-border-subtle);
   background: var(--app-surface);
-  font-size: 12px;
-  line-height: 1.4;
+  flex-shrink: 0;
 }
-.jr-info-strip__filename {
-  font-family: var(--app-mono);
-  font-weight: 600;
-  color: var(--app-ink);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  min-width: 0;
+.jr-preview-topbar .jr-focused-filename {
+  /* Reuse the same filename class the manual CropStage uses so the
+     two topbars are visually identical. flex:1 min-width:0 lets the
+     ellipsis kick in cleanly on long names. */
   flex: 1 1 auto;
+  min-width: 0;
 }
-/* When the strip hosts the pill form of the score, unpin it from
-   absolute positioning (which .jr-score defaults to for the pre-strip
-   in-thumbnail placement) so it sits inline with the filename + chips. */
-.jr-info-strip .jr-score {
-  position: static;
-  bottom: auto;
-  right: auto;
-  flex: 0 0 auto;
-}
-.jr-info-strip__chips {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--app-s2);
-  flex: 0 0 auto;
-}
-.jr-info-strip__chip {
-  display: inline-block;
-  padding: 1px 6px;
-  border-radius: 3px;
-  font-size: 10px;
-  letter-spacing: 0.03em;
-  font-weight: 600;
-  text-transform: uppercase;
-  color: #fff;
-}
-.jr-info-strip__chip--reprint  { background: var(--app-red); }
-.jr-info-strip__chip--cropped  { background: var(--app-brand-green); }
-.jr-info-strip__chip--enhanced { background: var(--app-purple-ai); }
 
 /* ─── Customer Originals (Phase 1) ───────────────────────────────────── */
 
@@ -1959,6 +1942,13 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* 2026-07-24 refinement — take remaining horizontal space so the
+     ellipsis actually triggers on long filenames instead of pushing the
+     ScoreBadge + orientation/rotation controls off-screen. min-width:0
+     is the standard flex-shrink escape hatch for text-overflow inside
+     a flex row. */
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .jr-focused-cropped-badge {
   background: var(--app-brand-green-weak);

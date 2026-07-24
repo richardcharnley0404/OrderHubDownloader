@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useReducer } from 'react';
 import { CropEditor } from './CropEditor.jsx';
 import { CropThumbRail } from './CropThumbRail.jsx';
-import { ImageInfoStrip } from './ImageInfoStrip.jsx';
+import { ScoreBadge } from './ScoreBadge.jsx';
 import { bestFitOrientation } from '../../../shared/cropRectMath.js';
 
 /**
@@ -1023,12 +1023,15 @@ function CropStage({
     <div className="jr-crop-stage">
       <header className="jr-crop-stage__topbar">
         <div className="jr-crop-stage__title">
-          {/* Filename lives in the ImageInfoStrip below the CropEditor now
-              (2026-07-24 UI-standardisation) — same info anchor in both
-              review modes. This top-bar keeps just the counter + status
-              badges + rotation label, alongside the orientation and
-              rotation controls to the right. */}
+          {/* 2026-07-24 refinement — filename + AI score live here again
+              (as siblings of the counter), so both review modes now
+              anchor filename + score above the preview. Filename column
+              is flex:1 min-width:0 in CSS so it ellipses gracefully and
+              never crowds the orientation/rotation controls to the
+              right. */}
           <span className="jr-focused-counter">{selectedIndex + 1} / {totalCount}</span>
+          <span className="jr-focused-filename" title={image.filename}>{image.filename}</span>
+          <ScoreBadge aiQuality={image.aiQuality} threshold={aiQualityThreshold} />
           {state.cropAppliedOnDisk && !state.modifiedSinceApproval && (
             <span className="jr-focused-cropped-badge" title="Approved on disk">approved</span>
           )}
@@ -1107,13 +1110,6 @@ function CropStage({
           onCancel={() => {}}
         />
       </div>
-
-      {/* 2026-07-24 UI-standardisation — same info anchor as the
-          standard mode carries under its main preview. Sits between
-          the CropEditor and the per-image error / footer so filename
-          + AI score + state chips are always in the operator's eye
-          line while they crop. */}
-      <ImageInfoStrip image={image} aiQualityThreshold={aiQualityThreshold} />
 
       {/* Per-image error strip — only renders when state.applyError is
           set. Footer below stays a clean 5-button row otherwise. */}

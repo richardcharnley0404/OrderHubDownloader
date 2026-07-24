@@ -19,12 +19,15 @@
  *   - scored, above threshold                           → white text on dark pill (or neutral dot)
  *   - scored, below threshold                           → red text + red border (or red dot)
  *
- * Tooltip lines (assembled once by computeScoreDisplay):
- *   Error: <error>              (only when hasError)
- *   Scored: <local date/time>   (aiQuality.scoredAt)
- *   Model: <version>            (aiQuality.modelVersion)
- *   Mode:  <mode>               (aiQuality.modeAtScoreTime)
- *   Threshold at scoring: <n>   (aiQuality.thresholdAtScoreTime)
+ * Tooltip (single line, assembled by computeScoreDisplay):
+ *   Score: <display>                              (scored path)
+ *   Score: n/a — <error>                          (errored path — keeps the
+ *                                                  actionable reason)
+ *
+ * Trimmed 2026-07-24 per operator feedback: model / mode / threshold /
+ * timestamp are dead weight on hover; the score value is what matters.
+ * The error reason survives on errored images so the operator still has
+ * a lead for a failed-score frame without opening the log.
  */
 
 /**
@@ -41,19 +44,11 @@ export function computeScoreDisplay(aiQuality, threshold) {
   const subThreshold  = !hasError && score !== null && score < threshold;
   const display       = hasError || score === null ? 'n/a' : score.toFixed(1);
 
-  const tipLines = [];
-  if (hasError) tipLines.push(`Error: ${aiQuality.error}`);
-  if (aiQuality.scoredAt) {
-    try {
-      tipLines.push(`Scored: ${new Date(aiQuality.scoredAt).toLocaleString()}`);
-    } catch { /* ignore parse failure */ }
-  }
-  if (aiQuality.modelVersion) tipLines.push(`Model: ${aiQuality.modelVersion}`);
-  if (aiQuality.modeAtScoreTime) tipLines.push(`Mode: ${aiQuality.modeAtScoreTime}`);
-  if (aiQuality.thresholdAtScoreTime != null) {
-    tipLines.push(`Threshold at scoring: ${aiQuality.thresholdAtScoreTime}`);
-  }
-  const tooltip = tipLines.join('\n');
+  // Single-line tooltip. Scored: just the number. Errored: n/a plus the
+  // error reason so a failed-score frame is still diagnosable on hover.
+  const tooltip = hasError
+    ? `Score: ${display} — ${aiQuality.error}`
+    : `Score: ${display}`;
 
   return { shouldRender: true, hasError, subThreshold, display, tooltip };
 }
