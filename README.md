@@ -1,204 +1,168 @@
-# OrderHub Desktop
+# OrderHub Downloader
 
-A Windows desktop application that automatically downloads files from an FTP server based on jobs retrieved from the OrderHub API. Runs continuously in the background as a system tray application.
+A Windows desktop application (Electron) that automates a photo lab's print
+production: it ingests jobs from OrderHub, pulls the artwork, lets an operator
+review and crop it, routes it to the right print controller, and uploads film
+scans and customer file uploads to S3.
 
-## Features
+Runs continuously in the system tray. Product name on disk is
+**OrderHub Downloader** (`%APPDATA%\OrderHub Downloader\`); the window title
+says OrderHub Desktop.
 
-- 🚀 **Automatic Polling**: Checks OrderHub API every 60 seconds for new jobs
-- 📥 **FTP Downloads**: Downloads files from FTP server to local directory
-- 🎯 **System Tray**: Runs quietly in the system tray
-- ⚙️ **Easy Configuration**: Simple GUI for all settings
-- 📝 **Comprehensive Logging**: All operations logged with rotation
-- 🔄 **Auto-Start**: Optional launch on Windows startup
-- 🔒 **Single Instance**: Prevents multiple instances from running
+---
 
-## Installation
+## What it does
 
-### Development
+OHD runs four independent ingestion loops, each separately enabled in Settings:
 
-1. **Clone or extract the project**
+| Loop | Default interval | Purpose |
+|---|---|---|
+| **Jobs** | 60s | Poll the OrderHub API for pending jobs, download artwork over FTP and/or S3, route and dispatch to print controllers |
+| **Film Scans** | 5 min | Watch a scanner output folder, review/rotate/enhance, upload rolls to S3 |
+| **File Uploads** | 5 min | Same watch→upload pattern for customer file uploads, no review surface |
+| **Order XML** | 1 min | Watch hot folders for ROES / Photo Finale order XML and submit orders into OrderHub |
 
-2. **Install dependencies**
-   ```bash
-   npm install
-   ```
+A PC can run any subset — an upload-only station can have job polling switched
+off entirely and still do film scans.
 
-3. **Run the application**
-   ```bash
-   npm start
-   ```
+### Feature areas
 
-### Production Build
+**Job ingestion.** `job-service.js` polls `/jobs/pending`, merges into a
+persisted cache, marks jobs received and syncs authoritative status back.
+Artwork arrives over FTP (`ftp-service.js`, with magic-byte integrity checks)
+or S3 (`s3-artwork-downloader.js`) — both produce an identical on-disk layout.
+Files can land before the order manifest does; `awaiting-manifest.js` holds the
+job in a recoverable state rather than a sticky error.
 
-1. **Create installer**
-   ```bash
-   npm run build
-   ```
+**Job Review.** A React drawer over the Jobs grid: per-image crop, rotate,
+discard/restore, reprint flag, AI quality score, enhancement. Non-destructive —
+pristine copies are kept in `{job}/originals/` and never rewritten.
+**Manual Crop mode** is the per-image-first cropping workflow for manual-source
+artwork, with best-fit crop-box orientation (the box matches each image's own
+aspect, not the target size's) and Approve All.
 
-2. **Find installer in**
-   ```
-   dist/OrderHub Desktop Setup X.X.X.exe
-   ```
+**Routing and dispatch.** `routing-service.js` resolves a job through three
+layers — process-folder exceptions, process→controller mappings, then channel
+mappings (product code + options → channel, print size, media). Unmatched jobs
+surface for manual Assign rather than guessing. `print-service.js` then
+dispatches per controller type:
 
-## Configuration
+- `noritsu` / `epson` — DPOF (`AUTPRINT.MRK`) + `IMAGES/` folder, prefix-based
+  status lifecycle watched by a hot-folder monitor
+- `darkroompro` — Darkroom Pro job files, incl. back-print token templates
+- `fujijobmaker` — one `.txt` per surface into the JobMaker share
+- `frontline` — XML
+- `folder_copy` / `pdf_copy` — flat copy and the PDF pipeline (interleaves,
+  banner sheets, order identifiers)
 
-On first launch, configure the application:
+Print size is mandatory and comes from the channel mapping, never from the
+upstream manifest.
 
-### OrderHub API Settings
-- **API URL**: Your OrderHub API endpoint
-- **API Key**: Your API authentication key
+**Film Scans / Film Review.** Optional mirror from a scanner source folder,
+stability check, AI auto-rotation (ONNX), optional Perfectly Clear enhancement,
+operator review (Auto / Smart / Manual modes), then S3 upload with a completion
+manifest. **Auto Assignment Mode** holds each roll until a Film Development job
+with a matching twin check arrives, then uploads and stamps the match onto the
+manifest so OrderHub can record it.
 
-### FTP Server Settings
-- **Host**: FTP server hostname (e.g., ftp.example.com)
-- **Port**: FTP port (default: 21)
-- **Username**: FTP username
-- **Password**: FTP password
+**AI quality gate.** A MUSIQ ONNX model scores incoming artwork; low scores can
+warn or hold the job out of auto-print, with optional automatic fix-up.
+Fails open — a scoring failure never blocks a print.
 
-### Download Settings
-- **Download Directory**: Local directory where files will be saved
+**Enhancement.** Two independent systems: Perfectly Clear QuickServer
+(hot-folder, usable on Jobs / Film Scans / File Uploads) and AI upscaling
+(local Real-ESRGAN, or Topaz cloud with an API key).
 
-### Application Settings
-- **Enable automatic polling**: Toggle automatic job checking
-- **Launch on Windows startup**: Auto-start with Windows
+**Reprints and customer originals.** Reprints always source from
+`{job}/originals/`, never the working set. Operators can open a customer's
+pre-crop upload and re-crop from it; every re-crop is written to
+`{job}/recrops/` as an append-only audit trail.
 
-## Usage
+**Backup & restore.** Daily snapshot of five config stores to a UNC or local
+path, per-host, secrets deliberately excluded. See `docs/backup-restore.md`.
 
-### First Time Setup
+---
 
-1. Launch the application
-2. Fill in all configuration fields
-3. Click "Test API Connection" to verify OrderHub API access
-4. Click "Test FTP Connection" to verify FTP access
-5. Select a download directory
-6. Enable polling if desired
-7. Click "Save Settings"
-
-### Running
-
-- The application runs in the system tray (bottom right corner)
-- Click the tray icon to open settings
-- Right-click the tray icon for menu:
-  - **Show Settings**: Open configuration window
-  - **Polling: ON/OFF**: Current polling status
-  - **Last check**: Time of last API check
-  - **Start/Stop Polling**: Toggle polling
-  - **Quit**: Exit application
-
-### System Tray Icon
-
-The tray icon tooltip shows:
-- Application name
-- Last check time
-
-### Logs
-
-Logs are stored in:
-```
-%APPDATA%/orderhub-downloader/logs/
-```
-
-Files:
-- `app.log` - All application logs
-- `error.log` - Error logs only
-
-Log rotation: 5MB per file, 5 files maximum
-
-## Project Structure
+## Architecture
 
 ```
-OrderHubDownloader/
-├── src/
-│   ├── main/               # Main process (Node.js)
-│   │   ├── index.js        # Application entry point
-│   │   ├── window-manager.js
-│   │   ├── tray-manager.js
-│   │   ├── ipc-handlers.js
-│   │   └── services/
-│   │       ├── polling-service.js
-│   │       ├── ftp-service.js
-│   │       ├── config-service.js
-│   │       └── logger.js
-│   ├── preload/            # Security bridge
-│   │   └── preload.js
-│   └── renderer/           # UI (HTML/CSS/JS)
-│       ├── index.html
-│       ├── styles.css
-│       └── renderer.js
-├── assets/
-│   └── icons/
-├── package.json
-└── electron-builder.yml
+src/
+  main/            Electron main process
+    index.js         boot: single instance, migrations, IPC, window, tray, timers
+    ipc-handlers.js  ~125 IPC handlers + the auto-print orchestrator
+    services/        ingestion, routing, dispatch, film scans, AI, config stores
+    jobs/            Job Review main-side logic (sidecar, crops, reprints)
+    enhancement/     Perfectly Clear client + local/Topaz AI upscaling
+  preload/         the single contextBridge surface (window.electronAPI)
+  renderer/
+    index.html       tab shell: Jobs / Film Scans / Order XML / Settings / Log
+    renderer.js      vanilla JS driving all of the above (no build step)
+    views/           React sources for the two rich views
+    *.bundle.js      committed esbuild output for those views
+  shared/          Electron-free logic used by BOTH main and renderer
+  pdf-pipeline/    pdf_copy controller pipeline
 ```
+
+Two rendering styles coexist deliberately. The tab shell and Settings are plain
+HTML + `renderer.js` and need no build. **Job Review** and **Film Review** are
+React, compiled by esbuild into `job-review.bundle.js` / `film-review.bundle.js`
+— and those bundles are **committed to git**.
+
+> **If you edit any `.jsx` under `src/renderer/views/`, you must run
+> `npm run build:renderer` and commit the regenerated bundle.** Otherwise the
+> app keeps showing the old behaviour and it looks like a broken feature.
+
+### Where data lives
+
+Everything is in `%APPDATA%\OrderHub Downloader\`, logs in `logs/` beneath it.
+
+| File | Holds |
+|---|---|
+| `config.json` | credentials, folders, all feature flags and intervals |
+| `routing.json` | controllers, process mappings, channel mappings — the live routing store |
+| `jobs-cache.json` | the OrderHub job cache |
+| `dpof-state.json` | operator "Printed" flags |
+| `frame-metadata.json` | per-frame film-scan rotation / flags / review state |
+| `order-xml-ingestion.json` | order XML ingestion history |
+| `app-prefs.json` | app theme |
+| `print-controllers.json` | **legacy** — migrated into `routing.json` on startup |
+
+---
 
 ## Development
 
-### Scripts
-
-- `npm start` - Run in development mode
-- `npm run dev` - Run with dev flag
-- `npm run build` - Create production installer
-- `npm run build:dir` - Build unpacked (faster testing)
-
-### Adding Features
-
-1. **Main Process**: Add logic to `src/main/`
-2. **UI**: Modify `src/renderer/`
-3. **IPC**: Add handlers in `src/main/ipc-handlers.js`
-4. **Security Bridge**: Expose in `src/preload/preload.js`
-
-## Technologies
-
-- **Electron** (v32) - Desktop application framework
-- **basic-ftp** (v5) - FTP client
-- **electron-store** (v10) - Configuration persistence
-- **winston** (v3.11) - Logging
-- **electron-builder** (v25) - Packaging
-
-## Troubleshooting
-
-### Application won't start
-- Check logs in `%APPDATA%/orderhub-downloader/logs/`
-- Ensure no other instance is running
-
-### FTP connection fails
-- Verify FTP credentials
-- Check firewall settings
-- Ensure FTP server is accessible
-
-### API connection fails
-- Verify API URL and key
-- Check network connectivity
-- Review API endpoint availability
-
-### Downloads not working
-- Ensure download directory exists and is writable
-- Check FTP credentials
-- Review logs for specific errors
-
-### Polling not running
-- Enable polling in settings
-- Ensure all configuration is complete
-- Check "Polling: ON" in tray menu
-
-## Security Notes
-
-**Phase 1 Implementation:**
-- Passwords stored in plain text
-- Basic authentication only
-- No encryption
-
-**Future Enhancements:**
-- Password encryption using Electron's safeStorage API
-- Secure credential storage
-- Enhanced authentication
-
-## License
-
-MIT
-
-## Support
-
-For issues or questions, check the logs first:
+```bash
+npm install
+npm start              # or: npm run dev
+npm run build:renderer # after any .jsx change — then commit the bundle
+npm test
+npm run build          # Windows NSIS installer into dist/
 ```
-%APPDATA%/orderhub-downloader/logs/app.log
-```
+
+`npm test` runs `node --test` over five explicit globs (see `package.json`).
+There is no test framework — `node:test` + `node:assert/strict`. Concurrency is
+pinned to 1 on purpose: several folder-watch integration tests share an on-disk
+store file and flake in parallel. A `__tests__` directory outside those five
+globs will silently never run.
+
+Releases ship **unsigned** unless the Azure signing environment variables are
+present; users install through the SmartScreen warning.
+
+> When running `npm run build`, never redirect or tee the output into a file
+> inside the repo. electron-builder packs the asar in two passes; a file growing
+> between passes corrupts the offsets and produces an installer that launches
+> and then dies natively with no logs.
+
+---
+
+## Documentation map
+
+- `CHANGELOG.md` — the authoritative per-release record
+- `docs/RELEASE-NOTES-*.md` — long-form notes for recent releases
+- `docs/print-controllers/` — per-controller formats, setup, workflow,
+  troubleshooting, validation
+- `docs/backup-restore.md`, `docs/order-xml-hotfolder.md`,
+  `docs/perfectly-clear-quickserver-*.md` — subsystem guides
+- `docs/phase*-spec.md`, `docs/orderhub-film-gallery-email-workflow-plan.md` —
+  designs for planned, not-yet-built work
+- `CLAUDE.md` — orientation for AI coding agents working in this repo
