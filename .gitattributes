@@ -33,3 +33,11 @@
 *.yml text eol=lf
 *.yaml text eol=lf
 *.sh text eol=lf
+
+# Sample/fixture data and licence texts. These get rewritten with CRLF by
+# Windows editors; declaring them as text means git normalises on add/compare
+# so they stop showing as phantom modifications.
+*.xml text eol=lf
+*.txt text eol=lf
+LICENCE text eol=lf
+LICENSE text eol=lf
