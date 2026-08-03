@@ -58,12 +58,14 @@ const nodeFs = require('node:fs');
 const path   = require('node:path');
 const Store  = require('electron-store');
 
-// Lazy require so tests that stub-in the file writer don't pull the
-// real fsPromises stack until needed.
-let _fileWriter = null;
-function _writer() {
-  if (!_fileWriter) _fileWriter = require('./fuji-pic-pro-file-writer');
-  return _fileWriter;
+// Lazy require of the real file-writer module — falls through to
+// `require('./fuji-pic-pro-file-writer')` only if the monitor
+// instance has no `deps.fileWriter`. Kept as a module-level cache
+// so multiple monitors on the same process share one require.
+let _defaultFileWriter = null;
+function _defaultWriter() {
+  if (!_defaultFileWriter) _defaultFileWriter = require('./fuji-pic-pro-file-writer');
+  return _defaultFileWriter;
 }
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -139,6 +141,13 @@ class FujiPicProMonitor {
     this._sweepTimer = null;
     this._sweepMs    = DEFAULT_IDLE_SWEEP_MS;
     this._watchDebounceTimer = null;
+    // Fuji PIC Pro review fix 5. `_scan` is async and gets called from
+    // both `setInterval` and the `fs.watch` debounce, neither of
+    // which awaits. Without a mutex a DIGIN move that takes longer
+    // than the 1 s sweep would re-enter and produce a half-copied
+    // folder in DIGIN or drop the entry with no `[release]`. This
+    // flag serialises scans across BOTH triggers.
+    this._scanInFlight = false;
 
     // In-memory mirror of the persisted queue. Loaded on start,
     // rewritten to disk on every mutation.
@@ -326,35 +335,49 @@ class FujiPicProMonitor {
 
   async _scan(now) {
     if (!this._callback) return;
-    // Snapshot to avoid mutating-while-iterating when a callback
-    // enqueues a new order.
-    const entries = [...this._pending.values()];
-    for (const entry of entries) {
-      try {
-        // Keep advancing the same entry as long as each step
-        // transitioned synchronously — `delivering` and `releasing`
-        // have no wait signal (they perform their own I/O), so one
-        // sweep should carry an entry through them without pausing.
-        // The wait phases (`awaiting-gateway`, `building`) return
-        // without changing the phase and break the loop naturally.
-        let previousPhase;
-        do {
-          previousPhase = entry.phase;
-          await this._stepEntry(entry, now);
-          // Terminal → the entry has been deleted from _pending.
-        } while (this._pending.has(entry.orderId) && entry.phase !== previousPhase);
-      } catch (err) {
-        (this._logger.logError || this._logger.error || (() => {})).call(
-          this._logger,
-          '[fuji-pic-pro] entry step failed — emitting failed status',
-          err,
-          { orderId: entry.orderId, phase: entry.phase },
-        );
-        this._resolveEntry(entry, 'failed', now);
+    // Fuji PIC Pro review fix 5. Serialise scans — a slow DIGIN move
+    // MUST NOT be re-entered by the next interval tick or the watch
+    // debounce. If a scan is already in flight, skip: the in-flight
+    // scan re-checks the queue on completion (via `_rescheduleSweep`
+    // at the end + the fact that the next interval fires 1 s later
+    // anyway), so no work is lost.
+    if (this._scanInFlight) return;
+    this._scanInFlight = true;
+    try {
+      // Snapshot to avoid mutating-while-iterating when a callback
+      // enqueues a new order.
+      const entries = [...this._pending.values()];
+      for (const entry of entries) {
+        try {
+          // Keep advancing the same entry as long as each step
+          // transitioned synchronously — `delivering` and `releasing`
+          // have no wait signal (they perform their own I/O), so one
+          // sweep should carry an entry through them without pausing.
+          // The wait phases (`awaiting-gateway`, `building`) return
+          // without changing the phase and break the loop naturally.
+          let previousPhase;
+          do {
+            previousPhase = entry.phase;
+            await this._stepEntry(entry, now);
+            // Terminal → the entry has been deleted from _pending.
+          } while (this._pending.has(entry.orderId) && entry.phase !== previousPhase);
+        } catch (err) {
+          (this._logger.logError || this._logger.error || (() => {})).call(
+            this._logger,
+            '[fuji-pic-pro] entry step failed — emitting failed status',
+            err,
+            { orderId: entry.orderId, phase: entry.phase },
+          );
+          this._resolveEntry(entry, 'failed', now);
+        }
       }
+      // Fast → slow cadence switch when the queue drains.
+      this._rescheduleSweep();
+    } finally {
+      // Always clear the flag, even if the loop throws — otherwise
+      // one bad scan permanently locks the monitor.
+      this._scanInFlight = false;
     }
-    // Fast → slow cadence switch when the queue drains.
-    this._rescheduleSweep();
   }
 
   async _stepEntry(entry, now) {
@@ -409,7 +432,7 @@ class FujiPicProMonitor {
   async _stepDelivering(entry, now) {
     // No filesystem watch to wait on — perform the DIGIN move now.
     try {
-      const { deliverToDigin } = _writer();
+      const { deliverToDigin } = this._fileWriter || _defaultWriter();
       await deliverToDigin({
         stagingFolder: entry.stagingFolder,
         diginPath:     entry.diginPath,
@@ -474,7 +497,7 @@ class FujiPicProMonitor {
   async _stepReleasing(entry, now) {
     if (entry.sendReleaseCommand === true) {
       try {
-        const { writeCommandFile } = _writer();
+        const { writeCommandFile } = this._fileWriter || _defaultWriter();
         await writeCommandFile({
           orderDataPath: entry.orderDataPath,
           command:       'release',

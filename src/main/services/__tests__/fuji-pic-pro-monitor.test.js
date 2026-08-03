@@ -673,6 +673,88 @@ test('building holds until BOTH mergeData variants (`{orderId}.con` and `{orderI
   monitor.stopMonitoring();
 });
 
+// ── Fix 5 regression: _scan reentrancy guard ─────────────────────────────
+
+test('fix 5: concurrent _scan invocations do not double-run the same entry (in-flight guard)', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const ws = await setupWorkspace(dir, { orderId: 'ORD-CONC' });
+
+  // Inject a fileWriter whose deliverToDigin is slow — 50 ms of
+  // await — so the second _scan tick fires while the first is
+  // still inside the delivering step. Without the in-flight guard
+  // the second scan would call deliverToDigin a second time and
+  // either half-copy a folder or error on a name collision.
+  let deliverToDiginCalls = 0;
+  const slowFileWriter = {
+    ...fileWriter,
+    deliverToDigin: async (args) => {
+      deliverToDiginCalls++;
+      await new Promise((r) => setTimeout(r, 50));
+      return fileWriter.deliverToDigin(args);
+    },
+  };
+
+  const monitor = new FujiPicProMonitor({
+    deps: { fs, logger: silentLogger, store: makeInMemoryStore(), clock: makeClock(), fileWriter: slowFileWriter },
+  });
+  monitor.startMonitoring({}, () => {});
+  enqueue(monitor, ws, 'ORD-CONC');
+
+  // Get the entry past awaiting-gateway so the next scan enters
+  // `delivering` — that's where the slow move happens.
+  await fsp.unlink(path.join(ws.orderData, 'ORD-CONC.txt'));
+  await monitor._scanNow();  // absent count 1
+  // Fire two scans concurrently. The second one should see
+  // _scanInFlight === true and return immediately.
+  const [first, second] = await Promise.all([
+    monitor._scanNow(),      // advances counter to 2 → delivering → slow move → building
+    monitor._scanNow(),      // must short-circuit (guard set by first)
+  ]);
+  void first; void second;
+
+  assert.equal(deliverToDiginCalls, 1,
+    'deliverToDigin must run exactly once even when two scans race — the fix 5 in-flight guard is what makes this true');
+  assert.equal(monitor.getPending()[0].phase, 'building',
+    'entry must advance normally despite the guarded second call');
+  monitor.stopMonitoring();
+});
+
+test('fix 5: _scanInFlight is cleared even when a scan throws (no permanent lock)', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const ws = await setupWorkspace(dir, { orderId: 'ORD-BOOM' });
+
+  const explodingFileWriter = {
+    ...fileWriter,
+    deliverToDigin: async () => { throw new Error('simulated fatal delivery error'); },
+  };
+  const monitor = new FujiPicProMonitor({
+    deps: { fs, logger: silentLogger, store: makeInMemoryStore(), clock: makeClock(), fileWriter: explodingFileWriter },
+  });
+  monitor.startMonitoring({}, () => {});
+  enqueue(monitor, ws, 'ORD-BOOM');
+
+  await fsp.unlink(path.join(ws.orderData, 'ORD-BOOM.txt'));
+  // Two observations to reach `delivering`; the delivering step
+  // throws, the entry is resolved as `failed`, and the guard MUST
+  // clear so the next scan can process fresh work.
+  for (let i = 0; i < _internals.REQUIRED_ABSENT_OBSERVATIONS; i++) {
+    await monitor._scanNow();
+  }
+  assert.equal(monitor._scanInFlight, false,
+    'the finally block must clear _scanInFlight even after an exception path');
+
+  // Enqueue a new order and confirm the monitor still processes it.
+  const ws2 = await setupWorkspace(await makeTempDir(), { orderId: 'ORD-NEXT' });
+  t.after(() => fsp.rm(path.dirname(ws2.orderData), { recursive: true, force: true }));
+  enqueue(monitor, ws2, 'ORD-NEXT');
+  await monitor._scanNow();
+  assert.equal(monitor.getPending().length, 1,
+    'monitor stays functional post-exception — the guard is not stuck');
+  monitor.stopMonitoring();
+});
+
 // ── Sweep cadence ─────────────────────────────────────────────────────────
 
 test('sweep cadence flips between active (1s) and idle (60s) as the queue drains', async (t) => {
