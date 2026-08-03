@@ -212,6 +212,38 @@ test('stageImages: re-run overwrites existing staged files (idempotent for retry
   assert.equal(b2, 'updated-2');
 });
 
+test('fix 8: retry clears stale files from a prior partial attempt (wrong-extension NegNumber bug)', async (t) => {
+  // Simulates the operator retrying a job that failed part-way
+  // through staging on a previous attempt, with a DIFFERENT source
+  // extension this time (e.g. .png replaced by .jpg). Pre-fix the
+  // `mkdir -p` silently reused the folder → the second attempt's
+  // `0001.jpg` landed alongside the prior `0001.png`, and
+  // `NegNumber=0001` (ext-less per spec p. 347) is ambiguous —
+  // DIGIN could pick either. Wrong picture printed.
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const stagingRoot = path.join(dir, 'staging'); await fsp.mkdir(stagingRoot);
+  const stagingFolder = path.join(stagingRoot, 'ORD-RETRY');
+  await fsp.mkdir(stagingFolder);
+  // Pre-populate: leftover 0001.png + a 0007.jpg from a bigger prior batch
+  // that we're now retrying with fewer images.
+  await fsp.writeFile(path.join(stagingFolder, '0001.png'), 'stale-png-bytes');
+  await fsp.writeFile(path.join(stagingFolder, '0007.jpg'), 'stale-jpg-from-larger-batch');
+
+  const sources = await makeSourceImages(dir, 2);   // two source .JPGs
+
+  const result = await stageImages({
+    imageStagingRoot: stagingRoot,
+    orderId:          'ORD-RETRY',
+    imageFiles:       sources,
+  });
+
+  const entries = (await fsp.readdir(stagingFolder)).sort();
+  assert.deepEqual(entries, ['0001.jpg', '0002.jpg'],
+    'staging folder must contain ONLY the current run — no stale 0001.png (ambiguous with the new 0001.jpg on NegNumber lookup) and no leftover 0007.jpg from a larger prior batch');
+  assert.equal(result.negNumberMap.length, 2);
+});
+
 test('stageImages: arg validation — missing / empty inputs throw before any I/O', async () => {
   await assert.rejects(stageImages({ orderId: 'x', imageFiles: [{}] }),
     /imageStagingRoot.+is required/);

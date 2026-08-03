@@ -92,8 +92,18 @@ async function stageImages({
   }
 
   const stagingFolder = path.join(imageStagingRoot, orderId);
-  // Per-order subfolder we DO create — it's the OHD-owned "our
-  // scratch space" not the operator-configured root.
+  // Fuji PIC Pro review fix 8. Wipe any leftover files from a
+  // previous partial attempt before staging. Without this, a retry
+  // after a failed dispatch could ship stale `000N.<oldext>` files
+  // — the extension in the previous attempt would bind to the
+  // spec-mandated ext-less `NegNumber` and print the wrong picture
+  // (spec p. 347: NegNumber is filename minus extension). Also
+  // prevents staging from growing without bound across retries.
+  //
+  // Safe to `rm -rf`: the per-order staging folder is OHD-owned
+  // scratch space (unlike `imageStagingRoot` which is operator-
+  // configured and must exist — the guard above enforces that).
+  await fsPromises.rm(stagingFolder, { recursive: true, force: true });
   await fsPromises.mkdir(stagingFolder, { recursive: true });
 
   const negNumberMap = [];
