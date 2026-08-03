@@ -1382,6 +1382,48 @@ class PrintService {
       return { success: false, error: genErr.message };
     }
 
+    // Reprints DO need the monitor — the DIGIN move + optional
+    // [release] don't happen without it. But we do NOT
+    // _markCompleted / _markInProduction; parent lifecycle untouched,
+    // same posture as the JobMaker reprint.
+    //
+    // Fix 11 pattern applies here too: enqueue → write → markCommitted
+    // so a crash in the window doesn't orphan a .txt that PIC Pro
+    // consumed with no DIGIN follow-through.
+    printControllerService.startMonitoring(route.controllerId);
+    const monitor = printControllerService.getMonitor(route.controllerId);
+    if (!monitor || typeof monitor.enqueueSubmission !== 'function') {
+      const msg = `Fuji PIC Pro monitor unavailable for controller ${route.controllerId} — refusing to dispatch reprint.`;
+      logger.logError(msg, new Error('no-monitor'), {
+        parentJobId: parentJob.id, reprintSuffix, orderId: reprintOrderId,
+      });
+      return { success: false, error: msg };
+    }
+
+    try {
+      monitor.enqueueSubmission({
+        orderRef:            reprintOrderId,
+        orderId:             reprintOrderId,
+        stagingFolder:       stageResult.stagingFolder,
+        controllerId:        route.controllerId,
+        orderDataPath:       route.orderDataPath,
+        diginPath:           route.diginPath,
+        mergeDataPath:       route.mergeDataPath || '',
+        gatewayTimeoutMs:    route.gatewayTimeoutMs,
+        buildTimeoutMs:      route.buildTimeoutMs,
+        sendReleaseCommand:  route.sendReleaseCommand === true,
+      });
+    } catch (enqueueErr) {
+      logger.logError('Fuji PIC Pro reprint enqueue failed — refusing to write .txt', enqueueErr, {
+        parentJobId:  parentJob.id,
+        reprintSuffix,
+        controller:   route.controllerName,
+        orderId:      reprintOrderId,
+        code:         enqueueErr && enqueueErr.code,
+      });
+      return { success: false, error: enqueueErr.message };
+    }
+
     let writtenPath;
     try {
       ({ writtenPath } = await fujiPicProFileWriter.writeOrderFile({
@@ -1390,6 +1432,7 @@ class PrintService {
         contents:      orderFile.contents,
       }));
     } catch (writeErr) {
+      try { monitor.dequeue(reprintOrderId); } catch (_) { /* best-effort */ }
       logger.logError('Fuji PIC Pro reprint write failed — staged images may remain', writeErr, {
         parentJobId:  parentJob.id,
         reprintSuffix,
@@ -1398,40 +1441,7 @@ class PrintService {
       return { success: false, error: writeErr.message };
     }
 
-    // Reprints DO need the monitor — the DIGIN move + optional
-    // [release] don't happen without it. But we do NOT
-    // _markCompleted / _markInProduction; parent lifecycle untouched,
-    // same posture as the JobMaker reprint.
-    printControllerService.startMonitoring(route.controllerId);
-    const monitor = printControllerService.getMonitor(route.controllerId);
-    if (monitor && typeof monitor.enqueueSubmission === 'function') {
-      try {
-        monitor.enqueueSubmission({
-          orderRef:            reprintOrderId,
-          orderId:             reprintOrderId,
-          stagingFolder:       stageResult.stagingFolder,
-          controllerId:        route.controllerId,
-          orderDataPath:       route.orderDataPath,
-          diginPath:           route.diginPath,
-          mergeDataPath:       route.mergeDataPath || '',
-          gatewayTimeoutMs:    route.gatewayTimeoutMs,
-          buildTimeoutMs:      route.buildTimeoutMs,
-          sendReleaseCommand:  route.sendReleaseCommand === true,
-        });
-      } catch (enqueueErr) {
-        // Fix 9 — same rationale as the send-path handler. Duplicate
-        // reprintSuffix would be a caller bug; surface it clearly
-        // instead of letting it propagate as an unhandled throw.
-        logger.logError('Fuji PIC Pro reprint enqueue failed', enqueueErr, {
-          parentJobId:  parentJob.id,
-          reprintSuffix,
-          controller:   route.controllerName,
-          orderId:      reprintOrderId,
-          code:         enqueueErr && enqueueErr.code,
-        });
-        return { success: false, error: enqueueErr.message };
-      }
-    }
+    monitor.markCommitted(reprintOrderId);
 
     logger.info('Reprint sent via Fuji PIC Pro — enqueued for OrderGateway handshake', {
       parentJobId:  parentJob.id,
@@ -2406,6 +2416,61 @@ class PrintService {
       return { success: false, error: genErr.message };
     }
 
+    // ── Enqueue for the monitor and START it (idempotent) ──────────────────
+    // Fuji PIC Pro review fix 11. Reordered: enqueue BEFORE writing
+    // the .txt. Pre-fix a crash between write and enqueue (or a
+    // blank diginPath that failed enqueue) left OrderGateway with a
+    // .txt it consumed while OHD had no monitor entry to drive the
+    // DIGIN handshake — orphaned image-less order at PIC Pro. The
+    // reordered flow persists the pending entry first (with
+    // txtCommitted=false so the monitor won't advance yet), then
+    // writes the .txt, then flips txtCommitted via `markCommitted`.
+    // Kill in the enqueue↔write gap now leaves a recoverable entry
+    // (times out via gatewayTimeoutMs) rather than an orphaned .txt.
+    //
+    // startMonitoring first so the monitor exists to enqueue into.
+    // printControllerService.startMonitoring is a no-op when the
+    // monitor is already up.
+    printControllerService.startMonitoring(route.controllerId);
+    const monitor = printControllerService.getMonitor(route.controllerId);
+    if (!monitor || typeof monitor.enqueueSubmission !== 'function') {
+      // Monitor wasn't wired for this controller type — shouldn't
+      // happen in production (print-controller-service.startMonitoring
+      // handles fujipicpro). Fail loudly rather than silently
+      // dropping the handshake.
+      const msg = `Fuji PIC Pro monitor unavailable for controller ${route.controllerId} — refusing to dispatch. DIGIN delivery + release would not happen.`;
+      logger.logError(msg, new Error('no-monitor'), { controllerId: route.controllerId, orderId });
+      jobService.updateJobLocally(job.id, { _status: 'error', _errorMessage: msg });
+      return { success: false, error: msg };
+    }
+
+    try {
+      monitor.enqueueSubmission({
+        orderRef:            orderId,
+        orderId,
+        stagingFolder:       stageResult.stagingFolder,
+        controllerId:        route.controllerId,
+        orderDataPath:       route.orderDataPath,
+        diginPath:           route.diginPath,
+        mergeDataPath:       route.mergeDataPath || '',
+        gatewayTimeoutMs:    route.gatewayTimeoutMs,
+        buildTimeoutMs:      route.buildTimeoutMs,
+        sendReleaseCommand:  route.sendReleaseCommand === true,
+      });
+    } catch (enqueueErr) {
+      // Fix 9: duplicate orderId (in-flight submission not yet
+      // resolved). Never write the .txt in this state — OrderGateway
+      // would then have two writes for the same order.
+      logger.logError('Fuji PIC Pro enqueue failed — refusing to write .txt', enqueueErr, {
+        jobId:      job.id,
+        controller: route.controllerName,
+        orderId,
+        code:       enqueueErr && enqueueErr.code,
+      });
+      jobService.updateJobLocally(job.id, { _status: 'error', _errorMessage: enqueueErr.message });
+      return { success: false, error: enqueueErr.message };
+    }
+
     // ── Write the order.txt into Order Data (atomic .tmp + rename) ─────────
     let writtenPath;
     try {
@@ -2415,6 +2480,12 @@ class PrintService {
         contents:      orderFile.contents,
       }));
     } catch (writeErr) {
+      // Fix 11: enqueue already ran, so we must dequeue the entry
+      // ourselves rather than let it sit in awaiting-gateway
+      // waiting for a .txt that never landed. dequeue is silent
+      // (no callback) since the caller stamps the job's error
+      // status here directly.
+      try { monitor.dequeue(orderId); } catch (_) { /* best-effort */ }
       logger.logError('Fuji PIC Pro order file write failed — staged images may remain', writeErr, {
         jobId:      job.id,
         controller: route.controllerName,
@@ -2423,51 +2494,10 @@ class PrintService {
       return { success: false, error: writeErr.message };
     }
 
-    // ── Enqueue for the monitor and START it (idempotent) ──────────────────
-    // Order matters: startMonitoring first so the monitor exists to
-    // enqueue into. printControllerService.startMonitoring is a no-op
-    // when the monitor is already up.
-    printControllerService.startMonitoring(route.controllerId);
-    const monitor = printControllerService.getMonitor(route.controllerId);
-    if (monitor && typeof monitor.enqueueSubmission === 'function') {
-      try {
-        monitor.enqueueSubmission({
-          orderRef:            orderId,
-          orderId,
-          stagingFolder:       stageResult.stagingFolder,
-          controllerId:        route.controllerId,
-          orderDataPath:       route.orderDataPath,
-          diginPath:           route.diginPath,
-          mergeDataPath:       route.mergeDataPath || '',
-          gatewayTimeoutMs:    route.gatewayTimeoutMs,
-          buildTimeoutMs:      route.buildTimeoutMs,
-          sendReleaseCommand:  route.sendReleaseCommand === true,
-        });
-      } catch (enqueueErr) {
-        // Fuji PIC Pro review fix 9: `enqueueSubmission` throws on a
-        // duplicate orderId (in-flight submission not yet resolved).
-        // Surface as `_status:'error'` on the job — don't leave the
-        // caller thinking dispatch succeeded when the monitor won't
-        // pick up the DIGIN move.
-        logger.logError('Fuji PIC Pro enqueue failed — order file was written but the monitor could not accept the submission', enqueueErr, {
-          jobId:      job.id,
-          controller: route.controllerName,
-          orderId,
-          code:       enqueueErr && enqueueErr.code,
-        });
-        jobService.updateJobLocally(job.id, { _status: 'error', _errorMessage: enqueueErr.message });
-        return { success: false, error: enqueueErr.message };
-      }
-    } else {
-      // Monitor wasn't wired for this controller type — shouldn't
-      // happen in production (print-controller-service.startMonitoring
-      // handles fujipicpro) but log rather than silently drop the
-      // handshake.
-      logger.logWarning('[fuji-pic-pro] no monitor available to enqueue submission — DIGIN delivery + release will not happen automatically', {
-        controllerId: route.controllerId,
-        orderId,
-      });
-    }
+    // Fix 11: signal the monitor that the .txt is now on disk.
+    // Only from this call onward does `_stepAwaitingGateway` start
+    // observing for OrderGateway consumption.
+    monitor.markCommitted(orderId);
 
     logger.info('Job sent via Fuji PIC Pro (routed) — enqueued for OrderGateway handshake', {
       jobId:        job.id,

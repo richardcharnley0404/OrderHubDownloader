@@ -314,6 +314,13 @@ class FujiPicProMonitor {
       phase:               'awaiting-gateway',
       submittedAt:         now,
       phaseStartedAt:      now,
+      // Fuji PIC Pro review fix 11. The dispatch enqueues BEFORE
+      // writing the .txt so a kill in the tiny gap leaves an
+      // entry (recoverable via the timeout) rather than an
+      // orphaned .txt that OrderGateway consumed with no tracking.
+      // Monitor scans skip advancing until `markCommitted` flips
+      // this flag; the awaiting-gateway timeout is the backstop.
+      txtCommitted:        false,
     };
 
     this._pending.set(entry.orderId, entry);
@@ -321,6 +328,40 @@ class FujiPicProMonitor {
     this._rescheduleSweep();
 
     return entry;
+  }
+
+  /**
+   * Fix 11 — signal to the monitor that the dispatch has finished
+   * writing `{orderDataPath}/{orderId}.txt`. Only after this call
+   * does `_stepAwaitingGateway` start observing the file for
+   * OrderGateway consumption. Reset `phaseStartedAt` so the gateway
+   * timeout window measures from commit time (which is when
+   * OrderGateway can actually pick up the file), not from enqueue.
+   *
+   * Silent no-op when the orderId is unknown — the entry may have
+   * been resolved (dropped from `_pending`) between enqueue and
+   * commit, in which case there's nothing to update.
+   */
+  markCommitted(orderId) {
+    const entry = this._pending.get(orderId);
+    if (!entry) return;
+    entry.txtCommitted   = true;
+    entry.phaseStartedAt = this._clock();
+    this._persist();
+  }
+
+  /**
+   * Fix 11 — remove an in-flight submission without firing a
+   * callback. Used by dispatch when `writeOrderFile` throws AFTER
+   * `enqueueSubmission` succeeded, so the caller decides how to
+   * surface the failure (via its own `_status:'error'` stamp on
+   * the job) rather than the monitor emitting a redundant
+   * terminal callback.
+   */
+  dequeue(orderId) {
+    const removed = this._pending.delete(orderId);
+    if (removed) this._persist();
+    return removed;
   }
 
   /** Return a snapshot of the queue (test / debug hook). */
@@ -448,6 +489,28 @@ class FujiPicProMonitor {
   }
 
   async _stepAwaitingGateway(entry, now) {
+    // Fuji PIC Pro review fix 11. Two-phase enqueue:
+    //   1. Dispatch calls enqueueSubmission (entry created,
+    //      txtCommitted=false).
+    //   2. Dispatch writes the .txt.
+    //   3. Dispatch calls markCommitted (txtCommitted=true, phase
+    //      timer reset).
+    // Without this gate, a crash between (2) and (3), or between
+    // (1) and (2), would let the classifier see 'absent' → advance
+    // to delivering → move images into DIGIN with no OrderGateway
+    // order behind them. Skip the observation entirely until
+    // dispatch signals it committed.
+    if (!entry.txtCommitted) {
+      if ((now - entry.phaseStartedAt) >= entry.gatewayTimeoutMs) {
+        // Never committed by the gateway timeout — the write must
+        // have failed AND dispatch didn't dequeue (crash between
+        // enqueue and write). Resolve as failed. No .txt cleanup
+        // needed because there's nothing on disk to unlink.
+        this._resolveEntry(entry, 'failed', now);
+      }
+      return;
+    }
+
     const txtPath = path.join(entry.orderDataPath, `${entry.orderId}.txt`);
     const state   = await _classifyPath(this._fs, txtPath);
 
@@ -475,6 +538,24 @@ class FujiPicProMonitor {
     entry._absentTicks = 0;
 
     if ((now - entry.phaseStartedAt) >= entry.gatewayTimeoutMs) {
+      // Fix 11 part B: best-effort clean up the .txt so it doesn't
+      // sit in Order Data waiting for a future run that will never
+      // come. If OrderGateway did consume it just before our
+      // timeout, the unlink is a harmless ENOENT.
+      try {
+        await this._fs.promises.unlink(txtPath);
+        (this._logger.info || (() => {})).call(this._logger,
+          '[fuji-pic-pro] cleaned up unconsumed .txt after gateway timeout',
+          { orderId: entry.orderId, txtPath },
+        );
+      } catch (unlinkErr) {
+        if (unlinkErr && unlinkErr.code !== 'ENOENT') {
+          (this._logger.logWarning || this._logger.warn || (() => {})).call(this._logger,
+            '[fuji-pic-pro] failed to clean up .txt after gateway timeout',
+            { orderId: entry.orderId, txtPath, error: unlinkErr && unlinkErr.message },
+          );
+        }
+      }
       this._resolveEntry(entry, 'failed', now);
     }
   }

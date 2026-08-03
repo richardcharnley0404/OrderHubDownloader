@@ -50,6 +50,8 @@ const __markCompletedCalls       = [];
 const __markInProductionCalls    = [];
 const __startMonitoringCalls     = [];
 const __enqueueCalls             = [];
+const __markCommittedCalls       = [];
+const __dequeueCalls             = [];
 let   __routeForReturn           = null;
 
 function resetCaptures() {
@@ -60,6 +62,8 @@ function resetCaptures() {
   __markInProductionCalls.length = 0;
   __startMonitoringCalls.length  = 0;
   __enqueueCalls.length          = 0;
+  __markCommittedCalls.length    = 0;
+  __dequeueCalls.length          = 0;
   __routeForReturn               = null;
 }
 
@@ -131,6 +135,11 @@ const fakePrintControllerService = {
     startMonitoring: (controllerId) => { __startMonitoringCalls.push(controllerId); },
     getMonitor:      () => ({
       enqueueSubmission: (entry) => { __enqueueCalls.push(entry); return entry; },
+      // Fix 11 introduced the two-phase enqueue → markCommitted flow.
+      // Reprint dispatch calls markCommitted after writeOrderFile
+      // succeeds; test fake just records so we can assert on it.
+      markCommitted:     (orderId) => { __markCommittedCalls.push(orderId); },
+      dequeue:           (orderId) => { __dequeueCalls.push(orderId); return true; },
     }),
   },
 };

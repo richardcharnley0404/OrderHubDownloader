@@ -110,10 +110,15 @@ async function setupWorkspace(dir, { orderId, imageCount = 2 } = {}) {
 
 /**
  * Enqueue helper — thin wrapper over enqueueSubmission that fills in
- * all the paths from setupWorkspace + the monitor's own controller.
+ * all the paths from setupWorkspace + the monitor's own controller,
+ * then simulates dispatch's post-write `markCommitted` call. Fix 11
+ * split enqueue and commit into two steps; every pre-existing test
+ * expects the "dispatch completed" state, so bake the commit into
+ * the helper. The `fix 11 …` tests below bypass this and call
+ * enqueue+commit directly to exercise the intermediate state.
  */
 function enqueue(monitor, ws, orderId, overrides = {}) {
-  return monitor.enqueueSubmission({
+  const entry = monitor.enqueueSubmission({
     orderId,
     orderRef:            orderId,
     stagingFolder:       ws.stagingFolder,
@@ -126,6 +131,8 @@ function enqueue(monitor, ws, orderId, overrides = {}) {
     mergeDataPath:       '',
     ...overrides,
   });
+  monitor.markCommitted(orderId);
+  return entry;
 }
 
 function makeMonitor(overrides = {}) {
@@ -670,6 +677,136 @@ test('building holds until BOTH mergeData variants (`{orderId}.con` and `{orderI
   }
   assert.equal(monitor.getPending().length, 0);
   assert.equal(cb.events[0].status, 'accepted');
+  monitor.stopMonitoring();
+});
+
+// ── Fix 11 regression: two-phase enqueue → write → markCommitted ─────────
+
+test('fix 11: an entry without txtCommitted does NOT advance even if the .txt is absent', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const ws = await setupWorkspace(dir, { orderId: 'ORD-UNC' });
+
+  const { monitor } = makeMonitor();
+  monitor.startMonitoring({}, () => {});
+  // Enqueue WITHOUT markCommitted — simulates the mid-dispatch state
+  // between `enqueueSubmission` and `markCommitted`.
+  monitor.enqueueSubmission({
+    orderId:             'ORD-UNC',
+    orderRef:            'ORD-UNC',
+    stagingFolder:       ws.stagingFolder,
+    orderDataPath:       ws.orderData,
+    diginPath:           ws.diginPath,
+    controllerId:        'ctrl-x',
+    gatewayTimeoutMs:    30_000,
+    buildTimeoutMs:      600_000,
+    sendReleaseCommand:  false,
+    mergeDataPath:       '',
+  });
+  // Delete the .txt so the classifier would return absent AND the
+  // 2-observation counter would tick. Pre-fix, the entry would
+  // advance to delivering after two scans — moving images into
+  // DIGIN with no OrderGateway order behind them.
+  await fsp.unlink(path.join(ws.orderData, 'ORD-UNC.txt'));
+
+  for (let i = 0; i < 5; i++) {
+    await monitor._scanNow();
+  }
+  assert.equal(monitor.getPending()[0].phase, 'awaiting-gateway',
+    'entry must stay in awaiting-gateway until markCommitted flips the flag');
+  monitor.stopMonitoring();
+});
+
+test('fix 11: markCommitted flips the flag AND resets phaseStartedAt from commit time', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const ws = await setupWorkspace(dir, { orderId: 'ORD-MC' });
+
+  const clock = makeClock(1_000_000);
+  const { monitor } = makeMonitor({ clock });
+  monitor.startMonitoring({}, () => {});
+  monitor.enqueueSubmission({
+    orderId:'ORD-MC', orderRef:'ORD-MC',
+    stagingFolder: ws.stagingFolder, orderDataPath: ws.orderData, diginPath: ws.diginPath,
+    controllerId: 'x', gatewayTimeoutMs: 5_000, buildTimeoutMs: 600_000, sendReleaseCommand: false,
+  });
+  const startedAtBefore = monitor.getPending()[0].phaseStartedAt;
+  clock.advance(1_000);
+  monitor.markCommitted('ORD-MC');
+  const startedAtAfter = monitor.getPending()[0].phaseStartedAt;
+
+  assert.equal(monitor.getPending()[0].txtCommitted, true);
+  assert.notEqual(startedAtBefore, startedAtAfter,
+    'phaseStartedAt must reset from the commit moment so gateway timeout measures from when OrderGateway can actually act');
+  monitor.stopMonitoring();
+});
+
+test('fix 11: an uncommitted entry that ages past gatewayTimeoutMs is resolved as failed', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const ws = await setupWorkspace(dir, { orderId: 'ORD-STUCK' });
+
+  const clock = makeClock(1_000_000);
+  const { monitor } = makeMonitor({ clock });
+  const cb = recorderCallback();
+  monitor.startMonitoring({}, cb);
+  monitor.enqueueSubmission({
+    orderId: 'ORD-STUCK', orderRef: 'ORD-STUCK',
+    stagingFolder: ws.stagingFolder, orderDataPath: ws.orderData, diginPath: ws.diginPath,
+    controllerId: 'x', gatewayTimeoutMs: 5_000, buildTimeoutMs: 600_000, sendReleaseCommand: false,
+  });
+  // Simulate a crash between enqueue and write: markCommitted is
+  // NEVER called. The entry should time out via the existing
+  // gateway timeout.
+  clock.advance(6_000);
+  await monitor._scanNow();
+
+  assert.equal(monitor.getPending().length, 0);
+  assert.equal(cb.events[0].status, 'failed',
+    'stranded-uncommitted entry must eventually resolve as failed rather than sit forever');
+  monitor.stopMonitoring();
+});
+
+test('fix 11: dequeue removes an entry without firing a callback', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const ws = await setupWorkspace(dir, { orderId: 'ORD-DQ' });
+
+  const { monitor } = makeMonitor();
+  const cb = recorderCallback();
+  monitor.startMonitoring({}, cb);
+  enqueue(monitor, ws, 'ORD-DQ');
+  assert.equal(monitor.getPending().length, 1);
+
+  const removed = monitor.dequeue('ORD-DQ');
+  assert.equal(removed, true);
+  assert.equal(monitor.getPending().length, 0);
+  assert.equal(cb.events.length, 0,
+    'dequeue must be silent — the dispatch caller handles the error surfacing directly');
+
+  // Unknown id returns false without throwing.
+  assert.equal(monitor.dequeue('nope'), false);
+  monitor.stopMonitoring();
+});
+
+test('fix 11 part B: gateway timeout best-effort unlinks the .txt', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const ws = await setupWorkspace(dir, { orderId: 'ORD-CLEANUP' });
+
+  const clock = makeClock(1_000_000);
+  const { monitor } = makeMonitor({ clock });
+  monitor.startMonitoring({}, () => {});
+  enqueue(monitor, ws, 'ORD-CLEANUP', { gatewayTimeoutMs: 5_000 });
+
+  // The .txt is still on disk (setupWorkspace writes it). Simulate
+  // OrderGateway never consuming: clock past the timeout.
+  clock.advance(6_000);
+  await monitor._scanNow();
+
+  assert.equal(monitor.getPending().length, 0);
+  assert.equal(fs.existsSync(path.join(ws.orderData, 'ORD-CLEANUP.txt')), false,
+    'gateway-timeout cleanup must unlink the abandoned .txt so OrderGateway does not later pick up an order OHD gave up on');
   monitor.stopMonitoring();
 });
 
