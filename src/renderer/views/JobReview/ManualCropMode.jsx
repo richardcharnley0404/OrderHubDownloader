@@ -1007,10 +1007,17 @@ function CropStage({
 
   const hasPrev = selectedIndex > 0;
   const hasNext = selectedIndex < totalCount - 1;
+  // M0.7 (Fuji PIC Pro brief): gate on targetSizeReady. Without this,
+  // an operator on a controller with no size translation (e.g. a Fuji
+  // JobMaker job pre-M0) could Approve every image at a 1:1 square
+  // crop while the ⚠ pill was showing, then Send to Print. The
+  // comment above approveAndAdvance (~line 546) claimed the gate
+  // already existed — it did not until M0.
   const canApprove = stageImgLoaded
     && !!state.pendingCropRect
     && !state.applying
-    && !state.discarded;
+    && !state.discarded
+    && targetSizeReady;
   // Delete / Restore button presentation flips on state.discarded.
   const deleteRestoreLabel    = state.discarded ? 'Restore' : 'Delete';
   const deleteRestoreOnClick  = state.discarded ? onRestore : onDiscard;
