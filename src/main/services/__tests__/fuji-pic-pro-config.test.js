@@ -41,6 +41,7 @@ const {
   ALLOWED_COLORS,
   DEFAULT_COLOR,
   CONTROLLER_TYPE,
+  _internals,
 } = require('../fuji-pic-pro-config');
 
 // Belt-and-braces: constants sanity so future changes to the
@@ -265,6 +266,140 @@ test('sendReleaseCommand + includeCustomerName: strict boolean semantics (defaul
     assert.equal(result.normalized.includeCustomerName, raw === true,
       `includeCustomerName with raw=${JSON.stringify(raw)} must only be true when raw === true`);
   }
+});
+
+// ── Fix 14: overlapping-path rejection ─────────────────────────────────────
+
+test('fix 14: imageStagingRoot === diginPath is rejected', () => {
+  const result = validateControllerConfig({
+    type: 'fujipicpro',
+    name: 'x',
+    orderDataPath:    '\\\\Lab\\OrderData',
+    diginPath:        '\\\\Lab\\Shared',
+    imageStagingRoot: '\\\\Lab\\Shared',   // same as diginPath
+  });
+  assert.equal(result.valid, false);
+  assert.match(result.errors.join('|'), /diginPath and imageStagingRoot must be different folders/i);
+});
+
+test('fix 14: imageStagingRoot as a child of diginPath is rejected (nested overlap)', () => {
+  const result = validateControllerConfig({
+    type: 'fujipicpro',
+    name: 'x',
+    orderDataPath:    '\\\\Lab\\OrderData',
+    diginPath:        '\\\\Lab\\DIGIN',
+    imageStagingRoot: '\\\\Lab\\DIGIN\\Staging',   // inside diginPath
+  });
+  assert.equal(result.valid, false);
+  assert.match(result.errors.join('|'), /must not overlap/i);
+});
+
+test('fix 14: diginPath as a child of imageStagingRoot is rejected (nested overlap, reverse direction)', () => {
+  const result = validateControllerConfig({
+    type: 'fujipicpro',
+    name: 'x',
+    orderDataPath:    '\\\\Lab\\OrderData',
+    diginPath:        '\\\\Lab\\Staging\\DIGIN',
+    imageStagingRoot: '\\\\Lab\\Staging',
+  });
+  assert.equal(result.valid, false);
+  assert.match(result.errors.join('|'), /must not overlap/i);
+});
+
+test('fix 14: orderDataPath === diginPath is also rejected', () => {
+  const result = validateControllerConfig({
+    type: 'fujipicpro',
+    name: 'x',
+    orderDataPath:    '\\\\Lab\\Shared',
+    diginPath:        '\\\\Lab\\Shared',
+    imageStagingRoot: '\\\\Lab\\Staging',
+  });
+  assert.equal(result.valid, false);
+  assert.match(result.errors.join('|'), /orderDataPath and diginPath must be different/i);
+});
+
+test('fix 14: mergeDataPath overlaps flagged too when set', () => {
+  const result = validateControllerConfig({
+    type: 'fujipicpro',
+    name: 'x',
+    orderDataPath:    '\\\\Lab\\OrderData',
+    diginPath:        '\\\\Lab\\DIGIN',
+    imageStagingRoot: '\\\\Lab\\Staging',
+    mergeDataPath:    '\\\\Lab\\DIGIN\\Merge',  // inside diginPath
+  });
+  assert.equal(result.valid, false);
+  assert.match(result.errors.join('|'), /diginPath and mergeDataPath must not overlap/i);
+});
+
+test('fix 14: mergeDataPath blank does NOT trigger overlap warning', () => {
+  const result = validateControllerConfig({
+    type: 'fujipicpro',
+    name: 'x',
+    orderDataPath:    '\\\\Lab\\OrderData',
+    diginPath:        '\\\\Lab\\DIGIN',
+    imageStagingRoot: '\\\\Lab\\Staging',
+    mergeDataPath:    '',
+  });
+  assert.equal(result.valid, true);
+});
+
+test('fix 14: four sibling paths are ALLOWED (no overlap even with common ancestor)', () => {
+  // A common lab layout: all four paths under `\\Lab1\Fuji\...` as
+  // siblings. Siblings must NOT trip the overlap check — the
+  // rejection is strictly for equal or nested.
+  const result = validateControllerConfig({
+    type: 'fujipicpro',
+    name: 'x',
+    orderDataPath:    '\\\\Lab1\\Fuji\\OrderData',
+    diginPath:        '\\\\Lab1\\Fuji\\DIGIN',
+    imageStagingRoot: '\\\\Lab1\\Fuji\\Staging',
+    mergeDataPath:    '\\\\Lab1\\Fuji\\Merge',
+  });
+  assert.equal(result.valid, true, result.errors.join('; '));
+});
+
+test('fix 14: case-insensitive comparison (Windows NTFS convention)', () => {
+  const result = validateControllerConfig({
+    type: 'fujipicpro',
+    name: 'x',
+    orderDataPath:    '\\\\Lab\\OrderData',
+    diginPath:        'C:\\Fuji\\DIGIN',
+    imageStagingRoot: 'c:\\fuji\\digin',      // same as diginPath except case
+  });
+  assert.equal(result.valid, false);
+  assert.match(result.errors.join('|'), /diginPath and imageStagingRoot must be different/i);
+});
+
+test('fix 14: trailing separators + mixed / and \\ normalise to the same path', () => {
+  const result = validateControllerConfig({
+    type: 'fujipicpro',
+    name: 'x',
+    orderDataPath:    'C:\\Fuji\\OrderData\\',
+    diginPath:        'C:/Fuji/DIGIN/',
+    imageStagingRoot: 'C:\\Fuji\\DIGIN',      // = diginPath after normalisation
+  });
+  assert.equal(result.valid, false);
+  assert.match(result.errors.join('|'), /diginPath and imageStagingRoot must be different/i);
+});
+
+test('fix 14: _pathsOverlap classifier — equal / contains / none', () => {
+  const { _pathsOverlap } = _internals;
+  // Distinct paths
+  assert.equal(_pathsOverlap('C:\\a', 'C:\\b'), 'none');
+  // Sibling paths — common prefix but neither contains the other
+  assert.equal(_pathsOverlap('C:\\a\\x', 'C:\\a\\y'), 'none');
+  // Similar names must NOT match as prefix (would be a bug — `C:\a`
+  // is not inside `C:\ab`).
+  assert.equal(_pathsOverlap('C:\\a', 'C:\\ab'), 'none');
+  // Equal (with trailing slash normalisation + case)
+  assert.equal(_pathsOverlap('C:\\A\\', 'c:/a'), 'equal');
+  // Contains (either direction)
+  assert.equal(_pathsOverlap('C:\\a', 'C:\\a\\sub'), 'contains');
+  assert.equal(_pathsOverlap('C:\\a\\sub', 'C:\\a'), 'contains');
+  // Blank inputs short-circuit
+  assert.equal(_pathsOverlap('',      'C:\\a'), 'none');
+  assert.equal(_pathsOverlap('C:\\a', ''),      'none');
+  assert.equal(_pathsOverlap(null,    'C:\\a'), 'none');
 });
 
 test('non-object input is rejected cleanly', () => {

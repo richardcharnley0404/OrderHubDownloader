@@ -168,6 +168,44 @@ function validateControllerConfig(controller) {
 
   out.isActive = controller.isActive === undefined ? true : Boolean(controller.isActive);
 
+  // Fuji PIC Pro review fix 14. Reject overlapping paths.
+  // Two failure modes if the operator picks the same folder (or
+  // nested folders) for two of these fields:
+  //
+  //   - imageStagingRoot === diginPath → stageImages copies into
+  //     {imageStagingRoot}/{orderId}/ = {diginPath}/{orderId}/;
+  //     DIGIN sees the images BEFORE the .txt exists in Order Data,
+  //     which is exactly the sequencing PIC Pro's spec forbids
+  //     (docs/fuji-pic-pro-investigation-and-plan.md §1a). Every
+  //     order breaks while the monitor may still report `accepted`
+  //     because deliverToDigin's fix-7 idempotency check sees the
+  //     dest folder already present.
+  //   - Any other pair overlapping (or one being a subfolder of
+  //     another) has the same class of ordering / cleanup hazards
+  //     — e.g. staging inside Order Data would let the writer's
+  //     `rm -rf {staging}` sweep past the .txt.
+  //
+  // Only validate when the required paths are all present (avoid
+  // piling required-field errors on top of an overlap error).
+  const pairs = [
+    ['orderDataPath',    out.orderDataPath],
+    ['diginPath',        out.diginPath],
+    ['imageStagingRoot', out.imageStagingRoot],
+    ['mergeDataPath',    out.mergeDataPath],   // may be blank; _pathsOverlap short-circuits on blank
+  ];
+  for (let i = 0; i < pairs.length; i++) {
+    for (let j = i + 1; j < pairs.length; j++) {
+      const [labelA, pathA] = pairs[i];
+      const [labelB, pathB] = pairs[j];
+      const overlap = _pathsOverlap(pathA, pathB);
+      if (overlap === 'equal') {
+        errors.push(`${labelA} and ${labelB} must be different folders (both set to ${JSON.stringify(pathA)})`);
+      } else if (overlap === 'contains') {
+        errors.push(`${labelA} and ${labelB} must not overlap — one is nested inside the other (${JSON.stringify(pathA)} vs ${JSON.stringify(pathB)}). Use sibling folders instead.`);
+      }
+    }
+  }
+
   return { valid: errors.length === 0, errors, normalized: errors.length === 0 ? out : null };
 }
 
@@ -270,6 +308,38 @@ function _trim(v) {
 }
 
 /**
+ * Fuji PIC Pro review fix 14. Compare two operator-entered paths
+ * for equality or nesting. Returns:
+ *   'none'      → paths are distinct and neither contains the other
+ *   'equal'     → the two paths refer to the same folder
+ *   'contains'  → one path is inside the other (either direction)
+ *
+ * Handles Windows conventions:
+ *   - `\` and `/` are both directory separators (normalise to `\`)
+ *   - Comparison is case-insensitive (NTFS default)
+ *   - Trailing separators are stripped so `C:\a\` == `C:\a`
+ *
+ * Blank inputs short-circuit to 'none' — `mergeDataPath` is
+ * optional and blank should never trigger an overlap error.
+ */
+function _pathsOverlap(a, b) {
+  if (!a || !b) return 'none';
+  const _norm = (p) => String(p)
+    .replace(/[/\\]+/g, '\\')          // collapse any / or \ runs → single \
+    .replace(/\\+$/, '')                // strip trailing separators
+    .toLowerCase();
+  const na = _norm(a);
+  const nb = _norm(b);
+  if (!na || !nb) return 'none';
+  if (na === nb) return 'equal';
+  // Prefix check with a trailing separator so `C:\a` isn't
+  // treated as a prefix of `C:\ab`. The comparison is symmetric.
+  if (nb.startsWith(na + '\\')) return 'contains';
+  if (na.startsWith(nb + '\\')) return 'contains';
+  return 'none';
+}
+
+/**
  * Common integer-with-bounds pattern used by both timeout fields. Empty
  * / null / undefined → default. Anything outside [min, max] or non-
  * finite → default + push a descriptive error.
@@ -296,4 +366,5 @@ module.exports = {
   ALLOWED_COLORS,
   DEFAULT_COLOR,
   CONTROLLER_TYPE,
+  _internals: { _pathsOverlap },
 };
