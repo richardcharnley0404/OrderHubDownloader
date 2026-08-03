@@ -257,6 +257,43 @@ class PrintControllerService {
   getMonitor(controllerId) {
     return this.monitors.get(controllerId) || null;
   }
+
+  /**
+   * Boot-time hook (Fuji PIC Pro review fix 4). Iterate every
+   * configured `fujipicpro` controller in routing-service and start
+   * its monitor so pending entries persisted from a previous session
+   * rehydrate immediately. Without this, a crash / restart mid-
+   * handshake would leave the persisted entry sitting in the store
+   * until the NEXT dispatch to that controller — images stuck in
+   * staging, PIC Pro holding an image-less order, nothing surfacing
+   * to the operator.
+   *
+   * Idempotent — `startMonitoring` short-circuits when a monitor
+   * for that controllerId is already running, so calling this on
+   * every `restartFolderMonitors` is safe. JobMaker monitors don't
+   * need boot-time startup because JobMaker's monitor holds no
+   * persistent state (in-memory tracking only); anything unfinished
+   * at shutdown is dropped by design.
+   */
+  startAllPicProMonitors() {
+    try {
+      const controllers = routingService.getControllers();
+      for (const c of controllers) {
+        if (c && c.type === 'fujipicpro') {
+          try {
+            this.startMonitoring(c.id);
+          } catch (err) {
+            logger.logError('[fuji-pic-pro] boot startMonitoring failed', err, {
+              controllerId: c.id,
+              name:         c.name,
+            });
+          }
+        }
+      }
+    } catch (err) {
+      logger.logError('[fuji-pic-pro] startAllPicProMonitors scan failed', err);
+    }
+  }
 }
 
 const printControllerService = new PrintControllerService();

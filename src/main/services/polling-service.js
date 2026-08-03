@@ -6,6 +6,7 @@ const jobDownloadService = require('./job-download-service');
 const { createS3ArtworkDownloader } = require('./s3-artwork-downloader');
 const { printControllerStore } = require('./print-controller-store');
 const routingService = require('./routing-service');
+const { printControllerService } = require('./print-controller-service');
 const { FolderMonitor } = require('./folder-monitor');
 const logger = require('./logger');
 
@@ -618,6 +619,15 @@ class PollingService {
       // 1. New routing-system DPOF controllers
       const orderControllers = routingService.getControllers();
       for (const c of orderControllers) {
+        // Fuji-family types have their own dedicated monitors
+        // (fuji-jobmaker-monitor + fuji-pic-pro-monitor) started
+        // via `printControllerService.startMonitoring` — don't also
+        // attach a DPOF FolderMonitor to them (it would look for
+        // folder-rename events the Fuji IC never fires). PIC Pro
+        // in particular sets `outputPath: ''` in its route, so
+        // without this skip we'd log the spurious "no output path"
+        // warning on every restart.
+        if (c.type === 'fujijobmaker' || c.type === 'fujipicpro') continue;
         if (c.checkOrderStatus === false) {
           logger.info('Hot folder monitor skipped — checkOrderStatus disabled', { controller: c.name, id: c.id });
           continue;
@@ -656,6 +666,17 @@ class PollingService {
       logger.info(`Started ${this.folderMonitors.size} hot folder monitor(s)`);
     } catch (error) {
       logger.logError('Error starting folder monitors', error);
+    }
+
+    // Fuji PIC Pro review fix 4: boot / restart PIC Pro state-machine
+    // monitors alongside the DPOF folder monitors so a persisted
+    // pending queue rehydrates. Idempotent — `startMonitoring`
+    // short-circuits on an already-running monitor, so this is safe
+    // to call from `restartFolderMonitors` after every save.
+    try {
+      printControllerService.startAllPicProMonitors();
+    } catch (err) {
+      logger.logError('Error starting PIC Pro monitors at boot', err);
     }
   }
 

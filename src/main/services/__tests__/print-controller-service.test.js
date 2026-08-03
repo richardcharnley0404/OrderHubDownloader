@@ -40,8 +40,11 @@ function stubInCache(absPath, exports) {
 
 const FUJI_ID    = 'bf223599-e586-4ce9-a8f4-725adeca5849';
 const FUJI_PATH  = 'C:\\OHD\\hot\\fuji';
+const PP_ID      = 'aa000000-bbbb-cccc-dddd-000000000001';
+const PP_ID_2    = 'aa000000-bbbb-cccc-dddd-000000000002';
 
-let __fujiMonitorStartCalls = [];
+let __fujiMonitorStartCalls  = [];
+let __picProMonitorStartCalls = [];
 
 // ── Stub modules ─────────────────────────────────────────────────────────────
 
@@ -61,6 +64,29 @@ const fakeRoutingService = {
       outputPath:       FUJI_PATH,
       failureTimeoutMs: 60 * 1000,
       checkOrderStatus: false,
+    },
+    // Two PIC Pro controllers so fix 4's `startAllPicProMonitors`
+    // has a meaningful list to iterate (and fix 6's per-controller
+    // store namespacing has multiple instances to prove against).
+    {
+      id:                  PP_ID,
+      name:                'PIC Pro DL650',
+      type:                'fujipicpro',
+      orderDataPath:       '\\\\Lab1\\Order Data',
+      diginPath:           '\\\\Lab1\\DIGIN',
+      gatewayTimeoutMs:    120000,
+      buildTimeoutMs:      1800000,
+      sendReleaseCommand:  false,
+    },
+    {
+      id:                  PP_ID_2,
+      name:                'PIC Pro DL650-B',
+      type:                'fujipicpro',
+      orderDataPath:       '\\\\Lab2\\Order Data',
+      diginPath:           '\\\\Lab2\\DIGIN',
+      gatewayTimeoutMs:    120000,
+      buildTimeoutMs:      1800000,
+      sendReleaseCommand:  false,
     },
   ],
   // Other exports the real routing-service offers — not exercised by
@@ -90,6 +116,13 @@ const fakeFujiJobMakerMonitor = {
     }
   },
 };
+const fakeFujiPicProMonitor = {
+  FujiPicProMonitor: class {
+    startMonitoring(controller, _callback) {
+      __picProMonitorStartCalls.push({ controllerId: controller && controller.id });
+    }
+  },
+};
 
 const fakeJobStore = { jobStore: { updateJobStatus: () => {} } };
 const fakeDpofGenerator = { dpofGenerator: { generate: () => '' } };
@@ -104,6 +137,7 @@ stubInCache(path.join(SVC, 'print-controller-store.js'),  fakePrintControllerSto
 stubInCache(path.join(SVC, 'folder-monitor.js'),          fakeFolderMonitor);
 stubInCache(path.join(SVC, 'darkroom-pro-monitor.js'),    fakeDarkroomProMonitor);
 stubInCache(path.join(SVC, 'fuji-jobmaker-monitor.js'),   fakeFujiJobMakerMonitor);
+stubInCache(path.join(SVC, 'fuji-pic-pro-monitor.js'),    fakeFujiPicProMonitor);
 stubInCache(path.join(SVC, 'job-store.js'),               fakeJobStore);
 stubInCache(path.join(SVC, 'dpof-generator.js'),          fakeDpofGenerator);
 stubInCache(path.join(SVC, 'order-folder-writer.js'),     fakeOrderFolderWriter);
@@ -150,4 +184,47 @@ test('startMonitoring throws when controller is unknown to BOTH stores', () => {
     () => printControllerService.startMonitoring('ghost-id-not-in-any-store'),
     /Controller ghost-id-not-in-any-store not found/,
   );
+});
+
+test('fix 4: startAllPicProMonitors boots every configured fujipicpro controller', () => {
+  __picProMonitorStartCalls = [];
+  // Clear any monitors accumulated by previous tests so this scan
+  // observes the boot state.
+  printControllerService.monitors.delete(PP_ID);
+  printControllerService.monitors.delete(PP_ID_2);
+
+  printControllerService.startAllPicProMonitors();
+
+  const startedIds = __picProMonitorStartCalls.map(c => c.controllerId).sort();
+  assert.deepEqual(startedIds, [PP_ID, PP_ID_2].sort(),
+    'every fujipicpro controller must have its monitor started at boot so persisted pending entries rehydrate');
+  assert.ok(printControllerService.monitors.has(PP_ID),
+    'monitor registered against its controllerId');
+  assert.ok(printControllerService.monitors.has(PP_ID_2));
+});
+
+test('fix 4: startAllPicProMonitors is idempotent — repeat call does not double-start', () => {
+  __picProMonitorStartCalls = [];
+  // Both monitors are still registered from the previous test.
+  printControllerService.startAllPicProMonitors();
+  assert.equal(__picProMonitorStartCalls.length, 0,
+    'startMonitoring short-circuits on an already-monitored controller; startAllPicProMonitors must inherit that');
+});
+
+test('fix 4: startAllPicProMonitors skips non-fujipicpro controllers', () => {
+  // The Fuji JobMaker controller in the routing fixture must not be
+  // started via the PIC Pro monitor (would misroute status events).
+  __fujiMonitorStartCalls  = [];
+  __picProMonitorStartCalls = [];
+  // Force a clean slate.
+  printControllerService.monitors.delete(FUJI_ID);
+  printControllerService.monitors.delete(PP_ID);
+  printControllerService.monitors.delete(PP_ID_2);
+
+  printControllerService.startAllPicProMonitors();
+
+  assert.equal(__fujiMonitorStartCalls.length, 0,
+    'JobMaker controller must NOT be touched by the PIC Pro boot loop');
+  assert.equal(__picProMonitorStartCalls.length, 2,
+    'only the two fujipicpro controllers are started');
 });
