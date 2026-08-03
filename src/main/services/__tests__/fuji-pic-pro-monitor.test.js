@@ -673,6 +673,81 @@ test('building holds until BOTH mergeData variants (`{orderId}.con` and `{orderI
   monitor.stopMonitoring();
 });
 
+// ── Fix 6 regression: per-controller pending store namespace ──────────────
+
+test('fix 6: two monitors on different controllers get different store filenames', async (t) => {
+  // Instantiate two monitors with a factory-shim `store` that records
+  // its own name → prove that each monitor sees a distinct
+  // namespaced file. Without fix 6 both would open
+  // fuji-picpro-pending.json and each `_persist()` would erase the
+  // other's queue.
+  const storesByName = new Map();
+  // Track the file name each Store instance was opened with. We
+  // build a fake electron-store constructor that records the name
+  // it receives — the monitor's own `deps.store` accepts a
+  // ready-made store, so we test the lazy-created branch by NOT
+  // passing `deps.store`. Instead we override the real electron-store
+  // constructor via Module.prototype.require.
+  const Module = require('node:module');
+  const originalRequire = Module.prototype.require;
+  Module.prototype.require = function (req) {
+    if (req === 'electron-store') {
+      return function FakeStore(opts) {
+        const name = opts && opts.name;
+        const data = {};
+        const impl = {
+          _name: name,
+          get: (k, d) => (k in data ? data[k] : d),
+          set: (k, v) => { data[k] = v; },
+          delete: (k) => { delete data[k]; },
+          has: (k) => k in data,
+          _dump: () => ({ ...data }),
+        };
+        storesByName.set(name, impl);
+        return impl;
+      };
+    }
+    return originalRequire.apply(this, arguments);
+  };
+  t.after(() => { Module.prototype.require = originalRequire; });
+
+  // Clear the module cache so the monitor re-imports electron-store
+  // through our shim.
+  const monitorModulePath = require.resolve('../fuji-pic-pro-monitor');
+  delete require.cache[monitorModulePath];
+  const { FujiPicProMonitor: FreshMonitor } = require('../fuji-pic-pro-monitor');
+  t.after(() => { delete require.cache[monitorModulePath]; });
+
+  const m1 = new FreshMonitor({ deps: { fs, logger: silentLogger, clock: makeClock(), fileWriter } });
+  const m2 = new FreshMonitor({ deps: { fs, logger: silentLogger, clock: makeClock(), fileWriter } });
+
+  // Start with distinct controller ids → each triggers _getStore()
+  // via _loadFromStore → each creates a FakeStore with a namespaced
+  // filename.
+  m1.startMonitoring({ id: 'ctrl-lab1' }, () => {});
+  m2.startMonitoring({ id: 'ctrl-lab2' }, () => {});
+
+  assert.ok(storesByName.has('fuji-picpro-pending-ctrl-lab1'),
+    'ctrl-lab1 must open its own namespaced store file');
+  assert.ok(storesByName.has('fuji-picpro-pending-ctrl-lab2'),
+    'ctrl-lab2 must open its own namespaced store file — pre-fix both would share fuji-picpro-pending.json');
+
+  m1.stopMonitoring();
+  m2.stopMonitoring();
+});
+
+test('fix 6: filename sanitiser strips path-traversal characters', () => {
+  const s = _internals._sanitiseControllerIdForStoreName;
+  assert.equal(s('normal-uuid-1234'), 'normal-uuid-1234');
+  assert.equal(s('bf223599-e586-4ce9'), 'bf223599-e586-4ce9', 'UUIDs pass through unchanged');
+  assert.equal(s('../etc/passwd'), '___etc_passwd',
+    'path traversal characters must be replaced — the sanitiser is the last line of defense before electron-store makes it a filename');
+  assert.equal(s('a\\b/c'), 'a_b_c');
+  assert.equal(s(''), 'unassigned', 'blank id falls back to a sentinel rather than an empty filename');
+  assert.equal(s(null), 'unassigned');
+  assert.equal(s('x'.repeat(200)).length, 128, 'clamped to a reasonable max length');
+});
+
 // ── Fix 5 regression: _scan reentrancy guard ─────────────────────────────
 
 test('fix 5: concurrent _scan invocations do not double-run the same entry (in-flight guard)', async (t) => {

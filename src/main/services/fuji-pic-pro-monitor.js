@@ -70,8 +70,26 @@ function _defaultWriter() {
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const STORE_NAME = 'fuji-picpro-pending';
-const STORE_KEY  = 'pending';
+// One electron-store file per controller so two `fujipicpro`
+// controllers can't step on each other's queues. Pre-fix every
+// monitor instance opened `fuji-picpro-pending.json` and wrote to
+// the same `pending` key — each instance's `_persist()` erased the
+// other's queue, and rehydrate rebuilt whichever won the last write.
+// See docs/fuji-pic-pro-review-fixes.md item 6.
+const STORE_NAME_PREFIX = 'fuji-picpro-pending';
+const STORE_KEY         = 'pending';
+
+/**
+ * Sanitise a controllerId into a safe file-basename fragment. The
+ * store name becomes the JSON file name on disk (via electron-store),
+ * so any `/` `\` `..` etc. would be a path traversal. UUIDs are the
+ * common case and pass through unchanged.
+ */
+function _sanitiseControllerIdForStoreName(controllerId) {
+  return String(controllerId || 'unassigned')
+    .replace(/[^a-zA-Z0-9_-]/g, '_')
+    .slice(0, 128);
+}
 
 const DEFAULT_ACTIVE_SWEEP_MS = 1000;      // 1 s while anything is pending
 const DEFAULT_IDLE_SWEEP_MS   = 60 * 1000; // 60 s heartbeat
@@ -128,6 +146,10 @@ class FujiPicProMonitor {
     this._fs         = deps.fs         || nodeFs;
     this._fileWriter = deps.fileWriter || null;   // resolved lazily via _writer()
     this._store      = deps.store      || null;   // resolved lazily via _getStore()
+    // Track whether the store was passed in by the caller (tests
+    // typically pass an in-memory shim) vs lazy-created here so a
+    // controllerId change doesn't discard a user-supplied store.
+    this._storeIsUserSupplied = !!deps.store;
     this._logger     = deps.logger     || {
       info:       () => {}, warn:      () => {}, error:      () => {},
       logInfo:    () => {}, logWarning: () => {}, logError:  () => {},
@@ -173,6 +195,18 @@ class FujiPicProMonitor {
     if (this._sweepTimer) {
       // Idempotency — tear down before rebuilding.
       this.stopMonitoring();
+    }
+    // If the controllerId changed between starts, drop the cached
+    // store so `_getStore()` computes a new namespaced filename
+    // for the new controllerId. Only relevant for the lazy-created
+    // store; a user-supplied store (tests) stays untouched.
+    // In practice print-controller-service keeps one monitor per
+    // controllerId so this rarely fires — the guard just keeps
+    // `_getStore` internally consistent.
+    const prevId = this._controller && this._controller.id;
+    const nextId = controller && controller.id;
+    if (prevId !== nextId && !this._storeIsUserSupplied) {
+      this._store = null;
     }
     this._controller = controller || {};
     this._callback   = callback;
@@ -562,7 +596,14 @@ class FujiPicProMonitor {
 
   _getStore() {
     if (this._store) return this._store;
-    this._store = new Store({ name: STORE_NAME });
+    // Namespace by the active controller's id — fix 6. Falls back to
+    // 'unassigned' when the monitor is somehow being started with no
+    // controller (test path); production always has a controllerId
+    // because print-controller-service.startMonitoring resolves one
+    // before calling us.
+    const controllerId = this._controller && this._controller.id;
+    const storeName = `${STORE_NAME_PREFIX}-${_sanitiseControllerIdForStoreName(controllerId)}`;
+    this._store = new Store({ name: storeName });
     return this._store;
   }
 
@@ -615,7 +656,7 @@ class FujiPicProMonitor {
 module.exports = {
   FujiPicProMonitor,
   _internals: {
-    STORE_NAME,
+    STORE_NAME_PREFIX,
     STORE_KEY,
     DEFAULT_ACTIVE_SWEEP_MS,
     DEFAULT_IDLE_SWEEP_MS,
@@ -624,5 +665,6 @@ module.exports = {
     TERMINAL_STATUSES,
     REQUIRED_ABSENT_OBSERVATIONS,
     _classifyPath,
+    _sanitiseControllerIdForStoreName,
   },
 };
