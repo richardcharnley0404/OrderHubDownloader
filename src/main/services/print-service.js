@@ -1290,10 +1290,12 @@ class PrintService {
     const workingPath   = path.join(reprintJobPath, 'working');
 
     let imageFiles = reprintImages.map(img => ({
-      sourcePath:       path.join(originalsPath, img.filename),
-      filename:         img.filename,
-      originalFilename: img.originalFilename || null,
-      quantity:         img.qtyCurrent || 1,
+      sourcePath: path.join(originalsPath, img.filename),
+      filename:   img.filename,
+      // NOTE: `_applyCorrectionsToImageFiles` drops every non-
+      // {sourcePath,filename} field whenever a CMY correction fires.
+      // originalFilename + qtyCurrent are therefore read straight
+      // from reprintImages[i] downstream — same fix as the send path.
     }));
 
     for (const img of imageFiles) {
@@ -1324,9 +1326,9 @@ class PrintService {
       stageResult = await fujiPicProFileWriter.stageImages({
         imageStagingRoot: route.imageStagingRoot,
         orderId:          reprintOrderId,
-        imageFiles: imageFiles.map(img => ({
+        imageFiles: imageFiles.map((img, i) => ({
           sourcePath:       img.sourcePath,
-          originalFilename: img.originalFilename,
+          originalFilename: reprintImages[i].originalFilename || null,
         })),
       });
     } catch (stageErr) {
@@ -1351,9 +1353,12 @@ class PrintService {
       images: stageResult.negNumberMap.map((staged, i) => ({
         negNumber:        staged.negNumber,
         printCode:        route.printCode,
-        quantity:         imageFiles[i].quantity,
+        // Read from reprintImages, not imageFiles — see the send-path
+        // note about `_applyCorrectionsToImageFiles` stripping fields
+        // whenever a CMY correction runs.
+        quantity:         reprintImages[i].qtyCurrent || 1,
         color:            route.color || 'C',
-        originalFilename: imageFiles[i].originalFilename || staged.originalFilename || '',
+        originalFilename: reprintImages[i].originalFilename || staged.originalFilename || '',
         filename:         staged.stagedName,
       })),
     };
@@ -2291,10 +2296,16 @@ class PrintService {
         logger.info('Using enhanced image for Fuji PIC Pro print', { filename: basename, enhancedPath });
       }
       return {
-        sourcePath:       resolveDispatchImageSource({ rootPath: path.join(orderFolderPath, img.filename), jobFolderPath, basename, enhancedPath }),
-        filename:         basename,
-        originalFilename: img.originalFilename || null,
-        quantity:         img.quantity || 1,
+        sourcePath: resolveDispatchImageSource({ rootPath: path.join(orderFolderPath, img.filename), jobFolderPath, basename, enhancedPath }),
+        filename:   basename,
+        // NOTE: `_applyCorrectionsToImageFiles` returns only
+        // { sourcePath, filename } for corrected rows (see
+        // print-service.js `_applyCorrectionsToImageFiles`), so any
+        // per-image field we stash here is silently dropped the
+        // moment a CMY slider is non-zero. Everything the generator
+        // needs (quantity, originalFilename) is therefore read
+        // straight from `jobManifest.images[i]` below — same posture
+        // JobMaker uses at `_sendViaFujiJobMakerRouted`.
       };
     });
 
@@ -2321,9 +2332,11 @@ class PrintService {
       stageResult = await fujiPicProFileWriter.stageImages({
         imageStagingRoot: route.imageStagingRoot,
         orderId,
-        imageFiles: imageFiles.map(img => ({
+        imageFiles: imageFiles.map((img, i) => ({
           sourcePath:       img.sourcePath,
-          originalFilename: img.originalFilename,
+          // Read originalFilename from the manifest — imageFiles
+          // may have been stripped by `_applyCorrectionsToImageFiles`.
+          originalFilename: jobManifest.images[i].originalFilename || null,
         })),
       });
     } catch (stageErr) {
@@ -2349,12 +2362,16 @@ class PrintService {
       images: stageResult.negNumberMap.map((staged, i) => ({
         negNumber:        staged.negNumber,
         printCode:        route.printCode,
-        quantity:         imageFiles[i].quantity,
+        // Manifest-sourced — never trust imageFiles[i].quantity, that
+        // key is dropped whenever CMY corrections run. `|| 1` matches
+        // JobMaker's default.
+        quantity:         jobManifest.images[i].quantity || 1,
         color:            route.color || 'C',
         // {originalFilename} back-print reads from the manifest, not
         // the sequence-renamed 0001.jpg — so the customer's real
-        // filename still lands on the back of the print.
-        originalFilename: imageFiles[i].originalFilename || staged.originalFilename || '',
+        // filename still lands on the back of the print. Also
+        // manifest-sourced for the same reason as quantity.
+        originalFilename: jobManifest.images[i].originalFilename || staged.originalFilename || '',
         filename:         staged.stagedName,
       })),
     };

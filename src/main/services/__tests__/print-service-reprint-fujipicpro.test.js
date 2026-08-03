@@ -276,6 +276,55 @@ test('PIC Pro reprint: sidecar images + qty flow to the generator; route.printCo
   assert.equal(genJob.images[1].quantity,  5);
 });
 
+test('PIC Pro reprint (regression, fix 1): qty + originalFilename survive `_applyCorrectionsToImageFiles` field-stripping', async (t) => {
+  // Reproduces the review defect: `_applyCorrectionsToImageFiles`
+  // returns only { sourcePath, filename } whenever a CMY correction
+  // is applied (print-service.js line ~3075), dropping every other
+  // per-image key. Pre-fix the reprint arm read qty + originalFilename
+  // off that stripped array, so any B&W-tinted reprint quietly became
+  // Qty=1 with a blank Backprint1.
+  //
+  // Simulate the real function's field-stripping by installing a
+  // stub that behaves identically for corrected rows. Then assert
+  // the emitted generator payload still carries the manifest-source
+  // values.
+  const origApply = printService._applyCorrectionsToImageFiles;
+  printService._applyCorrectionsToImageFiles = async (imageFiles, _wp, correctionsMap) => {
+    return imageFiles.map((img) => {
+      const c = (correctionsMap && correctionsMap.get(img.filename)) || {};
+      const hasCorrection = (c.cyan || 0) !== 0 || (c.magenta || 0) !== 0 || (c.yellow || 0) !== 0;
+      // Matches the real function at print-service.js `_applyCorrectionsToImageFiles`.
+      return hasCorrection
+        ? { sourcePath: img.sourcePath, filename: img.filename }
+        : img;
+    });
+  };
+  t.after(() => { printService._applyCorrectionsToImageFiles = origApply; });
+
+  resetCaptures();
+  __routeForReturn = picProRoute();
+  const reprintPath = await makeReprintFolder();
+  t.after(() => fs.rmSync(reprintPath, { recursive: true, force: true }));
+
+  await printService.sendReprint(PARENT, reprintPath, 'r1', [
+    // qtyCurrent 3 + a non-zero magenta so the stub strips the row.
+    // Pre-fix: image[0].quantity comes back undefined and the
+    // generator defaults it to 1 — customer gets one print instead
+    // of three. Backprint1 also loses `DSC_9.jpg`.
+    { filename: 'a.jpg', qtyCurrent: 3, originalFilename: 'DSC_9.jpg', corrections: { magenta: 12 } },
+  ]);
+
+  const genImg = __generateCalls[0].job.images[0];
+  assert.equal(genImg.quantity, 3,
+    'Qty must survive `_applyCorrectionsToImageFiles` — pre-fix this came back undefined and defaulted to 1');
+  assert.equal(genImg.originalFilename, 'DSC_9.jpg',
+    '{originalFilename} must survive — pre-fix Backprint1 rendered blank on any corrected image');
+
+  // Also assert stageImages saw the original filename so
+  // negNumberMap.originalFilename is populated for the dispatch record.
+  assert.equal(__stageCalls[0].imageFiles[0].originalFilename, 'DSC_9.jpg');
+});
+
 test('PIC Pro reprint: monitor IS started + submission IS enqueued (needed for the DIGIN handshake)', async (t) => {
   // This is the one deliberate divergence from the JobMaker reprint
   // contract. JobMaker reprints skip the monitor because dropping the
