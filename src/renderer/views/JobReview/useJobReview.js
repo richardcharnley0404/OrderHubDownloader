@@ -621,18 +621,29 @@ export function useJobReview(jobId, jobPath, ohJobId = null) {
    * Apply a crop to the selected image.
    * - DPOF:      sizeOption.channelMappingId  => sets _channelMappingOverride
    * - Darkroom:  sizeOption.darkroomSize      => sets _darkroomProSize
+   * - Fuji:      sizeOption is informational only (crop-aspect field);
+   *              never stamps _channelMappingOverride — see the Fuji PIC Pro
+   *              review-fixes doc, unverified-section item. Fuji printSize
+   *              is a crop-aspect indicator, not a routing selector; picking
+   *              a Fuji dropdown row must NOT reroute the job to Fuji.
    * - Plain:     no override, routing unchanged
    */
   const cropImage = useCallback(async (filename, sizeOption, cropRect) => {
     const snapshot = sidecarRef.current;
     if (!snapshot) throw new Error('No sidecar loaded');
 
+    // Suppress the routing override for Fuji-source options. DPOF +
+    // Darkroom preserve their existing behaviour byte-identically.
+    const channelMappingId = (sizeOption && sizeOption.source === 'fuji')
+      ? null
+      : (sizeOption?.channelMappingId || null);
+
     const result = await window.electronAPI.jobCropImage({
       jobPath:          jobPathRef.current,
       sidecar:          snapshot,
       filename,
       cropRect,
-      channelMappingId: sizeOption?.channelMappingId || null,
+      channelMappingId,
       darkroomSize:     sizeOption?.darkroomSize     || null,
       ohJobId:          ohJobIdRef.current,
     });

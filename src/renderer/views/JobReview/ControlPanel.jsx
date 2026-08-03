@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { CMYSliders } from './CMYSliders.jsx';
+import { buildSizeOptions } from '../../../shared/cropSizeDropdown.js';
 
 /**
  * src/renderer/views/JobReview/ControlPanel.jsx
@@ -686,33 +687,11 @@ function LegacyEnhancementPanel({ selected, jobId, jobPath, onRefreshSidecar }) 
 
 // ── Crop-to-size section ──────────────────────────────────────────────────────────────────
 
-// Built-in common print sizes always available in the dropdown.
-// If a channel mapping exists with the same dimensions it replaces the entry
-// so that the routing override is also applied after cropping.
-const COMMON_PRINT_SIZES = [
-  { id: '__3x3',   w: 3,    h: 3,    label: '3×3"'   },
-  { id: '__4x4',   w: 4,    h: 4,    label: '4×4"'   },
-  { id: '__4x6',   w: 4,    h: 6,    label: '4×6"'   },
-  { id: '__5x5',   w: 5,    h: 5,    label: '5×5"'   },
-  { id: '__5x7',   w: 5,    h: 7,    label: '5×7"'   },
-  { id: '__6x6',   w: 6,    h: 6,    label: '6×6"'   },
-  { id: '__6x8',   w: 6,    h: 8,    label: '6×8"'   },
-  { id: '__8x8',   w: 8,    h: 8,    label: '8×8"'   },
-  { id: '__8x10',  w: 8,    h: 10,   label: '8×10"'  },
-  { id: '__10x10', w: 10,   h: 10,   label: '10×10"' },
-  { id: '__10x13', w: 10,   h: 13,   label: '10×13"' },
-  { id: '__12x12', w: 12,   h: 12,   label: '12×12"' },
-];
-
-function buildSizeOptions(allSizeOptions) {
-  const options = COMMON_PRINT_SIZES.map(s => ({ ...s }));
-  for (const opt of allSizeOptions) {
-    const idx = options.findIndex(s => s.w === opt.w && s.h === opt.h);
-    if (idx >= 0) options[idx] = { ...options[idx], ...opt };
-    else options.push({ ...opt });
-  }
-  return options;
-}
+// `buildSizeOptions` + `COMMON_PRINT_SIZES` now live in
+// `src/shared/cropSizeDropdown.js` — extracted so the merge rules
+// (which have real reroute consequences — see the Fuji PIC Pro
+// review-fixes doc, unverified section) are unit-testable from
+// `node --test`. Imported at the top of this file.
 
 function CropSection({ selected, allSizeOptions, cropSizeOption, onOpenCropEditor }) {
   const sizeOptions = buildSizeOptions(allSizeOptions);
