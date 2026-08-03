@@ -1405,18 +1405,32 @@ class PrintService {
     printControllerService.startMonitoring(route.controllerId);
     const monitor = printControllerService.getMonitor(route.controllerId);
     if (monitor && typeof monitor.enqueueSubmission === 'function') {
-      monitor.enqueueSubmission({
-        orderRef:            reprintOrderId,
-        orderId:             reprintOrderId,
-        stagingFolder:       stageResult.stagingFolder,
-        controllerId:        route.controllerId,
-        orderDataPath:       route.orderDataPath,
-        diginPath:           route.diginPath,
-        mergeDataPath:       route.mergeDataPath || '',
-        gatewayTimeoutMs:    route.gatewayTimeoutMs,
-        buildTimeoutMs:      route.buildTimeoutMs,
-        sendReleaseCommand:  route.sendReleaseCommand === true,
-      });
+      try {
+        monitor.enqueueSubmission({
+          orderRef:            reprintOrderId,
+          orderId:             reprintOrderId,
+          stagingFolder:       stageResult.stagingFolder,
+          controllerId:        route.controllerId,
+          orderDataPath:       route.orderDataPath,
+          diginPath:           route.diginPath,
+          mergeDataPath:       route.mergeDataPath || '',
+          gatewayTimeoutMs:    route.gatewayTimeoutMs,
+          buildTimeoutMs:      route.buildTimeoutMs,
+          sendReleaseCommand:  route.sendReleaseCommand === true,
+        });
+      } catch (enqueueErr) {
+        // Fix 9 — same rationale as the send-path handler. Duplicate
+        // reprintSuffix would be a caller bug; surface it clearly
+        // instead of letting it propagate as an unhandled throw.
+        logger.logError('Fuji PIC Pro reprint enqueue failed', enqueueErr, {
+          parentJobId:  parentJob.id,
+          reprintSuffix,
+          controller:   route.controllerName,
+          orderId:      reprintOrderId,
+          code:         enqueueErr && enqueueErr.code,
+        });
+        return { success: false, error: enqueueErr.message };
+      }
     }
 
     logger.info('Reprint sent via Fuji PIC Pro — enqueued for OrderGateway handshake', {
@@ -2416,18 +2430,34 @@ class PrintService {
     printControllerService.startMonitoring(route.controllerId);
     const monitor = printControllerService.getMonitor(route.controllerId);
     if (monitor && typeof monitor.enqueueSubmission === 'function') {
-      monitor.enqueueSubmission({
-        orderRef:            orderId,
-        orderId,
-        stagingFolder:       stageResult.stagingFolder,
-        controllerId:        route.controllerId,
-        orderDataPath:       route.orderDataPath,
-        diginPath:           route.diginPath,
-        mergeDataPath:       route.mergeDataPath || '',
-        gatewayTimeoutMs:    route.gatewayTimeoutMs,
-        buildTimeoutMs:      route.buildTimeoutMs,
-        sendReleaseCommand:  route.sendReleaseCommand === true,
-      });
+      try {
+        monitor.enqueueSubmission({
+          orderRef:            orderId,
+          orderId,
+          stagingFolder:       stageResult.stagingFolder,
+          controllerId:        route.controllerId,
+          orderDataPath:       route.orderDataPath,
+          diginPath:           route.diginPath,
+          mergeDataPath:       route.mergeDataPath || '',
+          gatewayTimeoutMs:    route.gatewayTimeoutMs,
+          buildTimeoutMs:      route.buildTimeoutMs,
+          sendReleaseCommand:  route.sendReleaseCommand === true,
+        });
+      } catch (enqueueErr) {
+        // Fuji PIC Pro review fix 9: `enqueueSubmission` throws on a
+        // duplicate orderId (in-flight submission not yet resolved).
+        // Surface as `_status:'error'` on the job — don't leave the
+        // caller thinking dispatch succeeded when the monitor won't
+        // pick up the DIGIN move.
+        logger.logError('Fuji PIC Pro enqueue failed — order file was written but the monitor could not accept the submission', enqueueErr, {
+          jobId:      job.id,
+          controller: route.controllerName,
+          orderId,
+          code:       enqueueErr && enqueueErr.code,
+        });
+        jobService.updateJobLocally(job.id, { _status: 'error', _errorMessage: enqueueErr.message });
+        return { success: false, error: enqueueErr.message };
+      }
     } else {
       // Monitor wasn't wired for this controller type — shouldn't
       // happen in production (print-controller-service.startMonitoring

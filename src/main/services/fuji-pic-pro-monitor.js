@@ -282,6 +282,22 @@ class FujiPicProMonitor {
     if (!args.stagingFolder || !args.orderDataPath || !args.diginPath) {
       throw new Error('Fuji PIC Pro monitor: enqueueSubmission requires stagingFolder, orderDataPath, diginPath');
     }
+    // Fuji PIC Pro review fix 9. An orderId already in-flight cannot
+    // be replaced silently — pre-fix `.set()` overwrote the prior
+    // entry, dropping its `[release]` + timeout tracking while new
+    // staging writes ran into the folder the first delivery was
+    // still renaming. Reject and let the caller decide: legitimate
+    // retry after a resolve, or a caller bug.
+    if (this._pending.has(args.orderId)) {
+      const existing = this._pending.get(args.orderId);
+      const err = new Error(
+        `Fuji PIC Pro monitor: submission for orderId "${args.orderId}" is already in-flight (phase: ${existing.phase}). ` +
+        'Wait for the terminal callback before re-enqueueing, or call clearTracked() first.'
+      );
+      err.code = 'FUJI_PICPRO_DUPLICATE_SUBMISSION';
+      err.existingPhase = existing.phase;
+      throw err;
+    }
 
     const now = this._clock();
     const entry = {

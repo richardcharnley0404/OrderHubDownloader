@@ -673,6 +673,62 @@ test('building holds until BOTH mergeData variants (`{orderId}.con` and `{orderI
   monitor.stopMonitoring();
 });
 
+// ── Fix 9 regression: enqueueSubmission dedupe ───────────────────────────
+
+test('fix 9: enqueueSubmission throws on a duplicate orderId (does not silently overwrite)', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const ws = await setupWorkspace(dir, { orderId: 'ORD-DUP' });
+
+  const { monitor } = makeMonitor();
+  monitor.startMonitoring({}, () => {});
+  enqueue(monitor, ws, 'ORD-DUP');
+
+  // Second dispatch with the same orderId while the first is still
+  // in-flight must fail loudly. Pre-fix `.set()` overwrote silently,
+  // dropping the first entry's [release] / timeout tracking while
+  // new staging writes ran into the folder the first delivery was
+  // still renaming.
+  let caught = null;
+  try {
+    enqueue(monitor, ws, 'ORD-DUP');
+  } catch (err) {
+    caught = err;
+  }
+  assert.ok(caught, 'duplicate enqueue must throw');
+  assert.equal(caught.code, 'FUJI_PICPRO_DUPLICATE_SUBMISSION');
+  assert.match(caught.message, /already in-flight/);
+  assert.equal(caught.existingPhase, 'awaiting-gateway',
+    'the throw includes the phase of the existing entry so the caller can log meaningfully');
+
+  // Queue still holds exactly one entry — the ORIGINAL — not a
+  // silently-replaced second one.
+  assert.equal(monitor.getPending().length, 1);
+  monitor.stopMonitoring();
+});
+
+test('fix 9: enqueue succeeds again after the previous entry resolves (fresh retry allowed)', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const ws = await setupWorkspace(dir, { orderId: 'ORD-REDO' });
+
+  const clock = makeClock(1_000_000);
+  const { monitor } = makeMonitor({ clock });
+  monitor.startMonitoring({}, () => {});
+  enqueue(monitor, ws, 'ORD-REDO', { gatewayTimeoutMs: 5_000 });
+
+  // Timeout the first entry → resolved as `failed` → dropped from
+  // the queue. The dedupe check must NOT block a subsequent legit
+  // dispatch with the same orderId.
+  clock.advance(6_000);
+  await monitor._scanNow();
+  assert.equal(monitor.getPending().length, 0, 'first entry resolved');
+
+  assert.doesNotThrow(() => enqueue(monitor, ws, 'ORD-REDO'),
+    'a fresh dispatch of the same orderId after the previous entry resolved must be allowed');
+  monitor.stopMonitoring();
+});
+
 // ── Fix 6 regression: per-controller pending store namespace ──────────────
 
 test('fix 6: two monitors on different controllers get different store filenames', async (t) => {
