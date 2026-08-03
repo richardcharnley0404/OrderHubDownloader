@@ -132,7 +132,7 @@ stubInCache(path.join(SVC, 'controller-types.js'),                { DPOF_TYPES: 
 stubInCache(path.join(SVC, 'awaiting-manifest.js'),               { awaitingReArmUpdates: () => {} });
 stubInCache(path.join(SVC, 'test-print-controller.js'),           { runTest: async () => ({}) });
 stubInCache(path.join(SVC, 'print-controller-store.js'),          { printControllerStore: { get: () => [], set: () => {} } });
-stubInCache(path.join(SVC, 'routing-service.js'),                 { migrateFromPrintControllerStore: () => {}, backfillLegacyPrintSizeCode: () => {}, validateDPOFPrintSizeCode: () => ({ valid: true }), stripDeprecatedConfigJsonKeys: () => {}, getControllers: () => [], resolveRoute: () => null, getRoutingHeldProcesses: () => new Set() });
+stubInCache(path.join(SVC, 'routing-service.js'),                 { migrateFromPrintControllerStore: () => {}, backfillLegacyPrintSizeCode: () => {}, backfillFujiPrintSize: () => {}, validateDPOFPrintSizeCode: () => ({ valid: true }), stripDeprecatedConfigJsonKeys: () => {}, getControllers: () => [], resolveRoute: () => null, getRoutingHeldProcesses: () => new Set() });
 stubInCache(path.join(SVC, 'process-folder-service.js'),          {});
 stubInCache(path.join(SVC, 'fuji-jobmaker-config.js'),            {});
 stubInCache(path.join(SVC, 'frame-metadata-store.js'),            fakeFrameMetadataStore);

@@ -221,10 +221,12 @@ test('valid minimal mapping fills surfaceCode from first letter of surface', () 
     controllerId: 'ctrl-1',
     productCode: '0305-cut-print',
     printCode: '3.5x5',
+    printSize: '3.5x5',
     surface: 'Lustre',
   });
   assert.equal(result.valid, true, result.errors.join('; '));
   assert.equal(result.normalized.surfaceCode, 'L');
+  assert.equal(result.normalized.printSize,   '3.5x5');
   assert.deepEqual(result.normalized.options, {});
   assert.equal(result.normalized.isActive, true);
 });
@@ -234,6 +236,7 @@ test('explicit surfaceCode wins over auto-derived', () => {
     controllerId: 'ctrl-1',
     productCode: 'p',
     printCode: '3.5x5',
+    printSize: '3.5x5',
     surface: 'Glossy',
     surfaceCode: 'Glo',
   });
@@ -246,6 +249,7 @@ test('options object is preserved with values coerced to strings', () => {
     controllerId: 'c',
     productCode: 'p',
     printCode: '3.5x5',
+    printSize: '3.5x5',
     surface: 'L',
     options: { Finish: 'Lustre', Quantity: 4, Border: null },
   });
@@ -262,6 +266,7 @@ test('options as array is rejected', () => {
     controllerId: 'c',
     productCode: 'p',
     printCode: '3.5x5',
+    printSize: '3.5x5',
     surface: 'L',
     options: [['Finish', 'Lustre']],
   });
@@ -269,13 +274,14 @@ test('options as array is rejected', () => {
   assert.match(result.errors[0], /options must be a plain object/);
 });
 
-test('mapping requires controllerId, productCode, printCode, surface', () => {
+test('mapping requires controllerId, productCode, printCode, printSize, surface', () => {
   const result = validateProductMappingConfig({});
   assert.equal(result.valid, false);
   const errs = result.errors.join('|');
   assert.match(errs, /controllerId is required/);
   assert.match(errs, /productCode is required/);
   assert.match(errs, /printCode is required/);
+  assert.match(errs, /printSize is required/);
   assert.match(errs, /surface is required/);
 });
 
@@ -284,11 +290,71 @@ test('valid mapping with isActive=false', () => {
     controllerId: 'c',
     productCode: 'p',
     printCode: '3.5x5',
+    printSize: '3.5x5',
     surface: 'Lustre',
     isActive: false,
   });
   assert.equal(result.valid, true);
   assert.equal(result.normalized.isActive, false);
+});
+
+// ── M0: printSize is a new mandatory field ─────────────────────────────────
+//
+// Sets the Manual Crop aspect ratio for Fuji jobs. Never written to the
+// printer's .txt — its only job is to keep resolveTargetSize away from
+// the pre-M0 1:1 fallback. The IPC handler (ipc-handlers.js) is what
+// invokes this validator on both the modal save path and CSV import.
+
+test('printSize is required (blank rejected with a clear message)', () => {
+  const result = validateProductMappingConfig({
+    controllerId: 'c', productCode: 'p',
+    printCode: '3.5x5', surface: 'Lustre',
+  });
+  assert.equal(result.valid, false);
+  assert.match(result.errors.join('|'), /printSize is required/,
+    'a blank printSize must surface an operator-actionable message, not a generic error');
+});
+
+test('printSize whitespace-only is rejected', () => {
+  const result = validateProductMappingConfig({
+    controllerId: 'c', productCode: 'p',
+    printCode: '3.5x5', printSize: '   ', surface: 'Lustre',
+  });
+  assert.equal(result.valid, false);
+  assert.match(result.errors.join('|'), /printSize is required/);
+});
+
+test('printSize accepts bare WxH shapes: 6x4, 3.5x5, "8 x 10", 8X8, 8×8', () => {
+  for (const size of ['6x4', '3.5x5', '8 x 10', '8X8', '8×8', '4.5x6.5']) {
+    const result = validateProductMappingConfig({
+      controllerId: 'c', productCode: 'p',
+      printCode: '3.5x5', printSize: size, surface: 'Lustre',
+    });
+    assert.equal(result.valid, true, `${size} must be accepted; errors: ${result.errors.join('; ')}`);
+    assert.equal(result.normalized.printSize, size.trim(), `${size} persisted verbatim after trim`);
+  }
+});
+
+test('printSize rejects non-WxH shapes: KG, 2L, arbitrary text, half-shapes', () => {
+  for (const size of ['KG', '2L', 'A4', 'NML -PSIZE "8x4"', '4x', 'x6', '6x', 'six by four']) {
+    const result = validateProductMappingConfig({
+      controllerId: 'c', productCode: 'p',
+      printCode: '3.5x5', printSize: size, surface: 'Lustre',
+    });
+    assert.equal(result.valid, false, `${size} must be rejected — printSize drives crop aspect, not the printer's code table`);
+    assert.match(result.errors.join('|'), /printSize must be a bare WxH shape/);
+  }
+});
+
+test('printSize error message names the accepted shape family so operators can fix it', () => {
+  const result = validateProductMappingConfig({
+    controllerId: 'c', productCode: 'p',
+    printCode: '3.5x5', printSize: 'KG', surface: 'Lustre',
+  });
+  assert.equal(result.valid, false);
+  const msg = result.errors.find(e => /printSize/.test(e));
+  assert.match(msg, /6x4/, 'error must reference the WxH shape so operators know what to type');
+  assert.match(msg, /3\.5x5/, 'decimal example belongs in the message — one of the values most likely to be blocked');
 });
 
 test('non-object mapping rejected cleanly', () => {

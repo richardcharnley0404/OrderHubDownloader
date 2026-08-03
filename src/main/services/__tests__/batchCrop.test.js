@@ -843,6 +843,168 @@ test('M5b matcher: returns no-job when job arg is missing — defensive', () => 
   assert.equal(res.reason, 'no-job');
 });
 
+// ─── M0 (Fuji PIC Pro brief): Fuji-family path 2b ──────────────────────────
+//
+// Pre-M0, Fuji routes returned {ok:false, reason:'no-size-translation'}
+// because their `channelNumber` is deliberately null (Fuji dispatches by
+// PrintCode+Surface, not channel numbers). The new Path 2b keys off the
+// route's `channelMappingId` + the `printSize` field on the mapping,
+// which getAllSizeOptions publishes as source:'fuji' sizeOptions.
+
+const FIXT_FUJI_SIZES = [
+  { id: 'cm_fuji-mapping-a',    source: 'fuji', w: 6, h: 4, label: '6×4"',
+    channelMappingId: 'fuji-mapping-a', controllerId: 'CTRL_FUJI_JM' },
+  { id: 'cm_fuji-mapping-b',    source: 'fuji', w: 3.5, h: 5, label: '3.5×5"',
+    channelMappingId: 'fuji-mapping-b', controllerId: 'CTRL_FUJI_JM' },
+  { id: 'cm_fuji-picpro-mapping', source: 'fuji', w: 8, h: 10, label: '8×10"',
+    channelMappingId: 'fuji-picpro-mapping', controllerId: 'CTRL_FUJI_PP' },
+];
+
+test('M0 matcher: fujijobmaker route with channelMappingId → resolves via source:fuji sizeOption', () => {
+  const job = { product_code: 'PROD-6X4' };
+  const route = {
+    type: 'controller',
+    controllerType: 'fujijobmaker',
+    controllerId:   'CTRL_FUJI_JM',
+    channelNumber:  null,   // Fuji never carries a channel number
+    channelMappingId: 'fuji-mapping-a',
+    printSize:      '6x4',
+  };
+  const res = resolveTargetSize(job, makeDeps({
+    resolveRoute:      () => route,
+    getAllSizeOptions: () => FIXT_FUJI_SIZES,
+  }));
+  assert.equal(res.ok, true, 'Path 2b must fire for a Fuji route carrying a channelMappingId');
+  assert.equal(res.sizeOption.w, 6);
+  assert.equal(res.sizeOption.h, 4);
+  assert.equal(res.sizeOption.source, 'fuji',
+    'the returned sizeOption must come from the fuji source, not the DPOF regex fallback');
+  assert.equal(res.sizeOption.channelMappingId, 'fuji-mapping-a');
+});
+
+test('M0 matcher: fujipicpro route resolves the same way (Path 2b covers both Fuji types)', () => {
+  const job = { product_code: 'PROD-8X10' };
+  const route = {
+    type: 'controller',
+    controllerType: 'fujipicpro',
+    controllerId:   'CTRL_FUJI_PP',
+    channelNumber:  null,
+    channelMappingId: 'fuji-picpro-mapping',
+    printSize:      '8x10',
+  };
+  const res = resolveTargetSize(job, makeDeps({
+    resolveRoute:      () => route,
+    getAllSizeOptions: () => FIXT_FUJI_SIZES,
+  }));
+  assert.equal(res.ok, true);
+  assert.equal(res.sizeOption.source, 'fuji');
+  assert.equal(res.sizeOption.w, 8);
+  assert.equal(res.sizeOption.h, 10);
+});
+
+test('M0 matcher: Fuji route with no channelMappingId falls through to no-size-translation', () => {
+  // Legacy pre-M0 mappings backed by pre-M0 route shape. Also the case
+  // where getAllSizeOptions omitted the mapping because its printSize
+  // was blank (backfill couldn't derive it). Must not silently pick a
+  // wrong DPOF sizeOption via the Path 3 regex on some unrelated string.
+  const job = { product_code: 'PROD-X' };
+  const route = {
+    type: 'controller',
+    controllerType: 'fujijobmaker',
+    controllerId:   'CTRL_FUJI_JM',
+    channelNumber:  null,
+    channelMappingId: null,
+    printSize:      '',
+  };
+  const res = resolveTargetSize(job, makeDeps({
+    resolveRoute:      () => route,
+    getAllSizeOptions: () => FIXT_FUJI_SIZES,
+  }));
+  assert.equal(res.ok, false);
+  assert.equal(res.reason, 'no-size-translation',
+    'Fuji route without a channelMappingId must surface the actionable error, not fall through to a wrong-source match');
+});
+
+test('M0 matcher: Fuji route whose channelMappingId names a mapping missing from sizeOptions → no-size-translation', () => {
+  // The mapping exists in the store but its printSize is blank, so
+  // getAllSizeOptions doesn't publish a sizeOption for it. Same
+  // outcome as if the mapping id were stale.
+  const job = { product_code: 'PROD-X' };
+  const route = {
+    type: 'controller',
+    controllerType: 'fujijobmaker',
+    controllerId:   'CTRL_FUJI_JM',
+    channelNumber:  null,
+    channelMappingId: 'fuji-mapping-blank',   // not in FIXT_FUJI_SIZES
+    printSize:      '',
+  };
+  const res = resolveTargetSize(job, makeDeps({
+    resolveRoute:      () => route,
+    getAllSizeOptions: () => FIXT_FUJI_SIZES,
+  }));
+  assert.equal(res.ok, false);
+  assert.equal(res.reason, 'no-size-translation');
+});
+
+test('M0 matcher: Path 2b takes precedence over the Path 3 regex fallback', () => {
+  // Belt-and-braces: a Fuji route COULD carry a `printSizeCode` string
+  // that happens to parse as a size (unlikely — Fuji routes set it to
+  // null). Even if that happens, Path 2b's explicit channelMappingId
+  // lookup must win so the returned sizeOption comes from the Fuji
+  // source, not whichever DPOF sizeOption's {w,h} happens to match.
+  const job = { product_code: 'PROD-6X4' };
+  const route = {
+    type: 'controller',
+    controllerType: 'fujijobmaker',
+    controllerId:   'CTRL_FUJI_JM',
+    channelNumber:  null,
+    channelMappingId: 'fuji-mapping-a',
+    printSize:      '6x4',
+    printSizeCode:  '4x6',  // would trip Path 3 to a DPOF match if reached
+  };
+  // Include a DPOF sizeOption at 4×6 that Path 3 WOULD find if Path 2b
+  // failed to short-circuit.
+  const sizes = [
+    { id: 'cm_dpof-4x6', source: 'dpof', w: 4, h: 6, label: '4×6"' },
+    ...FIXT_FUJI_SIZES,
+  ];
+  const res = resolveTargetSize(job, makeDeps({
+    resolveRoute:      () => route,
+    getAllSizeOptions: () => sizes,
+  }));
+  assert.equal(res.ok, true);
+  assert.equal(res.sizeOption.source, 'fuji',
+    'Path 2b must return before Path 3 gets a chance to match a DPOF sizeOption on the same numbers');
+  assert.equal(res.sizeOption.channelMappingId, 'fuji-mapping-a');
+});
+
+test('M0 matcher: non-Fuji route with a channelMappingId does NOT hit Path 2b', () => {
+  // Path 2b guards on controllerType — a Darkroom or DPOF route that
+  // happens to carry a channelMappingId (Darkroom does) must not
+  // accidentally pull a Fuji sizeOption. To prove Path 2b was skipped,
+  // we combine the default DPOF/Darkroom fixture with the Fuji one so
+  // Path 2 (Darkroom sizeTranslations) can still resolve.
+  const job = { product_code: 'POS-WHATEVER' };
+  const route = {
+    type: 'controller',
+    controllerType: 'darkroompro',
+    controllerId:   'DR1',
+    channelNumber:  null,
+    channelMappingId: 'fuji-mapping-a',   // deliberately points at a Fuji mapping id
+    printSizeCode:  null,
+  };
+  const res = resolveTargetSize(job, makeDeps({
+    resolveRoute:      () => route,
+    getAllSizeOptions: () => [...FIXT_SIZES, ...FIXT_FUJI_SIZES],
+  }));
+  // Path 2 (Darkroom sizeTranslations) matches POS-* → dt_DR1_POS 4×6.
+  // A Path 2b regression would return the Fuji sizeOption first
+  // instead — this assertion pins that.
+  assert.equal(res.ok, true);
+  assert.equal(res.sizeOption.id, 'dt_DR1_POS',
+    'Darkroom controllerType must resolve via Path 2, not accidentally match a Fuji sizeOption via a channelMappingId');
+});
+
 test('M5b matcher: REGRESSION — bare size code "4x6" never matches the wrong-shape sizeOption.id/label (pre-fix bug)', () => {
   // The pre-fix matcher compared route.printSizeCode ("4x6") against
   // sizeOption.id (`cm_dpof-4x6`) and sizeOption.label ("4×6\""). Both

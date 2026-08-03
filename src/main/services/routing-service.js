@@ -3,6 +3,7 @@
 const Store  = require('electron-store');
 const logger = require('./logger');
 const { resolveSize, resolveMedia } = require('./darkroom-pro-output');
+const { isBareWxH: _sharedIsBareWxH } = require('../../shared/printSizeShapes');
 
 // Routing data lives in its own named store so that config-service's default
 // Store instance (which shares config.json) cannot inadvertently overwrite
@@ -36,15 +37,12 @@ const store = new Store({ name: 'routing' });
 // Bare WxH shape — e.g. "4x6", "8 x 10", "4.5x6.5", "8×8", "8X8". These
 // need to be wrapped as `NML -PSIZE "<W>x<H>"` (with whitespace stripped
 // and Unicode × normalised to ASCII x) before Noritsu will accept them.
-// Exported via `isBareWxH` so the legacy-`size` backfill uses the SAME
-// detection as read-time resolution — otherwise the two can drift apart
-// and a backfilled mapping could resolve to a different PSL string than
-// the legacy fallback did.
-const BARE_WXH_PATTERN = /^\s*\d+(?:\.\d+)?\s*[x×]\s*\d+(?:\.\d+)?\s*$/i;
-
-function isBareWxH(value) {
-  return BARE_WXH_PATTERN.test(String(value == null ? '' : value));
-}
+// Sourced from src/shared/printSizeShapes so the DPOF resolvePrintSizeCode
+// read path, the legacy-`size` backfill, and the Fuji `printSize` save-
+// time validator all use the SAME detector — the reason the regex lives
+// in shared. Re-exported below so existing callers of
+// `routing-service.isBareWxH` continue to work.
+const isBareWxH = _sharedIsBareWxH;
 
 /**
  * Resolve a channel mapping's print size code into the exact value emitted as
@@ -145,6 +143,11 @@ function resolveRoute(job) {
               surface:           overrideMapping.surface,
               surfaceCode:       overrideSurfaceCode,
               printCode:         overrideMapping.printCode,
+              // M0: carry the mapping id + printSize so resolveTargetSize
+              // can look up the crop aspect for Fuji routes. Blank on
+              // legacy mappings — the amber routing-list badge flags them.
+              channelMappingId:  overrideMapping.id,
+              printSize:         overrideMapping.printSize || '',
               channelNumber:     null,
               printSizeCode:     null,
               bannerSheet:       false,
@@ -378,6 +381,13 @@ function resolveRoute(job) {
       surface:           channelMapping.surface,
       surfaceCode,
       printCode:         channelMapping.printCode,
+      // M0: carry the mapping id + printSize so resolveTargetSize can
+      // look up the crop aspect for Fuji routes without re-walking the
+      // channel-mappings store. Blank printSize is left as-is; the
+      // amber routing-list badge flags any legacy mapping that
+      // couldn't be backfilled.
+      channelMappingId:  channelMapping.id,
+      printSize:         channelMapping.printSize || '',
       // Legacy DPOF route fields — not used by Fuji but kept null for shape parity.
       channelNumber:     null,
       printSizeCode:     null,
@@ -652,9 +662,11 @@ function getChannelMappings() {
  * Sources:
  *   1. DPOF channel mappings  (channelMappings store, `size` field)
  *   2. Darkroom Pro           (controller.sizeTranslations[].darkroomSize)
+ *   3. Fuji-family mappings   (channelMappings store, `printSize` field —
+ *                              M0 field; drives Manual Crop aspect only)
  *
  * Each entry: { id, source, w, h, label, channelMappingId?, channelNumber?,
- *               darkroomSize?, darkroomControllerId? }
+ *               darkroomSize?, darkroomControllerId?, controllerId? }
  */
 function getAllSizeOptions() {
   const SIZE_RE = /(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)/i;
@@ -666,10 +678,21 @@ function getAllSizeOptions() {
     return { w: parseFloat(m[1]), h: parseFloat(m[2]), label: `${m[1]}\u00d7${m[2]}"` };
   }
 
-  const options = [];
+  const options            = [];
+  const mappings           = store.get('channelMappings',  []);
+  const controllers        = store.get('orderControllers', []);
+  const controllerTypeById = new Map(
+    controllers.map(c => [c.id, c && c.type ? String(c.type) : ''])
+  );
 
-  // Source 1: DPOF channel mappings
-  for (const m of store.get('channelMappings', [])) {
+  // Source 1: DPOF channel mappings. Fuji-family mappings are excluded
+  // here because their crop aspect lives in the dedicated `printSize`
+  // field (Source 3 below) \u2014 reading it out of `size` / `printSizeCode`
+  // / `batchCode` would silently paper over a missing printSize with
+  // whatever else happens to parse.
+  for (const m of mappings) {
+    const type = controllerTypeById.get(m.controllerId) || '';
+    if (FUJI_FAMILY_CONTROLLER_TYPES.has(type)) continue;
     const sz = parseSize(m.size || m.printSizeCode || m.batchCode || '');
     if (!sz) continue;
     options.push({
@@ -684,7 +707,7 @@ function getAllSizeOptions() {
   }
 
   // Source 2: Darkroom Pro sizeTranslations
-  for (const ctrl of store.get('orderControllers', [])) {
+  for (const ctrl of controllers) {
     if (ctrl.type !== 'darkroompro') continue;
     for (const t of (ctrl.sizeTranslations || [])) {
       const sz = parseSize(t.darkroomSize || '');
@@ -700,6 +723,26 @@ function getAllSizeOptions() {
         productCodePrefix:   t.productCodePrefix,
       });
     }
+  }
+
+  // Source 3: Fuji-family channel mappings (M0). Blank or unparseable
+  // printSize is skipped here \u2014 those surface via the amber "No print
+  // size" badge on the routing list instead of contributing a silently-
+  // wrong crop aspect.
+  for (const m of mappings) {
+    const type = controllerTypeById.get(m.controllerId) || '';
+    if (!FUJI_FAMILY_CONTROLLER_TYPES.has(type)) continue;
+    const sz = parseSize(m.printSize || '');
+    if (!sz) continue;
+    options.push({
+      id:               `cm_${m.id}`,
+      source:           'fuji',
+      w:                sz.w,
+      h:                sz.h,
+      label:            sz.label,
+      channelMappingId: m.id,
+      controllerId:     m.controllerId,
+    });
   }
 
   return options;
@@ -1159,16 +1202,115 @@ function backfillLegacyPrintSizeCode() {
   }
 }
 
+// ── Fuji printSize backfill ──────────────────────────────────────────────────
+
+// Controller types whose channel mappings gained the new `printSize` field
+// in the M0 migration. `fujipicpro` is included so that when M1 registers
+// the new type, any mapping already in the store (from a fresh install run
+// under a dev build, say) is picked up by the same backfill pass.
+const FUJI_FAMILY_CONTROLLER_TYPES = new Set(['fujijobmaker', 'fujipicpro']);
+
+/**
+ * One-time backfill: copy a bare-WxH `mapping.printCode` into `mapping.printSize`
+ * for Fuji-family channel mappings whose `printSize` is blank.
+ *
+ * Background: pre-M0 Fuji mappings only carried `printCode` (a Frontier
+ * Quick Print code like `4x6` or `3.5x5` for JobMaker; a lab-defined
+ * package code for PIC Pro). That value was never used to drive the
+ * Manual Crop aspect ratio — `resolveTargetSize` had no Fuji branch and
+ * silently fell back to a 1:1 square. The new `printSize` field feeds
+ * `resolveTargetSize` (and `getAllSizeOptions`) so Fuji jobs crop at the
+ * right aspect.
+ *
+ * The vast majority of existing JobMaker `printCode` values happen to
+ * already be bare WxH, so copying them across is safe and preserves the
+ * operator's intent. Anything that isn't bare WxH (a code the lab
+ * assigned, e.g. `KG`) is left blank and logged so operators (and the
+ * M0.6 amber badge) surface it for manual fixing.
+ *
+ * Scope: mappings whose controller type is in `FUJI_FAMILY_CONTROLLER_TYPES`.
+ * Non-Fuji types get their crop aspect from other sources and must be
+ * skipped so the backfill can't clobber their data.
+ *
+ * Mappings that already have a non-blank `printSize` are left untouched.
+ * Mappings with neither `printSize` nor a bare-WxH `printCode` are left
+ * blank — the M0.6 badge covers them.
+ *
+ * Idempotent: guarded by `_backfill_fuji_print_size_v1` in the routing
+ * store. Even without the flag the eligibility condition (blank
+ * `printSize` + bare-WxH `printCode`) is false for every mapping after
+ * the first pass — same shape as `backfillLegacyPrintSizeCode`.
+ *
+ * Called once at application start from ipc-handlers.js, alongside the
+ * DPOF backfill.
+ */
+function backfillFujiPrintSize() {
+  if (store.get('_backfill_fuji_print_size_v1', false)) return;
+
+  try {
+    const controllers = store.get('orderControllers', []);
+    const mappings    = store.get('channelMappings',  []);
+
+    const controllerTypeById = new Map(
+      controllers.map(c => [c.id, c && c.type ? String(c.type) : ''])
+    );
+
+    let backfilled       = 0;
+    let skippedNonWxH    = 0;
+    const nextMappings = mappings.map(m => {
+      const type = controllerTypeById.get(m.controllerId) || '';
+      if (!FUJI_FAMILY_CONTROLLER_TYPES.has(type)) return m;
+
+      const existing = String(m.printSize || '').trim();
+      if (existing) return m;
+
+      const printCode = String(m.printCode || '').trim();
+      if (!printCode) return m;
+
+      if (!isBareWxH(printCode)) {
+        skippedNonWxH++;
+        logger.logWarning('routing-service: Fuji channel-mapping printCode is not WxH — printSize not backfilled', {
+          channelMappingId: m.id,
+          controllerId:     m.controllerId,
+          controllerType:   type,
+          productCode:      m.productCode || '',
+          printCode,
+        });
+        return m;
+      }
+
+      backfilled++;
+      return { ...m, printSize: printCode };
+    });
+
+    if (backfilled > 0) {
+      store.set('channelMappings', nextMappings);
+    }
+    store.set('_backfill_fuji_print_size_v1', true);
+
+    logger.info('routing-service: Fuji printSize backfill complete', {
+      backfilled,
+      skippedNonWxH,
+      totalMappings: mappings.length,
+    });
+  } catch (err) {
+    logger.logError('routing-service: Fuji printSize backfill failed', err);
+    // Do NOT set the flag so it retries next startup
+  }
+}
+
 // ── Exports ───────────────────────────────────────────────────────────────────
 
 module.exports = {
   resolveRoute,
   resolveRouteForController,
   resolvePrintSizeCode,
+  isBareWxH,
   optionsMatchWithIgnore,
   getRoutingHeldProcesses,
   migrateFromPrintControllerStore,
   backfillLegacyPrintSizeCode,
+  backfillFujiPrintSize,
   validateDPOFPrintSizeCode,
   stripDeprecatedConfigJsonKeys,
   // Controllers

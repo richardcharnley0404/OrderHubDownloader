@@ -116,6 +116,13 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
   // freshly copied out of the old store on this same startup.
   routingService.backfillLegacyPrintSizeCode();
 
+  // One-time backfill: copy bare-WxH `mapping.printCode` into `mapping.printSize`
+  // for Fuji-family channel mappings so the new Manual Crop aspect resolver
+  // (M0 of the Fuji PIC Pro brief) has a size to look up. Idempotent, guarded
+  // by its own flag; non-WxH printCodes are left blank + logged so operators
+  // can fix them via the amber badge on the routing list.
+  routingService.backfillFujiPrintSize();
+
   // One-time cleanup: remove the now-deprecated routing keys from config.json
   // (orderControllers, processControllerMappings, channelMappings, ...).
   // Routing data lives exclusively in routing.json since the store split, but
@@ -1208,6 +1215,7 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
           // `options` alone — the persisted array form is what the matcher
           // expects.
           mapping.printCode   = normalized.printCode;
+          mapping.printSize   = normalized.printSize;
           mapping.surface     = normalized.surface;
           mapping.surfaceCode = normalized.surfaceCode;
         } else if (parentCtrl) {

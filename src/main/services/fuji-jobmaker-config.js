@@ -1,5 +1,12 @@
 'use strict';
 
+// Same bare-WxH detector routing-service uses for DPOF read-time
+// resolution and the legacy-`size` backfill. Loaded from the shared
+// module directly (no lazy-require + no cycle) because it's a pure
+// regex helper with no Electron deps — see CLAUDE.md on the src/shared
+// convention.
+const { isBareWxH } = require('../../shared/printSizeShapes');
+
 /**
  * Fuji JobMaker config validation + defaults.
  *
@@ -201,6 +208,20 @@ function validateProductMappingConfig(mapping) {
   const printCode = _trim(mapping.printCode);
   if (!printCode) errors.push('printCode is required');
   out.printCode = printCode;
+
+  // printSize — bare WxH string used ONLY to drive the crop-box aspect
+  // in Manual Crop. Never written into JobMaker's .txt or PIC Pro's
+  // order.txt. Mandatory at save time so a mapping can't ship a square
+  // crop by accident (see M0 of the Fuji PIC Pro brief). Reuses
+  // routing-service.isBareWxH so the accepted shape set matches
+  // resolvePrintSizeCode's read-time regex exactly.
+  const printSize = _trim(mapping.printSize);
+  if (!printSize) {
+    errors.push('printSize is required — sets the crop aspect (e.g. 6x4, 3.5x5)');
+  } else if (!isBareWxH(printSize)) {
+    errors.push(`printSize must be a bare WxH shape like 6x4 or 3.5x5; got ${JSON.stringify(mapping.printSize)}`);
+  }
+  out.printSize = printSize;
 
   const surface = _trim(mapping.surface);
   if (!surface) errors.push('surface is required');

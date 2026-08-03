@@ -798,6 +798,29 @@ function resolveTargetSize(job, deps = {}) {
       }
     }
 
+    // ── Path 2b: Fuji-family channel-mapping lookup (M0) ────────────────────
+    //
+    // Fuji routes deliberately set channelNumber:null (there's no
+    // channel — Fuji dispatches by PrintCode+Surface), so Path 1's
+    // `channelNumber != null` gate never fires for them. That gate is
+    // what keeps DPOF resolution correct, so we DO NOT loosen it —
+    // instead the Fuji route now carries the `channelMappingId` it
+    // resolved from, and Source 3 of getAllSizeOptions publishes a
+    // sizeOption keyed by the same id.
+    //
+    // Falls through to no-size-translation unchanged when the mapping
+    // has no printSize (backfill couldn't populate it, or a fresh
+    // mapping saved via a stale renderer). The amber routing-list
+    // badge is what surfaces those to the operator.
+    if ((route.controllerType === 'fujijobmaker' || route.controllerType === 'fujipicpro')
+        && route.channelMappingId
+        && typeof deps.getAllSizeOptions === 'function') {
+      const match = sizes.find((s) =>
+        s && s.source === 'fuji' && s.channelMappingId === route.channelMappingId
+      );
+      if (match) return { ok: true, sizeOption: match };
+    }
+
     // ── Path 3: printSizeCode / darkroomSize regex parse fallback ──────────
     //
     // Last resort: parse a {w, h} pair out of whatever size string the

@@ -1402,6 +1402,13 @@
         <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Frontier Quick Print code. Must match an entry on the IC's Quick Print list exactly. Emitted as <code>PrintCode=</code>.</small>
       </div>
 
+      <!-- Fuji: crop-aspect field (never written to the .txt) -->
+      <div class="form-group" id="cmPrintSizeGroup" style="display:none">
+        <label for="cmPrintSize">Print Size <span style="color:#e05252">*</span></label>
+        <input type="text" id="cmPrintSize" placeholder="e.g. 6x4 or 3.5x5" style="width:200px;">
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Sets the Manual Crop aspect ratio for this product — bare <code>WxH</code> only. Never written into the printer's <code>.txt</code>, so it doesn't have to match the lab's Print Code exactly.</small>
+      </div>
+
       <div class="form-group" id="cmSurfaceGroup" style="display:none">
         <label for="cmSurface">Surface</label>
         <input type="text" id="cmSurface" placeholder="e.g. Lustre" style="width:200px;">
@@ -1537,6 +1544,12 @@
           <label class="form-label" for="assignPrintCode">Print Code <span style="color:#e05252">*</span></label>
           <input type="text" id="assignPrintCode" class="form-control" placeholder='e.g. 4x6' style="width:180px">
           <p class="field-hint">The Frontier quick-print code for this product (written as <code>PrintCode=</code> in the .txt file).</p>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="assignPrintSize">Print Size <span style="color:#e05252">*</span></label>
+          <input type="text" id="assignPrintSize" class="form-control" placeholder='e.g. 6x4 or 3.5x5' style="width:180px">
+          <p class="field-hint">Sets the Manual Crop aspect ratio for this product — bare <code>WxH</code> only. Never written into the printer's <code>.txt</code>.</p>
         </div>
 
         <div class="form-group">

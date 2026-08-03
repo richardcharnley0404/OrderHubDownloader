@@ -1346,7 +1346,14 @@ function openAssignModal(job, route) {
   // modal has always handled this correctly; the per-job Assign modal was
   // still routing Fuji jobs through the DPOF default branch and silently
   // failing IPC validation. See CHANGELOG v1.7.9.
-  const isFuji        = route.controller && route.controller.type === 'fujijobmaker';
+  //
+  // M0 (Fuji PIC Pro brief): fujipicpro shares the JobMaker per-mapping
+  // shape (printCode + printSize + surface), so the Assign modal treats
+  // both types identically. printSize is what Manual Crop uses for the
+  // aspect ratio; the .txt writer ignores it.
+  const isFuji        = route.controller
+                     && (route.controller.type === 'fujijobmaker'
+                      || route.controller.type === 'fujipicpro');
 
   // Populate read-only fields
   document.getElementById('assignModalProduct').textContent     = job.product     || '—';
@@ -1387,16 +1394,19 @@ function openAssignModal(job, route) {
   document.getElementById('assignFujiGroup').style.display           = isFuji        ? '' : 'none';
 
   if (isFuji) {
-    // Reset the three Fuji fields each time the modal opens — the Assign
+    // Reset the Fuji fields each time the modal opens — the Assign
     // affordance always creates a new channel mapping, never edits an
     // existing one, so we deliberately don't pre-fill from any cache.
     const printCodeInput   = document.getElementById('assignPrintCode');
+    const printSizeInput   = document.getElementById('assignPrintSize');
     const surfaceInput     = document.getElementById('assignSurface');
     const surfaceCodeInput = document.getElementById('assignSurfaceCode');
     printCodeInput.value   = '';
+    printSizeInput.value   = '';
     surfaceInput.value     = '';
     surfaceCodeInput.value = '';
     printCodeInput.setCustomValidity('');
+    printSizeInput.setCustomValidity('');
     surfaceInput.setCustomValidity('');
   }
 
@@ -1526,30 +1536,47 @@ function openAssignModal(job, route) {
     }
 
     if (isFuji) {
-      // ── Fuji JobMaker flow: create a new permanent channel mapping ──────
-      // Payload shape mirrors the Settings-side cmSaveBtn handler so the
-      // IPC handler's Fuji validator (ipc-handlers.js:1177) accepts both
-      // entry points identically.
+      // ── Fuji flow (JobMaker + PIC Pro): create a new permanent channel
+      // mapping. Payload shape mirrors the Settings-side cmSaveBtn handler
+      // so the IPC handler's Fuji validator accepts both entry points
+      // identically. M0 adds printSize as a mandatory field.
       const printCodeInput   = document.getElementById('assignPrintCode');
+      const printSizeInput   = document.getElementById('assignPrintSize');
       const surfaceInput     = document.getElementById('assignSurface');
       const surfaceCodeInput = document.getElementById('assignSurfaceCode');
 
       const printCode   = printCodeInput.value.trim();
+      const printSize   = printSizeInput.value.trim();
       const surface     = surfaceInput.value.trim();
       const surfaceCode = surfaceCodeInput.value.trim();
+
+      // Same bare-WxH check the IPC handler enforces server-side.
+      const BARE_WXH = /^\s*\d+(?:\.\d+)?\s*[x×]\s*\d+(?:\.\d+)?\s*$/i;
 
       // Validate before touching the Save button so the operator can correct
       // errors in place — same setCustomValidity + reportValidity pattern
       // the Darkroom Pro and DPOF branches use.
       if (!printCode) {
-        printCodeInput.setCustomValidity('Print Code is required for Fuji JobMaker mappings.');
+        printCodeInput.setCustomValidity('Print Code is required for Fuji mappings.');
         printCodeInput.reportValidity();
         return;
       }
       printCodeInput.setCustomValidity('');
 
+      if (!printSize) {
+        printSizeInput.setCustomValidity('Print Size is required for Fuji mappings — sets the crop aspect (e.g. 6x4, 3.5x5).');
+        printSizeInput.reportValidity();
+        return;
+      }
+      if (!BARE_WXH.test(printSize)) {
+        printSizeInput.setCustomValidity('Print Size must be a bare WxH shape like 6x4 or 3.5x5.');
+        printSizeInput.reportValidity();
+        return;
+      }
+      printSizeInput.setCustomValidity('');
+
       if (!surface) {
-        surfaceInput.setCustomValidity('Surface is required for Fuji JobMaker mappings.');
+        surfaceInput.setCustomValidity('Surface is required for Fuji mappings.');
         surfaceInput.reportValidity();
         return;
       }
@@ -1579,6 +1606,7 @@ function openAssignModal(job, route) {
           // Fuji-specific — surfaceCode empty is fine; resolveRoute +
           // print-service both default to surface[0].toUpperCase().
           printCode,
+          printSize,
           surface,
           surfaceCode,
         });
@@ -5518,11 +5546,15 @@ function renderChannelMappings(mappings, controllers) {
 
     // Controller types that don't consult `printSizeCode` — same list as
     // routing-service.NON_DPOF_CONTROLLER_TYPES. Only DPOF-family rows
-    // get the "no print size" warning badge (non-DPOF types don't have
-    // the field at all).
-    const NON_DPOF_TYPES = new Set(['darkroompro', 'fujijobmaker', 'frontline', 'folder_copy', 'pdf_copy']);
+    // get the "no print size" warning badge for the DPOF `printSizeCode`
+    // field (non-DPOF types don't have the field at all).
+    const NON_DPOF_TYPES = new Set(['darkroompro', 'fujijobmaker', 'fujipicpro', 'frontline', 'folder_copy', 'pdf_copy']);
     const ctrlType     = ctrl && ctrl.type ? String(ctrl.type) : '';
     const isDpofFamily = !NON_DPOF_TYPES.has(ctrlType);
+    // Fuji-family (JobMaker + PIC Pro) — different mapping shape
+    // (printCode + printSize + surface) so it renders a bespoke row and
+    // gets its own amber badge for M0's `printSize` field.
+    const isFujiFamily = ctrlType === 'fujijobmaker' || ctrlType === 'fujipicpro';
 
     for (const mapping of ctrlMappings) {
       const optionsHtml = (mapping.options || [])
@@ -5550,14 +5582,28 @@ function renderChannelMappings(mappings, controllers) {
         : (isDpofFamily
             ? `<span class="badge badge-warning" title="No Print Size Code configured — jobs routed here will fail at dispatch. Edit to set the Print Size Code.">⚠ No print size</span>`
             : '');
+      // Fuji-family badge — Manual Crop needs `printSize` to know the
+      // crop aspect. Blank means the M0 backfill couldn't derive it
+      // from `printCode` (or a fresh mapping was saved via a stale
+      // renderer). Jobs still dispatch but Manual Crop falls back to
+      // a 1:1 square — flag it so the operator can fix it.
+      const fujiPrintSizeHtml = isFujiFamily
+        ? (mapping.printSize
+            ? `<span class="channel-mapping-options">${escapeHtml(mapping.printSize)}</span>`
+            : `<span class="badge badge-warning" title="No Print Size configured — Manual Crop will fall back to a 1:1 square for jobs routed here. Edit to set the crop aspect.">⚠ No print size</span>`)
+        : '';
       infoDiv.innerHTML =
         `<span class="channel-mapping-product">${escapeHtml(mapping.productCode)}</span>` +
         (optionsHtml ? `<span class="channel-mapping-options">${optionsHtml}</span>` : '') +
         (isFrontlineMapping
           ? `<span class="channel-mapping-channel">→ ${escapeHtml(mapping.batchCode || '(no batch code)')}</span>` +
             (mapping.sortString ? `<span class="channel-mapping-options">${escapeHtml(mapping.sortString)}</span>` : '')
-          : `<span class="channel-mapping-channel">→ Ch ${mapping.channelNumber}</span>` +
-            printSizeHtml) +
+          : isFujiFamily
+            ? `<span class="channel-mapping-channel">→ ${escapeHtml(mapping.printCode || '(no print code)')}</span>` +
+              fujiPrintSizeHtml +
+              (mapping.surface ? `<span class="channel-mapping-options">${escapeHtml(mapping.surface)}</span>` : '')
+            : `<span class="channel-mapping-channel">→ Ch ${mapping.channelNumber}</span>` +
+              printSizeHtml) +
         (mapping.skipAutoPrint ? `<span class="channel-mapping-options" title="This channel is excluded from Auto Print">skip auto-print</span>` : '');
 
       const actionsDiv = document.createElement('div');
@@ -5616,8 +5662,9 @@ function openChannelMappingModal(mapping = null, controllers = null) {
   // Frontline fields
   document.getElementById('cmBatchCode').value        = mapping ? (mapping.batchCode  || '') : '';
   document.getElementById('cmSortString').value       = mapping ? (mapping.sortString || '') : '';
-  // Fuji JobMaker fields
+  // Fuji-family fields (JobMaker + PIC Pro)
   document.getElementById('cmPrintCode').value        = mapping ? (mapping.printCode   || '') : '';
+  document.getElementById('cmPrintSize').value        = mapping ? (mapping.printSize   || '') : '';
   document.getElementById('cmSurface').value          = mapping ? (mapping.surface     || '') : '';
   document.getElementById('cmSurfaceCode').value      = mapping ? (mapping.surfaceCode || '') : '';
 
@@ -5641,15 +5688,19 @@ function _updateCmFields(controllerId, ctrlList) {
   const ctrl       = (ctrlList || cachedOrderControllers).find(c => c.id === controllerId);
   const isFrontline   = ctrl && ctrl.type === 'frontline';
   const isDarkroomPro = ctrl && ctrl.type === 'darkroompro';
-  const isFuji        = ctrl && ctrl.type === 'fujijobmaker';
+  // Fuji family: JobMaker + PIC Pro share the printCode/printSize/surface
+  // channel-mapping shape. Keep the checks in sync — anything that gates
+  // on "Fuji-style mapping" must include both types.
+  const isFuji        = ctrl && (ctrl.type === 'fujijobmaker' || ctrl.type === 'fujipicpro');
 
   document.getElementById('cmChannelNumberGroup').style.display  = (!isFrontline && !isDarkroomPro && !isFuji) ? '' : 'none';
   document.getElementById('cmSkipAutoPrintGroup').style.display  = (!isFrontline && !isFuji) ? '' : 'none';
   document.getElementById('cmPrintSizeCodeGroup').style.display  = (!isFrontline && !isDarkroomPro && !isFuji) ? '' : 'none';
   document.getElementById('cmBatchCodeGroup').style.display      = isFrontline ? '' : 'none';
   document.getElementById('cmSortStringGroup').style.display     = isFrontline ? '' : 'none';
-  // Fuji JobMaker-specific
+  // Fuji-family: JobMaker + PIC Pro
   document.getElementById('cmPrintCodeGroup').style.display      = isFuji ? '' : 'none';
+  document.getElementById('cmPrintSizeGroup').style.display      = isFuji ? '' : 'none';
   document.getElementById('cmSurfaceGroup').style.display        = isFuji ? '' : 'none';
   document.getElementById('cmSurfaceCodeGroup').style.display    = isFuji ? '' : 'none';
 }
@@ -5714,6 +5765,7 @@ document.getElementById('cmSaveBtn').addEventListener('click', async () => {
   const batchCode      = document.getElementById('cmBatchCode').value.trim();
   const sortString     = document.getElementById('cmSortString').value.trim();
   const printCode      = document.getElementById('cmPrintCode').value.trim();
+  const printSize      = document.getElementById('cmPrintSize').value.trim();
   const surface        = document.getElementById('cmSurface').value.trim();
   const surfaceCode    = document.getElementById('cmSurfaceCode').value.trim();
 
@@ -5723,11 +5775,19 @@ document.getElementById('cmSaveBtn').addEventListener('click', async () => {
   let   selectedController = cachedOrderControllers.find(c => c.id === controllerId);
   const isFrontlineCtrl    = selectedController?.type === 'frontline';
   const isDarkroomProCtrl  = selectedController?.type === 'darkroompro';
-  const isFujiCtrl         = selectedController?.type === 'fujijobmaker';
+  const isFujiCtrl         = selectedController?.type === 'fujijobmaker'
+                          || selectedController?.type === 'fujipicpro';
+
+  // Bare-WxH shape check — same regex the IPC-side validator (routing-
+  // service.isBareWxH) uses. Duplicated here purely for a friendlier
+  // pre-submit message; the IPC handler enforces the same rule server-side.
+  const BARE_WXH = /^\s*\d+(?:\.\d+)?\s*[x×]\s*\d+(?:\.\d+)?\s*$/i;
 
   if (isFujiCtrl) {
-    if (!printCode) { alert('Print Code is required for Fuji JobMaker mappings.'); return; }
-    if (!surface)   { alert('Surface is required for Fuji JobMaker mappings.');    return; }
+    if (!printCode)                  { alert('Print Code is required for Fuji mappings.'); return; }
+    if (!printSize)                  { alert('Print Size is required for Fuji mappings — sets the crop aspect (e.g. 6x4, 3.5x5).'); return; }
+    if (!BARE_WXH.test(printSize))   { alert('Print Size must be a bare WxH shape like 6x4 or 3.5x5.'); return; }
+    if (!surface)                    { alert('Surface is required for Fuji mappings.'); return; }
   } else if (isFrontlineCtrl) {
     if (!batchCode) { alert('Batch code is required for Frontline controllers.'); return; }
   } else if (!isDarkroomProCtrl) {
@@ -5803,6 +5863,7 @@ document.getElementById('cmSaveBtn').addEventListener('click', async () => {
     };
     if (isFujiCtrl) {
       payload.printCode   = printCode;
+      payload.printSize   = printSize;
       payload.surface     = surface;
       payload.surfaceCode = surfaceCode;
     }
