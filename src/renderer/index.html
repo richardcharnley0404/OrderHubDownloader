@@ -1481,6 +1481,19 @@
         <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Frontier paper surface name. Must match a value in <code>paperinfo.ini</code> exactly (case-sensitive). Also the per-file grouping key — emitted as <code>Surface=</code>.</small>
       </div>
 
+      <!-- Fuji PIC Pro-only: Color (mandatory field in order.txt, spec p. 353) -->
+      <div class="form-group" id="cmColorGroup" style="display:none">
+        <label for="cmColor">Color</label>
+        <select id="cmColor" style="width:200px;">
+          <option value="C">C — Colour (default)</option>
+          <option value="B">B — Black &amp; White</option>
+          <option value="S">S — Sepia</option>
+          <option value="S2">S2 — Sepia (medium)</option>
+          <option value="S3">S3 — Sepia (dark)</option>
+        </select>
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">PIC Pro <code>Color=</code> value. Required per spec p. 353; defaults to <code>C</code>. B&amp;W packages must select <code>B</code>, sepia packages one of <code>S/S2/S3</code>.</small>
+      </div>
+
       <div class="form-group" id="cmSurfaceCodeGroup" style="display:none">
         <label for="cmSurfaceCode">Surface Code <span style="font-weight:normal;color:#888">(optional)</span></label>
         <input type="text" id="cmSurfaceCode" placeholder="e.g. L" style="width:80px;" maxlength="4">
@@ -1628,6 +1641,19 @@
           <label class="form-label" for="assignSurfaceCode">Surface Code <span style="font-weight:normal;color:#888">(optional)</span></label>
           <input type="text" id="assignSurfaceCode" class="form-control" placeholder='e.g. L' style="width:120px" maxlength="3">
           <p class="field-hint">Leave blank to use the first letter of Surface. Prefixes the <code>Order_ID</code> (e.g. <code>L-BALLY-T0PXA7</code>).</p>
+        </div>
+
+        <!-- PIC Pro-only: Color. Shown when the parent controller is fujipicpro. -->
+        <div class="form-group" id="assignColorGroup" style="display:none">
+          <label class="form-label" for="assignColor">Color</label>
+          <select id="assignColor" class="form-control" style="width:220px">
+            <option value="C">C — Colour (default)</option>
+            <option value="B">B — Black &amp; White</option>
+            <option value="S">S — Sepia</option>
+            <option value="S2">S2 — Sepia (medium)</option>
+            <option value="S3">S3 — Sepia (dark)</option>
+          </select>
+          <p class="field-hint">PIC Pro <code>Color=</code> value. Required by spec p. 353; defaults to <code>C</code>.</p>
         </div>
 
       </div>

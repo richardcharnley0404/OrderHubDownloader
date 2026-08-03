@@ -1408,6 +1408,11 @@ function openAssignModal(job, route) {
     printCodeInput.setCustomValidity('');
     printSizeInput.setCustomValidity('');
     surfaceInput.setCustomValidity('');
+    // Fix 13: PIC Pro-only Color= field. Show + reset to 'C' for
+    // fujipicpro; hidden for fujijobmaker (no Color= in that format).
+    const isFujiPicPro = route.controller && route.controller.type === 'fujipicpro';
+    document.getElementById('assignColorGroup').style.display = isFujiPicPro ? '' : 'none';
+    document.getElementById('assignColor').value = 'C';
   }
 
   if (isDarkroomPro) {
@@ -1592,6 +1597,14 @@ function openAssignModal(job, route) {
           const { tickedIgnore, untickedNames } = _collectAssignModalIgnore();
           await reconcileControllerIgnore(controllerId, tickedIgnore, untickedNames);
         }
+        // Fix 13: PIC Pro-only Color= field. Read from the
+        // dropdown if visible (fujipicpro parent); default 'C'
+        // otherwise so JobMaker payloads don't grow an unused key.
+        const isPicProParent = route.controller && route.controller.type === 'fujipicpro';
+        const assignColor    = isPicProParent
+          ? (document.getElementById('assignColor').value || 'C')
+          : undefined;
+
         const result = await window.electronAPI.saveChannelMapping({
           id:             crypto.randomUUID(),
           controllerId,
@@ -1609,6 +1622,9 @@ function openAssignModal(job, route) {
           printSize,
           surface,
           surfaceCode,
+          // Only include `color` on PIC Pro payloads — see the same
+          // guard in `cmSaveBtn`.
+          ...(isPicProParent ? { color: assignColor } : {}),
         });
 
         if (result && result.success === false) {
@@ -5766,6 +5782,11 @@ function openChannelMappingModal(mapping = null, controllers = null) {
   document.getElementById('cmPrintSize').value        = mapping ? (mapping.printSize   || '') : '';
   document.getElementById('cmSurface').value          = mapping ? (mapping.surface     || '') : '';
   document.getElementById('cmSurfaceCode').value      = mapping ? (mapping.surfaceCode || '') : '';
+  // PIC Pro-only: Color=. Default to 'C' when the mapping doesn't
+  // carry one (fresh mapping or JobMaker→PIC Pro switch). Fix 13
+  // makes this a real UI field so editing a B&W mapping doesn't
+  // silently reset to C via the validator's default.
+  document.getElementById('cmColor').value            = mapping && mapping.color ? mapping.color : 'C';
 
   const optsList = document.getElementById('cmOptionsList');
   optsList.innerHTML = '';
@@ -5789,8 +5810,10 @@ function _updateCmFields(controllerId, ctrlList) {
   const isDarkroomPro = ctrl && ctrl.type === 'darkroompro';
   // Fuji family: JobMaker + PIC Pro share the printCode/printSize/surface
   // channel-mapping shape. Keep the checks in sync — anything that gates
-  // on "Fuji-style mapping" must include both types.
-  const isFuji        = ctrl && (ctrl.type === 'fujijobmaker' || ctrl.type === 'fujipicpro');
+  // on "Fuji-style mapping" must include both types. Color is PIC Pro-
+  // only (JobMaker doesn't have Color=).
+  const isFuji         = ctrl && (ctrl.type === 'fujijobmaker' || ctrl.type === 'fujipicpro');
+  const isFujiPicPro   = ctrl && ctrl.type === 'fujipicpro';
 
   document.getElementById('cmChannelNumberGroup').style.display  = (!isFrontline && !isDarkroomPro && !isFuji) ? '' : 'none';
   document.getElementById('cmSkipAutoPrintGroup').style.display  = (!isFrontline && !isFuji) ? '' : 'none';
@@ -5802,6 +5825,10 @@ function _updateCmFields(controllerId, ctrlList) {
   document.getElementById('cmPrintSizeGroup').style.display      = isFuji ? '' : 'none';
   document.getElementById('cmSurfaceGroup').style.display        = isFuji ? '' : 'none';
   document.getElementById('cmSurfaceCodeGroup').style.display    = isFuji ? '' : 'none';
+  // PIC Pro-only: Color= is a mandatory field in order.txt (spec p. 353).
+  // JobMaker's format has no Color= equivalent so the group stays hidden
+  // for `fujijobmaker`.
+  document.getElementById('cmColorGroup').style.display          = isFujiPicPro ? '' : 'none';
 }
 
 function addChannelMappingOptionRow(container, name = '', value = '', ignored = false) {
@@ -5867,6 +5894,7 @@ document.getElementById('cmSaveBtn').addEventListener('click', async () => {
   const printSize      = document.getElementById('cmPrintSize').value.trim();
   const surface        = document.getElementById('cmSurface').value.trim();
   const surfaceCode    = document.getElementById('cmSurfaceCode').value.trim();
+  const cmColor        = document.getElementById('cmColor').value;
 
   if (!controllerId)                         { alert('Please select a controller.');                  return; }
   if (!productCode)                          { alert('Product code is required.');                    return; }
@@ -5965,6 +5993,13 @@ document.getElementById('cmSaveBtn').addEventListener('click', async () => {
       payload.printSize   = printSize;
       payload.surface     = surface;
       payload.surfaceCode = surfaceCode;
+      // PIC Pro-only. Sending `color` on a JobMaker payload is a
+      // no-op (JobMaker's validator ignores it), but keep the
+      // shape narrow so the persisted mapping doesn't grow an
+      // extraneous `color` key on JobMaker rows.
+      if (selectedController?.type === 'fujipicpro') {
+        payload.color = cmColor || 'C';
+      }
     }
     const result = await window.electronAPI.saveChannelMapping(payload);
     // Surface validator failures from the IPC handler (e.g. Fuji
