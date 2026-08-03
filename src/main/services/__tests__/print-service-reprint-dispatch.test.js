@@ -49,6 +49,7 @@ function withDispatchSpy(fn) {
       fc:    printService._sendReprintViaFolderCopy,
       dpof:  printService._sendReprintViaDPOF,
       fuji:  printService._sendReprintViaFujiJobMaker,
+      pp:    printService._sendReprintViaFujiPicPro,
       pdf:   printService._sendReprintViaPdfCopy,
       front: printService._sendReprintViaFrontline,
     };
@@ -56,6 +57,7 @@ function withDispatchSpy(fn) {
     printService._sendReprintViaFolderCopy   = async () => { calls.push('folder_copy');  return { success: true, method: 'folder-copy-reprint' }; };
     printService._sendReprintViaDPOF         = async () => { calls.push('dpof');         return { success: true, method: 'dpof-reprint' }; };
     printService._sendReprintViaFujiJobMaker = async () => { calls.push('fujijobmaker'); return { success: true, method: 'fujijobmaker-reprint' }; };
+    printService._sendReprintViaFujiPicPro   = async () => { calls.push('fujipicpro');   return { success: true, method: 'fujipicpro-reprint' }; };
     printService._sendReprintViaPdfCopy      = async () => { calls.push('pdf_copy');     return { success: true, method: 'pdf_copy-reprint' }; };
     printService._sendReprintViaFrontline    = async () => { calls.push('frontline');    return { success: true, method: 'frontline-reprint' }; };
     t.after(() => {
@@ -63,6 +65,7 @@ function withDispatchSpy(fn) {
       printService._sendReprintViaFolderCopy   = orig.fc;
       printService._sendReprintViaDPOF         = orig.dpof;
       printService._sendReprintViaFujiJobMaker = orig.fuji;
+      printService._sendReprintViaFujiPicPro   = orig.pp;
       printService._sendReprintViaPdfCopy      = orig.pdf;
       printService._sendReprintViaFrontline    = orig.front;
       routingService.resolveRoute              = originalResolveRoute;
@@ -132,6 +135,13 @@ test('sendReprint: controllerType "fujijobmaker" dispatches to _sendReprintViaFu
   assert.equal(result.success, true);
 }));
 
+test('sendReprint: controllerType "fujipicpro" dispatches to _sendReprintViaFujiPicPro (M5)', withDispatchSpy(async (calls) => {
+  stubRoute('fujipicpro');
+  const result = await printService.sendReprint(PARENT, REPRINT_PATH, 'r1', REPRINT_IMAGES);
+  assert.deepEqual(calls, ['fujipicpro'], 'must reach the Fuji PIC Pro reprint pipeline (not fall through to the unsupported branch)');
+  assert.equal(result.success, true);
+}));
+
 test('sendReprint: controllerType "pdf_copy" dispatches to _sendReprintViaPdfCopy (Phase 3b)', withDispatchSpy(async (calls) => {
   stubRoute('pdf_copy');
   const result = await printService.sendReprint(PARENT, REPRINT_PATH, 'r1', REPRINT_IMAGES);
@@ -162,6 +172,7 @@ test('sendReprint: reprint matrix is complete — every configured controllerTyp
     { type: 'darkroompro',  arm: 'darkroompro'  },
     { type: 'folder_copy',  arm: 'folder_copy'  },
     { type: 'fujijobmaker', arm: 'fujijobmaker' },
+    { type: 'fujipicpro',   arm: 'fujipicpro'   },
     { type: 'pdf_copy',     arm: 'pdf_copy'     },
     { type: 'frontline',    arm: 'frontline'    },
   ];

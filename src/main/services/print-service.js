@@ -15,6 +15,8 @@ const { frontlineGenerator } = require('./frontline-generator');
 const { frontlineFileWriter } = require('./frontline-file-writer');
 const { generateFujiJobMakerFiles } = require('./fuji-jobmaker-generator');
 const { fujiJobMakerFileWriter } = require('./fuji-jobmaker-file-writer');
+const { generateFujiPicProOrderFile } = require('./fuji-pic-pro-generator');
+const fujiPicProFileWriter = require('./fuji-pic-pro-file-writer');
 const { printControllerService } = require('./print-controller-service');
 const { resolvePrintSizeCode } = require('./routing-service');
 const { isDpofType } = require('./controller-types');
@@ -221,6 +223,9 @@ class PrintService {
     }
     if (route.controllerType === 'fujijobmaker') {
       return this._sendViaFujiJobMakerRouted(job, route);
+    }
+    if (route.controllerType === 'fujipicpro') {
+      return this._sendViaFujiPicProRouted(job, route);
     }
 
     const downloadDirectory = configService.get('downloadDirectory');
@@ -736,6 +741,9 @@ class PrintService {
     if (route.controllerType === 'fujijobmaker') {
       return this._sendReprintViaFujiJobMaker(parentJob, route, reprintJobPath, reprintSuffix, reprintImages);
     }
+    if (route.controllerType === 'fujipicpro') {
+      return this._sendReprintViaFujiPicPro(parentJob, route, reprintJobPath, reprintSuffix, reprintImages);
+    }
     if (route.controllerType === 'pdf_copy') {
       return this._sendReprintViaPdfCopy(parentJob, route, reprintJobPath, reprintSuffix, reprintImages);
     }
@@ -1232,6 +1240,200 @@ class PrintService {
       method:       'fujijobmaker-reprint',
       destPaths:    writeResult.writtenFiles,
       stagedFolder: writeResult.imageStagingFolder,
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Reprint — Fuji PIC Pro pipeline
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Fuji PIC Pro reprint.
+   *
+   * Follows the same posture as the other reprint methods:
+   *   1. Source images from {reprintJobPath}/originals/ — CLAUDE.md
+   *      landmine "Reprints must source from `{job}/originals/`, never
+   *      /working/". No manifest, no enhanced-path lookup, no
+   *      resolveDispatchImageSource.
+   *   2. CMY corrections from the reprint sidecar are re-applied to
+   *      /working/ before staging.
+   *   3. orderId = `{parentJobName}-{reprintSuffix}` — creates a
+   *      fresh PIC Pro order. We do NOT use PIC Pro's native
+   *      `[restart]` command because that reprints the ORIGINAL
+   *      order untouched, and OHD reprints are typically a subset of
+   *      images with possibly re-cropped versions.
+   *   4. Enqueue with the monitor so the DIGIN move + optional
+   *      release still happen — BUT do not mark completed / in
+   *      production. Parent job's lifecycle stays untouched; the
+   *      reprint is a sibling concept, matching every other reprint
+   *      method.
+   */
+  async _sendReprintViaFujiPicPro(parentJob, route, reprintJobPath, reprintSuffix, reprintImages) {
+    if (!Array.isArray(reprintImages) || reprintImages.length === 0) {
+      return { success: false, error: 'Reprint has no images to send.' };
+    }
+
+    if (!route || !route.orderDataPath || !route.diginPath || !route.imageStagingRoot || !route.printCode) {
+      const missing = [
+        !route || !route.orderDataPath     ? 'orderDataPath'    : null,
+        !route || !route.diginPath         ? 'diginPath'        : null,
+        !route || !route.imageStagingRoot  ? 'imageStagingRoot' : null,
+        !route || !route.printCode         ? 'printCode'        : null,
+      ].filter(Boolean).join(', ');
+      return {
+        success: false,
+        error: `Fuji PIC Pro reprint route missing required fields (${missing}). Add a channel mapping for the parent's product on this controller in Settings → Routing.`,
+      };
+    }
+
+    const originalsPath = path.join(reprintJobPath, 'originals');
+    const workingPath   = path.join(reprintJobPath, 'working');
+
+    let imageFiles = reprintImages.map(img => ({
+      sourcePath:       path.join(originalsPath, img.filename),
+      filename:         img.filename,
+      originalFilename: img.originalFilename || null,
+      quantity:         img.qtyCurrent || 1,
+    }));
+
+    for (const img of imageFiles) {
+      if (!fs.existsSync(img.sourcePath)) {
+        return {
+          success: false,
+          error: `Reprint image not found on disk: ${img.sourcePath}`,
+        };
+      }
+    }
+
+    const correctionsMap = new Map(
+      reprintImages.map(img => [img.filename, img.corrections || {}])
+    );
+    imageFiles = await this._applyCorrectionsToImageFiles(
+      imageFiles,
+      workingPath,
+      correctionsMap,
+    );
+
+    // Reprint-suffixed orderId — the parent's job_name plus -r{n},
+    // matching the JobMaker reprint's shape so both Fuji types
+    // produce recognisably-siblings filenames in Order Data.
+    const reprintOrderId = `${parentJob.job_name || parentJob.order_number || ''}-${reprintSuffix}`;
+
+    let stageResult;
+    try {
+      stageResult = await fujiPicProFileWriter.stageImages({
+        imageStagingRoot: route.imageStagingRoot,
+        orderId:          reprintOrderId,
+        imageFiles: imageFiles.map(img => ({
+          sourcePath:       img.sourcePath,
+          originalFilename: img.originalFilename,
+        })),
+      });
+    } catch (stageErr) {
+      logger.logError('Fuji PIC Pro reprint staging failed', stageErr, {
+        parentJobId:  parentJob.id,
+        reprintSuffix,
+        controller:   route.controllerName,
+      });
+      return { success: false, error: stageErr.message };
+    }
+
+    const fullName = (parentJob.customer_name || '').trim();
+    const picProJob = {
+      orderId: reprintOrderId,
+      id:      parentJob.id,
+      jobName: reprintOrderId,
+      customer: {
+        fullName,
+        email: parentJob.customer_email || '',
+        phone: parentJob.customer_phone || '',
+      },
+      images: stageResult.negNumberMap.map((staged, i) => ({
+        negNumber:        staged.negNumber,
+        printCode:        route.printCode,
+        quantity:         imageFiles[i].quantity,
+        color:            route.color || 'C',
+        originalFilename: imageFiles[i].originalFilename || staged.originalFilename || '',
+        filename:         staged.stagedName,
+      })),
+    };
+
+    const controllerCfg = {
+      backprintMode:       route.backprintMode      || 'none',
+      backprintTemplate:   route.backprintTemplate  || '',
+      backprintTemplate2:  route.backprintTemplate2 || '',
+      includeCustomerName: route.includeCustomerName === true,
+    };
+
+    let orderFile;
+    try {
+      orderFile = generateFujiPicProOrderFile(picProJob, controllerCfg);
+    } catch (genErr) {
+      logger.logError('Fuji PIC Pro reprint generation failed', genErr, {
+        parentJobId:  parentJob.id,
+        reprintSuffix,
+        controller:   route.controllerName,
+      });
+      return { success: false, error: genErr.message };
+    }
+
+    let writtenPath;
+    try {
+      ({ writtenPath } = await fujiPicProFileWriter.writeOrderFile({
+        orderDataPath: route.orderDataPath,
+        filename:      orderFile.filename,
+        contents:      orderFile.contents,
+      }));
+    } catch (writeErr) {
+      logger.logError('Fuji PIC Pro reprint write failed — staged images may remain', writeErr, {
+        parentJobId:  parentJob.id,
+        reprintSuffix,
+        controller:   route.controllerName,
+      });
+      return { success: false, error: writeErr.message };
+    }
+
+    // Reprints DO need the monitor — the DIGIN move + optional
+    // [release] don't happen without it. But we do NOT
+    // _markCompleted / _markInProduction; parent lifecycle untouched,
+    // same posture as the JobMaker reprint.
+    printControllerService.startMonitoring(route.controllerId);
+    const monitor = printControllerService.getMonitor(route.controllerId);
+    if (monitor && typeof monitor.enqueueSubmission === 'function') {
+      monitor.enqueueSubmission({
+        orderRef:            reprintOrderId,
+        orderId:             reprintOrderId,
+        stagingFolder:       stageResult.stagingFolder,
+        controllerId:        route.controllerId,
+        orderDataPath:       route.orderDataPath,
+        diginPath:           route.diginPath,
+        mergeDataPath:       route.mergeDataPath || '',
+        gatewayTimeoutMs:    route.gatewayTimeoutMs,
+        buildTimeoutMs:      route.buildTimeoutMs,
+        sendReleaseCommand:  route.sendReleaseCommand === true,
+      });
+    }
+
+    logger.info('Reprint sent via Fuji PIC Pro — enqueued for OrderGateway handshake', {
+      parentJobId:  parentJob.id,
+      reprintSuffix,
+      controller:   route.controllerName,
+      orderId:      reprintOrderId,
+      printCode:    route.printCode,
+      orderFile:    writtenPath,
+      stagedImages: stageResult.negNumberMap.length,
+    });
+
+    return {
+      success:       true,
+      method:        'fujipicpro-reprint',
+      orderFilePath: writtenPath,
+      stagedFolder:  stageResult.stagingFolder,
+      negNumberMap:  stageResult.negNumberMap.map(e => ({
+        negNumber:        e.negNumber,
+        stagedName:       e.stagedName,
+        originalFilename: e.originalFilename,
+      })),
     };
   }
 
@@ -1990,6 +2192,267 @@ class PrintService {
       sourcePath: jobFolderPath,
       destPaths:  writeResult.writtenFiles,
       stagedFolder: writeResult.imageStagingFolder,
+    };
+  }
+
+  /**
+   * Fuji PIC Pro dispatch — one file per order, three explicit paths
+   * (Order Data / DIGIN / Merge Data), OrderGateway handshake handled
+   * asynchronously by FujiPicProMonitor.
+   *
+   * Mirrors _sendViaFujiJobMakerRouted for steps 1–4 exactly, because
+   * that shape is what makes the CROPPED file the one that ships: the
+   * enhanced/corrected/raw resolution via resolveDispatchImageSource
+   * → _applyCorrectionsToImageFiles honours the sidecar's
+   * `cropApplied` + `croppedPath` first, then falls back to enhanced,
+   * root, /working/, /originals/. See dispatch-image-source.js for
+   * the full precedence.
+   *
+   * Steps 5–8 diverge:
+   *   5. Stage images with sequence rename (0001.<ext>, 0002.<ext>, …).
+   *      The negNumberMap becomes the source for `NegNumber=` in the
+   *      order.txt AND lands on the dispatch record so a later "which
+   *      file is 0007?" question is answerable.
+   *   6. Build the generator job from the negNumberMap + manifest
+   *      quantities + route.printCode / route.color.
+   *   7. writeOrderFile → Order Data. This is the trigger for
+   *      OrderGateway; MUST land AFTER staging so a fast Gateway
+   *      can't consume it before images are in place. (In practice
+   *      the images aren't in DIGIN yet — they're in staging — but
+   *      the writer's atomic rename guarantees the .txt is either
+   *      absent or complete, never partial.)
+   *   8. Enqueue the pending submission and start the monitor. Return
+   *      immediately — the monitor does the DIGIN move + optional
+   *      [release] later. Blocking here would stall runAutoPrint for
+   *      up to the full build timeout every time OrderGateway is
+   *      stopped.
+   *
+   * The route's `checkOrderStatus` toggle drives the same
+   * _markCompleted / _markInProduction split JobMaker uses. For PIC
+   * Pro the monitor's `accepted` / `failed` / `timed_out` callback
+   * (wired via print-controller-service's onPicProStatus adapter)
+   * is what eventually transitions JobStore state.
+   */
+  async _sendViaFujiPicProRouted(job, route) {
+    const downloadDirectory = configService.get('downloadDirectory');
+    if (!downloadDirectory) {
+      throw new Error('Download directory is not configured.');
+    }
+
+    const orderFolderName = `${job.order_number}_${job.order_id}`;
+    const jobFolderName   = `${job.order_number}_${job.id}`;
+    const orderFolderPath = path.join(downloadDirectory, orderFolderName);
+    const jobFolderPath   = path.join(orderFolderPath, jobFolderName);
+
+    if (!fs.existsSync(jobFolderPath)) {
+      throw new Error(`Job folder not found: ${jobFolderPath}`);
+    }
+
+    const manifest    = await this._readManifest(orderFolderPath, job.order_number);
+    const jobManifest = this._findJobInManifest(manifest, job);
+
+    if (!jobManifest) {
+      throw new Error(`Job ${job.id} not found in order manifest.`);
+    }
+
+    // ── Route validation ────────────────────────────────────────────────────
+    // Belt-and-braces — routing-service.resolveRoute won't emit a
+    // fujipicpro route without a channel mapping, but a mapping that
+    // pre-dates M0 might carry no printSize. Fail loudly so the
+    // operator gets an actionable error instead of a square-cropped
+    // ghost print.
+    if (!route.printCode) {
+      const errMsg =
+        `Fuji PIC Pro route is missing printCode for product "${job.product_code || '(none)'}". ` +
+        `Add a channel mapping for this product in Settings → Routing.`;
+      jobService.updateJobLocally(job.id, { _status: 'error', _errorMessage: errMsg });
+      return { success: false, error: errMsg };
+    }
+    if (!route.printSize) {
+      const errMsg =
+        `Fuji PIC Pro route is missing printSize for product "${job.product_code || '(none)'}". ` +
+        `Edit the channel mapping in Settings → Routing to set the crop aspect (e.g. 6x4).`;
+      jobService.updateJobLocally(job.id, { _status: 'error', _errorMessage: errMsg });
+      return { success: false, error: errMsg };
+    }
+
+    // ── Resolve image paths — enhanced → cropped → corrected → raw ─────────
+    // Exact same shape as the DPOF + JobMaker pipelines so the cropped
+    // file in /working/ wins over the raw at the flat root. This is
+    // what makes pre-cropped dispatch work: skipping any of these
+    // steps loses either the enhancement or the crop.
+    const enhancedMap    = await this._getEnhancedPathMap(jobFolderName, jobFolderPath);
+    const correctionsMap = await this._getCorrectionsMap(jobFolderName, jobFolderPath);
+
+    let imageFiles = jobManifest.images.map(img => {
+      const basename     = path.basename(img.filename);
+      const enhancedPath = enhancedMap.get(basename);
+      if (enhancedPath) {
+        logger.info('Using enhanced image for Fuji PIC Pro print', { filename: basename, enhancedPath });
+      }
+      return {
+        sourcePath:       resolveDispatchImageSource({ rootPath: path.join(orderFolderPath, img.filename), jobFolderPath, basename, enhancedPath }),
+        filename:         basename,
+        originalFilename: img.originalFilename || null,
+        quantity:         img.quantity || 1,
+      };
+    });
+
+    imageFiles = await this._applyCorrectionsToImageFiles(
+      imageFiles,
+      path.join(jobFolderPath, 'working'),
+      correctionsMap,
+    );
+
+    for (const img of imageFiles) {
+      if (!fs.existsSync(img.sourcePath)) {
+        throw new Error(`Image not found: ${img.sourcePath}`);
+      }
+    }
+
+    // ── Stage images with sequence rename (0001.<ext>, 0002.<ext>, …) ──────
+    // orderId is per-job (job_name, e.g. ORD-O4YK5Z-1) — matches
+    // JobMaker's convention so two jobs from one order can't collide
+    // in PIC Pro's staging or Order Data folders.
+    const orderId = job.job_name || job.order_number || '';
+
+    let stageResult;
+    try {
+      stageResult = await fujiPicProFileWriter.stageImages({
+        imageStagingRoot: route.imageStagingRoot,
+        orderId,
+        imageFiles: imageFiles.map(img => ({
+          sourcePath:       img.sourcePath,
+          originalFilename: img.originalFilename,
+        })),
+      });
+    } catch (stageErr) {
+      logger.logError('Fuji PIC Pro image staging failed', stageErr, {
+        jobId:      job.id,
+        controller: route.controllerName,
+      });
+      jobService.updateJobLocally(job.id, { _status: 'error', _errorMessage: stageErr.message });
+      return { success: false, error: stageErr.message };
+    }
+
+    // ── Build generator input from the sequenced files + route fields ──────
+    const fullName = (job.customer_name || '').trim();
+    const picProJob = {
+      orderId,
+      id:       job.id,
+      jobName:  orderId,
+      customer: {
+        fullName,
+        email: job.customer_email || '',
+        phone: job.customer_phone || '',
+      },
+      images: stageResult.negNumberMap.map((staged, i) => ({
+        negNumber:        staged.negNumber,
+        printCode:        route.printCode,
+        quantity:         imageFiles[i].quantity,
+        color:            route.color || 'C',
+        // {originalFilename} back-print reads from the manifest, not
+        // the sequence-renamed 0001.jpg — so the customer's real
+        // filename still lands on the back of the print.
+        originalFilename: imageFiles[i].originalFilename || staged.originalFilename || '',
+        filename:         staged.stagedName,
+      })),
+    };
+
+    const controllerCfg = {
+      backprintMode:       route.backprintMode      || 'none',
+      backprintTemplate:   route.backprintTemplate  || '',
+      backprintTemplate2:  route.backprintTemplate2 || '',
+      includeCustomerName: route.includeCustomerName === true,
+    };
+
+    let orderFile;
+    try {
+      orderFile = generateFujiPicProOrderFile(picProJob, controllerCfg);
+    } catch (genErr) {
+      logger.logError('Fuji PIC Pro generation failed', genErr, { jobId: job.id });
+      jobService.updateJobLocally(job.id, { _status: 'error', _errorMessage: genErr.message });
+      return { success: false, error: genErr.message };
+    }
+
+    // ── Write the order.txt into Order Data (atomic .tmp + rename) ─────────
+    let writtenPath;
+    try {
+      ({ writtenPath } = await fujiPicProFileWriter.writeOrderFile({
+        orderDataPath: route.orderDataPath,
+        filename:      orderFile.filename,
+        contents:      orderFile.contents,
+      }));
+    } catch (writeErr) {
+      logger.logError('Fuji PIC Pro order file write failed — staged images may remain', writeErr, {
+        jobId:      job.id,
+        controller: route.controllerName,
+      });
+      jobService.updateJobLocally(job.id, { _status: 'error', _errorMessage: writeErr.message });
+      return { success: false, error: writeErr.message };
+    }
+
+    // ── Enqueue for the monitor and START it (idempotent) ──────────────────
+    // Order matters: startMonitoring first so the monitor exists to
+    // enqueue into. printControllerService.startMonitoring is a no-op
+    // when the monitor is already up.
+    printControllerService.startMonitoring(route.controllerId);
+    const monitor = printControllerService.getMonitor(route.controllerId);
+    if (monitor && typeof monitor.enqueueSubmission === 'function') {
+      monitor.enqueueSubmission({
+        orderRef:            orderId,
+        orderId,
+        stagingFolder:       stageResult.stagingFolder,
+        controllerId:        route.controllerId,
+        orderDataPath:       route.orderDataPath,
+        diginPath:           route.diginPath,
+        mergeDataPath:       route.mergeDataPath || '',
+        gatewayTimeoutMs:    route.gatewayTimeoutMs,
+        buildTimeoutMs:      route.buildTimeoutMs,
+        sendReleaseCommand:  route.sendReleaseCommand === true,
+      });
+    } else {
+      // Monitor wasn't wired for this controller type — shouldn't
+      // happen in production (print-controller-service.startMonitoring
+      // handles fujipicpro) but log rather than silently drop the
+      // handshake.
+      logger.logWarning('[fuji-pic-pro] no monitor available to enqueue submission — DIGIN delivery + release will not happen automatically', {
+        controllerId: route.controllerId,
+        orderId,
+      });
+    }
+
+    logger.info('Job sent via Fuji PIC Pro (routed) — enqueued for OrderGateway handshake', {
+      jobId:        job.id,
+      controller:   route.controllerName,
+      orderId,
+      printCode:    route.printCode,
+      color:        route.color || 'C',
+      orderFile:    writtenPath,
+      stagedImages: stageResult.negNumberMap.length,
+    });
+
+    if (route.checkOrderStatus === false) {
+      logger.info('[Fuji PIC Pro] checkOrderStatus disabled — marking job completed immediately', { jobId: job.id });
+      await this._markCompleted(job.id);
+    } else {
+      await this._markInProduction(job.id);
+    }
+
+    return {
+      success:       true,
+      method:        'fujipicpro-routed',
+      sourcePath:    jobFolderPath,
+      orderFilePath: writtenPath,
+      stagedFolder:  stageResult.stagingFolder,
+      // Handy for a later "which physical file went out as NegNumber X"
+      // debug session — the dispatch record persists this alongside
+      // the audit log entry.
+      negNumberMap:  stageResult.negNumberMap.map(e => ({
+        negNumber:        e.negNumber,
+        stagedName:       e.stagedName,
+        originalFilename: e.originalFilename,
+      })),
     };
   }
 
