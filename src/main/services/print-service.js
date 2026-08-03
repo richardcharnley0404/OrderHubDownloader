@@ -2285,11 +2285,9 @@ class PrintService {
     }
 
     // ── Route validation ────────────────────────────────────────────────────
-    // Belt-and-braces — routing-service.resolveRoute won't emit a
-    // fujipicpro route without a channel mapping, but a mapping that
-    // pre-dates M0 might carry no printSize. Fail loudly so the
-    // operator gets an actionable error instead of a square-cropped
-    // ghost print.
+    // Only `printCode` is required to dispatch — it's written as
+    // `Code=` in the order.txt (PIC Pro spec p. 351). Missing =>
+    // fail loudly with an actionable message.
     if (!route.printCode) {
       const errMsg =
         `Fuji PIC Pro route is missing printCode for product "${job.product_code || '(none)'}". ` +
@@ -2297,12 +2295,29 @@ class PrintService {
       jobService.updateJobLocally(job.id, { _status: 'error', _errorMessage: errMsg });
       return { success: false, error: errMsg };
     }
+    // Review fix 12 (2026-08-03): `printSize` is a CROP-aspect
+    // indicator only — it's never written into the order.txt (spec
+    // pp. 339-370 has no size-bearing field this maps to) and the
+    // writer doesn't consume it. JobMaker's dispatch (`:2079`)
+    // correctly doesn't gate on it either.
+    //
+    // Blocking auto-print on blank `printSize` breaks the Pixfizz
+    // artwork-source flow: those jobs never enter Manual Crop
+    // (artwork_source gate excludes them) so the field is legitimately
+    // unset for them. Manual-source jobs that DO enter Manual Crop
+    // surface a ⚠ pill via `resolveTargetSize` when printSize is
+    // blank, and fix 2 gates Approve behind that pill — the incorrect-
+    // crop failure mode is already covered upstream.
+    //
+    // Downgrade to a warning so the log still surfaces "operator
+    // should probably set this" without failing an otherwise-valid
+    // order.
     if (!route.printSize) {
-      const errMsg =
-        `Fuji PIC Pro route is missing printSize for product "${job.product_code || '(none)'}". ` +
-        `Edit the channel mapping in Settings → Routing to set the crop aspect (e.g. 6x4).`;
-      jobService.updateJobLocally(job.id, { _status: 'error', _errorMessage: errMsg });
-      return { success: false, error: errMsg };
+      logger.logWarning('[fuji-pic-pro] route.printSize is blank — Manual Crop for this product will fall back to a 1:1 square, but dispatch is proceeding (printSize is a crop-aspect indicator only, not written to order.txt)', {
+        jobId:      job.id,
+        controller: route.controllerName,
+        productCode: job.product_code,
+      });
     }
 
     // ── Resolve image paths — enhanced → cropped → corrected → raw ─────────

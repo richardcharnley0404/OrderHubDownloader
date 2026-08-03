@@ -421,3 +421,23 @@ test('PIC Pro reprint: missing printCode rejects (guard against a stale pre-M1 m
   assert.equal(result.success, false);
   assert.match(result.error, /printCode/);
 });
+
+test('review fix 12: PIC Pro reprint does NOT gate on printSize — it is a crop-aspect field only', async (t) => {
+  // Locks the reprint contract to match the send arm after fix 12.
+  // printSize is never written into order.txt and the writer
+  // doesn't consume it; the sole consumer is Manual Crop's aspect
+  // resolver. Pixfizz jobs bypass Manual Crop entirely (artwork-
+  // source gate) so blank printSize must not block dispatch — the
+  // reprint arm has always been right on this; the send arm now
+  // matches. Regressing either to a hard-fail here would break
+  // otherwise-valid orders.
+  resetCaptures();
+  __routeForReturn = picProRoute({ printSize: '' });
+  const reprintPath = await makeReprintFolder();
+  t.after(() => fs.rmSync(reprintPath, { recursive: true, force: true }));
+
+  const result = await printService.sendReprint(PARENT, reprintPath, 'r1',
+    [{ filename: 'a.jpg', qtyCurrent: 1 }]);
+  assert.equal(result.success, true, `expected success with blank printSize; got: ${result.error}`);
+  assert.equal(result.method, 'fujipicpro-reprint');
+});
