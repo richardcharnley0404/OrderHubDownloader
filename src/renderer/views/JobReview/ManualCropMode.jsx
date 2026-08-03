@@ -378,10 +378,15 @@ export default function ManualCropMode({
   const [naturalByFilename, setNaturalByFilename] = useState({});
 
   // ── Refs for unmount-time flush ──────────────────────────────────────────
-  const perImageStateRef = useRef(perImageState);
-  const sidecarRef       = useRef(sidecar);
-  const imagesRef        = useRef(images);
-  const jobPathRef       = useRef(jobPath);
+  const perImageStateRef  = useRef(perImageState);
+  const sidecarRef        = useRef(sidecar);
+  const imagesRef         = useRef(images);
+  const jobPathRef        = useRef(jobPath);
+  // Kept in sync with `stageImgLoaded` state via the effect below.
+  // approveAndAdvance reads through this ref so its guard sees the
+  // current value regardless of whether the callback closure has
+  // been rebuilt yet.
+  const stageImgLoadedRef = useRef(false);
   // Per-image-visit flag — true until the first onCropRectChange fires
   // for the current image. The first emission after image switch (or
   // initial mount) is CropEditor's seed-echo; subsequent emissions are
@@ -389,10 +394,11 @@ export default function ManualCropMode({
   // Rotation/orientation toggles do NOT reset this — those are operator
   // actions, so any post-toggle re-emit should flip modified normally.
   const seedAbsorbedRef = useRef(false);
-  useEffect(() => { perImageStateRef.current = perImageState; }, [perImageState]);
-  useEffect(() => { sidecarRef.current       = sidecar;       }, [sidecar]);
-  useEffect(() => { imagesRef.current        = images;        }, [images]);
-  useEffect(() => { jobPathRef.current       = jobPath;       }, [jobPath]);
+  useEffect(() => { perImageStateRef.current  = perImageState;  }, [perImageState]);
+  useEffect(() => { sidecarRef.current        = sidecar;        }, [sidecar]);
+  useEffect(() => { imagesRef.current         = images;         }, [images]);
+  useEffect(() => { jobPathRef.current        = jobPath;        }, [jobPath]);
+  useEffect(() => { stageImgLoadedRef.current = stageImgLoaded; }, [stageImgLoaded]);
 
   // ── Drain pending state on unmount ───────────────────────────────────────
   //
@@ -538,12 +544,22 @@ export default function ManualCropMode({
     const rect = st.pendingCropRect;
     if (!isValidRect(rect)) return;
 
+    // Fuji PIC Pro review fix 2 (2026-08-03): the same guard the
+    // button uses. Without it the Enter/Space keyboard shortcut
+    // (registered below) would fire this callback even when the
+    // ⚠ pill is showing — producing a 1:1 square crop for any job
+    // routed to a controller with no size translation. Gating here
+    // covers every caller (button + keyboard + any future addition)
+    // with one check.
+    if (!targetSizeReady) return;
+    if (!stageImgLoadedRef.current) return;
+    if (st.discarded) return;
+
     // 2026-07-23 — resolve the per-image orientation that shaped this
     // rect so the sidecar records reality. Priority mirrors approveAll:
     // operator's explicit pendingOrientation → best-fit from the natural
     // size (cached by onStageNaturalSize when the image loaded) → derive
-    // from the rect's own w/h. sizeOption may be null pre-resolve; guard
-    // for that even though the Approve button is gated on !targetSizeReady.
+    // from the rect's own w/h.
     const targetOrient = sizeOption && (sizeOption.w / sizeOption.h) >= 1 ? 'landscape' : 'portrait';
     const natural = naturalByFilename[filename] || null;
     const resolvedOrientation = st.pendingOrientation
@@ -586,7 +602,7 @@ export default function ManualCropMode({
     } catch (err) {
       dispatch({ type: 'APPLY_ERROR', filename, error: err && err.message ? err.message : String(err) });
     }
-  }, [currentImage, ohJobId, onBatchApplied, selectedIndex, sizeOption, naturalByFilename]);
+  }, [currentImage, ohJobId, onBatchApplied, selectedIndex, sizeOption, naturalByFilename, targetSizeReady]);
 
   // ── Keyboard handlers (document-level) ──────────────────────────────────
   useEffect(() => {
