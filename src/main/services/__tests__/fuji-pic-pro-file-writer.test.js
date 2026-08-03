@@ -458,6 +458,83 @@ test('deliverToDigin: missing staging folder throws', async (t) => {
   );
 });
 
+// ── Fix 7: idempotent replay ──────────────────────────────────────────────
+
+test('fix 7: destFolder already exists + staging gone → idempotent no-op (already-delivered)', async (t) => {
+  // Simulates a crash between the successful DIGIN move and the
+  // monitor's subsequent `_advance('building')` persist. On restart
+  // the entry rehydrates in `delivering`; the monitor replays this
+  // function. Without fix 7 the replay would throw (either EEXIST
+  // or "stagingFolder does not exist") and mark a successfully-
+  // delivered order failed, with [release] never fired.
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const stagingRoot = path.join(dir, 'staging'); await fsp.mkdir(stagingRoot);
+  const stagingFolder = path.join(stagingRoot, 'ORD-IDEM'); // deliberately DOES NOT exist
+  const diginPath = path.join(dir, 'digin'); await fsp.mkdir(diginPath);
+  const destFolder = path.join(diginPath, 'ORD-IDEM'); await fsp.mkdir(destFolder);
+  await fsp.writeFile(path.join(destFolder, '0001.jpg'), 'already-delivered-bytes');
+
+  const result = await deliverToDigin({
+    stagingFolder, diginPath, orderId: 'ORD-IDEM',
+    deps: { logger: silentLogger },
+  });
+
+  assert.equal(result.method, 'already-delivered',
+    'must return the idempotent-replay marker rather than throw');
+  assert.equal(result.destFolder, destFolder);
+  const bytes = await fsp.readFile(path.join(destFolder, '0001.jpg'), 'utf-8');
+  assert.equal(bytes, 'already-delivered-bytes',
+    'must NOT overwrite the previously delivered file');
+});
+
+test('fix 7: destFolder AND staging both exist → refuse to merge (throws)', async (t) => {
+  // Ambiguous state: could be a partial prior delivery, or a
+  // legitimate name conflict between two dispatches. Refuse rather
+  // than merge — the operator investigates.
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const stagingRoot = path.join(dir, 'staging'); await fsp.mkdir(stagingRoot);
+  const stagingFolder = path.join(stagingRoot, 'ORD-CONFLICT');
+  await fsp.mkdir(stagingFolder);
+  await fsp.writeFile(path.join(stagingFolder, '0001.jpg'), 'from-staging');
+  const diginPath = path.join(dir, 'digin'); await fsp.mkdir(diginPath);
+  const destFolder = path.join(diginPath, 'ORD-CONFLICT'); await fsp.mkdir(destFolder);
+  await fsp.writeFile(path.join(destFolder, '0001.jpg'), 'from-earlier');
+
+  await assert.rejects(
+    deliverToDigin({
+      stagingFolder, diginPath, orderId: 'ORD-CONFLICT',
+      deps: { logger: silentLogger },
+    }),
+    /already exists AND staging folder still exists — refusing to merge/,
+  );
+  // Neither side was mutated.
+  const stagingBytes = await fsp.readFile(path.join(stagingFolder, '0001.jpg'), 'utf-8');
+  const destBytes    = await fsp.readFile(path.join(destFolder,    '0001.jpg'), 'utf-8');
+  assert.equal(stagingBytes, 'from-staging');
+  assert.equal(destBytes,    'from-earlier');
+});
+
+test('fix 7: happy path still returns method:"rename" (idempotency check does not paper over normal flow)', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const stagingRoot = path.join(dir, 'staging'); await fsp.mkdir(stagingRoot);
+  const stagingFolder = path.join(stagingRoot, 'ORD-HP'); await fsp.mkdir(stagingFolder);
+  await fsp.writeFile(path.join(stagingFolder, '0001.jpg'), 'hp');
+  const diginPath = path.join(dir, 'digin'); await fsp.mkdir(diginPath);
+
+  const result = await deliverToDigin({
+    stagingFolder, diginPath, orderId: 'ORD-HP',
+    deps: { logger: silentLogger },
+  });
+  assert.equal(result.method, 'rename',
+    'when neither dest nor conflict exists the fast path (rename) still runs');
+});
+
 // ── writeCommandFile ──────────────────────────────────────────────────────
 
 test('writeCommandFile: contents are literally [command]orderId (no trailing newline)', async (t) => {

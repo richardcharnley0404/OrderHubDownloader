@@ -184,12 +184,29 @@ async function writeOrderFile({
  *
  * DIGIN Path MUST exist — same reasoning as writeOrderFile.
  *
+ * **Idempotent** (Fuji PIC Pro review fix 7). The monitor persists
+ * the `delivering` phase BEFORE calling this function. A crash
+ * between the successful move and the subsequent `_advance('building')`
+ * persist would rehydrate the entry in `delivering` and replay the
+ * call. Rather than throw on the replay (staging is gone or destFolder
+ * exists → old EPERM/EEXIST error), we detect the completed state
+ * and treat it as a successful no-op.
+ *
+ * Detection rules (in order):
+ *   - `destFolder` exists and `stagingFolder` is gone → previous
+ *     run completed. Return `{ method: 'already-delivered' }`.
+ *   - `destFolder` exists AND `stagingFolder` still exists → the
+ *     paths conflict (this is not a legitimate replay). Throw so the
+ *     operator can decide.
+ *   - Neither exists → nothing to deliver from. Throw.
+ *   - Only `stagingFolder` exists → normal path, proceed.
+ *
  * @param {object} args
  * @param {string} args.stagingFolder
  * @param {string} args.diginPath
  * @param {string} args.orderId
  * @param {object} [args.deps]
- * @returns {Promise<{ destFolder: string, method: 'rename' | 'copy' }>}
+ * @returns {Promise<{ destFolder: string, method: 'rename' | 'copy' | 'already-delivered' }>}
  */
 async function deliverToDigin({
   stagingFolder,
@@ -207,11 +224,29 @@ async function deliverToDigin({
   if (!fs.existsSync(diginPath)) {
     throw new Error(`Fuji PIC Pro writer: diginPath does not exist: ${diginPath}`);
   }
-  if (!fs.existsSync(stagingFolder)) {
+
+  const destFolder    = path.join(diginPath, orderId);
+  const destExists    = fs.existsSync(destFolder);
+  const stagingExists = fs.existsSync(stagingFolder);
+
+  // Fix 7: idempotent replay after a crash between move + persist.
+  if (destExists && !stagingExists) {
+    (log.info || (() => {})).call(log,
+      '[fuji-pic-pro] deliverToDigin: destFolder already exists, staging gone — treating as completed prior delivery (idempotent replay)',
+      { destFolder, orderId },
+    );
+    return { destFolder, method: 'already-delivered' };
+  }
+  if (destExists && stagingExists) {
+    // Ambiguous — could be a partial prior delivery, or a name
+    // conflict between two dispatches. Refuse to merge.
+    throw new Error(
+      `Fuji PIC Pro writer: DIGIN destination ${destFolder} already exists AND staging folder still exists — refusing to merge. Investigate manually.`
+    );
+  }
+  if (!stagingExists) {
     throw new Error(`Fuji PIC Pro writer: stagingFolder does not exist: ${stagingFolder}`);
   }
-
-  const destFolder = path.join(diginPath, orderId);
 
   // Fast path — same-volume rename.
   try {
