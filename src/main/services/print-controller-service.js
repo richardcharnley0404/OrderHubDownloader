@@ -171,6 +171,49 @@ class PrintControllerService {
         hotFolder:  hotFolderPath,
         failureTimeoutMs: controller.failureTimeoutMs || 30 * 60 * 1000,
       });
+    } else if (controller.type === 'fujipicpro') {
+      // Fuji PIC Pro: multi-phase handshake — the OrderGateway consumes
+      // the .txt, the writer moves the staged folder into DIGIN, PIC
+      // Pro builds the containers, and the monitor writes [release] if
+      // configured. Full state machine lives in FujiPicProMonitor (M4).
+      // Lazy-require so tests that stub print-controller-service don't
+      // need to fake the whole monitor module.
+      // eslint-disable-next-line global-require
+      const { FujiPicProMonitor } = require('./fuji-pic-pro-monitor');
+      const monitor = new FujiPicProMonitor();
+
+      // Map the monitor's per-submission event shape to the JobStore's
+      // legacy `{ orderNumber, status, timestamp }` shape, same posture
+      // as the JobMaker adapter above. Any non-'accepted' terminal
+      // status collapses to 'failed' so the JobStore surfaces the
+      // problem without needing new statuses.
+      const onPicProStatus = (event) => {
+        if (event.status === 'timed_out' || event.status === 'failed') {
+          logger.warn('Fuji PIC Pro submission did not complete cleanly', {
+            controller: controller.name,
+            orderRef:   event.orderRef,
+            phase:      event.phase,
+            status:     event.status,
+          });
+        }
+        onStatusChange({
+          orderNumber: event.orderRef,
+          status:      event.status === 'accepted' ? 'accepted' : 'failed',
+          timestamp:   event.timestamp,
+        });
+      };
+
+      monitor.startMonitoring(controller, onPicProStatus);
+      this.monitors.set(controllerId, monitor);
+
+      logger.info('Started Fuji PIC Pro monitoring', {
+        controller:       controller.name,
+        orderDataPath:    controller.orderDataPath,
+        diginPath:        controller.diginPath,
+        mergeDataPath:    controller.mergeDataPath || '(unset)',
+        gatewayTimeoutMs: controller.gatewayTimeoutMs || 120000,
+        buildTimeoutMs:   controller.buildTimeoutMs   || 1800000,
+      });
     } else {
       // DPOF controllers (Noritsu, Epson): watches for folder prefix renames (o→e, o→q)
       const monitor = new FolderMonitor();

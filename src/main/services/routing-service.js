@@ -155,6 +155,46 @@ function resolveRoute(job) {
             };
           }
         }
+        if (overrideCtrl.type === 'fujipicpro') {
+          if (!overrideMapping.surface || !overrideMapping.printCode) {
+            logger.logWarning('Fuji PIC Pro channel mapping override is missing surface/printCode', {
+              jobId:            job.id,
+              channelMappingId: overrideMapping.id,
+            });
+          } else {
+            const overrideSurfaceCode = overrideMapping.surfaceCode
+              || (overrideMapping.surface ? overrideMapping.surface.charAt(0).toUpperCase() : '');
+
+            return {
+              type:                'controller',
+              controllerType:      'fujipicpro',
+              controllerId:        overrideCtrl.id,
+              controllerName:      overrideCtrl.name,
+              orderDataPath:       overrideCtrl.orderDataPath    || '',
+              diginPath:           overrideCtrl.diginPath        || '',
+              mergeDataPath:       overrideCtrl.mergeDataPath    || '',
+              imageStagingRoot:    overrideCtrl.imageStagingRoot || '',
+              outputPath:          '',
+              gatewayTimeoutMs:    Number.isFinite(overrideCtrl.gatewayTimeoutMs) ? overrideCtrl.gatewayTimeoutMs : 120000,
+              buildTimeoutMs:      Number.isFinite(overrideCtrl.buildTimeoutMs)   ? overrideCtrl.buildTimeoutMs   : 1800000,
+              sendReleaseCommand:  overrideCtrl.sendReleaseCommand === true,
+              backprintMode:       overrideCtrl.backprintMode      || 'none',
+              backprintTemplate:   overrideCtrl.backprintTemplate  || '',
+              backprintTemplate2:  overrideCtrl.backprintTemplate2 || '',
+              includeCustomerName: overrideCtrl.includeCustomerName === true,
+              surface:             overrideMapping.surface,
+              surfaceCode:         overrideSurfaceCode,
+              printCode:           overrideMapping.printCode,
+              color:               overrideMapping.color || 'C',
+              channelMappingId:    overrideMapping.id,
+              printSize:           overrideMapping.printSize || '',
+              channelNumber:       null,
+              printSizeCode:       null,
+              bannerSheet:         false,
+              checkOrderStatus:    overrideCtrl.checkOrderStatus !== false,
+            };
+          }
+        }
         if (overrideCtrl.type === 'frontline') {
           return {
             type:             'controller',
@@ -393,6 +433,73 @@ function resolveRoute(job) {
       printSizeCode:     null,
       bannerSheet:       false,
       checkOrderStatus:  controller.checkOrderStatus !== false,
+    };
+  }
+
+  // ── Fuji PIC Pro: look up channel mapping for printCode + surface ─────
+  //
+  // Mirrors the JobMaker branch — same mapping shape (printCode +
+  // printSize + surface + color) plus the three PIC Pro-specific paths
+  // (orderData / digin / mergeData / staging) and the two timeouts. The
+  // dispatch method (M5's _sendViaFujiPicProRouted) consumes this route
+  // shape without re-querying the channel store.
+  if (controller.type === 'fujipicpro') {
+    const channelMappings = store.get('channelMappings', []);
+    const channelMapping  = channelMappings.find(m =>
+      m.controllerId === controller.id &&
+      m.productCode  === productCode   &&
+      optionsMatchWithIgnore(m.options, options, controller)
+    );
+    if (!channelMapping) {
+      return { type: 'unrouted', reason: 'no-channel', controller };
+    }
+    if (!channelMapping.surface || !channelMapping.printCode) {
+      return { type: 'unrouted', reason: 'no-channel', controller };
+    }
+
+    const surfaceCode = channelMapping.surfaceCode
+      || (channelMapping.surface ? channelMapping.surface.charAt(0).toUpperCase() : '');
+
+    return {
+      type:                'controller',
+      controllerType:      'fujipicpro',
+      controllerId:        controller.id,
+      controllerName:      controller.name,
+      // PIC Pro's three explicit paths — each may live on a different
+      // server, so we don't collapse them into a single root.
+      orderDataPath:       controller.orderDataPath    || '',
+      diginPath:           controller.diginPath        || '',
+      mergeDataPath:       controller.mergeDataPath    || '',
+      imageStagingRoot:    controller.imageStagingRoot || '',
+      // outputPath kept for parity with the folder-copy shape callers
+      // that read `route.outputPath` for logging. Empty for PIC Pro —
+      // the three paths above are what the writer uses.
+      outputPath:          '',
+      // Timeouts + release-command toggle. Defaults live in fuji-pic-pro-
+      // config; falling through to the same values here means a route
+      // built from a stale controller (missing fields) still resolves
+      // to sensible bounds instead of NaN.
+      gatewayTimeoutMs:    Number.isFinite(controller.gatewayTimeoutMs) ? controller.gatewayTimeoutMs : 120000,
+      buildTimeoutMs:      Number.isFinite(controller.buildTimeoutMs)   ? controller.buildTimeoutMs   : 1800000,
+      sendReleaseCommand:  controller.sendReleaseCommand === true,
+      // Back-print
+      backprintMode:       controller.backprintMode      || 'none',
+      backprintTemplate:   controller.backprintTemplate  || '',
+      backprintTemplate2:  controller.backprintTemplate2 || '',
+      includeCustomerName: controller.includeCustomerName === true,
+      // Channel-resolved fields
+      surface:             channelMapping.surface,
+      surfaceCode,
+      printCode:           channelMapping.printCode,
+      color:               channelMapping.color || 'C',
+      // M0: crop aspect
+      channelMappingId:    channelMapping.id,
+      printSize:           channelMapping.printSize || '',
+      // Shape-parity nulls
+      channelNumber:       null,
+      printSizeCode:       null,
+      bannerSheet:         false,
+      checkOrderStatus:    controller.checkOrderStatus !== false,
     };
   }
 
@@ -1051,7 +1158,7 @@ function migrateFromPrintControllerStore() {
 // size from its own dedicated fields. Shared by the save-time validator
 // (`validateDPOFPrintSizeCode`) so the two lists can't drift apart.
 const NON_DPOF_CONTROLLER_TYPES = new Set([
-  'darkroompro', 'fujijobmaker', 'frontline', 'folder_copy', 'pdf_copy',
+  'darkroompro', 'fujijobmaker', 'fujipicpro', 'frontline', 'folder_copy', 'pdf_copy',
 ]);
 
 /**

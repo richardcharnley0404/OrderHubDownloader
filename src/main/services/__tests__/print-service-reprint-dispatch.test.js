@@ -215,4 +215,12 @@ test('controller-types.DPOF_TYPES contains noritsu, epson, dpof (single source o
   assert.equal(isDpofType('darkroompro'),  false);
   assert.equal(isDpofType('frontline'),    false);
   assert.equal(isDpofType('fujijobmaker'), false);
+  // M1 (Fuji PIC Pro brief): controller-types.js is the DPOF classifier
+  // ONLY. fujipicpro is a non-DPOF controller — its dispatch pipeline
+  // and monitor are separate from the DPOF path. Pinning this here so
+  // a future change that accidentally adds it to DPOF_TYPES breaks
+  // loudly rather than mis-routing PIC Pro jobs to the DPOF reprint
+  // arm at runtime.
+  assert.equal(isDpofType('fujipicpro'), false,
+    'fujipicpro is NON-DPOF — see docs/fuji-pic-pro-claude-code-brief.md §M1');
 });

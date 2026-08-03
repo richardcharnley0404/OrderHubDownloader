@@ -99,6 +99,13 @@ test('validateDPOFPrintSizeCode: fujijobmaker + blank → valid (out of scope �
   assert.deepEqual(validateDPOFPrintSizeCode({ printSizeCode: '' }, 'fujijobmaker'), { valid: true });
 });
 
+test('validateDPOFPrintSizeCode: fujipicpro + blank → valid (out of scope — PIC Pro validator owns this)', () => {
+  // M1 (Fuji PIC Pro brief). PIC Pro mappings never carry a DPOF-style
+  // printSizeCode — their crop aspect lives in the shared `printSize`
+  // field, validated by fuji-pic-pro-config.validateProductMappingConfig.
+  assert.deepEqual(validateDPOFPrintSizeCode({ printSizeCode: '' }, 'fujipicpro'), { valid: true });
+});
+
 test('validateDPOFPrintSizeCode: frontline + blank → valid (uses batchCode, not printSizeCode)', () => {
   assert.deepEqual(validateDPOFPrintSizeCode({ printSizeCode: '' }, 'frontline'), { valid: true });
 });

@@ -11,6 +11,7 @@ const { printControllerStore } = require('./services/print-controller-store');
 const routingService = require('./services/routing-service');
 const processFolderService = require('./services/process-folder-service');
 const fujiJobMakerConfig = require('./services/fuji-jobmaker-config');
+const fujiPicProConfig   = require('./services/fuji-pic-pro-config');
 const logger = require('./services/logger');
 // Film Review panel (PW-007 Phase 1 — Milestone 4)
 const frameMetadataStore = require('./services/frame-metadata-store');
@@ -1089,6 +1090,23 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
         Object.assign(controller, normalized);
       }
 
+      // Fuji PIC Pro — same posture as JobMaker, different validator.
+      // Enforces the three explicit paths (orderData / digin / staging),
+      // the two timeouts, and the sendReleaseCommand toggle. See
+      // fuji-pic-pro-config.js docblock for the full field table.
+      if (controller && controller.type === 'fujipicpro') {
+        const { valid, errors, normalized } = fujiPicProConfig.validateControllerConfig(controller);
+        if (!valid) {
+          logger.logWarning('[routing] save-controller rejected — Fuji PIC Pro validation', {
+            controllerId: controller.id,
+            name:         controller.name,
+            errors,
+          });
+          return { success: false, error: errors.join('; ') };
+        }
+        Object.assign(controller, normalized);
+      }
+
       routingService.saveController(controller);
 
       // Darkroom Pro controllers are dual-written to the legacy printControllerStore
@@ -1218,6 +1236,30 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
           mapping.printSize   = normalized.printSize;
           mapping.surface     = normalized.surface;
           mapping.surfaceCode = normalized.surfaceCode;
+        } else if (parentCtrl && parentCtrl.type === 'fujipicpro') {
+          // Same convert-options-to-object step as JobMaker so the shared
+          // validator shape works on the persisted array form.
+          const optionsObj = Array.isArray(mapping.options)
+            ? mapping.options.reduce((acc, { name, value }) => {
+                if (name) acc[name] = value;
+                return acc;
+              }, {})
+            : (mapping.options || {});
+          const validationInput = { ...mapping, options: optionsObj };
+          const { valid, errors, normalized } = fujiPicProConfig.validateProductMappingConfig(validationInput);
+          if (!valid) {
+            logger.logWarning('[routing] save-channel-mapping rejected — Fuji PIC Pro validation', {
+              controllerId: mapping.controllerId,
+              productCode:  mapping.productCode,
+              errors,
+            });
+            return { success: false, error: errors.join('; ') };
+          }
+          mapping.printCode   = normalized.printCode;
+          mapping.printSize   = normalized.printSize;
+          mapping.surface     = normalized.surface;
+          mapping.surfaceCode = normalized.surfaceCode;
+          mapping.color       = normalized.color;
         } else if (parentCtrl) {
           // DPOF/Noritsu family — printSizeCode is now mandatory. See
           // routing-service.validateDPOFPrintSizeCode for the scope

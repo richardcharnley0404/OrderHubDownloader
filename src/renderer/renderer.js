@@ -4461,6 +4461,7 @@ function getControllerTypeLabel(type) {
     case 'darkroompro': return 'Darkroom Pro';
     case 'frontline':   return 'Frontline';
     case 'fujijobmaker': return 'Fuji JobMaker';
+    case 'fujipicpro':   return 'Fuji PIC Pro';
     default:            return (type || 'noritsu').toUpperCase();
   }
 }
@@ -4742,7 +4743,12 @@ function readMediaTranslations() {
 
 function updateOcTypeFields() {
   const type = document.getElementById('ocType').value;
-  const isFuji = type === 'fujijobmaker';
+  const isFujiJobMaker = type === 'fujijobmaker';
+  const isFujiPicPro   = type === 'fujipicpro';
+  // Fields shared by both Fuji types (Image Staging Root, Back-Print mode
+  // + template). Split out so PIC Pro can also get printer-independent
+  // back-print without duplicating the JobMaker markup.
+  const isAnyFuji      = isFujiJobMaker || isFujiPicPro;
   document.getElementById('ocProcessedFolderGroup').style.display    = type === 'darkroompro' ? '' : 'none';
   document.getElementById('ocArtworkRootPathGroup').style.display     = type === 'darkroompro' ? '' : 'none';
   document.getElementById('ocOrderLastNameFormatGroup').style.display  = type === 'darkroompro' ? '' : 'none';
@@ -4757,16 +4763,28 @@ function updateOcTypeFields() {
   document.getElementById('ocDeviceGroup').style.display     = type === 'frontline' ? '' : 'none';
   document.getElementById('ocBackPrint1Group').style.display = type === 'frontline' ? '' : 'none';
   document.getElementById('ocBackPrint2Group').style.display = type === 'frontline' ? '' : 'none';
-  // Fuji JobMaker-specific fields
-  document.getElementById('ocImageStagingRootGroup').style.display  = isFuji ? '' : 'none';
-  document.getElementById('ocPrinterNameGroup').style.display       = isFuji ? '' : 'none';
-  document.getElementById('ocAutoCorrectGroup').style.display       = isFuji ? '' : 'none';
-  document.getElementById('ocBackprintModeGroup').style.display     = isFuji ? '' : 'none';
-  document.getElementById('ocFailureTimeoutMsGroup').style.display  = isFuji ? '' : 'none';
-  // Back-print template only when mode === 'text'
+  // Fuji-family (JobMaker + PIC Pro) shared fields
+  document.getElementById('ocImageStagingRootGroup').style.display  = isAnyFuji ? '' : 'none';
+  document.getElementById('ocBackprintModeGroup').style.display     = isAnyFuji ? '' : 'none';
+  // JobMaker-only fields
+  document.getElementById('ocPrinterNameGroup').style.display       = isFujiJobMaker ? '' : 'none';
+  document.getElementById('ocAutoCorrectGroup').style.display       = isFujiJobMaker ? '' : 'none';
+  document.getElementById('ocFailureTimeoutMsGroup').style.display  = isFujiJobMaker ? '' : 'none';
+  // PIC Pro-only fields
+  document.getElementById('ocOrderDataPathGroup').style.display           = isFujiPicPro ? '' : 'none';
+  document.getElementById('ocDiginPathGroup').style.display               = isFujiPicPro ? '' : 'none';
+  document.getElementById('ocMergeDataPathGroup').style.display           = isFujiPicPro ? '' : 'none';
+  document.getElementById('ocGatewayTimeoutGroup').style.display          = isFujiPicPro ? '' : 'none';
+  document.getElementById('ocBuildTimeoutGroup').style.display            = isFujiPicPro ? '' : 'none';
+  document.getElementById('ocSendReleaseCommandGroup').style.display      = isFujiPicPro ? '' : 'none';
+  document.getElementById('ocPicProIncludeCustomerNameGroup').style.display = isFujiPicPro ? '' : 'none';
+  // Back-print template — visible when either Fuji type is selected AND mode === 'text'.
+  // Line 2 is PIC Pro-only.
   const backprintMode = document.getElementById('ocBackprintMode').value;
   document.getElementById('ocBackprintTemplateGroup').style.display =
-    (isFuji && backprintMode === 'text') ? '' : 'none';
+    (isAnyFuji && backprintMode === 'text') ? '' : 'none';
+  document.getElementById('ocBackprintTemplate2Group').style.display =
+    (isFujiPicPro && backprintMode === 'text') ? '' : 'none';
 }
 
 function openOrderControllerModal(ctrl = null) {
@@ -4805,17 +4823,34 @@ function openOrderControllerModal(ctrl = null) {
   const fujiAutoCorrect = ctrl && ctrl.type === 'fujijobmaker' ? ctrl.autoCorrect : null;
   document.getElementById('ocAutoCorrect').value      =
     fujiAutoCorrect === true ? 'on' : fujiAutoCorrect === false ? 'off' : '';
-  document.getElementById('ocBackprintMode').value    = ctrl && ctrl.type === 'fujijobmaker'
+  // Back-print mode + template are shared by both Fuji types. Fall back
+  // to whichever Fuji type this controller is, otherwise defaults.
+  const isFujiCtrl = ctrl && (ctrl.type === 'fujijobmaker' || ctrl.type === 'fujipicpro');
+  document.getElementById('ocBackprintMode').value    = isFujiCtrl
     ? (ctrl.backprintMode || 'none')
     : 'none';
-  document.getElementById('ocBackprintTemplate').value = ctrl && ctrl.type === 'fujijobmaker'
+  document.getElementById('ocBackprintTemplate').value = isFujiCtrl
     ? (ctrl.backprintTemplate || '{firstName}/{filename}/{date}')
     : '{firstName}/{filename}/{date}';
-  // Stored in ms; display in minutes. Default 30.
+  // Stored in ms; display in minutes. Default 30. JobMaker only.
   const failureTimeoutMs = ctrl && ctrl.type === 'fujijobmaker' && Number.isFinite(ctrl.failureTimeoutMs)
     ? ctrl.failureTimeoutMs
     : 30 * 60 * 1000;
   document.getElementById('ocFailureTimeoutMinutes').value = Math.round(failureTimeoutMs / 60000);
+
+  // ── PIC Pro-only pre-fill ────────────────────────────────────────────
+  const isPicPro = ctrl && ctrl.type === 'fujipicpro';
+  document.getElementById('ocOrderDataPath').value        = isPicPro ? (ctrl.orderDataPath   || '') : '';
+  document.getElementById('ocDiginPath').value            = isPicPro ? (ctrl.diginPath       || '') : '';
+  document.getElementById('ocMergeDataPath').value        = isPicPro ? (ctrl.mergeDataPath   || '') : '';
+  document.getElementById('ocBackprintTemplate2').value   = isPicPro ? (ctrl.backprintTemplate2 || '') : '';
+  document.getElementById('ocSendReleaseCommand').checked        = isPicPro ? (ctrl.sendReleaseCommand === true) : false;
+  document.getElementById('ocPicProIncludeCustomerName').checked = isPicPro ? (ctrl.includeCustomerName === true) : false;
+  // Stored in ms; display Gateway in seconds and Build in minutes.
+  const gatewayMs = isPicPro && Number.isFinite(ctrl.gatewayTimeoutMs) ? ctrl.gatewayTimeoutMs : 120 * 1000;
+  const buildMs   = isPicPro && Number.isFinite(ctrl.buildTimeoutMs)   ? ctrl.buildTimeoutMs   : 30 * 60 * 1000;
+  document.getElementById('ocGatewayTimeoutSec').value = Math.round(gatewayMs / 1000);
+  document.getElementById('ocBuildTimeoutMin').value   = Math.round(buildMs / 60000);
   document.getElementById('ocAutoPrint').checked        = ctrl ? !!ctrl.autoprint                      : false;
   document.getElementById('ocBannerSheet').checked      = ctrl ? !!ctrl.bannerSheet                    : false;
   document.getElementById('ocCheckOrderStatus').checked = ctrl ? (ctrl.checkOrderStatus === true)      : false;
@@ -5199,6 +5234,22 @@ document.getElementById('ocImageStagingRootBrowseBtn').addEventListener('click',
   if (dir) document.getElementById('ocImageStagingRoot').value = dir;
 });
 
+// PIC Pro's three explicit paths — one browse button each. Same
+// pattern; kept as three separate handlers rather than a loop so the
+// intent is obvious in the code.
+document.getElementById('ocOrderDataPathBrowseBtn').addEventListener('click', async () => {
+  const dir = await window.electronAPI.selectDirectory();
+  if (dir) document.getElementById('ocOrderDataPath').value = dir;
+});
+document.getElementById('ocDiginPathBrowseBtn').addEventListener('click', async () => {
+  const dir = await window.electronAPI.selectDirectory();
+  if (dir) document.getElementById('ocDiginPath').value = dir;
+});
+document.getElementById('ocMergeDataPathBrowseBtn').addEventListener('click', async () => {
+  const dir = await window.electronAPI.selectDirectory();
+  if (dir) document.getElementById('ocMergeDataPath').value = dir;
+});
+
 // Re-run the type-fields toggle when back-print mode changes so the template
 // input appears only in text mode.
 document.getElementById('ocBackprintMode').addEventListener('change', updateOcTypeFields);
@@ -5231,6 +5282,9 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
     type,
     outputPath,
     autoprint:        document.getElementById('ocAutoPrint').checked,
+    // Fuji-family types (JobMaker + PIC Pro) always run their in-band
+    // completion monitor, so checkOrderStatus is implicitly true and the
+    // checkbox is hidden in updateOcTypeFields.
     checkOrderStatus: (['noritsu', 'epson', 'dpof', 'darkroompro'].includes(type))
       ? document.getElementById('ocCheckOrderStatus').checked
       : true,
@@ -5304,6 +5358,51 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
     controller.backprintMode     = backprintMode;
     controller.backprintTemplate = backprintTemplate;
     controller.failureTimeoutMs  = failureTimeoutMin * 60 * 1000;
+  }
+  if (type === 'fujipicpro') {
+    // Three explicit paths — labs lay these out on different servers,
+    // so we don't derive them. Renderer-side guards mirror the
+    // required-field checks in fuji-pic-pro-config.validateControllerConfig;
+    // the validator runs again at the IPC boundary so a bad payload
+    // can't slip past.
+    const orderDataPath     = document.getElementById('ocOrderDataPath').value.trim();
+    const diginPath         = document.getElementById('ocDiginPath').value.trim();
+    const mergeDataPath     = document.getElementById('ocMergeDataPath').value.trim();
+    const imageStagingRoot  = document.getElementById('ocImageStagingRoot').value.trim();
+    const backprintMode     = document.getElementById('ocBackprintMode').value || 'none';
+    const backprintTemplate = document.getElementById('ocBackprintTemplate').value.trim();
+    const backprintTemplate2 = document.getElementById('ocBackprintTemplate2').value.trim();
+    const gatewayTimeoutSec = parseInt(document.getElementById('ocGatewayTimeoutSec').value, 10);
+    const buildTimeoutMin   = parseInt(document.getElementById('ocBuildTimeoutMin').value, 10);
+
+    if (!orderDataPath)    { alert('Order Data Path is required for Fuji PIC Pro controllers.'); return; }
+    if (!diginPath)        { alert('DIGIN Path is required for Fuji PIC Pro controllers.'); return; }
+    if (!imageStagingRoot) { alert('Image Staging Root is required for Fuji PIC Pro controllers.'); return; }
+    if (backprintMode === 'text' && !backprintTemplate) {
+      alert('Back Print Template is required when Back Print Mode is "Text".'); return;
+    }
+    if (!Number.isFinite(gatewayTimeoutSec) || gatewayTimeoutSec < 10 || gatewayTimeoutSec > 1800) {
+      alert('Gateway Timeout must be between 10 and 1800 seconds.'); return;
+    }
+    if (!Number.isFinite(buildTimeoutMin) || buildTimeoutMin < 1 || buildTimeoutMin > 1440) {
+      alert('Build Timeout must be between 1 and 1440 minutes.'); return;
+    }
+
+    controller.orderDataPath      = orderDataPath;
+    controller.diginPath          = diginPath;
+    controller.mergeDataPath      = mergeDataPath;
+    controller.imageStagingRoot   = imageStagingRoot;
+    controller.backprintMode      = backprintMode;
+    controller.backprintTemplate  = backprintTemplate;
+    controller.backprintTemplate2 = backprintTemplate2;
+    controller.gatewayTimeoutMs   = gatewayTimeoutSec * 1000;
+    controller.buildTimeoutMs     = buildTimeoutMin * 60 * 1000;
+    controller.sendReleaseCommand = document.getElementById('ocSendReleaseCommand').checked;
+    controller.includeCustomerName = document.getElementById('ocPicProIncludeCustomerName').checked;
+    // outputPath is required at the top of the handler but PIC Pro
+    // routes don't use it — the three explicit paths above are what
+    // the writer consumes. Persist whatever the operator typed for
+    // record-keeping; blank it below if empty.
   }
   try {
     const result = await window.electronAPI.saveOrderController(controller);

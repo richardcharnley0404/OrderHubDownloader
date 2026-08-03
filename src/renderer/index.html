@@ -1146,6 +1146,7 @@
           <option value="darkroompro">Darkroom Pro</option>
           <option value="frontline">Frontline</option>
           <option value="fujijobmaker">Fuji JobMaker</option>
+          <option value="fujipicpro">Fuji PIC Pro</option>
         </select>
       </div>
 
@@ -1213,6 +1214,71 @@
         <label for="ocFailureTimeoutMinutes">Failure Timeout <span style="font-weight:normal;color:#888">(minutes)</span></label>
         <input type="number" id="ocFailureTimeoutMinutes" placeholder="30" min="1" max="1440" style="width:120px;">
         <small style="color:var(--text-muted,#888);display:block;margin-top:4px">If a <code>.txt</code> still sits in the hot folder after this many minutes, OHD flags it as stuck (Frontier gives no in-band failure signal). Default 30 min. Min 1, max 1440 (24 h).</small>
+      </div>
+
+      <!-- ═══ Fuji PIC Pro-specific fields ═══ -->
+      <!-- Three explicit paths — PIC Pro labs can host each on a
+           different server (Order Data on the master, DIGIN on a
+           secondary). No derived roots. -->
+      <div class="form-group" id="ocOrderDataPathGroup" style="display:none">
+        <label for="ocOrderDataPath">Order Data Path</label>
+        <div class="input-with-button">
+          <input type="text" id="ocOrderDataPath" placeholder="e.g. \\Labserver1\Order Data" readonly>
+          <button type="button" id="ocOrderDataPathBrowseBtn" class="btn-browse">Browse...</button>
+        </div>
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Where <code>{OrderId}.txt</code> is written for OrderGateway to consume, and where command files (<code>[release]</code>, <code>[delete]</code>) are dropped.</small>
+      </div>
+
+      <div class="form-group" id="ocDiginPathGroup" style="display:none">
+        <label for="ocDiginPath">DIGIN Path</label>
+        <div class="input-with-button">
+          <input type="text" id="ocDiginPath" placeholder="e.g. \\Labserver1\DIGIN1" readonly>
+          <button type="button" id="ocDiginPathBrowseBtn" class="btn-browse">Browse...</button>
+        </div>
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Where the <code>{OrderId}</code> image folder is delivered after OrderGateway has consumed the .txt. Frontier builds the print run from here.</small>
+      </div>
+
+      <div class="form-group" id="ocMergeDataPathGroup" style="display:none">
+        <label for="ocMergeDataPath">Merge Data Path <span style="font-weight:normal;color:#888">(optional)</span></label>
+        <div class="input-with-button">
+          <input type="text" id="ocMergeDataPath" placeholder="e.g. \\Labserver1\Merge Data" readonly>
+          <button type="button" id="ocMergeDataPathBrowseBtn" class="btn-browse">Browse...</button>
+        </div>
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">When set, OHD waits for the container files under this path to be consumed before writing <code>[release]</code>. Leave blank to trust the DIGIN folder disappearing as the build-complete signal.</small>
+      </div>
+
+      <div class="form-group" id="ocGatewayTimeoutGroup" style="display:none">
+        <label for="ocGatewayTimeoutSec">Gateway Timeout <span style="font-weight:normal;color:#888">(seconds)</span></label>
+        <input type="number" id="ocGatewayTimeoutSec" placeholder="120" min="10" max="1800" style="width:120px;">
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">How long OHD waits for OrderGateway to consume the <code>.txt</code> before failing the job. Default 120 s. Bounds 10 s – 30 min.</small>
+      </div>
+
+      <div class="form-group" id="ocBuildTimeoutGroup" style="display:none">
+        <label for="ocBuildTimeoutMin">Build Timeout <span style="font-weight:normal;color:#888">(minutes)</span></label>
+        <input type="number" id="ocBuildTimeoutMin" placeholder="30" min="1" max="1440" style="width:120px;">
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">How long OHD waits for the order to finish building (containers + DIGIN cleared) before flagging as stuck. Default 30 min. Bounds 1 min – 24 h.</small>
+      </div>
+
+      <div class="form-group checkbox-group" id="ocSendReleaseCommandGroup" style="display:none">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+          <input type="checkbox" id="ocSendReleaseCommand">
+          Send [release] command
+        </label>
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">When on, OHD writes <code>[release]{OrderId}</code> to Order Data once the build completes. Requires the Autoprint Console to be running somewhere on the network. Off by default — safe to build without printing.</small>
+      </div>
+
+      <div class="form-group" id="ocBackprintTemplate2Group" style="display:none">
+        <label for="ocBackprintTemplate2">Back Print Line 2 Template <span style="font-weight:normal;color:#888">(optional)</span></label>
+        <input type="text" id="ocBackprintTemplate2" placeholder="" style="width:100%;">
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Second back-print line — PIC Pro supports two lines per image. Only emitted when Back Print Mode is "Text". Same token set as Line 1.</small>
+      </div>
+
+      <div class="form-group checkbox-group" id="ocPicProIncludeCustomerNameGroup" style="display:none">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+          <input type="checkbox" id="ocPicProIncludeCustomerName">
+          Include Customer Name in order.txt
+        </label>
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Emits <code>CustomerName=</code> in the order file. Off by default — when on and Back Print Line 2 is blank, the customer's name is printed on the back of every print (PIC Pro spec p. 343).</small>
       </div>
 
       <div class="form-group">
