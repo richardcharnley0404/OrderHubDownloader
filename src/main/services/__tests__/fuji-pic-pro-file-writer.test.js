@@ -550,6 +550,101 @@ test('fix 7: destFolder AND staging both exist → refuse to merge (throws)', as
   assert.equal(destBytes,    'from-earlier');
 });
 
+test('fix 10: stale .ohdtmp from a prior interrupted copy is wiped before the fresh copy runs', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const stagingRoot = path.join(dir, 'staging'); await fsp.mkdir(stagingRoot);
+  const stagingFolder = path.join(stagingRoot, 'ORD-TMP'); await fsp.mkdir(stagingFolder);
+  await fsp.writeFile(path.join(stagingFolder, '0001.jpg'), 'current-run-1');
+  await fsp.writeFile(path.join(stagingFolder, '0002.jpg'), 'current-run-2');
+  const diginPath = path.join(dir, 'digin'); await fsp.mkdir(diginPath);
+  // Pre-populate the leftover .ohdtmp with files from a prior
+  // 3-image interrupted attempt.
+  const tmpDest = path.join(diginPath, 'ORD-TMP' + _internals.DIGIN_COPY_TMP_SUFFIX);
+  await fsp.mkdir(tmpDest);
+  await fsp.writeFile(path.join(tmpDest, '0001.jpg'), 'STALE-run-1');
+  await fsp.writeFile(path.join(tmpDest, '0002.jpg'), 'STALE-run-2');
+  await fsp.writeFile(path.join(tmpDest, '0003.jpg'), 'STALE-orphan-from-larger-prior-batch');
+
+  // Force the EXDEV fallback: inject fsPromises whose first
+  // `rename` (staging → dest) throws EXDEV, subsequent `rename`
+  // calls (tmpDest → dest) pass through to real fs.
+  let renameCalls = 0;
+  const injectedFs = {
+    ...fsp,
+    rename: async (...args) => {
+      renameCalls++;
+      if (renameCalls === 1) {
+        const err = new Error('EXDEV cross-device'); err.code = 'EXDEV';
+        throw err;
+      }
+      return fsp.rename(...args);
+    },
+  };
+
+  const result = await deliverToDigin({
+    stagingFolder, diginPath, orderId: 'ORD-TMP',
+    deps: { fsPromises: injectedFs, logger: silentLogger },
+  });
+  assert.equal(result.method, 'copy');
+
+  // destFolder must contain ONLY the current run's two files —
+  // no `0003.jpg` orphan from the interrupted prior attempt.
+  const destContents = (await fsp.readdir(result.destFolder)).sort();
+  assert.deepEqual(destContents, ['0001.jpg', '0002.jpg'],
+    'destFolder must reflect ONLY the current run — pre-fix the leftover 0003.jpg would have been merged in');
+  const bytes1 = await fsp.readFile(path.join(result.destFolder, '0001.jpg'), 'utf-8');
+  assert.equal(bytes1, 'current-run-1', 'current run bytes win over the pre-populated stale bytes');
+});
+
+test('fix 10: EXDEV copy failure cleans up its own partial .ohdtmp', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const stagingRoot = path.join(dir, 'staging'); await fsp.mkdir(stagingRoot);
+  const stagingFolder = path.join(stagingRoot, 'ORD-BOOM'); await fsp.mkdir(stagingFolder);
+  await fsp.writeFile(path.join(stagingFolder, '0001.jpg'), 'x');
+  const diginPath = path.join(dir, 'digin'); await fsp.mkdir(diginPath);
+
+  // First rename throws EXDEV; copyFile deep inside _copyDirRecursive
+  // throws EACCES on the first file, aborting the copy mid-flight.
+  let renameCalls = 0;
+  let copyCalls   = 0;
+  const injectedFs = {
+    ...fsp,
+    rename: async (...args) => {
+      renameCalls++;
+      if (renameCalls === 1) {
+        const err = new Error('EXDEV cross-device'); err.code = 'EXDEV';
+        throw err;
+      }
+      return fsp.rename(...args);
+    },
+    copyFile: async (...args) => {
+      copyCalls++;
+      // First copyFile creates a partial .ohdtmp, second explodes.
+      if (copyCalls === 1) return fsp.copyFile(...args);
+      const err = new Error('EACCES simulated mid-copy failure'); err.code = 'EACCES';
+      throw err;
+    },
+  };
+  // Add a second file so the copy has something to explode on.
+  await fsp.writeFile(path.join(stagingFolder, '0002.jpg'), 'y');
+
+  await assert.rejects(
+    deliverToDigin({
+      stagingFolder, diginPath, orderId: 'ORD-BOOM',
+      deps: { fsPromises: injectedFs, logger: silentLogger },
+    }),
+    /EACCES/,
+  );
+
+  const dirents = await fsp.readdir(diginPath);
+  assert.deepEqual(dirents, [],
+    'the partial .ohdtmp from the failed copy must be removed — otherwise the next retry would merge into it');
+});
+
 test('fix 7: happy path still returns method:"rename" (idempotency check does not paper over normal flow)', async (t) => {
   const dir = await makeTempDir();
   t.after(() => fsp.rm(dir, { recursive: true, force: true }));

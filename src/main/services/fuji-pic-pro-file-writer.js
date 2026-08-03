@@ -278,8 +278,32 @@ async function deliverToDigin({
   // watch ignores it until the rename lands (Frontier only picks up
   // folders whose names look like OrderIds, not our tmp sibling).
   const tmpDest = destFolder + DIGIN_COPY_TMP_SUFFIX;
-  await _copyDirRecursive(stagingFolder, tmpDest, fsPromises);
-  await fsPromises.rename(tmpDest, destFolder);
+
+  // Fuji PIC Pro review fix 10. Wipe any leftover `.ohdtmp` from a
+  // prior interrupted copy BEFORE starting this one. Without this,
+  // `_copyDirRecursive` merges into the partial folder — copyFile
+  // overwrites matching filenames but files that only appeared in
+  // the previous attempt (e.g. a 10-image order that got
+  // interrupted at 7, then re-submitted as an 8-image order) stay
+  // and get delivered to DIGIN alongside the current order's
+  // files.
+  try {
+    await fsPromises.rm(tmpDest, { recursive: true, force: true });
+  } catch (_) { /* nothing there / not-permitted / etc. — copy will surface any real issue */ }
+
+  // Wrap the copy + rename so a failure during either step cleans
+  // up the partial `.ohdtmp` — otherwise the next attempt (which
+  // now has the fix-10 pre-copy wipe) does the cleanup, but
+  // there's no reason to leave the leftover between retries.
+  try {
+    await _copyDirRecursive(stagingFolder, tmpDest, fsPromises);
+    await fsPromises.rename(tmpDest, destFolder);
+  } catch (copyErr) {
+    try {
+      await fsPromises.rm(tmpDest, { recursive: true, force: true });
+    } catch (_) { /* best-effort */ }
+    throw copyErr;
+  }
   // Best-effort cleanup of the now-empty staging folder. If it can't
   // be removed (rare — network glitch), the folder just lingers; the
   // dispatched order is already safely in DIGIN.
