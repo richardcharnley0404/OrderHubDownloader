@@ -81,6 +81,35 @@ const DEFAULT_BUILD_TIMEOUT_MS   = 30 * 60 * 1000;
 // Terminal state → the monitor drops the entry after emitting.
 const TERMINAL_STATUSES = new Set(['accepted', 'failed', 'timed_out']);
 
+// Fuji PIC Pro review fix 3 (2026-08-03).
+// Require this many consecutive `_classifyPath === 'absent'` observations
+// before treating a watched path as gone. A single missed stat under
+// a transient network / permission blip on an SMB share is *not* the
+// same signal as "OrderGateway consumed the file"; without this gate,
+// a blip drives the next phase (DIGIN move / `[release]`) against an
+// order that isn't ready. Value 2 is the minimum that filters a
+// single-scan blip; larger values just add latency to happy-path
+// transitions (1 s per extra observation at the active sweep cadence).
+const REQUIRED_ABSENT_OBSERVATIONS = 2;
+
+/**
+ * Classify a filesystem path into 'present' | 'absent' | 'unknown'.
+ * Only ENOENT counts as 'absent' — every other error (EACCES, EIO,
+ * ENOTFOUND on an unmounted share, EBUSY, timeouts) is 'unknown', so
+ * a phase gate can distinguish "confirmed gone" from "couldn't tell"
+ * and keep the entry in its current phase until the answer is
+ * unambiguous. See docs/fuji-pic-pro-review-fixes.md item 3.
+ */
+async function _classifyPath(fs, filePath) {
+  try {
+    await fs.promises.stat(filePath);
+    return 'present';
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return 'absent';
+    return 'unknown';
+  }
+}
+
 // ── Monitor ─────────────────────────────────────────────────────────────────
 
 class FujiPicProMonitor {
@@ -345,13 +374,33 @@ class FujiPicProMonitor {
     }
   }
 
-  _stepAwaitingGateway(entry, now) {
+  async _stepAwaitingGateway(entry, now) {
     const txtPath = path.join(entry.orderDataPath, `${entry.orderId}.txt`);
-    if (!this._fs.existsSync(txtPath)) {
-      // OrderGateway consumed it — advance to delivering.
-      this._advance(entry, 'delivering', now);
+    const state   = await _classifyPath(this._fs, txtPath);
+
+    if (state === 'absent') {
+      // Fuji PIC Pro review fix 3: require two consecutive absent
+      // observations before advancing so a single momentary SMB
+      // blip can't drive delivery of images to DIGIN while the
+      // OrderGateway hasn't actually consumed the .txt yet. Counter
+      // lives in memory only — a restart resets to 0 so a rehydrated
+      // entry re-observes before moving.
+      entry._absentTicks = (entry._absentTicks || 0) + 1;
+      if (entry._absentTicks >= REQUIRED_ABSENT_OBSERVATIONS) {
+        entry._absentTicks = 0;
+        this._advance(entry, 'delivering', now);
+      }
       return;
     }
+
+    // Any state that isn't "absent" — including 'present' AND
+    // 'unknown' (EACCES / EIO / ENOTFOUND / etc.) — must reset the
+    // counter and stay in phase. The whole point of the fix is that
+    // existsSync-returns-false is not the same signal as
+    // "OrderGateway consumed the file". The timeout below is the
+    // backstop for a genuinely stuck Gateway.
+    entry._absentTicks = 0;
+
     if ((now - entry.phaseStartedAt) >= entry.gatewayTimeoutMs) {
       this._resolveEntry(entry, 'failed', now);
     }
@@ -380,26 +429,40 @@ class FujiPicProMonitor {
     this._advance(entry, 'building', now);
   }
 
-  _stepBuilding(entry, now) {
+  async _stepBuilding(entry, now) {
     const diginFolder = path.join(entry.diginPath, entry.orderId);
-    const diginGone   = !this._fs.existsSync(diginFolder);
+    const diginState  = await _classifyPath(this._fs, diginFolder);
 
-    let mergeGone = true;
+    let mergeAbsent;
     if (entry.mergeDataPath) {
       // Spec (p. 369) — the containers may be flat (`{orderId}.con`)
       // or under a per-order subdirectory (`{orderId}/`) depending on
       // whether "Container Path Use Subdirs" is ticked in
       // OrderGateway. Check both — the build is only complete when
-      // BOTH are gone.
+      // BOTH are ABSENT. An 'unknown' from either path (permission /
+      // network blip) blocks advancement so `[release]` can't fire
+      // against an order that hasn't actually finished building.
       const conPath    = path.join(entry.mergeDataPath, `${entry.orderId}.con`);
       const subdirPath = path.join(entry.mergeDataPath, entry.orderId);
-      mergeGone = !this._fs.existsSync(conPath) && !this._fs.existsSync(subdirPath);
+      const conState    = await _classifyPath(this._fs, conPath);
+      const subdirState = await _classifyPath(this._fs, subdirPath);
+      mergeAbsent = (conState === 'absent') && (subdirState === 'absent');
+    } else {
+      mergeAbsent = true;
     }
 
-    if (diginGone && mergeGone) {
-      this._advance(entry, 'releasing', now);
+    const cleared = (diginState === 'absent') && mergeAbsent;
+
+    if (cleared) {
+      entry._absentTicks = (entry._absentTicks || 0) + 1;
+      if (entry._absentTicks >= REQUIRED_ABSENT_OBSERVATIONS) {
+        entry._absentTicks = 0;
+        this._advance(entry, 'releasing', now);
+      }
       return;
     }
+    entry._absentTicks = 0;
+
     if ((now - entry.phaseStartedAt) >= entry.buildTimeoutMs) {
       // Timed out — don't send [release] (the build hasn't finished,
       // releasing an incomplete order is worse than not printing at
@@ -436,6 +499,10 @@ class FujiPicProMonitor {
   _advance(entry, nextPhase, now) {
     entry.phase          = nextPhase;
     entry.phaseStartedAt = now;
+    // Reset the absent-observation counter on every transition so the
+    // NEXT phase's gate starts from zero (and to avoid confusing a
+    // stale counter from a previous phase's classifier).
+    entry._absentTicks   = 0;
     this._persist();
   }
 
@@ -490,6 +557,13 @@ class FujiPicProMonitor {
             entry.phase = 'awaiting-gateway';
             entry.phaseStartedAt = this._clock();
           }
+          // The absent-observation counter is transient and must
+          // reset on rehydrate — otherwise a persisted `_absentTicks: 1`
+          // after a hard crash could let a fresh session advance on
+          // the very first scan, silently defeating the two-observation
+          // gate. Explicitly zero so post-restart still needs the full
+          // observation window.
+          entry._absentTicks = 0;
           this._pending.set(entry.orderId, entry);
         }
       }
@@ -525,5 +599,7 @@ module.exports = {
     DEFAULT_GATEWAY_TIMEOUT_MS,
     DEFAULT_BUILD_TIMEOUT_MS,
     TERMINAL_STATUSES,
+    REQUIRED_ABSENT_OBSERVATIONS,
+    _classifyPath,
   },
 };

@@ -149,7 +149,7 @@ function recorderCallback() {
 
 // ── Phase transitions ─────────────────────────────────────────────────────
 
-test('awaiting-gateway → delivering when the .txt disappears from Order Data', async (t) => {
+test('awaiting-gateway → delivering when the .txt disappears from Order Data (across REQUIRED_ABSENT_OBSERVATIONS scans)', async (t) => {
   const dir = await makeTempDir();
   t.after(() => fsp.rm(dir, { recursive: true, force: true }));
   const ws = await setupWorkspace(dir, { orderId: 'ORD-1' });
@@ -166,13 +166,15 @@ test('awaiting-gateway → delivering when the .txt disappears from Order Data',
   // Simulate OrderGateway consuming it
   await fsp.unlink(path.join(ws.orderData, 'ORD-1.txt'));
 
-  // First scan should advance to `delivering`, kick off deliverToDigin,
-  // and then transition to `building` on the same scan (delivering has
-  // no wait — it performs the move inline).
-  await monitor._scanNow();
+  // Fix 3: transition requires two consecutive absent observations.
+  // The first absent scan does not advance yet.
+  for (let i = 0; i < _internals.REQUIRED_ABSENT_OBSERVATIONS; i++) {
+    await monitor._scanNow();
+  }
   const entry = monitor.getPending()[0];
   assert.ok(entry, 'entry still pending — should be in building');
-  assert.equal(entry.phase, 'building');
+  assert.equal(entry.phase, 'building',
+    `must transition after ${_internals.REQUIRED_ABSENT_OBSERVATIONS} absent observations (delivering completes inline in the same scan)`);
   assert.ok(fs.existsSync(path.join(ws.diginPath, 'ORD-1')),
     'DIGIN folder must exist after the delivering step ran');
   assert.equal(fs.existsSync(ws.stagingFolder), false,
@@ -191,12 +193,17 @@ test('building → releasing → accepted (release toggle off) removes the entry
   monitor.startMonitoring({}, cb);
   enqueue(monitor, ws, 'ORD-1', { sendReleaseCommand: false });
 
-  // Fast-forward through awaiting-gateway + delivering.
+  // Fast-forward through awaiting-gateway + delivering. Two scans
+  // per transition per fix 3 (see REQUIRED_ABSENT_OBSERVATIONS).
   await fsp.unlink(path.join(ws.orderData, 'ORD-1.txt'));
-  await monitor._scanNow();       // → building (via delivering inline)
+  for (let i = 0; i < _internals.REQUIRED_ABSENT_OBSERVATIONS; i++) {
+    await monitor._scanNow();
+  }
   // Simulate PIC Pro consuming the DIGIN folder.
   await fsp.rm(path.join(ws.diginPath, 'ORD-1'), { recursive: true, force: true });
-  await monitor._scanNow();       // → releasing → accepted
+  for (let i = 0; i < _internals.REQUIRED_ABSENT_OBSERVATIONS; i++) {
+    await monitor._scanNow();
+  }
 
   assert.equal(monitor.getPending().length, 0, 'entry should be resolved and removed');
   assert.equal(cb.events.length, 1, 'exactly one terminal callback');
@@ -220,9 +227,13 @@ test('releasing writes [release]{orderId} when sendReleaseCommand=true', async (
   enqueue(monitor, ws, 'ORD-1', { sendReleaseCommand: true });
 
   await fsp.unlink(path.join(ws.orderData, 'ORD-1.txt'));
-  await monitor._scanNow();
+  for (let i = 0; i < _internals.REQUIRED_ABSENT_OBSERVATIONS; i++) {
+    await monitor._scanNow();
+  }
   await fsp.rm(path.join(ws.diginPath, 'ORD-1'), { recursive: true, force: true });
-  await monitor._scanNow();
+  for (let i = 0; i < _internals.REQUIRED_ABSENT_OBSERVATIONS; i++) {
+    await monitor._scanNow();
+  }
 
   assert.equal(cb.events[0].status, 'accepted');
   const files = await fsp.readdir(ws.orderData);
@@ -278,9 +289,12 @@ test('buildTimeoutMs expiring while DIGIN still holds the folder emits "timed_ou
     buildTimeoutMs:     10_000,
   });
 
-  // Advance through awaiting-gateway + delivering
+  // Advance through awaiting-gateway + delivering. Fix 3: two
+  // absent observations required before advancing.
   await fsp.unlink(path.join(ws.orderData, 'ORD-B.txt'));
-  await monitor._scanNow();
+  for (let i = 0; i < _internals.REQUIRED_ABSENT_OBSERVATIONS; i++) {
+    await monitor._scanNow();
+  }
   assert.equal(monitor.getPending()[0].phase, 'building');
 
   // Simulate DIGIN not clearing for long enough
@@ -311,7 +325,14 @@ test('a file that vanishes before its timeout is captured on the next scan (no p
 
   clock.advance(4_999);          // just before the timeout
   await fsp.unlink(path.join(ws.orderData, 'ORD-V.txt'));
-  await monitor._scanNow();      // vanish beats the timeout
+  for (let i = 0; i < _internals.REQUIRED_ABSENT_OBSERVATIONS; i++) {
+    // Advance the clock a hair between observations but stay well
+    // below the timeout — the fix requires N absent observations, so
+    // "vanish beats the timeout" now means N observations complete
+    // BEFORE the timeout window closes.
+    clock.advance(1);
+    await monitor._scanNow();
+  }
 
   const entry = monitor.getPending()[0];
   assert.ok(entry, 'still tracked (now in a later phase)');
@@ -348,12 +369,16 @@ test('restart recovery: startMonitoring rehydrates entries from the persisted st
   assert.equal(pending[0].phase, 'awaiting-gateway',
     'phase preserved across restart');
 
-  // Simulate OrderGateway consuming the .txt after restart.
+  // Simulate OrderGateway consuming the .txt after restart. Fix 3:
+  // absent-observation counter resets on rehydrate, so this still
+  // needs the same two-scan gate as a fresh entry.
   await fsp.unlink(path.join(ws.orderData, 'ORD-R.txt'));
-  await m2._scanNow();
+  for (let i = 0; i < _internals.REQUIRED_ABSENT_OBSERVATIONS; i++) {
+    await m2._scanNow();
+  }
 
   assert.notEqual(m2.getPending()[0].phase, 'awaiting-gateway',
-    'rehydrated entry must advance on the next scan just like a fresh entry');
+    'rehydrated entry must advance just like a fresh entry (both need two absent observations)');
   m2.stopMonitoring();
 });
 
@@ -452,6 +477,157 @@ test('startMonitoring is idempotent — calling twice does not leak timers or wa
   assert.equal(monitor._watchers.size, 0);
 });
 
+// ── Fix 3 regression: existsSync=false ≠ absent ──────────────────────────
+
+test('fix 3: awaiting-gateway does NOT advance after ONE absent observation (blip protection)', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const ws = await setupWorkspace(dir, { orderId: 'ORD-BLIP' });
+
+  const { monitor } = makeMonitor();
+  monitor.startMonitoring({}, () => {});
+  enqueue(monitor, ws, 'ORD-BLIP');
+
+  await fsp.unlink(path.join(ws.orderData, 'ORD-BLIP.txt'));
+  // Only ONE absent observation — must NOT advance.
+  await monitor._scanNow();
+  assert.equal(monitor.getPending()[0].phase, 'awaiting-gateway',
+    'single absent observation is not enough — fix 3 requires two consecutive observations');
+
+  // Second observation → transition. Delivering runs inline so we
+  // land in building on the same scan.
+  await monitor._scanNow();
+  assert.equal(monitor.getPending()[0].phase, 'building');
+  monitor.stopMonitoring();
+});
+
+test('fix 3: an EACCES / permission blip mid-window resets the counter, does NOT advance', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const ws = await setupWorkspace(dir, { orderId: 'ORD-EACCES' });
+
+  // Inject an fs whose promises.stat throws EACCES the SECOND time
+  // called for the .txt path — the first observation returns ENOENT
+  // (absent) so the counter ticks to 1, the second returns 'unknown'
+  // (EACCES) so the counter must reset instead of advancing.
+  let statCalls = 0;
+  const injectedFs = {
+    ...fs,
+    // fs.watch / fs.existsSync stay real — deliverToDigin uses fs directly.
+    existsSync: fs.existsSync.bind(fs),
+    watch:      fs.watch.bind(fs),
+    promises: {
+      ...fs.promises,
+      stat: async (p) => {
+        statCalls++;
+        if (statCalls === 2) {
+          const err = new Error('EACCES simulated permission blip');
+          err.code = 'EACCES';
+          throw err;
+        }
+        return fs.promises.stat(p);
+      },
+    },
+  };
+
+  const monitor = new FujiPicProMonitor({
+    deps: { fs: injectedFs, logger: silentLogger, store: makeInMemoryStore(), clock: makeClock(), fileWriter },
+  });
+  monitor.startMonitoring({}, () => {});
+  enqueue(monitor, ws, 'ORD-EACCES');
+
+  // Delete the .txt so stat returns ENOENT for observations that get
+  // through — but the EACCES on the 2nd stat call must reset the
+  // counter.
+  await fsp.unlink(path.join(ws.orderData, 'ORD-EACCES.txt'));
+
+  await monitor._scanNow();  // call 1: absent (ENOENT) → ticks to 1
+  assert.equal(monitor.getPending()[0].phase, 'awaiting-gateway');
+  assert.equal(monitor.getPending()[0]._absentTicks, 1);
+
+  await monitor._scanNow();  // call 2: 'unknown' (EACCES) → counter resets to 0
+  assert.equal(monitor.getPending()[0].phase, 'awaiting-gateway',
+    'permission blip must NOT trigger advancement — the whole point of fix 3');
+  assert.equal(monitor.getPending()[0]._absentTicks, 0,
+    'counter must reset to 0 on any non-absent classification');
+
+  // Then two consecutive absent observations recover normally.
+  await monitor._scanNow();  // call 3: absent → 1
+  await monitor._scanNow();  // call 4: absent → 2 → advance
+  assert.equal(monitor.getPending()[0].phase, 'building',
+    'after the blip resets the counter, two clean absent observations still advance');
+  monitor.stopMonitoring();
+});
+
+test('fix 3: _classifyPath returns present/absent/unknown for the three cases', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const realPath    = path.join(dir, 'exists.txt');
+  const missingPath = path.join(dir, 'gone.txt');
+  await fsp.writeFile(realPath, 'x');
+
+  // Real fs against real paths for the two clear cases.
+  assert.equal(await _internals._classifyPath(fs, realPath),    'present');
+  assert.equal(await _internals._classifyPath(fs, missingPath), 'absent');
+
+  // Injected fs to force the "unknown" third case (any non-ENOENT).
+  const errorFs = { promises: { stat: async () => {
+    const e = new Error('EIO simulated'); e.code = 'EIO'; throw e;
+  } } };
+  assert.equal(await _internals._classifyPath(errorFs, '/anything'), 'unknown',
+    'any non-ENOENT error must map to unknown — fix 3 depends on distinguishing this from absent');
+});
+
+test('fix 3: building phase — an EACCES on the Merge Data check keeps the entry in building', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const ws = await setupWorkspace(dir, { orderId: 'ORD-M2' });
+  const mergeData = path.join(dir, 'merge-data'); await fsp.mkdir(mergeData);
+
+  // Only fail Merge Data stats; let DIGIN + Order Data stats succeed.
+  const injectedFs = {
+    ...fs,
+    existsSync: fs.existsSync.bind(fs),
+    watch:      fs.watch.bind(fs),
+    promises: {
+      ...fs.promises,
+      stat: async (p) => {
+        if (String(p).startsWith(mergeData)) {
+          const err = new Error('EACCES on merge share'); err.code = 'EACCES';
+          throw err;
+        }
+        return fs.promises.stat(p);
+      },
+    },
+  };
+
+  const monitor = new FujiPicProMonitor({
+    deps: { fs: injectedFs, logger: silentLogger, store: makeInMemoryStore(), clock: makeClock(), fileWriter },
+  });
+  monitor.startMonitoring({}, () => {});
+  enqueue(monitor, ws, 'ORD-M2', { mergeDataPath: mergeData });
+
+  // Drive to `building`.
+  await fsp.unlink(path.join(ws.orderData, 'ORD-M2.txt'));
+  for (let i = 0; i < _internals.REQUIRED_ABSENT_OBSERVATIONS; i++) {
+    await monitor._scanNow();
+  }
+  assert.equal(monitor.getPending()[0].phase, 'building');
+
+  // Remove the DIGIN folder — but merge-data stats still throw EACCES.
+  // The classifier returns 'unknown' for both merge paths so
+  // mergeAbsent is false, keeping the entry in building even though
+  // DIGIN is genuinely gone. `[release]` MUST NOT fire.
+  await fsp.rm(path.join(ws.diginPath, 'ORD-M2'), { recursive: true, force: true });
+  for (let i = 0; i < 4; i++) {
+    await monitor._scanNow();
+  }
+  assert.equal(monitor.getPending()[0].phase, 'building',
+    'EACCES on Merge Data must NOT advance to releasing — treating unknown as absent would fire [release] on an unbuilt order');
+  monitor.stopMonitoring();
+});
+
 // ── Merge Data check ─────────────────────────────────────────────────────
 
 test('building holds until BOTH mergeData variants (`{orderId}.con` and `{orderId}/`) are absent', async (t) => {
@@ -465,9 +641,11 @@ test('building holds until BOTH mergeData variants (`{orderId}.con` and `{orderI
   monitor.startMonitoring({}, cb);
   enqueue(monitor, ws, 'ORD-M', { mergeDataPath: mergeData });
 
-  // Drive through awaiting-gateway + delivering.
+  // Drive through awaiting-gateway + delivering (two absent obs).
   await fsp.unlink(path.join(ws.orderData, 'ORD-M.txt'));
-  await monitor._scanNow();
+  for (let i = 0; i < _internals.REQUIRED_ABSENT_OBSERVATIONS; i++) {
+    await monitor._scanNow();
+  }
   assert.equal(monitor.getPending()[0].phase, 'building');
 
   // Simulate PIC Pro removing the DIGIN folder but leaving containers.
@@ -484,9 +662,12 @@ test('building holds until BOTH mergeData variants (`{orderId}.con` and `{orderI
   assert.equal(monitor.getPending()[0].phase, 'building',
     'other variant still present → still building (spec p. 369 — the two variants depend on "Container Path Use Subdirs")');
 
-  // Remove the subdir — build is finally complete.
+  // Remove the subdir — build is finally complete. Fix 3: two absent
+  // observations required.
   await fsp.rm(path.join(mergeData, 'ORD-M'), { recursive: true, force: true });
-  await monitor._scanNow();
+  for (let i = 0; i < _internals.REQUIRED_ABSENT_OBSERVATIONS; i++) {
+    await monitor._scanNow();
+  }
   assert.equal(monitor.getPending().length, 0);
   assert.equal(cb.events[0].status, 'accepted');
   monitor.stopMonitoring();
