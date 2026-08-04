@@ -4794,6 +4794,15 @@ function updateOcTypeFields() {
   document.getElementById('ocBuildTimeoutGroup').style.display            = isFujiPicPro ? '' : 'none';
   document.getElementById('ocSendReleaseCommandGroup').style.display      = isFujiPicPro ? '' : 'none';
   document.getElementById('ocPicProIncludeCustomerNameGroup').style.display = isFujiPicPro ? '' : 'none';
+  // The generic Output Path field is misleading for PIC Pro — the
+  // three explicit paths above replace it. Hiding it also stops
+  // polling-service._startFolderMonitors from attaching a DPOF
+  // FolderMonitor (which watches for o→e/q renames PIC Pro never
+  // makes) to whatever the operator happens to type in the box.
+  // The ocSaveBtn handler forces controller.outputPath = '' for
+  // fujipicpro so the folder-monitor gate at
+  // polling-service.js:625 (`if (c.outputPath) {…}`) short-circuits.
+  document.getElementById('ocOutputPathGroup').style.display              = isFujiPicPro ? 'none' : '';
   // Back-print template — visible when either Fuji type is selected AND mode === 'text'.
   // Line 2 is PIC Pro-only.
   const backprintMode = document.getElementById('ocBackprintMode').value;
@@ -5286,10 +5295,19 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
   const modal      = document.getElementById('orderControllerModal');
   const name       = document.getElementById('ocName').value.trim();
   const type       = document.getElementById('ocType').value;
-  const outputPath = document.getElementById('ocOutputPath').value.trim();
+  // PIC Pro replaces the generic Output Path with three explicit
+  // paths (Order Data / DIGIN / Merge Data). The field is hidden
+  // for fujipicpro so we must not read its value AND must persist
+  // '' — polling-service._startFolderMonitors gates its DPOF
+  // FolderMonitor on `c.outputPath` being non-empty, and attaching
+  // that monitor to a PIC Pro controller would watch for folder
+  // renames PIC Pro never makes.
+  const outputPath = (type === 'fujipicpro')
+    ? ''
+    : document.getElementById('ocOutputPath').value.trim();
 
-  if (!name)       { alert('Controller name is required.');  return; }
-  if (!outputPath) { alert('Output path is required.');      return; }
+  if (!name)                              { alert('Controller name is required.'); return; }
+  if (!outputPath && type !== 'fujipicpro') { alert('Output path is required.');    return; }
 
   const editingId = modal.dataset.editingId;
   const controller = {
@@ -5415,10 +5433,11 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
     controller.buildTimeoutMs     = buildTimeoutMin * 60 * 1000;
     controller.sendReleaseCommand = document.getElementById('ocSendReleaseCommand').checked;
     controller.includeCustomerName = document.getElementById('ocPicProIncludeCustomerName').checked;
-    // outputPath is required at the top of the handler but PIC Pro
-    // routes don't use it — the three explicit paths above are what
-    // the writer consumes. Persist whatever the operator typed for
-    // record-keeping; blank it below if empty.
+    // `outputPath` is deliberately forced to '' at the top of the
+    // handler for fujipicpro — the three explicit paths above are
+    // what the writer consumes, and persisting a non-empty value
+    // would let polling-service._startFolderMonitors attach a DPOF
+    // FolderMonitor to it.
   }
   try {
     const result = await window.electronAPI.saveOrderController(controller);

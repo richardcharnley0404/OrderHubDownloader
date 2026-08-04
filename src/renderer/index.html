@@ -1176,7 +1176,7 @@
           <input type="text" id="ocImageStagingRoot" placeholder="e.g. \\MASTER\Pixfizz\Artwork\" readonly>
           <button type="button" id="ocImageStagingRootBrowseBtn" class="btn-browse">Browse...</button>
         </div>
-        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Root folder where OHD stages per-order subfolders containing the print images. Frontier reads <code>ImageFile=</code> from this path.</small>
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Scratch space where OHD assembles each order's per-order subfolder (sequence-renamed <code>0001.jpg</code>, <code>0002.jpg</code>…). Once OrderGateway consumes the <code>.txt</code>, OHD moves that subfolder into DIGIN. Nothing external ever reads from here. Two constraints: put it on the same volume as DIGIN Path (a cross-volume move degrades to a slow recursive copy), and it must not sit inside any of the other three paths (rejected at save time).</small>
       </div>
 
       <div class="form-group" id="ocPrinterNameGroup" style="display:none">
@@ -1201,7 +1201,7 @@
           <option value="none">None</option>
           <option value="text">Text</option>
         </select>
-        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Image-mode back prints are not enabled in v0 — see <code>docs/print-controllers/FUJI-JOBMAKER-FORMAT.md</code>.</small>
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Image-mode back prints are not enabled in v0.</small>
       </div>
 
       <div class="form-group" id="ocBackprintTemplateGroup" style="display:none">
@@ -1235,7 +1235,7 @@
           <input type="text" id="ocDiginPath" placeholder="e.g. \\Labserver1\DIGIN1" readonly>
           <button type="button" id="ocDiginPathBrowseBtn" class="btn-browse">Browse...</button>
         </div>
-        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Where the <code>{OrderId}</code> image folder is delivered after OrderGateway has consumed the .txt. Frontier builds the print run from here.</small>
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Where the <code>{OrderId}</code> image folder is delivered after OrderGateway has consumed the .txt. PIC Pro builds the print run from here.</small>
       </div>
 
       <div class="form-group" id="ocMergeDataPathGroup" style="display:none">
@@ -1281,7 +1281,7 @@
         <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Emits <code>CustomerName=</code> in the order file. Off by default — when on and Back Print Line 2 is blank, the customer's name is printed on the back of every print (PIC Pro spec p. 343).</small>
       </div>
 
-      <div class="form-group">
+      <div class="form-group" id="ocOutputPathGroup">
         <label for="ocOutputPath">Output Path</label>
         <div class="input-with-button">
           <input type="text" id="ocOutputPath" placeholder="C:\OrderHub Controllers\Epson" readonly>
