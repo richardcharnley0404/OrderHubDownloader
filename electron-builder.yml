@@ -61,7 +61,15 @@ win:
     - target: nsis
       arch:
         - x64
-  icon: assets/icons/icon.ico
+  # electron-builder would find this via buildResources auto-discovery
+  # anyway (directories.buildResources: assets → looks for
+  # buildResources/icon.ico by default), so the line is technically
+  # redundant. Kept explicit so `git grep icon` finds where the
+  # installer icon comes from — historically this line pointed at
+  # `assets/icons/icon.ico`, a path that never existed, and the auto-
+  # discovery fallback hid the misconfiguration until someone tried to
+  # trace it. See docs/RELEASE.md.
+  icon: assets/icon.ico
   signtoolOptions:
     sign: scripts/sign.js
 
