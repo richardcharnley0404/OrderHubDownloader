@@ -35,6 +35,11 @@ file inside the repo. electron-builder packs the asar in two passes; a file
 growing between them corrupts the offsets and the installer crashes natively
 (`0xc000041d`) with no logs. This bit v1.7.0.
 
+See `docs/RELEASE.md` for the full release process — pre-flight, version
+bump, CHANGELOG, build, artifact verification, upload (both `.exe` AND
+`latest.yml` — auto-updates break silently if `latest.yml` is missing),
+and the unsigned-installer / SmartScreen caveat to pass to operators.
+
 ## Layout
 
 - `src/main/services/` — ingestion, routing, dispatch, film scans, AI, stores
