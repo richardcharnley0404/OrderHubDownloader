@@ -1,3 +1,152 @@
+## v1.8.0 - 2026-08-05
+
+Fuji PIC Pro controller support + review-round hardening across the
+Fuji dispatch pipeline. Full format spec in
+`docs/print-controllers/FUJI-PIC-PRO-FORMAT.md`.
+
+### New: Fuji PIC Pro controller type
+
+OHD now dispatches to Fuji PIC Pro alongside Noritsu / Epson DPOF,
+Darkroom Pro, Fuji JobMaker, Frontline, PDF Copy and Folder Copy.
+Controller type `fujipicpro` in the routing config; three explicit
+paths in the Add Controller modal — Order Data (where OHD writes
+the `{OrderId}.txt`), DIGIN (where the images land after
+OrderGateway consumes the .txt), and an optional Merge Data path
+(watched to confirm the build completed before writing
+`[release]`). Two timeouts — a short gateway timeout (default 2
+min, bounds 10 s – 30 min) and a longer build timeout (default 30
+min, bounds 1 min – 24 h). Backprint supports two lines (`Backprint1`
+and `Backprint2`); `CustomerName=` is opt-in (off by default —
+enabling it back-prints the customer's name on every print unless
+`Backprint2` is also set). Optional `[release]` command auto-drop
+behind a per-controller toggle.
+
+Dispatch splits image staging from the DIGIN move so the PIC Pro
+sequencing (`.txt` first, images only once OrderGateway has
+consumed it) is respected. OHD sequence-renames staged images
+`0001.<ext>` / `0002.<ext>` / … so `NegNumber=` fits the spec's
+15-char cap. A persistent per-controller state-machine monitor
+(new `fuji-picpro-pending-{controllerId}.json` electron-store)
+drives each order through `awaiting-gateway → delivering →
+building → releasing` and survives an OHD restart mid-handshake.
+Reprints emit a fresh order with the `-r{n}` suffix rather than
+using PIC Pro's native `[restart]` (the OHD reprint is a subset
+of images, possibly re-cropped — `[restart]` would reprint the
+original order untouched).
+
+### New: Crop-to-Size dropdown surfaces Fuji targets
+
+The Job Review Crop-to-Size dropdown gains entries for Fuji
+mapping print sizes alongside DPOF and Darkroom rows. Multiple
+mappings sharing a dimension (e.g. a Noritsu 4×6 channel AND a
+PIC Pro 4×6 mapping) now render as separate labelled rows rather
+than one hidden-behind-the-other row that would silently reroute
+the job. Fuji rows are informational — picking one sets the crop
+aspect but does NOT stamp `_channelMappingOverride` (routing
+stays whatever the operator's process → controller mapping
+resolves to).
+
+### Fixed: Manual Crop aspect for Fuji jobs
+
+Pre-fix `resolveTargetSize()` had no Fuji branch, so every routed
+Fuji job returned `no-size-translation` and the crop box silently
+fell back to 1:1 square while the ⚠ pill was showing. New Fuji-
+family channel-mapping field `printSize` (bare `WxH`) feeds a new
+lookup path in `resolveTargetSize` + a new source in
+`getAllSizeOptions`. Required at save time for Fuji PIC Pro; a
+JobMaker save with blank `printSize` warns rather than blocks so
+a live install with lab-package `printCode` values isn't broken
+on upgrade. Manual Crop's per-image Approve button and its
+Enter/Space keyboard shortcut both share the same gate — no more
+approve-at-square-crop while the ⚠ pill is visible.
+
+### Fixed: 14 review-round hardening items on the Fuji dispatch path
+
+Bundled from the pre-release review (`docs/fuji-pic-pro-review-fixes.md`).
+None of these are latent in v1.7.22 — every one is on a code path
+new in 1.8.0.
+
+- **`Qty` and `{originalFilename}` survive CMY corrections.**
+  `_applyCorrectionsToImageFiles` strips every per-image key
+  except `{sourcePath, filename}` on rows with a non-zero
+  correction. Dispatch reads quantity + originalFilename from
+  the manifest / reprint sidecar directly now, matching
+  JobMaker.
+- **Approve button + Enter/Space share one gate** on Manual
+  Crop. Pre-fix the keyboard shortcut bypassed the button's
+  `targetSizeReady` check.
+- **Monitor's file-existence check hardened.** `fs.existsSync`
+  returned false on EACCES / EIO / unmounted-share as well as
+  ENOENT. Switched to `fs.promises.stat` and treat only ENOENT
+  as absent; every phase gate also requires two consecutive
+  absent observations before advancing so a single SMB blip
+  cannot drive the next phase against an order that isn't
+  ready.
+- **PIC Pro monitors start at boot** for every configured
+  controller. Persisted pending entries now rehydrate on
+  restart without waiting for the next dispatch.
+- **`_scan` is serialised** with an in-flight guard so a slow
+  DIGIN move can't re-enter itself via the `setInterval` tick
+  or the `fs.watch` debounce.
+- **Pending-store namespace per controllerId.** Two configured
+  PIC Pro controllers no longer erase each other's queues.
+- **`deliverToDigin` is idempotent** so a crash between the
+  move and the phase-persist replays cleanly.
+- **`stageImages` clears the per-order folder** before writing
+  so a retry doesn't ship a stale `0001.<oldext>` alongside
+  the current `0001.<newext>`.
+- **`enqueueSubmission` rejects duplicates** for an in-flight
+  `orderId` rather than silently overwriting the tracked entry.
+- **EXDEV `.ohdtmp` cleanup** — leftover from an interrupted
+  cross-volume copy is wiped before the next attempt and on
+  the failing attempt itself.
+- **Two-phase enqueue → write → markCommitted** with a gateway-
+  timeout `[delete]` on the abandoned `.txt`. A crash between
+  enqueue and write leaves a recoverable entry (times out via
+  `gatewayTimeoutMs`) rather than an orphaned `.txt` that
+  OrderGateway consumes with no OHD tracking.
+- **`printSize` is not a dispatch gate** — it's a crop-aspect
+  indicator only, never written into `order.txt`. Blocking
+  auto-print on it broke the Pixfizz artwork-source flow
+  (those jobs bypass Manual Crop). Downgraded to a warning
+  log; save-time still requires it for PIC Pro.
+- **`Color=` is a real UI field** on PIC Pro channel mappings
+  now, not silently reset to `C` via the validator default on
+  every mapping edit. Options: C / B / S / S2 / S3 per spec p.
+  353.
+- **Save-time reject** when `imageStagingRoot` / `diginPath` /
+  `orderDataPath` / `mergeDataPath` equal each other or nest
+  inside each other (sibling folders under a common ancestor
+  are fine).
+
+### Fixed: Fuji PIC Pro Add Controller modal cosmetics
+
+Image Staging Root help text described JobMaker's flow (`Frontier
+reads ImageFile= from this path`); rewritten to describe PIC Pro's
+staging-then-move flow plus the two operational constraints (same
+volume as DIGIN Path; must not overlap the other three paths). DIGIN
+Path help said "Frontier builds the print run from here" — PIC Pro,
+not Frontier. Back Print Mode help no longer references
+`FUJI-JOBMAKER-FORMAT.md`. Generic Output Path field is hidden for
+PIC Pro (its three explicit paths replace it) and forced blank on
+save so `polling-service._startFolderMonitors` doesn't attach a
+DPOF `FolderMonitor` watching for `o→e`/`o→q` renames PIC Pro never
+makes.
+
+### Documentation
+
+New `docs/print-controllers/FUJI-PIC-PRO-FORMAT.md` — the emitter
+contract, three-folder handshake, monitor state machine, reprint
+policy.
+
+`docs/print-controllers/WORKFLOW.md` rewritten. The v1.7.22-era
+document described the legacy `sendToPrint` path (single DPOF
+pipeline, `configService.getProcessMapping` for routing) that the
+app no longer uses. The new document reflects the current
+architecture: `routingService.resolveRoute` for routing, seven
+controller-type-specific pipelines, per-controller monitors, and
+the Fuji-family handshakes.
+
 ## v1.7.22 - 2026-07-24
 
 Correctness (print size) + lab-safety (film-scan pipeline) release. Full details in
