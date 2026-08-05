@@ -5,13 +5,11 @@ The only artifact this repo produces is a single Windows NSIS installer:
 - **File**: `OrderHub Desktop Setup {version}.exe`
 - **Size**: ~576 MB (Electron + Chromium + bundled AI models)
 - **Signing**: none (see [Unsigned installer — SmartScreen](#unsigned-installer--smartscreen))
-- **Distribution**: Richard uploads manually — no CI pipeline
-
-Runtime auto-updates are driven by `src/main/updater.js`, which points
-`electron-updater` at a download URL returned by OrderHub's `/checkin`
-API. That has one non-obvious consequence: **`latest.yml` MUST land at
-the download URL alongside the `.exe` on every release** — see
-step 6 below.
+- **Distribution**: Richard uploads the `.exe` to S3 by hand and pastes
+  the link into OrderHub. Labs download from that link and install it
+  themselves. There is no CI pipeline and no auto-update in production
+  — see [Auto-update is dormant](#auto-update-is-dormant) for the
+  code-vs-practice gap.
 
 ---
 
@@ -100,8 +98,6 @@ $ver = (Get-Item $exe).VersionInfo
 $exe
 Get-Item $exe | Select LastWriteTime, Length
 $ver.FileVersion; $ver.ProductVersion; $ver.ProductName
-Get-Item dist\latest.yml | Select LastWriteTime
-Get-Content dist\latest.yml
 ```
 
 Expected:
@@ -118,53 +114,73 @@ Expected:
   `Downloader` because renaming would break the
   `%APPDATA%\OrderHub Downloader\` data folder — see
   `electron-builder.yml`).
-- `dist\latest.yml` exists and its `LastWriteTime` matches the exe
-  (within a few seconds). Content should read:
-  ```yaml
-  version: 1.8.0
-  files:
-    - url: OrderHub Desktop Setup 1.8.0.exe
-      sha512: <...>
-      size: <bytes>
-  path: OrderHub Desktop Setup 1.8.0.exe
-  sha512: <...>
-  releaseDate: '2026-08-05T...'
-  ```
 
 `dist/` is gitignored (see `.gitignore` line 5), so nothing here
 gets committed. The build products live locally only until you
 upload them.
 
+`electron-builder` also drops `dist\latest.yml`,
+`dist\OrderHub Desktop Setup {version}.exe.blockmap`, and
+`dist\builder-debug.yml`. None of these are needed for the manual
+S3 upload — see [Auto-update is dormant](#auto-update-is-dormant)
+for why `latest.yml` is not shipped and how you'd wire it up if you
+ever wanted to.
+
 ## 6. Upload
 
-Two files must be uploaded to the release location. Both. In lockstep.
+One file, one destination.
 
-- **`dist\OrderHub Desktop Setup {version}.exe`** — the installer users
-  download.
-- **`dist\latest.yml`** — the update feed. `src/main/updater.js`
-  points `electron-updater`'s generic provider at whatever
-  `download_url` OrderHub's `/checkin` API returns; the generic
-  provider then fetches `{download_url}/latest.yml` to decide
-  whether an update is available. If `latest.yml` is missing or
-  stale, **every existing install stops updating silently** — the
-  updater logs an error to `%APPDATA%\OrderHub Downloader\logs\`
-  but the operator sees no dialog and no banner.
+1. Upload `dist\OrderHub Desktop Setup {version}.exe` to **S3**.
+   **TODO(richard):** exact bucket + path prefix — not declared in
+   this repo. `electron-builder.yml`'s `publish.url` is a leftover
+   placeholder (`https://your-s3-bucket…`) that isn't consumed by
+   the release process; ignore it.
+2. Paste the resulting object URL into OrderHub (admin console →
+   the same location the previous release's link went into).
+3. That's the release. Labs download from the OrderHub link and
+   install by hand.
 
-Order of upload is safest: `.exe` first, `latest.yml` second. That
-way an install that checks in during the upload window either
-sees the old `latest.yml` (skips) or sees the new one and
-downloads the fresh exe — it can never see a new `latest.yml`
-pointing at an exe that hasn't finished uploading yet.
+Do **not** upload `latest.yml`. It's an artifact of `electron-builder`
+that would only matter if runtime auto-updates were on — they
+aren't. See below.
 
-**Upload destination: TODO(richard)** — the OrderHub `/checkin`
-API is the source of truth for the download URL; it's not
-declared anywhere in this repo. `electron-builder.yml`'s
-`publish.url` is a leftover placeholder (`https://your-s3-bucket…`)
-and is not consumed at runtime.
+## Auto-update is dormant
 
-The `.exe.blockmap` and `builder-debug.yml` files that
-`electron-builder` also drops in `dist/` are for delta updates
-and diagnostics respectively — not needed for uploads.
+The code implies auto-updates work; the practice is that they don't.
+Both are true — the gap is worth reading before touching either.
+
+`src/main/updater.js` runs on a 4-hour schedule (gated on
+`pollingEnabled`). Each check-in:
+
+1. `POST {baseUrl}/checkin` against the OrderHub API with the
+   current app version + machine identity.
+2. If the response includes `is_up_to_date: false` **and** a
+   `download_url`, OHD calls
+   `autoUpdater.setFeedURL({ provider: 'generic', url: data.download_url })`
+   and then `autoUpdater.checkForUpdates()`.
+3. `electron-updater`'s generic provider then fetches
+   `{download_url}/latest.yml` — a manifest file that would tell
+   it whether a newer version exists and where to download it.
+
+**No `latest.yml` has ever been published**, so step 3 has never
+found anything to update to and the in-app "Update Ready" dialog
+has never fired in the field.
+
+If auto-update is ever wanted, it's an operational change, not a
+code one:
+
+1. Publish `dist\latest.yml` to the same S3 location as the `.exe`
+   on every release. Order matters — `.exe` first, then
+   `latest.yml`. That way an install that checks in during the
+   upload window either sees the old manifest (skips) or sees the
+   new one pointing at an exe that has already finished uploading.
+   Reversed order leaves a race where the manifest points at a
+   half-uploaded exe and the download fails partway through.
+2. Make sure the `download_url` field in the `/checkin` API
+   response points at the S3 directory the `.exe` and `latest.yml`
+   live under (not at the exe itself — the generic provider
+   expects a directory URL and appends `latest.yml` under the
+   hood).
 
 ## 7. Unsigned installer — SmartScreen
 
@@ -185,15 +201,14 @@ warning but not the UAC prompt.
 
 ## Post-release smoke test
 
-If you have a staging OHD install pointed at the same
-`/checkin` URL:
+Auto-updates are dormant (see above), so the check is a manual
+install:
 
-1. Wait for the next scheduled check-in (every 4 hours) or restart
-   the app to force one.
-2. In `%APPDATA%\OrderHub Downloader\logs\app.log`, look for
-   `Update available: v{new}` followed by
-   `Downloading update: N%` progress lines.
-3. On download completion, the **Update Ready** dialog appears with
-   Restart Now / Later buttons. `Restart Now` invokes
-   `autoUpdater.quitAndInstall()` and the installer replaces the app
-   in place; app relaunches at the new version.
+1. On a staging box or VM, download the installer from the S3 link
+   you pasted into OrderHub.
+2. Run through the SmartScreen + UAC prompts and complete the
+   install.
+3. Launch the app and confirm the About dialog / title bar reads
+   the new version.
+4. Do a smoke pass on the changed area — for a controller-type
+   release, dispatch one job of that type end-to-end.

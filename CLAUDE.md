@@ -36,9 +36,10 @@ growing between them corrupts the offsets and the installer crashes natively
 (`0xc000041d`) with no logs. This bit v1.7.0.
 
 See `docs/RELEASE.md` for the full release process — pre-flight, version
-bump, CHANGELOG, build, artifact verification, upload (both `.exe` AND
-`latest.yml` — auto-updates break silently if `latest.yml` is missing),
-and the unsigned-installer / SmartScreen caveat to pass to operators.
+bump, CHANGELOG, build, artifact verification, upload (single `.exe`
+to S3 by hand; paste the link into OrderHub), the unsigned-installer /
+SmartScreen caveat to pass to operators, and the code-vs-practice gap
+on auto-updates (wired but never activated in production).
 
 ## Layout
 
