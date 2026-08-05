@@ -274,15 +274,16 @@ test('options as array is rejected', () => {
   assert.match(result.errors[0], /options must be a plain object/);
 });
 
-test('mapping requires controllerId, productCode, printCode, printSize, surface', () => {
+test('mapping requires controllerId, productCode, printCode, surface (printSize is optional for JobMaker)', () => {
   const result = validateProductMappingConfig({});
   assert.equal(result.valid, false);
   const errs = result.errors.join('|');
   assert.match(errs, /controllerId is required/);
   assert.match(errs, /productCode is required/);
   assert.match(errs, /printCode is required/);
-  assert.match(errs, /printSize is required/);
   assert.match(errs, /surface is required/);
+  assert.doesNotMatch(errs, /printSize is required/,
+    'printSize is a Manual-Crop aspect indicator only; a live JobMaker install may have mappings whose printCode is a lab package code that leaves printSize blank via the M0 backfill — rejecting on blank would break a working install on upgrade');
 });
 
 test('valid mapping with isActive=false', () => {
@@ -298,30 +299,42 @@ test('valid mapping with isActive=false', () => {
   assert.equal(result.normalized.isActive, false);
 });
 
-// ── M0: printSize is a new mandatory field ─────────────────────────────────
+// ── printSize handling (M0 add, 2026-08-05 relax) ──────────────────────────
 //
-// Sets the Manual Crop aspect ratio for Fuji jobs. Never written to the
-// printer's .txt — its only job is to keep resolveTargetSize away from
+// Sets the Manual Crop aspect ratio for JobMaker jobs. Never written
+// into the .txt — its only job is to keep resolveTargetSize away from
 // the pre-M0 1:1 fallback. The IPC handler (ipc-handlers.js) is what
 // invokes this validator on both the modal save path and CSV import.
+//
+// 2026-08-05: relaxed to warn-only for JobMaker. A live install may
+// carry mappings whose `printCode` is a lab package code — the M0
+// backfill leaves `printSize` blank on those. Rejecting on blank
+// would break every subsequent edit of those mappings on upgrade,
+// even though dispatch is unaffected. PIC Pro (fuji-pic-pro-config)
+// still enforces the hard requirement — its mappings are entirely
+// new so no legacy state to protect.
+//
+// Non-blank values still get the bare-WxH shape check so typos like
+// "KG" don't slip through silently.
 
-test('printSize is required (blank rejected with a clear message)', () => {
+test('printSize blank is ALLOWED (was M0 error, relaxed 2026-08-05 to unbreak live upgrades)', () => {
   const result = validateProductMappingConfig({
     controllerId: 'c', productCode: 'p',
     printCode: '3.5x5', surface: 'Lustre',
   });
-  assert.equal(result.valid, false);
-  assert.match(result.errors.join('|'), /printSize is required/,
-    'a blank printSize must surface an operator-actionable message, not a generic error');
+  assert.equal(result.valid, true,
+    `blank printSize must not be an error on JobMaker; got errors: ${result.errors.join('; ')}`);
+  assert.equal(result.normalized.printSize, '',
+    'the value persists as blank rather than a fabricated default');
 });
 
-test('printSize whitespace-only is rejected', () => {
+test('printSize whitespace-only is treated as blank (allowed)', () => {
   const result = validateProductMappingConfig({
     controllerId: 'c', productCode: 'p',
     printCode: '3.5x5', printSize: '   ', surface: 'Lustre',
   });
-  assert.equal(result.valid, false);
-  assert.match(result.errors.join('|'), /printSize is required/);
+  assert.equal(result.valid, true);
+  assert.equal(result.normalized.printSize, '', 'whitespace trims to blank');
 });
 
 test('printSize accepts bare WxH shapes: 6x4, 3.5x5, "8 x 10", 8X8, 8×8', () => {
@@ -335,13 +348,13 @@ test('printSize accepts bare WxH shapes: 6x4, 3.5x5, "8 x 10", 8X8, 8×8', () =>
   }
 });
 
-test('printSize rejects non-WxH shapes: KG, 2L, arbitrary text, half-shapes', () => {
+test('printSize rejects non-WxH shapes when SET: KG, 2L, arbitrary text, half-shapes (shape check still fires)', () => {
   for (const size of ['KG', '2L', 'A4', 'NML -PSIZE "8x4"', '4x', 'x6', '6x', 'six by four']) {
     const result = validateProductMappingConfig({
       controllerId: 'c', productCode: 'p',
       printCode: '3.5x5', printSize: size, surface: 'Lustre',
     });
-    assert.equal(result.valid, false, `${size} must be rejected — printSize drives crop aspect, not the printer's code table`);
+    assert.equal(result.valid, false, `${size} must be rejected — a typed value that isn't WxH is a typo, not a legacy blank`);
     assert.match(result.errors.join('|'), /printSize must be a bare WxH shape/);
   }
 });

@@ -210,15 +210,25 @@ function validateProductMappingConfig(mapping) {
   out.printCode = printCode;
 
   // printSize — bare WxH string used ONLY to drive the crop-box aspect
-  // in Manual Crop. Never written into JobMaker's .txt or PIC Pro's
-  // order.txt. Mandatory at save time so a mapping can't ship a square
-  // crop by accident (see M0 of the Fuji PIC Pro brief). Reuses
-  // routing-service.isBareWxH so the accepted shape set matches
-  // resolvePrintSizeCode's read-time regex exactly.
+  // in Manual Crop. Never written into JobMaker's .txt (nor PIC Pro's
+  // order.txt).
+  //
+  // Relaxed 2026-08-05 (release-prep, review follow-up): blank is
+  // ALLOWED for JobMaker. A live install may have JobMaker mappings
+  // whose `printCode` is a lab package code — the M0 backfill leaves
+  // `printSize` blank on those, and dispatch is unaffected. A future
+  // edit of any other field on the mapping would otherwise be
+  // rejected here, breaking a working install on upgrade.
+  // Non-blank values still get the bare-WxH shape check so a typo
+  // like "KG" doesn't slip through. The amber "no print size" badge
+  // on the routing list and the ⚠ pill in Manual Crop keep the
+  // problem visible for operators who want to fix it.
+  //
+  // PIC Pro (`fuji-pic-pro-config.js.validateProductMappingConfig`)
+  // still enforces the hard requirement — its mappings are entirely
+  // new, so no legacy state to protect.
   const printSize = _trim(mapping.printSize);
-  if (!printSize) {
-    errors.push('printSize is required — sets the crop aspect (e.g. 6x4, 3.5x5)');
-  } else if (!isBareWxH(printSize)) {
+  if (printSize && !isBareWxH(printSize)) {
     errors.push(`printSize must be a bare WxH shape like 6x4 or 3.5x5; got ${JSON.stringify(mapping.printSize)}`);
   }
   out.printSize = printSize;

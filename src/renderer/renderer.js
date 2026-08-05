@@ -1555,6 +1555,10 @@ function openAssignModal(job, route) {
       const surface     = surfaceInput.value.trim();
       const surfaceCode = surfaceCodeInput.value.trim();
 
+      // Hoisted once — used by the printSize gate below and the
+      // color-field logic further down (fix 13).
+      const isPicProParent = route.controller && route.controller.type === 'fujipicpro';
+
       // Same bare-WxH check the IPC handler enforces server-side.
       const BARE_WXH = /^\s*\d+(?:\.\d+)?\s*[x×]\s*\d+(?:\.\d+)?\s*$/i;
 
@@ -1568,12 +1572,17 @@ function openAssignModal(job, route) {
       }
       printCodeInput.setCustomValidity('');
 
-      if (!printSize) {
-        printSizeInput.setCustomValidity('Print Size is required for Fuji mappings — sets the crop aspect (e.g. 6x4, 3.5x5).');
+      // Blank is allowed for JobMaker (a lab-package printCode makes
+      // printSize unfillable and dispatch is unaffected — see the
+      // cmSaveBtn split for the same rationale). PIC Pro still
+      // requires it because its mappings are entirely new. Non-blank
+      // values get the shape check for both types.
+      if (isPicProParent && !printSize) {
+        printSizeInput.setCustomValidity('Print Size is required for Fuji PIC Pro mappings — sets the crop aspect (e.g. 6x4, 3.5x5).');
         printSizeInput.reportValidity();
         return;
       }
-      if (!BARE_WXH.test(printSize)) {
+      if (printSize && !BARE_WXH.test(printSize)) {
         printSizeInput.setCustomValidity('Print Size must be a bare WxH shape like 6x4 or 3.5x5.');
         printSizeInput.reportValidity();
         return;
@@ -1598,9 +1607,9 @@ function openAssignModal(job, route) {
           await reconcileControllerIgnore(controllerId, tickedIgnore, untickedNames);
         }
         // Fix 13: PIC Pro-only Color= field. Read from the
-        // dropdown if visible (fujipicpro parent); default 'C'
-        // otherwise so JobMaker payloads don't grow an unused key.
-        const isPicProParent = route.controller && route.controller.type === 'fujipicpro';
+        // dropdown if visible (fujipicpro parent — hoisted above);
+        // default 'C' otherwise so JobMaker payloads don't grow an
+        // unused key.
         const assignColor    = isPicProParent
           ? (document.getElementById('assignColor').value || 'C')
           : undefined;
@@ -5930,10 +5939,19 @@ document.getElementById('cmSaveBtn').addEventListener('click', async () => {
   const BARE_WXH = /^\s*\d+(?:\.\d+)?\s*[x×]\s*\d+(?:\.\d+)?\s*$/i;
 
   if (isFujiCtrl) {
-    if (!printCode)                  { alert('Print Code is required for Fuji mappings.'); return; }
-    if (!printSize)                  { alert('Print Size is required for Fuji mappings — sets the crop aspect (e.g. 6x4, 3.5x5).'); return; }
-    if (!BARE_WXH.test(printSize))   { alert('Print Size must be a bare WxH shape like 6x4 or 3.5x5.'); return; }
-    if (!surface)                    { alert('Surface is required for Fuji mappings.'); return; }
+    if (!printCode)                             { alert('Print Code is required for Fuji mappings.'); return; }
+    // Print Size is a Manual-Crop aspect indicator only. PIC Pro
+    // mappings are new so we require it up front. JobMaker allows
+    // blank so a live install whose printCode is a lab package code
+    // (backfill left printSize blank) can still be edited without
+    // rejection — the amber routing-list badge + Manual Crop ⚠ pill
+    // keep the problem visible. Non-blank values still get the
+    // shape check for both types.
+    if (selectedController?.type === 'fujipicpro' && !printSize) {
+      alert('Print Size is required for Fuji PIC Pro mappings — sets the crop aspect (e.g. 6x4, 3.5x5).'); return;
+    }
+    if (printSize && !BARE_WXH.test(printSize)) { alert('Print Size must be a bare WxH shape like 6x4 or 3.5x5.'); return; }
+    if (!surface)                               { alert('Surface is required for Fuji mappings.'); return; }
   } else if (isFrontlineCtrl) {
     if (!batchCode) { alert('Batch code is required for Frontline controllers.'); return; }
   } else if (!isDarkroomProCtrl) {
