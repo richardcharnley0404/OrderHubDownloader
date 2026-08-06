@@ -18,6 +18,12 @@ const s3ArtworkDownloader = createS3ArtworkDownloader();
 class PollingService {
   constructor() {
     this.intervalId = null;
+    // Interval (ms) the currently-armed setInterval was created with.
+    // Distinct from getPollingInterval() so applyServerCadence() can log
+    // the true old→new delta after capabilities have already been merged
+    // (updateFromCheckin fires first; without this the "old" reading would
+    // already be the new value).
+    this._activeIntervalMs = null;
     this.isPolling = false;
     this.lastCheckTime = null;
     this.lastSummary = null;
@@ -49,11 +55,20 @@ class PollingService {
   }
 
   /**
-   * Get polling interval from config (in milliseconds)
+   * Get polling interval in milliseconds.
+   *
+   * Routes through server-capabilities so the server-advertised value wins
+   * everywhere it's read — start() at boot (including restarts against a
+   * persisted value), applyServerCadence() on the fly, and getStatus() in
+   * the UI. server-capabilities.getPollIntervalMs() falls back to
+   * configService.get('pollingInterval') when nothing has been advertised.
+   *
+   * Lazy require to avoid pulling electron-store into polling-service at
+   * module load — server-capabilities' Store constructor reads electron.app.
    */
   getPollingInterval() {
-    const seconds = configService.get('pollingInterval') || 60;
-    return seconds * 1000;
+    const { serverCapabilities } = require('./server-capabilities');
+    return serverCapabilities.getPollIntervalMs();
   }
 
   /**
@@ -101,6 +116,7 @@ class PollingService {
     this.intervalId = setInterval(() => {
       this.runAllModes();
     }, interval);
+    this._activeIntervalMs = interval;
 
     logger.info('Polling service started', {
       interval: `${interval / 1000} seconds`
@@ -126,6 +142,33 @@ class PollingService {
   }
 
   /**
+   * Re-clock the polling timer to the server-advertised interval, if any.
+   * No-op unless polling is currently running — a change while stopped will
+   * take effect on the next start() via serverCapabilities.getPollIntervalMs().
+   *
+   * Called by updater._checkIn when serverCapabilities.updateFromCheckin
+   * reports that the poll cadence changed. Lazy-requires server-capabilities
+   * to avoid pulling electron-store here at module load.
+   */
+  applyServerCadence() {
+    if (!this.isPolling) return;
+    const newMs = this.getPollingInterval();
+    const oldMs = this._activeIntervalMs;
+    if (newMs === oldMs) return;
+    if (this.intervalId) {
+      clearInterval(this.intervalId);
+    }
+    this.intervalId = setInterval(() => {
+      this.runAllModes();
+    }, newMs);
+    this._activeIntervalMs = newMs;
+    logger.info('Polling interval updated from server', {
+      oldSeconds: oldMs != null ? Math.round(oldMs / 1000) : null,
+      newSeconds: Math.round(newMs / 1000),
+    });
+  }
+
+  /**
    * Stop polling service
    */
   stop() {
@@ -140,6 +183,7 @@ class PollingService {
       clearInterval(this.intervalId);
       this.intervalId = null;
     }
+    this._activeIntervalMs = null;
 
     this._stopFilmScansTimer();
     this._stopFileUploadsTimer();

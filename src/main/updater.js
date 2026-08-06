@@ -5,6 +5,7 @@ const { getInstanceId } = require('./instance');
 const configService = require('./services/config-service');
 const logger = require('./services/logger');
 const { getOhdTelemetryHeaders } = require('./services/ohd-telemetry-headers');
+const { serverCapabilities } = require('./services/server-capabilities');
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -174,6 +175,19 @@ async function _checkIn() {
       is_up_to_date: data.is_up_to_date,
       latest_version: data.latest_version
     });
+
+    // ohd-api v1.4.0 — merge advertised cadences + feature flags.
+    // If poll cadence changed, re-clock the polling timer without waiting
+    // for the next app restart. Lazy require to avoid a load-order cycle
+    // (polling-service already requires config-service).
+    try {
+      const pollChanged = serverCapabilities.updateFromCheckin(data);
+      if (pollChanged) {
+        require('./services/polling-service').applyServerCadence();
+      }
+    } catch (capErr) {
+      logger.logWarning('Check-in: failed to apply server capabilities', { error: capErr.message });
+    }
 
     // Push update banner to renderer if the API signals one is available
     if (data.update && data.update.available === true) {
