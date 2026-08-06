@@ -26,6 +26,14 @@ class PollingService {
     this._activeIntervalMs = null;
     this.isPolling = false;
     this.lastCheckTime = null;
+    // Wall-clock timestamp of the last completed syncJobStatusFromOH attempt
+    // (M4 / ohd-api v1.4.0). null until the first attempt; also reset by
+    // stop(). Set in a `finally` so a throwing sync still advances it and
+    // can't spin every cycle.
+    this.lastStatusSyncAt = null;
+    // Injectable clock so cadence tests can drive time without patching
+    // Date.now globally. Production always uses Date.now.
+    this._now = () => Date.now();
     this.lastSummary = null;
     this.lastFolderWatchSummary = null;
     this.lastJobPollSummary = null;
@@ -236,10 +244,34 @@ class PollingService {
       // a job that OH already considers terminal isn't re-marked received
       // on the same cycle. syncJobStatusFromOH is internally chunked and
       // tolerant of per-job failures, so it can't take down the cycle.
-      try {
-        await jobService.syncJobStatusFromOH();
-      } catch (syncErr) {
-        logger.logWarning('Polling: syncJobStatusFromOH error', { error: syncErr.message });
+      //
+      // Cadence (M4 / ohd-api v1.4.0): when the server advertises
+      // status_poll_interval_seconds, the sync only runs at that cadence
+      // instead of every pollJobs cycle. When unadvertised, we fall back
+      // to today's every-cycle behaviour (pre-1.4.0 servers).
+      //
+      // Accepted trade-off: at the default 300s cadence, a job completed
+      // in OrderHub can take up to that long to clear from Awaiting
+      // Processing. TODO: if that lag becomes annoying, a
+      // forceStatusSyncNext() hook that resets lastStatusSyncAt to null
+      // could be called after operator actions (mark complete, retry,
+      // etc.) — do not build until asked.
+      const { serverCapabilities } = require('./server-capabilities');
+      const statusIntervalMs = serverCapabilities.getStatusPollIntervalMs();
+      const nowMs = this._now();
+      const statusDue = statusIntervalMs === null
+        || this.lastStatusSyncAt === null
+        || (nowMs - this.lastStatusSyncAt) >= statusIntervalMs;
+
+      if (statusDue) {
+        try {
+          await jobService.syncJobStatusFromOH();
+        } catch (syncErr) {
+          logger.logWarning('Polling: syncJobStatusFromOH error', { error: syncErr.message });
+        } finally {
+          // Advance in finally so a throwing sync doesn't spin every cycle.
+          this.lastStatusSyncAt = this._now();
+        }
       }
 
       const pendingJobs = jobService.getLocalJobs().jobs.filter(j => j._status === 'pending');
@@ -624,6 +656,7 @@ class PollingService {
     return {
       isRunning: this.isPolling,
       lastCheck: this.lastCheckTime,
+      lastStatusSync: this.lastStatusSyncAt,
       lastFilmScansCheck: this.lastFilmScansCheckTime,
       lastFileUploadsCheck: this.lastFileUploadsCheckTime,
       lastOrderXmlCheck: this.lastOrderXmlCheckTime,
