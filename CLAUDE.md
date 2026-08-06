@@ -41,6 +41,13 @@ to S3 by hand; paste the link into OrderHub), the unsigned-installer /
 SmartScreen caveat to pass to operators, and the code-vs-practice gap
 on auto-updates (wired but never activated in production).
 
+See `docs/BACKLOG.md` for open threads after v1.8.0 — Fuji PIC Pro lab-test
+wait, known non-blocking defects (Crop-to-Size labels, CSV channel-mapping
+import, PIC Pro rehydrate window, a flaky test), unverified paths (Manual
+Crop Approve gate), and parked decisions (auto-update activation, the
+legacy `folder_copy` Fuji controller). Read before starting new work so
+those threads don't get lost.
+
 ## Layout
 
 - `src/main/services/` — ingestion, routing, dispatch, film scans, AI, stores
