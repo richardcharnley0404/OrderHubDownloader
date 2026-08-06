@@ -3,6 +3,7 @@ const http = require('http');
 const Store = require('electron-store');
 const configService = require('./config-service');
 const logger = require('./logger');
+const { getOhdTelemetryHeaders } = require('./ohd-telemetry-headers');
 const { computeHoldForReview, formatHoldReasons } = require('../../shared/holdForReview');
 const { recoverManifestErrors } = require('../../shared/manifestErrorRecovery');
 // Lazy require — routing-service requires electron-store at module load; lazy
@@ -683,6 +684,7 @@ class JobService {
           headers: {
             'Authorization': `Bearer ${apiKey}`,
             'Accept': 'application/json',
+            ...getOhdTelemetryHeaders(),
             ...extraHeaders
           },
           timeout: 15000

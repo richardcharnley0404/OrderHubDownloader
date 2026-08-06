@@ -2,6 +2,7 @@ const https = require('https');
 const http = require('http');
 const configService = require('./config-service');
 const logger = require('./logger');
+const { getOhdTelemetryHeaders } = require('./ohd-telemetry-headers');
 
 // 2026-07-24 — transient-failure retry. Presign is idempotent (returns
 // URLs, no server-side state mutation), so retrying on 5xx / 429 /
@@ -235,6 +236,7 @@ class PresignService {
             'x-api-key': apiKey,          // OH presign endpoint uses x-api-key, not Bearer
             'Content-Type': 'application/json',
             'Accept': 'application/json',
+            ...getOhdTelemetryHeaders(),
             ...extraHeaders
           },
           timeout: 15000

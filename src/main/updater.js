@@ -4,6 +4,7 @@ const os = require('os');
 const { getInstanceId } = require('./instance');
 const configService = require('./services/config-service');
 const logger = require('./services/logger');
+const { getOhdTelemetryHeaders } = require('./services/ohd-telemetry-headers');
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -138,7 +139,8 @@ async function _checkIn() {
         headers: {
           'Authorization': `Bearer ${apiKey}`,
           'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(body)
+          'Content-Length': Buffer.byteLength(body),
+          ...getOhdTelemetryHeaders()
         },
         timeout: 15000
       };
