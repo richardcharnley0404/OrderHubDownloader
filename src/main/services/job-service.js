@@ -34,6 +34,15 @@ const jobStore = new Store({
   defaults: { jobs: [], lastFetchTime: null }
 });
 
+// Local statuses we ask OrderHub about on every sync cycle. See the doc
+// comment on syncJobStatusFromOH for why the set is broader than
+// in_production alone. Shared between the per-job and status-batch paths.
+const ACTIVE_LOCAL_STATUSES = ['in_production', 'received', 'pending'];
+
+// OrderHub statuses that collapse to local _status='completed' — from
+// OHD's perspective either terminal state means "OH is done with this job".
+const TERMINAL_OH_STATUSES = ['completed', 'cancelled'];
+
 class JobService {
   constructor() {
     // Load persisted jobs from disk
@@ -587,11 +596,25 @@ class JobService {
    * @returns {Promise<number>} Count of jobs auto-completed in this run
    */
   async syncJobStatusFromOH() {
+    const { serverCapabilities } = require('./server-capabilities');
+    return serverCapabilities.isEnabled('status_batch')
+      ? this._syncJobStatusFromOHBatch()
+      : this._syncJobStatusFromOHPerJob();
+  }
+
+  /**
+   * Per-job status sync — one GET /jobs/{id} per active job, chunked
+   * `CHUNK_SIZE` concurrent. Used against ohd-api servers older than
+   * v1.4.0, or as the fallback when a batch call surfaces a 404. Kept
+   * byte-for-byte from the original single implementation so behaviour
+   * against those older servers stays identical.
+   *
+   * @returns {Promise<number>} Count of jobs auto-completed in this run
+   */
+  async _syncJobStatusFromOHPerJob() {
     const { baseUrl, key: apiKey, organizationId, locationId } = configService.getApiSettings();
     if (!apiKey) return 0;
 
-    const ACTIVE_LOCAL_STATUSES = ['in_production', 'received', 'pending'];
-    const TERMINAL_OH_STATUSES  = ['completed', 'cancelled'];
     const CHUNK_SIZE = 8;
 
     const activeJobs = this.jobs.filter(j => ACTIVE_LOCAL_STATUSES.includes(j._status));
@@ -650,6 +673,154 @@ class JobService {
             _errorMessage: `OrderHub no longer recognizes this job (HTTP ${r.statusCode} on status sync) — it may have been deleted upstream.`,
           });
           logger.logWarning(`[sync] Job ${r.jobId} marked error — OH returned ${r.statusCode} on status sync`);
+        }
+      }
+    }
+
+    return autoCompleted;
+  }
+
+  /**
+   * Batched status sync — one POST /jobs/status-batch per chunk instead
+   * of one GET /jobs/{id} per active job. Enabled when the server
+   * advertises `features.status_batch` on /checkin. This is ohd-api
+   * v1.4.0's polling-cost reduction (Change 1 in the brief).
+   *
+   * Behaviour on per-id outcomes mirrors _syncJobStatusFromOHPerJob
+   * exactly:
+   *   - terminal (Completed / Cancelled, case-insensitive) → local
+   *     _status='completed' + counter.
+   *   - errors[] with status 400 → local _status='error' with the same
+   *     legacy message; 400 will never resolve on retry, so we surface
+   *     it in the UI rather than log-loop.
+   *   - errors[] with any other status (403/404/5xx) → warning only,
+   *     the job is left alone. Do NOT mark 404s as errors — that would
+   *     strand transiently-missing jobs.
+   *
+   * Cross-cutting rules:
+   *   - Chunks run sequentially — the whole point is to reduce load.
+   *   - job_ids are sent as strings (`String(job.id)`) so numeric local
+   *     ids match the server-echoed `requested_job_id`.
+   *   - Response order is not assumed to match request order.
+   *   - Request-level failure (transport, non-2xx other than 404,
+   *     success:false, parse) returns 0 without mutating any job.
+   *   - HTTP 404 on the endpoint means an older server: disable the
+   *     feature for this session and fall through to the per-job path
+   *     for the entire cycle.
+   *
+   * @returns {Promise<number>} Count of jobs auto-completed in this run
+   */
+  async _syncJobStatusFromOHBatch() {
+    const { serverCapabilities } = require('./server-capabilities');
+    const { baseUrl, key: apiKey, organizationId, locationId } = configService.getApiSettings();
+    if (!apiKey) return 0;
+
+    const activeJobs = this.jobs.filter(j => ACTIVE_LOCAL_STATUSES.includes(j._status));
+    if (activeJobs.length === 0) return 0;
+
+    const extraHeaders = {};
+    if (organizationId) extraHeaders['X-Organization-ID'] = organizationId;
+    if (locationId)     extraHeaders['X-Location-ID']     = locationId;
+
+    // Cap the chunk size at 100 even if the server allows more; that keeps
+    // individual request payload + response object small.
+    const chunkSize = Math.min(100, serverCapabilities.getStatusBatchMax());
+
+    // Response order isn't guaranteed to match request order, so look up
+    // the matching local job by String(id).
+    const jobsByStringId = new Map();
+    for (const job of activeJobs) {
+      jobsByStringId.set(String(job.id), job);
+    }
+
+    let autoCompleted = 0;
+
+    for (let i = 0; i < activeJobs.length; i += chunkSize) {
+      const chunk = activeJobs.slice(i, i + chunkSize);
+      const jobIds = chunk.map(j => String(j.id));
+
+      let response;
+      try {
+        response = await this._httpRequest(
+          'POST',
+          `${baseUrl}/jobs/status-batch`,
+          apiKey,
+          { job_ids: jobIds },
+          extraHeaders,
+        );
+      } catch (err) {
+        logger.logError('[sync] status-batch request failed', err);
+        return 0;
+      }
+
+      if (response.statusCode === 404) {
+        logger.logWarning(
+          '[sync] /jobs/status-batch returned 404 — server does not support batch, falling back to per-job for this cycle'
+        );
+        serverCapabilities.disableFeatureForSession('status_batch');
+        return this._syncJobStatusFromOHPerJob();
+      }
+
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        logger.logError(
+          `[sync] status-batch failed (HTTP ${response.statusCode})`,
+          new Error(response.body ? String(response.body).substring(0, 200) : ''),
+        );
+        return 0;
+      }
+
+      let data;
+      try {
+        data = JSON.parse(response.body);
+      } catch (err) {
+        logger.logError('[sync] status-batch response parse failed', err);
+        return 0;
+      }
+
+      if (data && data.success === false) {
+        logger.logError(
+          '[sync] status-batch reported success:false',
+          new Error(data.error || 'unknown'),
+        );
+        return 0;
+      }
+
+      const responded = new Set();
+
+      for (const entry of Array.isArray(data.jobs) ? data.jobs : []) {
+        const requestedId = String(entry.requested_job_id);
+        responded.add(requestedId);
+        const job = jobsByStringId.get(requestedId);
+        if (!job) continue;
+        const ohStatus = (entry.status || '').toLowerCase();
+        if (TERMINAL_OH_STATUSES.includes(ohStatus)) {
+          this.updateJobLocally(job.id, { _status: 'completed' });
+          logger.info(`[sync] Job ${job.id} auto-completed from OH status`, { ohStatus });
+          autoCompleted++;
+        }
+      }
+
+      for (const entry of Array.isArray(data.errors) ? data.errors : []) {
+        const requestedId = String(entry.requested_job_id);
+        responded.add(requestedId);
+        const job = jobsByStringId.get(requestedId);
+        if (!job) continue;
+        if (entry.status === 400) {
+          this.updateJobLocally(job.id, {
+            _status: 'error',
+            _errorMessage: `OrderHub no longer recognizes this job (HTTP ${entry.status} on status sync) — it may have been deleted upstream.`,
+          });
+          logger.logWarning(`[sync] Job ${job.id} marked error — OH returned ${entry.status} on status sync`);
+        } else {
+          logger.logWarning('[sync] Failed to fetch job status from OH', {
+            jobId: job.id, statusCode: entry.status,
+          });
+        }
+      }
+
+      for (const requestedId of jobIds) {
+        if (!responded.has(requestedId)) {
+          logger.logWarning('[sync] status-batch response omitted requested job', { jobId: requestedId });
         }
       }
     }
