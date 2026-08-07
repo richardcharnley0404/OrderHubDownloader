@@ -5,7 +5,7 @@ const { getInstanceId } = require('./instance');
 const configService = require('./services/config-service');
 const logger = require('./services/logger');
 const { getOhdTelemetryHeaders } = require('./services/ohd-telemetry-headers');
-const { serverCapabilities } = require('./services/server-capabilities');
+const { serverCapabilities, formatCheckinCapabilitiesForLog } = require('./services/server-capabilities');
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -182,6 +182,11 @@ async function _checkIn() {
     // (polling-service already requires config-service).
     try {
       const pollChanged = serverCapabilities.updateFromCheckin(data);
+      // Permanent [ohd-api] read-out: exactly what the server sent this
+      // check-in, so operators debugging "why is X still editable" can grep
+      // the Activity Log without a debug build. `features:absent` marks a
+      // pre-1.4.0 server that didn't include the block at all.
+      logger.info('[ohd-api] /checkin capabilities', formatCheckinCapabilitiesForLog(data));
       if (pollChanged) {
         require('./services/polling-service').applyServerCadence();
       }

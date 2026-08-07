@@ -186,6 +186,36 @@ class ServerCapabilities {
   }
 }
 
+/**
+ * Build the meta bag for the [ohd-api] /checkin log line. Extracted so
+ * updater._checkIn stays a one-liner and so the shape is unit-tested.
+ * The value is always the same set of keys regardless of what came
+ * back — features collapses to the sentinel string 'absent' when the
+ * server didn't send the block at all, so a grep for
+ * `features:'absent'` (or `features: absent` in the Winston-formatted
+ * activity log) surfaces pre-1.4.0 servers immediately.
+ *
+ * Contract: never throws, never touches the API key (data is the
+ * check-in RESPONSE body, which doesn't carry credentials — but the
+ * function still avoids blindly spreading `data` so if that ever
+ * changes, the log stays bounded to the fields listed here).
+ */
+function formatCheckinCapabilitiesForLog(data) {
+  const src = (data && typeof data === 'object') ? data : {};
+  const f = src.features;
+  const hasFeatures = f && typeof f === 'object';
+  return {
+    poll_interval_seconds:        src.poll_interval_seconds        ?? null,
+    status_poll_interval_seconds: src.status_poll_interval_seconds ?? null,
+    features: hasFeatures ? {
+      status_batch:     f.status_batch     ?? null,
+      pending_etag:     f.pending_etag     ?? null,
+      presign_expiry:   f.presign_expiry   ?? null,
+      status_batch_max: f.status_batch_max ?? null,
+    } : 'absent',
+  };
+}
+
 let _singleton = null;
 function _getSingleton() {
   if (!_singleton) _singleton = new ServerCapabilities();
@@ -195,5 +225,6 @@ function _getSingleton() {
 module.exports = {
   ServerCapabilities,
   DEFAULT_FEATURES,
+  formatCheckinCapabilitiesForLog,
   get serverCapabilities() { return _getSingleton(); },
 };

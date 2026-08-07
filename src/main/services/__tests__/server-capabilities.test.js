@@ -19,7 +19,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { ServerCapabilities, DEFAULT_FEATURES } = require('../server-capabilities');
+const { ServerCapabilities, DEFAULT_FEATURES, formatCheckinCapabilitiesForLog } = require('../server-capabilities');
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -143,6 +143,66 @@ test('disableFeatureForSession does not survive a fresh instance', () => {
   // Rebuild against the same store — session mute must NOT persist.
   const rehydrated = makeCaps({ store });
   assert.equal(rehydrated.isEnabled('status_batch'), true, 'session mute did not persist');
+});
+
+// ── formatCheckinCapabilitiesForLog ─────────────────────────────────────────
+
+test('formatCheckinCapabilitiesForLog: fully-populated response captures every field', () => {
+  const meta = formatCheckinCapabilitiesForLog({
+    poll_interval_seconds: 90,
+    status_poll_interval_seconds: 300,
+    features: {
+      status_batch:     true,
+      pending_etag:     true,
+      presign_expiry:   false,
+      status_batch_max: 150,
+    },
+    is_up_to_date: true,     // ignored — bounded to the listed keys
+    download_url:  'x',      // ignored
+  });
+
+  assert.deepEqual(meta, {
+    poll_interval_seconds:        90,
+    status_poll_interval_seconds: 300,
+    features: {
+      status_batch:     true,
+      pending_etag:     true,
+      presign_expiry:   false,
+      status_batch_max: 150,
+    },
+  });
+});
+
+test('formatCheckinCapabilitiesForLog: features block absent → sentinel "absent" (grep target)', () => {
+  const meta = formatCheckinCapabilitiesForLog({
+    poll_interval_seconds: 60,
+  });
+  assert.equal(meta.poll_interval_seconds, 60);
+  assert.equal(meta.status_poll_interval_seconds, null);
+  assert.equal(meta.features, 'absent', 'exact string sentinel — do not change without updating docs/greps');
+});
+
+test('formatCheckinCapabilitiesForLog: partial features → present flags captured, missing → null', () => {
+  const meta = formatCheckinCapabilitiesForLog({
+    features: { status_batch: true },
+  });
+  assert.deepEqual(meta.features, {
+    status_batch:     true,
+    pending_etag:     null,
+    presign_expiry:   null,
+    status_batch_max: null,
+  });
+});
+
+test('formatCheckinCapabilitiesForLog: never throws on garbage input', () => {
+  // Guards the "never blocks _checkIn" contract — a pre-1.4.0 server, a
+  // network dropped mid-parse, or a mocked stub can all deliver junk.
+  for (const junk of [null, undefined, '', 42, 'hello', [], { features: 'nope' }]) {
+    const meta = formatCheckinCapabilitiesForLog(junk);
+    assert.equal(meta.poll_interval_seconds, null);
+    assert.equal(meta.status_poll_interval_seconds, null);
+    assert.equal(meta.features, 'absent', `junk input ${JSON.stringify(junk)} → features:absent`);
+  }
 });
 
 test('updateFromCheckin returns true only when the poll cadence actually changed', () => {
