@@ -299,17 +299,33 @@ class PollingService {
       // each job runs up to 4 downloads in parallel internally.
       const downloadDirectory = configService.get('downloadDirectory');
       if (downloadDirectory) {
+        // Track cross-job failures so we invalidate the pending etag at
+        // most once per cycle. Any presign URL in the last /jobs/pending
+        // response could be stale — a fresh 200 next cycle reissues them.
+        let anyDownloadFailed = false;
         for (const job of pendingJobs) {
           if (Array.isArray(job.artwork_files) && job.artwork_files.length > 0) {
             try {
-              await s3ArtworkDownloader.downloadJobArtwork(job, downloadDirectory);
+              const result = await s3ArtworkDownloader.downloadJobArtwork(job, downloadDirectory);
+              if (result && Array.isArray(result.failed) && result.failed.length > 0) {
+                anyDownloadFailed = true;
+              }
             } catch (err) {
               // downloadJobArtwork never throws by contract, but defence-
               // in-depth: catch + log so a bug here can't take down the
               // poll cycle. checkLocalFiles will still run for the rest.
               logger.logError('[s3-artwork] downloadJobArtwork threw', err, { jobId: job.id });
+              anyDownloadFailed = true;
             }
           }
+        }
+        if (anyDownloadFailed) {
+          // Force the next fetchJobs to omit If-None-Match so we get a
+          // fresh 200 with new presigned URLs, rather than 304ing against
+          // the URLs that just failed. Self-heals expired-URL failures on
+          // the very next cycle instead of waiting for the presign safety
+          // window.
+          jobService.invalidatePendingEtag();
         }
       }
 

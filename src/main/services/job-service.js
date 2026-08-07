@@ -43,11 +43,41 @@ const ACTIVE_LOCAL_STATUSES = ['in_production', 'received', 'pending'];
 // OHD's perspective either terminal state means "OH is done with this job".
 const TERMINAL_OH_STATUSES = ['completed', 'cancelled'];
 
+// A stored /jobs/pending ETag is only reusable against the same query.
+// includeNoArtwork isn't currently sent by OHD, but the server's ETag
+// covers it — so the key format is forward-compatible for the day it
+// starts being sent. Same rationale for X-Location-ID: switching the
+// operator's location must invalidate the etag.
+function _pendingEtagKeyFor(locationId, includeNoArtwork = false) {
+  return `${locationId || ''}|${includeNoArtwork ? 'true' : 'false'}`;
+}
+
+// Presigned URLs in /jobs/pending have a 1-hour TTL. Force a genuine 200
+// while at least this much time is still on the clock so a 304 never
+// leaves us holding URLs that expire mid-download. With a 60s poll cycle,
+// that costs us roughly one full body per hour — the intended trade-off.
+const PRESIGN_SAFETY_MS = 5 * 60 * 1000;
+
 class JobService {
   constructor() {
     // Load persisted jobs from disk
     this.jobs = jobStore.get('jobs') || [];
     this.lastFetchTime = jobStore.get('lastFetchTime') || null;
+    // M5: conditional /jobs/pending state. Persisted so a restart before
+    // the next full 200 still knows what to send as If-None-Match.
+    // _pendingEtag is sent verbatim, weak prefix (`W/"..."`) included.
+    // _pendingEtagKey pins the etag to the query it was issued against
+    // (locationId + includeNoArtwork) — a query-key change drops the
+    // stored etag on the next fetch.
+    // _presignExpiresAt gates conditional requests off before the URLs
+    // go stale (see PRESIGN_SAFETY_MS above).
+    // _forcePendingRefresh is set by invalidatePendingEtag() when an
+    // artwork download fails on a presumed-expired URL, so the next
+    // fetch omits If-None-Match and gets fresh URLs unconditionally.
+    this._pendingEtag         = jobStore.get('pendingEtag',         null);
+    this._pendingEtagKey      = jobStore.get('pendingEtagKey',      null);
+    this._presignExpiresAt    = jobStore.get('presignExpiresAt',    null);
+    this._forcePendingRefresh = jobStore.get('forcePendingRefresh', false);
     logger.info('JobService: loaded persisted jobs', { count: this.jobs.length });
 
     // Startup self-heal: reset sticky "Order manifest not found" errors to
@@ -68,16 +98,40 @@ class JobService {
   }
 
   /**
-   * Persist current jobs array to disk
+   * Persist current jobs array + M5 conditional-fetch state to disk
    */
   _persistJobs() {
     jobStore.set('jobs', this.jobs);
     jobStore.set('lastFetchTime', this.lastFetchTime);
+    jobStore.set('pendingEtag',         this._pendingEtag);
+    jobStore.set('pendingEtagKey',      this._pendingEtagKey);
+    jobStore.set('presignExpiresAt',    this._presignExpiresAt);
+    jobStore.set('forcePendingRefresh', this._forcePendingRefresh);
+  }
+
+  /**
+   * Called by polling-service when an artwork download fails on what
+   * looks like an expired presigned URL. Guarantees the next fetchJobs
+   * omits If-None-Match, so we get a fresh 200 with new URLs on the very
+   * next cycle instead of waiting for the presign safety window.
+   */
+  invalidatePendingEtag() {
+    this._forcePendingRefresh = true;
+    this._persistJobs();
   }
 
   /**
    * Fetch pending jobs from OrderHub API
    * GET {baseUrl}/jobs/pending
+   *
+   * M5 / ohd-api v1.4.0: sends If-None-Match with the stored ETag when
+   * the server has advertised `features.pending_etag` AND we still have
+   * a fresh presign window AND the current query hasn't changed AND we
+   * haven't been asked to force a refresh. On 304 we do not touch the
+   * cached jobs array — we only advance lastFetchTime and re-derive the
+   * hold flags (routing holds are locally configured and change out-of-
+   * band; without re-deriving them here, operator hold changes would
+   * appear to do nothing until the next 200).
    */
   async fetchJobs() {
     const { baseUrl, key: apiKey, organizationId, locationId } = configService.getApiSettings();
@@ -87,15 +141,68 @@ class JobService {
       return this.jobs;
     }
 
+    const { serverCapabilities } = require('./server-capabilities');
+
     try {
       const fullUrl = baseUrl + '/jobs/pending';
-      logger.info('Fetching pending jobs from API', { url: fullUrl });
 
       const extraHeaders = {};
       if (organizationId) extraHeaders['X-Organization-ID'] = organizationId;
-      if (locationId) extraHeaders['X-Location-ID'] = locationId;
+      if (locationId)     extraHeaders['X-Location-ID']     = locationId;
+
+      // Drop the stored etag if it belongs to a different query — a
+      // location change would otherwise 304 against a set the operator
+      // no longer wants.
+      const currentKey = _pendingEtagKeyFor(locationId);
+      if (this._pendingEtag && this._pendingEtagKey !== currentKey) {
+        this._pendingEtag    = null;
+        this._pendingEtagKey = null;
+      }
+
+      // Decide whether to send If-None-Match. All gates must hold.
+      const presignFresh = this._presignExpiresAt
+        && (Date.parse(this._presignExpiresAt) - Date.now() > PRESIGN_SAFETY_MS);
+      const conditionalOk = serverCapabilities.isEnabled('pending_etag')
+        && this._pendingEtag
+        && !this._forcePendingRefresh
+        && presignFresh;
+      if (conditionalOk) {
+        extraHeaders['If-None-Match'] = this._pendingEtag;
+      }
+
+      logger.info('Fetching pending jobs from API', { url: fullUrl, conditional: conditionalOk });
 
       const response = await this._httpRequest('GET', fullUrl, apiKey, null, extraHeaders);
+
+      if (response.statusCode === 304) {
+        // Empty body — do NOT JSON.parse. Do NOT touch this.jobs, and do
+        // not clear or reset anything.
+        // DO advance lastFetchTime so the UI's "last checked" stays honest.
+        this.lastFetchTime = Date.now();
+
+        // Re-derive hold flags over the cached jobs. On the 200 path this
+        // happens inside _mergeJobs; on 304 that path is bypassed, but
+        // routing holds are configured LOCALLY and can change between
+        // polls, so we must re-derive them here or the operator's hold
+        // changes would silently no-op until the next 200.
+        const routingHeldProcesses = _getRoutingHeldProcesses();
+        const ctx = { routingHeldProcesses };
+        this.jobs = this.jobs.map(j => {
+          const hold = computeHoldForReview(j, ctx);
+          return { ...j, ...hold, _holdReasonsText: formatHoldReasons(hold._holdReasons) };
+        });
+
+        // Server may re-issue the etag on 304 — pick it up if so.
+        const newEtag = response.headers && (response.headers.etag || response.headers.ETag);
+        if (newEtag) {
+          this._pendingEtag    = newEtag;
+          this._pendingEtagKey = currentKey;
+        }
+
+        this._persistJobs();
+        logger.info('Jobs unchanged (304)');
+        return this.jobs;
+      }
 
       if (response.statusCode >= 200 && response.statusCode < 300) {
         const data = JSON.parse(response.body);
@@ -117,9 +224,23 @@ class JobService {
         // Merge: keep local _status for jobs we've already processed
         this.jobs = this._mergeJobs(filteredJobs);
         this.lastFetchTime = Date.now();
+
+        // M5: capture the ETag (prefer header, fall back to body field)
+        // and the presign expiry. Reset the force-refresh flag — we just
+        // took the full body, so whatever prompted the force is resolved.
+        const etagFromHeader = response.headers && (response.headers.etag || response.headers.ETag);
+        const etagFromBody   = typeof data.etag === 'string' ? data.etag : null;
+        const newEtag        = etagFromHeader || etagFromBody || null;
+        this._pendingEtag         = newEtag;
+        this._pendingEtagKey      = newEtag ? currentKey : null;
+        this._presignExpiresAt    = typeof data.presign_expires_at === 'string' ? data.presign_expires_at : null;
+        this._forcePendingRefresh = false;
+
         this._persistJobs();
         logger.info('Jobs fetched successfully', { total: mappedJobs.length, afterLocationFilter: filteredJobs.length });
       } else {
+        // Do NOT clear the stored etag — a transient 5xx shouldn't force
+        // a full body on the next cycle.
         logger.logWarning('Failed to fetch jobs', {
           statusCode: response.statusCode,
           body: response.body.substring(0, 200)
@@ -871,7 +992,12 @@ class JobService {
           let data = '';
           res.on('data', (chunk) => { data += chunk; });
           res.on('end', () => {
-            resolve({ statusCode: res.statusCode, body: data });
+            // headers exposed so callers can read ETag / other response
+            // metadata (M5 / ohd-api v1.4.0 conditional /jobs/pending).
+            // Every existing caller reads statusCode + body by property
+            // name — none destructure positionally — so adding a third
+            // field is additive.
+            resolve({ statusCode: res.statusCode, body: data, headers: res.headers });
           });
         });
 
