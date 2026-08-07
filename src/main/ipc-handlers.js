@@ -1199,6 +1199,16 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
     return routingService.getAllSizeOptions();
   });
 
+  // ohd-api v1.4.0 — server-capabilities snapshot. Used by the Settings
+  // panel to decide whether the polling-interval input is operator-editable
+  // or centrally-managed. Lazy-require: server-capabilities pulls
+  // electron-store at singleton-instantiation, and we don't want to widen
+  // ipc-handlers' load-time surface for this one read.
+  ipcMain.handle('ohd:server:get-capabilities', async () => {
+    const { serverCapabilities } = require('./services/server-capabilities');
+    return serverCapabilities.getSnapshot();
+  });
+
   ipcMain.handle('ohd:routing:save-channel-mapping', async (event, mapping) => {
     try {
       // Fuji JobMaker mappings get validated against fuji-jobmaker-config so

@@ -2170,6 +2170,29 @@ function populateForm(config) {
   // Shared
   document.getElementById('pollingInterval').value = config.pollingInterval || 60;
 
+  // ohd-api v1.4.0 — when OrderHub advertises a poll_interval_seconds on
+  // /checkin, the server value wins everywhere the timer is read (see
+  // polling-service.getPollingInterval). Reflect that in the UI so an
+  // operator editing this field doesn't file a bug when nothing changes.
+  // The saved config value stays live as the offline fallback (10-600
+  // validation in config-service still applies); this only rewrites the
+  // input's *displayed* value + locks it while the server owns it.
+  window.electronAPI.getServerCapabilities().then((caps) => {
+    const input = document.getElementById('pollingInterval');
+    if (!input) return;
+    const hint = input.parentElement && input.parentElement.querySelector('.field-hint');
+    if (caps && caps.pollIntervalSeconds != null) {
+      input.value    = caps.pollIntervalSeconds;
+      input.readOnly = true;
+      if (hint) hint.textContent = `Set centrally by OrderHub (${caps.pollIntervalSeconds}s). Contact Pixfizz to change it.`;
+    } else {
+      // Advertised value dropped or never present — restore the editable
+      // default so the field doesn't stay locked from a prior state.
+      input.readOnly = false;
+      if (hint) hint.textContent = 'How often to check for new jobs and files (10-600 seconds).';
+    }
+  }).catch(() => { /* IPC failure — leave the operator-editable default */ });
+
   // Process folder
   document.getElementById('processFolderPath').value = config.processFolderPath || '';
 

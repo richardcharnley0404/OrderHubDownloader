@@ -1,3 +1,90 @@
+## Unreleased
+
+Adopts ohd-api v1.4.0 to cut OHD's polling cost against OrderHub. In
+prod OHD spends ~99% of its API traffic — and ~94% of OrderHub's
+backend compute — on per-job status GETs that changed nothing. This
+release turns that into a single batched call, adds a conditional
+`/jobs/pending` (304 on unchanged), and lets OrderHub steer both
+cadences per-org. Every new behaviour is gated on a feature flag the
+server hands back on `/checkin`; against a pre-1.4.0 server the app
+runs exactly as it did in v1.8.0. See
+`docs/integrations/ohd-api-efficiency.md` for the full contract and
+the fallback rules.
+
+### New: server-advertised polling cadence + feature flags
+
+`/checkin` responses can now carry `poll_interval_seconds`,
+`status_poll_interval_seconds`, and a `features` bag. Persisted per-
+install in a new `server-capabilities` electron-store so a restart
+before the next check-in keeps the last configuration. Invalid or
+out-of-range values are ignored (never clamped); absent fields leave
+the stored value untouched; `disableFeatureForSession` mutes a flag
+in-memory only so one bad server response can't stick across restarts.
+`polling-service.getPollingInterval` and `getStatus().interval` route
+through this, so the server value wins at boot, on the fly, and in the
+UI. When the cadence changes on a live check-in, the polling timer
+re-clocks without waiting for a restart.
+
+### New: batched status sync (POST /jobs/status-batch)
+
+Replaces the per-job GET loop with sequential batches of up to
+`min(100, features.status_batch_max)` ids per request. Behaviour on
+per-id outcomes mirrors the per-job path byte-for-byte: `Completed`
+and `Cancelled` (case-insensitive) collapse to local
+`_status='completed'`; `errors[]` with `status:400` stamps
+`_status='error'` with the same legacy message so 400s surface in the
+UI instead of log-looping; any other error status warns and leaves the
+job alone (404 must NOT mark jobs as errored — that would strand
+transiently-missing work). Ids sent as strings so numeric local
+`job.id`s match server-echoed `requested_job_id`s; response order not
+assumed. Endpoint 404 → feature muted for the session + fall through
+to the per-job path for the whole cycle. `GET /jobs/{id}` is still
+available for one-off lookups — only removed from the polling loop.
+
+### New: status sync on its own cadence
+
+When `status_poll_interval_seconds` is advertised, the status sync
+only runs at that cadence instead of every `pollJobs` cycle.
+`lastStatusSyncAt` advances in a `finally` so a throwing sync can't
+collapse the gate back to every cycle. Surfaced in
+`getStatus().lastStatusSync`. Accepted trade-off, already signed off:
+at the default 300s cadence a job completed in OrderHub can take up
+to that long to clear from Awaiting Processing.
+
+### New: conditional /jobs/pending via If-None-Match
+
+Sends `If-None-Match` on `/jobs/pending` when the server has
+advertised `features.pending_etag`. Persists the etag, the query key
+it belongs to (locationId + `include_no_artwork`), and
+`presign_expires_at` in `jobs-cache`. Query-key changes drop the
+stored etag. Because a 304 doesn't extend presigned URL validity, we
+force a genuine 200 while at least `PRESIGN_SAFETY_MS` (5 min) of the
+1-hour TTL is still on the clock — that costs roughly one full body
+per hour at the default 60s cadence. On 304 we don't `JSON.parse` the
+empty body and don't touch `this.jobs`; we do advance `lastFetchTime`
+and re-derive hold flags (routing holds are locally configured and
+would otherwise appear to no-op until the next 200). When an artwork
+download fails, `polling-service` calls `invalidatePendingEtag()` so
+the very next fetch omits the conditional header and gets fresh URLs.
+
+### New: settings shows who owns the polling interval
+
+When `pollIntervalSeconds` is advertised, the Polling Interval field
+in Settings is populated from the server value, marked read-only, and
+the hint text below reads `Set centrally by OrderHub (Ns). Contact
+Pixfizz to change it.` The saved config value is still sent on save
+as the offline fallback (config-service's 10–600 validation still
+applies). Prevents the "I edited the field and nothing changed" bug
+reports.
+
+### New: telemetry headers on every ohd-api request
+
+`X-OHD-Version` and `X-OHD-Instance-ID` are sent with every request
+to the ohd-api host (job-service, updater, presign-service). Fire-
+and-forget; no response behaviour depends on them. `orderhub-api-client`
+(a different service with a different auth contract) is deliberately
+untouched.
+
 ## v1.8.0 - 2026-08-05
 
 Fuji PIC Pro controller support + review-round hardening across the

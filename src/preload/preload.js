@@ -84,6 +84,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveException:         (exc)     => ipcRenderer.invoke('ohd:routing:save-exception',        exc),
   deleteException:       (id)      => ipcRenderer.invoke('ohd:routing:delete-exception',      { id }),
   getProcessValues:      ()        => ipcRenderer.invoke('ohd:routing:get-process-values'),
+
+  // ohd-api v1.4.0 — server-advertised polling cadence + feature flags.
+  // Returned shape: { pollIntervalSeconds, statusPollIntervalSeconds,
+  // features: { status_batch, pending_etag, presign_expiry, status_batch_max },
+  // lastCheckinAt }. Null intervals mean "server hasn't advertised one".
+  getServerCapabilities: () => ipcRenderer.invoke('ohd:server:get-capabilities'),
   // v1.7.8 — release a routing-hold. controllerId=null releases to default;
   // controllerId=<string> reassigns. Returns { ok, reason?, controller?, releasedTo? }.
   // ok=false with reason='no-channel' carries `controller` so the renderer
