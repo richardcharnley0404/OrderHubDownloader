@@ -213,6 +213,32 @@ function resolveRoute(job) {
             checkOrderStatus: false,
           };
         }
+        if (overrideCtrl.type === 'darkroompro') {
+          // Mirror the shape returned by the darkroompro branch of the main
+          // resolveRoute path below. Without this, a reassigned darkroompro
+          // job fell into the DPOF fallthrough, silently losing
+          // artworkRootPath and orderLastNameFormat on the route.
+          // _sendViaDarkroomProRouted reads both directly off the route
+          // (print-service.js:1983-1984), so their absence produced broken
+          // artwork paths and default order-name formatting on the reassign
+          // path. Every field carried here must stay in sync with the
+          // main darkroompro literal — the override section has no shared
+          // builder; see BACKLOG.
+          return {
+            type:                'controller',
+            controllerType:      'darkroompro',
+            controllerId:        overrideCtrl.id,
+            controllerName:      overrideCtrl.name,
+            outputPath:          overrideCtrl.outputPath,
+            artworkRootPath:     overrideCtrl.artworkRootPath     || '',
+            orderLastNameFormat: overrideCtrl.orderLastNameFormat || 'orderRef_lastName',
+            channelMappingId:    overrideMapping.id,
+            channelNumber:       null,
+            printSizeCode:       null,
+            bannerSheet:         false,
+            checkOrderStatus:    overrideCtrl.checkOrderStatus !== false,
+          };
+        }
 
         // DPOF and other controller types
         const printSizeCode = resolvePrintSizeCode(overrideMapping);

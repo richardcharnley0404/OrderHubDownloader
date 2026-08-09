@@ -49,6 +49,18 @@ the flag can be set.
 deadline" fail intermittently under full-suite load. A ~30 ms write race, pre-existing,
 untouched by 1.8.0. Re-run before believing a red suite.
 
+**`resolveRoute`'s `_channelMappingOverride` block duplicates the route shape per
+controller type.** There is a hand-written literal per known type (`fujijobmaker`,
+`fujipicpro`, `frontline`, and — 2026-08-09 — `darkroompro`), with a DPOF fallthrough
+catching everything else. No shared builder. Any future route-level field has to be added
+in **two** places (the type's main branch AND its override branch), and the same
+silent-drop hazard the darkroompro branch fixed likely still exists for the Fuji branches:
+the override literals for JobMaker and PIC Pro were spot-checked to carry the fields the
+dispatch methods read *today*, but they aren't obviously drift-proof against the primary
+literals. Consider extracting a per-type route builder shared by both entry points before
+the next route field is added — or at minimum add an override/non-override key-set parity
+test per type (there is one for darkroompro in `routing-override-darkroompro.test.js`).
+
 **Settings polling-interval field on a fresh install shows editable until first check-in.**
 The Settings panel reads `ohd:server:get-capabilities` once when the panel opens (see
 `renderer.js` — `populateForm`), so the first time an operator installs OHD v1.9.0 and opens
