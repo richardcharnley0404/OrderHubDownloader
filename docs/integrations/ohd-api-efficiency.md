@@ -101,6 +101,33 @@ still counts as "attempted" and can't collapse the gate back to every
 cycle. This is defensive — an actual sync throw would already be logged
 by the polling-service `catch`.
 
+## Changing the cadence — server-side dials
+
+The two cadences live in the `organization_preferences` table in the
+**pixfizz-oms Supabase project** — that's where the ohd-api Edge
+Function reads them from before answering `/checkin`. Both are
+per-organisation and take effect on the very next check-in from every
+OHD install in that org, so **no client release is needed** to change
+them.
+
+| Preference column                       | Default | Purpose |
+|-----------------------------------------|---------|---------|
+| `ohd_poll_interval_seconds`             | `60`    | Cadence of the main `/jobs/pending` poll. Clamped to 10–600 client-side. Lower = more responsive to new jobs, higher = less traffic. |
+| `ohd_status_poll_interval_seconds`      | `300`   | Cadence of the batched status sync (see `status_batch` above). Clamped to 30–3600 client-side. This is what the 300s completion-lag trade-off refers to. |
+
+**There is no admin UI for these fields as of 2026-08-09.** Both
+columns exist on the schema and the Edge Function reads them, but no
+Lovable screen has been built to edit them yet — changing either
+means a direct SQL update against `organization_preferences` in
+Supabase (or scripting one through the CLI). As of writing, all 30
+orgs are still on the defaults.
+
+Once you write a new value, every OHD install in that org picks it up
+on its next `/checkin`: 4-hour schedule, or immediately on next
+launch. `polling-service.applyServerCadence()` re-clocks the running
+timer without waiting for a restart. If/when an admin UI lands,
+update this section.
+
 ## Where the server value wins vs the client config
 
 `configService.get('pollingInterval')` (the user's setting in

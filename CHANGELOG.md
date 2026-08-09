@@ -1,89 +1,103 @@
-## Unreleased
+## v1.9.0 - 2026-08-09
 
 Adopts ohd-api v1.4.0 to cut OHD's polling cost against OrderHub. In
-prod OHD spends ~99% of its API traffic — and ~94% of OrderHub's
-backend compute — on per-job status GETs that changed nothing. This
-release turns that into a single batched call, adds a conditional
-`/jobs/pending` (304 on unchanged), and lets OrderHub steer both
-cadences per-org. Every new behaviour is gated on a feature flag the
-server hands back on `/checkin`; against a pre-1.4.0 server the app
-runs exactly as it did in v1.8.0. See
-`docs/integrations/ohd-api-efficiency.md` for the full contract and
-the fallback rules.
+prod OHD spends ~99% of its API traffic and ~94% of OrderHub's
+backend compute on per-job status GETs that changed nothing. This
+release turns that into a single batched call per poll cycle, adds a
+conditional `/jobs/pending` (304 on unchanged), and moves both
+cadences under OrderHub-side control per organisation. Every new
+behaviour is gated on a feature flag the server hands back on
+`/checkin`; against a pre-1.4.0 server the app runs exactly as it did
+in v1.8.0. Full contract and fallback rules in
+`docs/integrations/ohd-api-efficiency.md`.
 
-### New: server-advertised polling cadence + feature flags
+### New: Batched status sync (POST /jobs/status-batch)
+The out-of-band status sync no longer issues one `GET /jobs/{id}` per
+active job per poll cycle. Enabled via `features.status_batch`, ids
+are sent in sequential batches of `min(100, features.status_batch_max)`
+per POST. Behaviour on per-id outcomes mirrors the per-job path
+byte-for-byte: `Completed` and `Cancelled` (case-insensitive) collapse
+to local `_status='completed'`; `errors[]` with `status:400` stamps
+`_status='error'` with the same legacy "OrderHub no longer recognizes
+this job" message so 400s surface in the UI instead of log-looping;
+any other error status (403/404/5xx) warns and leaves the job alone
+— 404 must not mark jobs as errored or transient misses would strand
+active work. Ids are sent as strings so numeric local `job.id`s match
+server-echoed `requested_job_id`s; response order is not assumed. HTTP
+404 on the endpoint itself → the feature is muted for the session and
+the per-job path takes over for the rest of the cycle. `GET
+/jobs/{id}` is still available for one-off lookups — only removed
+from the polling loop.
 
+### New: Conditional /jobs/pending via If-None-Match
+`/jobs/pending` sends `If-None-Match` when the server has advertised
+`features.pending_etag`. The stored ETag is pinned to its query key
+(locationId + `include_no_artwork`) — a query change drops it. Because
+a 304 does not extend presigned URL validity, we force a genuine 200
+while at least `PRESIGN_SAFETY_MS` (5 min) of the 1-hour TTL is still
+on the clock — costs roughly one full body per hour at the default 60
+s cadence, everything between those hourly refreshes is a cheap 304.
+On 304 the response body is empty and untouched (no `JSON.parse`),
+`this.jobs` is not reset, `lastFetchTime` advances, and hold flags are
+re-derived so an operator's routing-hold change takes effect on the
+very next poll instead of waiting for the next 200. When an artwork
+download fails, `polling-service` calls `invalidatePendingEtag()` so
+the very next fetch omits the conditional header and gets fresh URLs
+— self-heals expired-URL failures within one cycle.
+
+### New: OrderHub-driven polling cadence + feature flags
 `/checkin` responses can now carry `poll_interval_seconds`,
-`status_poll_interval_seconds`, and a `features` bag. Persisted per-
-install in a new `server-capabilities` electron-store so a restart
-before the next check-in keeps the last configuration. Invalid or
+`status_poll_interval_seconds`, and a `features` bag. OHD reads them
+on every check-in and persists them per-install to a new
+`server-capabilities` electron-store, so a restart before the next
+check-in still behaves as the last check-in configured. Invalid or
 out-of-range values are ignored (never clamped); absent fields leave
 the stored value untouched; `disableFeatureForSession` mutes a flag
-in-memory only so one bad server response can't stick across restarts.
-`polling-service.getPollingInterval` and `getStatus().interval` route
-through this, so the server value wins at boot, on the fly, and in the
-UI. When the cadence changes on a live check-in, the polling timer
-re-clocks without waiting for a restart.
+in-memory only so one bad server response can't stick across
+restarts. When a check-in changes the cadence live, the polling timer
+re-clocks without waiting for the next app restart. Every request to
+the ohd-api host now also carries `X-OHD-Version` and
+`X-OHD-Instance-ID` (fire-and-forget) so OrderHub can see which build
++ install is talking to it; the different-service `orderhub-api-client`
+with its `X-API-Key` contract is deliberately untouched.
 
-### New: batched status sync (POST /jobs/status-batch)
+### New: [ohd-api] check-in read-out in the Activity Log
+`_checkIn` logs one `[ohd-api] /checkin capabilities` info line per
+successful check-in, listing `poll_interval_seconds`,
+`status_poll_interval_seconds`, and each feature flag. When the
+server hasn't included the `features` block at all, the value
+collapses to the sentinel string `absent` — a grep for
+`features:'absent'` in the Activity Log surfaces pre-1.4.0 servers
+immediately. Bounded to the listed keys — nothing else from the
+response leaks in, no API key ever logged. Meant to replace the
+"attach a debugger to see what came back" step in support cases.
 
-Replaces the per-job GET loop with sequential batches of up to
-`min(100, features.status_batch_max)` ids per request. Behaviour on
-per-id outcomes mirrors the per-job path byte-for-byte: `Completed`
-and `Cancelled` (case-insensitive) collapse to local
-`_status='completed'`; `errors[]` with `status:400` stamps
-`_status='error'` with the same legacy message so 400s surface in the
-UI instead of log-looping; any other error status warns and leaves the
-job alone (404 must NOT mark jobs as errored — that would strand
-transiently-missing work). Ids sent as strings so numeric local
-`job.id`s match server-echoed `requested_job_id`s; response order not
-assumed. Endpoint 404 → feature muted for the session + fall through
-to the per-job path for the whole cycle. `GET /jobs/{id}` is still
-available for one-off lookups — only removed from the polling loop.
+### Changed: Status sync runs on its own cadence — up to 300 s completion lag
+When `status_poll_interval_seconds` is advertised (Pixfizz default:
+300 s), the out-of-band status sync only runs at that cadence instead
+of every `pollJobs` cycle. That's where most of the traffic saving
+comes from — but it means an OrderHub-side change (mark completed,
+cancel, another OHD instance completing the job) can take up to
+`status_poll_interval_seconds` to clear from OHD's Awaiting Processing
+view. The `lastStatusSyncAt` bookkeeping advances in a `finally` so a
+throwing sync can't collapse the gate back to every cycle, and
+`getStatus().lastStatusSync` surfaces the last attempt alongside
+`lastCheck`. When the interval is not advertised (pre-1.4.0 server),
+the sync runs on every cycle as before. The trade-off is accepted;
+`docs/integrations/ohd-api-efficiency.md` covers the reasoning and
+why a `forceStatusSyncNext()` hook is deliberately not built.
 
-### New: status sync on its own cadence
-
-When `status_poll_interval_seconds` is advertised, the status sync
-only runs at that cadence instead of every `pollJobs` cycle.
-`lastStatusSyncAt` advances in a `finally` so a throwing sync can't
-collapse the gate back to every cycle. Surfaced in
-`getStatus().lastStatusSync`. Accepted trade-off, already signed off:
-at the default 300s cadence a job completed in OrderHub can take up
-to that long to clear from Awaiting Processing.
-
-### New: conditional /jobs/pending via If-None-Match
-
-Sends `If-None-Match` on `/jobs/pending` when the server has
-advertised `features.pending_etag`. Persists the etag, the query key
-it belongs to (locationId + `include_no_artwork`), and
-`presign_expires_at` in `jobs-cache`. Query-key changes drop the
-stored etag. Because a 304 doesn't extend presigned URL validity, we
-force a genuine 200 while at least `PRESIGN_SAFETY_MS` (5 min) of the
-1-hour TTL is still on the clock — that costs roughly one full body
-per hour at the default 60s cadence. On 304 we don't `JSON.parse` the
-empty body and don't touch `this.jobs`; we do advance `lastFetchTime`
-and re-derive hold flags (routing holds are locally configured and
-would otherwise appear to no-op until the next 200). When an artwork
-download fails, `polling-service` calls `invalidatePendingEtag()` so
-the very next fetch omits the conditional header and gets fresh URLs.
-
-### New: settings shows who owns the polling interval
-
-When `pollIntervalSeconds` is advertised, the Polling Interval field
-in Settings is populated from the server value, marked read-only, and
-the hint text below reads `Set centrally by OrderHub (Ns). Contact
-Pixfizz to change it.` The saved config value is still sent on save
-as the offline fallback (config-service's 10–600 validation still
-applies). Prevents the "I edited the field and nothing changed" bug
-reports.
-
-### New: telemetry headers on every ohd-api request
-
-`X-OHD-Version` and `X-OHD-Instance-ID` are sent with every request
-to the ohd-api host (job-service, updater, presign-service). Fire-
-and-forget; no response behaviour depends on them. `orderhub-api-client`
-(a different service with a different auth contract) is deliberately
-untouched.
+### Changed: Polling Interval field in Settings shows who owns it
+When OrderHub advertises `poll_interval_seconds`, the Polling Interval
+field in Settings → Polling now populates from the server value, marks
+itself read-only, and the hint text below reads *Set centrally by
+OrderHub (Ns). Contact Pixfizz to change it.* The saved config value
+is still sent on save as the offline fallback (config-service's
+10–600 validation still applies). Kills the "I edited the field and
+nothing changed" bug report. First-launch wrinkle noted in
+`docs/BACKLOG.md`: the Settings panel reads capabilities once on open,
+so on a brand-new install the field shows editable until the first
+check-in lands — self-corrects on next panel open.
 
 ## v1.8.0 - 2026-08-05
 

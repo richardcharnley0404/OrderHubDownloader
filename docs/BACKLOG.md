@@ -49,6 +49,17 @@ the flag can be set.
 deadline" fail intermittently under full-suite load. A ~30 ms write race, pre-existing,
 untouched by 1.8.0. Re-run before believing a red suite.
 
+**Settings polling-interval field on a fresh install shows editable until first check-in.**
+The Settings panel reads `ohd:server:get-capabilities` once when the panel opens (see
+`renderer.js` — `populateForm`), so the first time an operator installs OHD v1.9.0 and opens
+Settings *before* the initial `/checkin` has landed, the Polling Interval input renders
+editable with today's default text — even in a Pixfizz org where OrderHub is advertising a
+central value. The next panel open (or an app restart after the first check-in has run)
+shows it correctly read-only with the *Set centrally by OrderHub (Ns)* hint. Cosmetic,
+self-correcting, not release-blocking. Fix would be pushing capabilities to the renderer
+from `_checkIn` (an `ipcRenderer.send`) so the input flips live rather than only on the
+next panel open — worth doing if it starts generating support tickets, but not otherwise.
+
 ---
 
 ## Unverified
