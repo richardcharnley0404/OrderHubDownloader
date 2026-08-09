@@ -183,9 +183,50 @@ function formatHoldReasons(reasons) {
   return reasons.map((r) => REASON_TEXT[r] || r).join('; ');
 }
 
+/**
+ * Derive the short chip label shown on the Jobs grid for a held job.
+ * The tooltip carries the detailed reason list (`formatHoldReasons`);
+ * this returns the compact category name.
+ *
+ * Categories:
+ *   - All-manual (MANUAL_SOURCE and/or MANUAL_FILE, nothing else) →
+ *     "Manual — review required" — matches the pre-M3 label so operators
+ *     see no change on the millions of existing manual jobs.
+ *   - Only OVER_BATCH_THRESHOLD → "Large job — review required" —
+ *     distinguishes a batch-splitting hold from a manual-artwork hold,
+ *     which is the whole point of the fix (a large Pixfizz order was
+ *     incorrectly rendering as "Manual" in the pre-fix renderer).
+ *   - Anything else (mixed set, routing-hold alone, empty when the
+ *     caller mis-invokes) → "Review required" (generic; the tooltip
+ *     carries the specifics).
+ *
+ * Kept next to formatHoldReasons and REASON_TEXT so the mapping stays
+ * in one place — the renderer is vanilla JS with no module imports and
+ * MUST NOT duplicate the mapping.
+ *
+ * @param {string[]} reasons - Same shape as `_holdReasons`.
+ * @returns {string}
+ */
+function deriveHoldChipLabel(reasons) {
+  if (!Array.isArray(reasons) || reasons.length === 0) {
+    // Defensive fallback — a held job with an empty reasons array is a
+    // caller bug, but be gentle: show the generic label rather than
+    // rendering an empty chip.
+    return 'Review required';
+  }
+  const isManualOnly = reasons.every(
+    (r) => r === REASON.MANUAL_SOURCE || r === REASON.MANUAL_FILE,
+  );
+  if (isManualOnly) return 'Manual — review required';
+  const isBatchOnly = reasons.length === 1 && reasons[0] === REASON.OVER_BATCH_THRESHOLD;
+  if (isBatchOnly) return 'Large job — review required';
+  return 'Review required';
+}
+
 module.exports = {
   computeHoldForReview,
   formatHoldReasons,
+  deriveHoldChipLabel,
   REASON,
   REASON_TEXT,
 };

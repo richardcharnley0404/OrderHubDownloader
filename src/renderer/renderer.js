@@ -968,15 +968,19 @@ function renderJobTable(jobs) {
         `</span>`;
     }
 
-    // S3 Artwork Channel M2 (2026-05-24) — yellow "Manual — review required"
-    // chip. Job is held from AUTO dispatch only; operator Send-to-Print still
-    // works. Tooltip text is pre-formatted by job-service._mapApiJob via
-    // shared/holdForReview.formatHoldReasons() so we don't duplicate the
-    // reason→text mapping here (vanilla renderer.js has no module imports).
+    // Hold-for-review chip. Job is held from AUTO dispatch only; operator
+    // Send-to-Print still works. BOTH the chip label AND the tooltip text
+    // are pre-computed by job-service._mapApiJob via
+    // shared/holdForReview.deriveHoldChipLabel() and formatHoldReasons() so
+    // we don't duplicate the reason→text mapping here (vanilla renderer.js
+    // has no module imports). Fallback preserves the pre-fix label for any
+    // legacy jobs-cache entry that lacks _holdChipLabel — the next poll
+    // stamps it and the badge updates.
     if (job._holdForReview) {
+      const chipLabel  = job._holdChipLabel   || 'Manual — review required';
       const reasonText = job._holdReasonsText || 'Manual artwork — review before printing';
-      const tipText = `Auto-print held: ${reasonText}. Click Send to Print to dispatch anyway.`;
-      flagsHtml += `<span class="hold-review-chip" title="${escapeHtml(tipText)}">Manual &mdash; review required</span>`;
+      const tipText    = `Auto-print held: ${reasonText}. Click Send to Print to dispatch anyway.`;
+      flagsHtml += `<span class="hold-review-chip" title="${escapeHtml(tipText)}">${escapeHtml(chipLabel)}</span>`;
     }
 
     // For error-status jobs, surface the _errorMessage right next to the

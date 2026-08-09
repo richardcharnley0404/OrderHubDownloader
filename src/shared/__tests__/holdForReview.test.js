@@ -15,6 +15,7 @@ const assert = require('node:assert/strict');
 const {
   computeHoldForReview,
   formatHoldReasons,
+  deriveHoldChipLabel,
   REASON,
   REASON_TEXT,
 } = require('../holdForReview');
@@ -350,4 +351,75 @@ test('Batch threshold: OVER_BATCH_THRESHOLD has operator-readable text in REASON
   const t = REASON_TEXT[REASON.OVER_BATCH_THRESHOLD];
   assert.ok(typeof t === 'string' && t.length > 0);
   assert.ok(/send to print/i.test(t), 'tooltip should tell the operator what to do next');
+});
+
+// ── deriveHoldChipLabel — short label for the Jobs-grid chip ────────────────
+//
+// Fix for a live bug: the pre-M3 renderer hard-coded "Manual — review
+// required" for any _holdForReview. When M3 introduced OVER_BATCH_THRESHOLD
+// a large Pixfizz order rendered as "Manual" in the Jobs grid, even though
+// the hold reason was actually the batch cap. The chip label now derives
+// from _holdReasons; the tooltip (formatHoldReasons) is unchanged.
+
+test('deriveHoldChipLabel: manual-source only → "Manual — review required" (unchanged from pre-M3)', () => {
+  assert.equal(deriveHoldChipLabel([REASON.MANUAL_SOURCE]), 'Manual — review required');
+});
+
+test('deriveHoldChipLabel: manual-file only → "Manual — review required"', () => {
+  assert.equal(deriveHoldChipLabel([REASON.MANUAL_FILE]), 'Manual — review required');
+});
+
+test('deriveHoldChipLabel: both manual reasons → "Manual — review required" (still all-manual)', () => {
+  assert.equal(deriveHoldChipLabel([REASON.MANUAL_SOURCE, REASON.MANUAL_FILE]), 'Manual — review required');
+});
+
+test('deriveHoldChipLabel: over-batch-threshold only → "Large job — review required" (the M3 fix)', () => {
+  assert.equal(deriveHoldChipLabel([REASON.OVER_BATCH_THRESHOLD]), 'Large job — review required');
+});
+
+test('deriveHoldChipLabel: routing-hold only → "Review required" (generic, not "Manual")', () => {
+  // Also a pre-existing renderer bug — the pre-fix chip would have said
+  // "Manual" for a routing-hold. The generic label is strictly better.
+  assert.equal(deriveHoldChipLabel([REASON.ROUTING_HOLD]), 'Review required');
+});
+
+test('deriveHoldChipLabel: manual + batch → generic "Review required" (mixed set)', () => {
+  assert.equal(
+    deriveHoldChipLabel([REASON.MANUAL_SOURCE, REASON.OVER_BATCH_THRESHOLD]),
+    'Review required',
+  );
+});
+
+test('deriveHoldChipLabel: manual + routing → generic "Review required"', () => {
+  assert.equal(
+    deriveHoldChipLabel([REASON.MANUAL_SOURCE, REASON.ROUTING_HOLD]),
+    'Review required',
+  );
+});
+
+test('deriveHoldChipLabel: routing + batch → generic "Review required"', () => {
+  assert.equal(
+    deriveHoldChipLabel([REASON.ROUTING_HOLD, REASON.OVER_BATCH_THRESHOLD]),
+    'Review required',
+  );
+});
+
+test('deriveHoldChipLabel: all three reason categories → generic "Review required"', () => {
+  assert.equal(
+    deriveHoldChipLabel([REASON.MANUAL_SOURCE, REASON.ROUTING_HOLD, REASON.OVER_BATCH_THRESHOLD]),
+    'Review required',
+  );
+});
+
+test('deriveHoldChipLabel: empty / non-array → "Review required" (defensive)', () => {
+  assert.equal(deriveHoldChipLabel([]),        'Review required');
+  assert.equal(deriveHoldChipLabel(null),      'Review required');
+  assert.equal(deriveHoldChipLabel(undefined), 'Review required');
+  assert.equal(deriveHoldChipLabel('nope'),    'Review required');
+});
+
+test('deriveHoldChipLabel: unknown reason token → generic "Review required" (not "Manual")', () => {
+  // Forward-compat: a future reason emitted by holdForReview but not yet
+  // known here must NOT mislabel as manual. Fall through to generic.
+  assert.equal(deriveHoldChipLabel(['some-future-reason']), 'Review required');
 });

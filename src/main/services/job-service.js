@@ -4,7 +4,7 @@ const Store = require('electron-store');
 const configService = require('./config-service');
 const logger = require('./logger');
 const { getOhdTelemetryHeaders } = require('./ohd-telemetry-headers');
-const { computeHoldForReview, formatHoldReasons } = require('../../shared/holdForReview');
+const { computeHoldForReview, formatHoldReasons, deriveHoldChipLabel } = require('../../shared/holdForReview');
 const { recoverManifestErrors } = require('../../shared/manifestErrorRecovery');
 // Lazy require — routing-service requires electron-store at module load; lazy
 // keeps job-service test-loadable in environments that shim electron later.
@@ -236,7 +236,12 @@ class JobService {
           // this call is a no-op fast path in the common case.
           _stampPrintCount(j);
           const hold = computeHoldForReview(j, ctx);
-          return { ...j, ...hold, _holdReasonsText: formatHoldReasons(hold._holdReasons) };
+          return {
+            ...j,
+            ...hold,
+            _holdReasonsText: formatHoldReasons(hold._holdReasons),
+            _holdChipLabel:   deriveHoldChipLabel(hold._holdReasons),
+          };
         });
 
         // Server may re-issue the etag on 304 — pick it up if so.
@@ -432,6 +437,7 @@ class JobService {
       ...job,
       ...hold,
       _holdReasonsText: formatHoldReasons(hold._holdReasons),
+      _holdChipLabel:   deriveHoldChipLabel(hold._holdReasons),
     };
   }
 
@@ -500,6 +506,7 @@ class JobService {
         ...mergedJob,
         ...hold,
         _holdReasonsText: formatHoldReasons(hold._holdReasons),
+        _holdChipLabel:   deriveHoldChipLabel(hold._holdReasons),
       };
     });
 
@@ -547,6 +554,7 @@ class JobService {
           ...existing,
           ...hold,
           _holdReasonsText: formatHoldReasons(hold._holdReasons),
+          _holdChipLabel:   deriveHoldChipLabel(hold._holdReasons),
         });
       }
     }
