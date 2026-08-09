@@ -2915,6 +2915,27 @@ async function runAutoPrint() {
       const { computeHoldForReview } = require('../shared/holdForReview');
       const hold = computeHoldForReview(job, {
         routingHeldProcesses: routingService.getRoutingHeldProcesses(),
+        // M3 batch-splitting hold. Reads the manifest FRESH per job per
+        // cycle — no _totalPrintCount cache. runAutoPrint is the last gate
+        // before dispatch, so correctness matters more than the SMB read
+        // cost (one small-file read per eligible job per 60s cycle). The
+        // awaiting-manifest gate at :2851 above guarantees the manifest
+        // is on disk by the time we get here; a transient read failure
+        // yields null → reason skipped → job continues into the dispatch
+        // path (which has its own 4-attempt manifest retry).
+        batchThresholdCheck: (j) => {
+          try {
+            const r = routingService.resolveRoute(j);
+            if (!(r && r.type === 'controller'
+                && Number.isFinite(r.maxPrintsPerJob) && r.maxPrintsPerJob > 0)) return null;
+            const { readManifestPrintCountSync } = require('../services/manifest-print-count');
+            const prints = readManifestPrintCountSync(j);
+            if (prints == null) return null;
+            return { cap: r.maxPrintsPerJob, prints };
+          } catch (_e) {
+            return null;
+          }
+        },
       });
       if (hold._holdForReview) {
         logger.info('[auto-print] job held for review', {

@@ -16,6 +16,50 @@ function _getRoutingHeldProcesses() {
   }
 }
 
+// Per-job resolver + cache for the M3 over-batch-threshold hold reason.
+//
+// Print count MUST come from the manifest (the same source M4's splitter
+// uses at print-service.js:1938) — see the M3 investigation notes for why
+// job.quantity and sum(artwork_files[].copies) both diverge from the
+// manifest on at least one job source. The manifest read is synchronous
+// and small (~few KB), but downloadDirectory is typically an SMB share
+// in the labs; hitting it once per cached job per poll would be a stall
+// risk on flaky networks. stampPrintCount caches the count on
+// job._totalPrintCount the first time it lands and reuses it forever
+// after; _mergeJobs preserves the field across polls, and the jobs-cache
+// round-trip carries it across restarts. The critical invariant — a
+// failed read must leave the field unset so the next poll retries — is
+// locked by manifest-print-count.test.js.
+//
+// runAutoPrint's resolver deliberately does NOT use this cache — it
+// reads fresh from disk at decision time (see the mirror there). The
+// dispatch decision must reflect the ground truth even if a cache
+// entry from a prior release period is stale.
+function _stampPrintCount(job) {
+  try {
+    return require('./manifest-print-count').stampPrintCount(job);
+  } catch (_e) {
+    return null;
+  }
+}
+
+function _getBatchThresholdCheck(job) {
+  try {
+    const route = require('./routing-service').resolveRoute(job);
+    if (!(route && route.type === 'controller'
+        && Number.isFinite(route.maxPrintsPerJob) && route.maxPrintsPerJob > 0)) {
+      return null;
+    }
+    const prints = Number.isFinite(job._totalPrintCount) && job._totalPrintCount >= 0
+      ? job._totalPrintCount
+      : null;
+    if (prints == null) return null;
+    return { cap: route.maxPrintsPerJob, prints };
+  } catch (_e) {
+    return null;
+  }
+}
+
 // Tenant date-format enum used by the renderer's formatDueDate helper.
 // OrderHub's /jobs/pending returns this at response level (e.g. "MDY"),
 // not per-job. We normalise here so a stray casing/whitespace from the API
@@ -186,8 +230,11 @@ class JobService {
         // polls, so we must re-derive them here or the operator's hold
         // changes would silently no-op until the next 200.
         const routingHeldProcesses = _getRoutingHeldProcesses();
-        const ctx = { routingHeldProcesses };
+        const ctx = { routingHeldProcesses, batchThresholdCheck: _getBatchThresholdCheck };
         this.jobs = this.jobs.map(j => {
+          // _totalPrintCount is usually already cached from a prior poll —
+          // this call is a no-op fast path in the common case.
+          _stampPrintCount(j);
           const hold = computeHoldForReview(j, ctx);
           return { ...j, ...hold, _holdReasonsText: formatHoldReasons(hold._holdReasons) };
         });
@@ -216,7 +263,11 @@ class JobService {
         // onto every mapped job so the renderer's formatDueDate(date, fmt)
         // can render dates without needing access to the raw response.
         const dateFormat = _normaliseDateFormat(data.date_format);
-        const mappedJobs = apiJobs.map(apiJob => this._mapApiJob(apiJob, { routingHeldProcesses, dateFormat }));
+        const mappedJobs = apiJobs.map(apiJob => this._mapApiJob(apiJob, {
+          routingHeldProcesses,
+          batchThresholdCheck: _getBatchThresholdCheck,
+          dateFormat,
+        }));
 
         // Filter jobs by location: only accept jobs whose locations array includes our locationId
         const filteredJobs = this._filterByLocation(mappedJobs, locationId);
@@ -369,6 +420,13 @@ class JobService {
     // re-derive happens in _mergeJobs after preservation. Safe to omit ctx:
     // missing routing context yields the same backward-compatible behaviour
     // as pre-v1.7.8 callers.
+    // M3: stamp the manifest-derived print count onto the job before the
+    // hold derivation reads it via ctx.batchThresholdCheck. First-write
+    // cache — a no-op on subsequent polls once _mergeJobs has preserved
+    // it from the prior cycle. If the manifest isn't on disk yet, the
+    // field stays absent and the batch-threshold reason is skipped — the
+    // Jobs-grid badge will appear as soon as the manifest lands.
+    _stampPrintCount(job);
     const hold = computeHoldForReview(job, ctx);
     return {
       ...job,
@@ -390,7 +448,7 @@ class JobService {
     // below so the routing-hold reason is consistent across newly-mapped and
     // kept-local jobs and honours any preserved _routingHoldReleased flag.
     const routingHeldProcesses = _getRoutingHeldProcesses();
-    const ctx = { routingHeldProcesses };
+    const ctx = { routingHeldProcesses, batchThresholdCheck: _getBatchThresholdCheck };
 
     // Map new jobs, preserving local-only fields where appropriate
     const merged = newJobs.map(newJob => {
@@ -423,10 +481,20 @@ class JobService {
       if (existing._routingReleasedAt)   preserved._routingReleasedAt   = existing._routingReleasedAt;
       if (existing._routingReleasedTo)   preserved._routingReleasedTo   = existing._routingReleasedTo;
       if (existing._channelMappingOverride) preserved._channelMappingOverride = existing._channelMappingOverride;
+      // M3: the manifest-derived print count is stable once known — carry it
+      // across polls so we don't re-hit the SMB share every cycle. Kept in
+      // sync with the persistent jobs-cache write below.
+      if (Number.isFinite(existing._totalPrintCount) && existing._totalPrintCount >= 0) {
+        preserved._totalPrintCount = existing._totalPrintCount;
+      }
 
       // Re-derive hold AFTER preservation so the routing-hold reason
       // accounts for the merged _routingHoldReleased flag.
       const mergedJob = { ...newJob, ...preserved };
+      // Try once more in case the manifest landed between _mapApiJob's
+      // stamp and now (rare, but the cost is a fast-path no-op when
+      // preserved / mapped already carried the count).
+      _stampPrintCount(mergedJob);
       const hold = computeHoldForReview(mergedJob, ctx);
       return {
         ...mergedJob,
@@ -468,6 +536,12 @@ class JobService {
                   || (existing._status === 'pending' && existing._awaitingManifest === true);
 
       if (retain) {
+        // Existing is the persisted-cache entry; a prior poll typically
+        // already stamped _totalPrintCount. This call is the no-op fast
+        // path in that case; if the field is missing (legacy cache entry
+        // pre-dating M3), try once here so the badge appears without an
+        // extra poll cycle.
+        _stampPrintCount(existing);
         const hold = computeHoldForReview(existing, ctx);
         merged.push({
           ...existing,

@@ -44,18 +44,20 @@
  */
 
 const REASON = Object.freeze({
-  MANUAL_SOURCE: 'manual-source',
-  MANUAL_FILE:   'manual-file',
-  ROUTING_HOLD:  'routing-hold',
+  MANUAL_SOURCE:        'manual-source',
+  MANUAL_FILE:          'manual-file',
+  ROUTING_HOLD:         'routing-hold',
+  OVER_BATCH_THRESHOLD: 'over-batch-threshold',
 });
 
 // Operator-readable text for each reason, used by the renderer to build the
 // tooltip on the hold chip. Exported so the renderer reads from the same
 // source of truth as the derivation.
 const REASON_TEXT = Object.freeze({
-  [REASON.MANUAL_SOURCE]: 'Manual upload',
-  [REASON.MANUAL_FILE]:   'Contains a manually-uploaded file',
-  [REASON.ROUTING_HOLD]:  'Held for manual routing — pick a controller',
+  [REASON.MANUAL_SOURCE]:        'Manual upload',
+  [REASON.MANUAL_FILE]:          'Contains a manually-uploaded file',
+  [REASON.ROUTING_HOLD]:         'Held for manual routing — pick a controller',
+  [REASON.OVER_BATCH_THRESHOLD]: 'Large job — total prints exceed this printer’s batch limit. Send to Print when ready.',
 });
 
 /**
@@ -73,6 +75,25 @@ const REASON_TEXT = Object.freeze({
  *   Routing. Supplied by the caller (job-service / runAutoPrint) which
  *   reads it from routing-service.getRoutingHeldProcesses() — passed in
  *   so this module stays pure and electron-store-free for node:test.
+ * @param {(job: object) => {cap:number, prints:number}|null} [ctx.batchThresholdCheck] -
+ *   Per-job resolver returning both sides of the comparison already
+ *   evaluated: the controller's maxPrintsPerJob cap (positive integer)
+ *   AND the job's total print count. Returns null when the check
+ *   cannot be made — no cap configured, route is not a
+ *   darkroompro-family controller, the job is unrouted, or the print
+ *   count cannot be determined (e.g. manifest not yet on disk).
+ *
+ *   The caller owns both sides so this module stays pure — no
+ *   dependency on routing-service (electron-store) or fs.
+ *
+ *   Print count MUST come from the same source the M4 splitter reads
+ *   (the on-disk manifest's per-image `quantity`), not from
+ *   `job.quantity`: the latter carries different meanings across job
+ *   sources (Pixfizz vs manual vs film) — see the M3 investigation
+ *   notes and `s3-artwork-downloader.js:434-479`.
+ *
+ *   Backward-compatible: when the resolver is absent OR returns null,
+ *   the batch-threshold reason is never emitted (M1 behaviour).
  * @returns {{ _holdForReview: boolean, _holdReasons: string[] }}
  *   `_holdForReview` is `_holdReasons.length > 0` (kept for read-site
  *   ergonomics; callers may also check the array length directly).
@@ -114,6 +135,35 @@ function computeHoldForReview(job, ctx = {}) {
     heldProcesses.has(job.process)
   ) {
     reasons.push(REASON.ROUTING_HOLD);
+  }
+
+  // Over-batch-threshold (M3, 2026-08-09): the job's total print count
+  // exceeds the controller's maxPrintsPerJob cap. Darkroom Pro only in
+  // this milestone.
+  //
+  // The resolver returns { cap, prints } only when BOTH are known — the
+  // route carries a positive cap AND the caller has determined a total
+  // print count (typically by reading the manifest, the same source the
+  // M4 splitter uses). Returns null otherwise; the reason is then
+  // skipped. This makes the derivation trivially pure: no fs, no store,
+  // no per-source arithmetic.
+  //
+  // The operator's manual Send-to-Print click is the release trigger —
+  // ipc-handlers.jobs:sendToPrint does not consult this gate. Only the
+  // auto-print loop and the routing-hold flow read _holdForReview.
+  //
+  // Backward-compatible: no resolver, or a resolver that returns null,
+  // means the reason is not emitted (M1 behaviour).
+  const check = ctx && ctx.batchThresholdCheck;
+  if (typeof check === 'function') {
+    const r = check(job);
+    if (
+      r
+      && Number.isFinite(r.cap) && r.cap > 0
+      && Number.isFinite(r.prints) && r.prints > r.cap
+    ) {
+      reasons.push(REASON.OVER_BATCH_THRESHOLD);
+    }
   }
 
   return { _holdForReview: reasons.length > 0, _holdReasons: reasons };
