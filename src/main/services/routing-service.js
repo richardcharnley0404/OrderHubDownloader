@@ -237,6 +237,10 @@ function resolveRoute(job) {
             printSizeCode:       null,
             bannerSheet:         false,
             checkOrderStatus:    overrideCtrl.checkOrderStatus !== false,
+            maxPrintsPerJob:
+              Number.isFinite(overrideCtrl.maxPrintsPerJob) && overrideCtrl.maxPrintsPerJob > 0
+                ? overrideCtrl.maxPrintsPerJob
+                : null,
           };
         }
 
@@ -408,6 +412,12 @@ function resolveRoute(job) {
       printSizeCode:       null,
       bannerSheet:         false,
       checkOrderStatus:    controller.checkOrderStatus !== false,
+      // v1.10 batch-splitting cap (Darkroom Pro only for M1). Read-time default:
+      // absent, non-numeric, zero or negative → null = feature off. No migration.
+      maxPrintsPerJob:
+        Number.isFinite(controller.maxPrintsPerJob) && controller.maxPrintsPerJob > 0
+          ? controller.maxPrintsPerJob
+          : null,
     };
   }
 
@@ -685,7 +695,7 @@ function resolveRouteForController(job, controllerId) {
   // both consume this same shape downstream). Frontline / Fuji reassignment
   // can be added later if the use case emerges — v1.7.8 ships with the
   // generic DPOF/Darkroom shape since that's the Lab use case.
-  return {
+  const shape = {
     type:           'controller',
     controllerType: controller.type || 'dpof',
     controllerId:   controller.id,
@@ -698,6 +708,15 @@ function resolveRouteForController(job, controllerId) {
     checkOrderStatus: controller.checkOrderStatus !== false,
     includeCustomerInFolder: controller.includeCustomerInFolder !== false,
   };
+  // v1.10 batch-splitting cap — Darkroom Pro only. Kept off the DPOF branch
+  // deliberately: the Epson release will add it there, not this one.
+  if (controller.type === 'darkroompro') {
+    shape.maxPrintsPerJob =
+      Number.isFinite(controller.maxPrintsPerJob) && controller.maxPrintsPerJob > 0
+        ? controller.maxPrintsPerJob
+        : null;
+  }
+  return shape;
 }
 
 // ── CRUD helpers ──────────────────────────────────────────────────────────────

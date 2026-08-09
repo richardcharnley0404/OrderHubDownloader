@@ -1072,6 +1072,29 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
         return { success: false, error: msg };
       }
 
+      // Defence-in-depth: batch-splitting cap must be null/absent OR an
+      // integer in [1, 10000]. Renderer already enforces this; the same
+      // check at the IPC boundary stops a malformed payload (future
+      // renderer bug, external caller) from persisting a value that
+      // would silently split every job.
+      if (
+        controller &&
+        controller.type === 'darkroompro' &&
+        controller.maxPrintsPerJob !== undefined &&
+        controller.maxPrintsPerJob !== null
+      ) {
+        const n = controller.maxPrintsPerJob;
+        if (!Number.isInteger(n) || n < 1 || n > 10000) {
+          const msg = 'Maximum prints per job must be an integer between 1 and 10000, or null.';
+          logger.logWarning('[routing] save-controller rejected — invalid maxPrintsPerJob', {
+            controllerId:    controller.id,
+            name:            controller.name,
+            maxPrintsPerJob: n,
+          });
+          return { success: false, error: msg };
+        }
+      }
+
       // Fuji JobMaker — single source of truth for required-field rules and
       // defaults lives in fuji-jobmaker-config.js. Run it at the save boundary
       // so a malformed payload (from a future renderer bug, an external IPC

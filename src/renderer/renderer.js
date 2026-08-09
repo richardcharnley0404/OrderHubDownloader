@@ -4807,6 +4807,7 @@ function updateOcTypeFields() {
   document.getElementById('ocPipelineGroup').style.display           = type === 'pdf_copy'     ? '' : 'none';
   document.getElementById('ocCheckOrderStatusGroup').style.display   = (type === 'noritsu' || type === 'epson' || type === 'dpof' || type === 'darkroompro') ? '' : 'none';
   document.getElementById('ocIncludeCustomerNameGroup').style.display = (type === 'noritsu' || type === 'epson' || type === 'dpof') ? '' : 'none';
+  document.getElementById('ocMaxPrintsPerJobGroup').style.display     = type === 'darkroompro' ? '' : 'none';
   // Frontline-specific fields
   document.getElementById('ocDeviceGroup').style.display     = type === 'frontline' ? '' : 'none';
   document.getElementById('ocBackPrint1Group').style.display = type === 'frontline' ? '' : 'none';
@@ -4913,6 +4914,13 @@ function openOrderControllerModal(ctrl = null) {
   document.getElementById('ocCheckOrderStatus').checked = ctrl ? (ctrl.checkOrderStatus === true)      : false;
   // Default ON for new controllers and for legacy controllers missing the field.
   document.getElementById('ocIncludeCustomerName').checked = ctrl ? (ctrl.includeCustomerInFolder !== false) : true;
+  // Batch-splitting cap — Darkroom Pro only. Blank field = feature off. A
+  // non-numeric or non-positive stored value is also displayed as blank.
+  const isDarkroomProCtrl = ctrl && ctrl.type === 'darkroompro';
+  document.getElementById('ocMaxPrintsPerJob').value =
+    isDarkroomProCtrl && Number.isFinite(ctrl.maxPrintsPerJob) && ctrl.maxPrintsPerJob > 0
+      ? String(ctrl.maxPrintsPerJob)
+      : '';
   // Load pipeline steps
   pipelineSteps = (ctrl && ctrl.pdfPipeline && ctrl.pdfPipeline.steps) ? JSON.parse(JSON.stringify(ctrl.pdfPipeline.steps)) : [];
   renderPipelineSteps();
@@ -5372,6 +5380,21 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
     controller.sizeTranslations     = readSizeTranslations();
     controller.mediaTranslations    = readMediaTranslations();
     controller.photoLines           = readPhotoLines();
+
+    // Batch-splitting cap. Blank = null (feature off). A stray non-numeric
+    // or out-of-range value is rejected rather than clamped so a typo can't
+    // silently split every job (e.g. `10` when the operator meant `100`).
+    const maxPrintsRaw = document.getElementById('ocMaxPrintsPerJob').value.trim();
+    if (maxPrintsRaw === '') {
+      controller.maxPrintsPerJob = null;
+    } else {
+      const n = parseInt(maxPrintsRaw, 10);
+      if (!Number.isFinite(n) || n < 1 || n > 10000 || String(n) !== maxPrintsRaw) {
+        alert('Maximum prints per job must be a whole number between 1 and 10000, or blank for no limit.');
+        return;
+      }
+      controller.maxPrintsPerJob = n;
+    }
 
     // Misconfiguration guard: defining translations without a Paper Type
     // Option Key is meaningless — resolveMedia short-circuits at line 129
