@@ -423,6 +423,18 @@ test('lifecycle: 6 batches all succeed + checkOrderStatus=false → _markComplet
   assert.equal(calls.markInProduction, 0);
 }));
 
+test('lifecycle: 6 batches all succeed + checkOrderStatus=true → _markInProduction once (not per batch)', withBatchingHarness(async (t, calls) => {
+  // M5 checklist item 2. If the lifecycle branch were still inside the loop
+  // (or accidentally called per-batch), _markInProduction would fire 6 times
+  // and the operator's "in production" indicator would be meaningless. It
+  // must fire exactly once, after every batch has landed successfully.
+  stubImagesOnFindJob(images(600, 1), calls);
+  await printService._sendViaDarkroomProRouted(makeJob(), makeRoute({ maxPrintsPerJob: 100, checkOrderStatus: true }));
+  assert.equal(calls.emit.length,      6);
+  assert.equal(calls.markInProduction, 1);
+  assert.equal(calls.markCompleted,    0);
+}));
+
 // ── Cleanup: restore require shim ────────────────────────────────────────────
 
 test.after(() => { Module.prototype.require = __originalRequire; });

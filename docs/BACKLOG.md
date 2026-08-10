@@ -61,6 +61,18 @@ literals. Consider extracting a per-type route builder shared by both entry poin
 the next route field is added — or at minimum add an override/non-override key-set parity
 test per type (there is one for darkroompro in `routing-override-darkroompro.test.js`).
 
+**Routed Darkroom Pro has no printer acceptance signal.** `darkroom-pro-monitor.js`
+`_extractOrderNumber` (`:145-149`) only matches the legacy `Order{n}.TXT` filename shape;
+the routed emitter writes `{job_name}.txt` (e.g. `PXTEST-XYZ-1.txt`, or
+`PXTEST-XYZ-1_3.txt` on split dispatches from M4), and `_sendViaDarkroomProRouted`
+(`print-service.js`) never calls `trackSubmission` or `startMonitoring`. Completion
+is therefore decided **synchronously at dispatch** — a `.txt` that Darkroom Pro
+never consumes goes unnoticed. This is the reason M5's "all batches accounted for"
+means "all written successfully", not "all printed". Fix would need the monitor to
+recognise the routed filename shape (batched too) *and* the routed dispatch to
+register each submission with the monitor. Not release-blocking — the legacy
+non-routed path still has the acceptance signal for labs on that path.
+
 **Settings polling-interval field on a fresh install shows editable until first check-in.**
 The Settings panel reads `ohd:server:get-capabilities` once when the panel opens (see
 `renderer.js` — `populateForm`), so the first time an operator installs OHD v1.9.0 and opens

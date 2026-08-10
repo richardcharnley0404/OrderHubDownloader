@@ -2143,9 +2143,10 @@ class PrintService {
       batches:    batches.length,
     });
 
-    // Lifecycle. Only fires when every batch has been written successfully.
-    // (M5 formalises this behaviour with dedicated tests; M4 must implement
-    // it correctly so single-batch and split paths both settle the job.)
+    // Lifecycle. Only fires when every batch has been written successfully —
+    // the partial-failure early return above prevents this on error, keeping
+    // the job visible and recoverable. Single-batch and split paths converge
+    // here (single-batch behaves byte-for-byte as v1.9.0).
     if (route.checkOrderStatus === false) {
       logger.info('[DarkroomPro] checkOrderStatus disabled — marking job as completed immediately', { jobId: job.id });
       await this._markCompleted(job.id);
