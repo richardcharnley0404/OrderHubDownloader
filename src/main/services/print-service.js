@@ -11,6 +11,7 @@ const { orderFolderWriter } = require('./order-folder-writer');
 const { darkroomProGenerator } = require('./darkroom-pro-generator');
 const { darkroomProFileWriter } = require('./darkroom-pro-file-writer');
 const { generateDarkroomProFile } = require('./darkroom-pro-output');
+const { splitIntoBatches, batchPrintCount } = require('../../shared/batchSplit');
 const { frontlineGenerator } = require('./frontline-generator');
 const { frontlineFileWriter } = require('./frontline-file-writer');
 const { generateFujiJobMakerFiles } = require('./fuji-jobmaker-generator');
@@ -1891,7 +1892,18 @@ class PrintService {
       throw new Error(`Job folder not found: ${jobFolderPath}`);
     }
 
+    // ── Per-job preparation — HOISTED above the batch loop ──────────────────
+    // Everything below is deterministic in `job` and MUST run exactly once
+    // even when the job splits into N batches. In particular,
+    // _applyCorrectionsToImageFiles WRITES corrected JPEGs to /working/;
+    // running it per-batch would do N× the disk churn for identical output.
+    // See docs/batch-splitting-darkroom-pro-brief.md M4 for the invariant.
+
     const manifest    = await this._readManifest(orderFolderPath, job.order_number);
+    // _findJobInManifest applies the operator-discarded filter (see
+    // print-service.js:2978-2987) so `jobManifest.images` already reflects
+    // what will actually print. Splitting must happen AFTER this to keep
+    // batch boundaries aligned with the printed image list.
     const jobManifest = this._findJobInManifest(manifest, job);
 
     if (!jobManifest) {
@@ -1931,50 +1943,6 @@ class PrintService {
       correctionsMap
     );
 
-    // Group by quantity for the Darkroom Pro line-item blocks.
-    // imageFiles is parallel to manifestImages so we can read qty by index.
-    const imagesByQty = new Map();
-    manifestImages.forEach((manifestImg, i) => {
-      const qty = manifestImg.quantity || 1;
-      if (!imagesByQty.has(qty)) imagesByQty.set(qty, []);
-      imagesByQty.get(qty).push({
-        filename:   imageFiles[i].filename,
-        sourcePath: imageFiles[i].sourcePath,
-        // Customer original upload path (manifest-relative). Carried through so
-        // the {originalFilename} photo-line token resolves per image. null when
-        // the manifest didn't ship one — token then resolves blank.
-        originalFilename: manifestImg.originalFilename || null,
-      });
-    });
-
-    const lineItems = [];
-    for (const [qty, images] of imagesByQty) {
-      lineItems.push({ qty, options: jobOptions, images });
-    }
-
-    const dpJob = {
-      // Job id is exposed so the {jobId} token resolves in configurable photo
-      // lines. Templates that don't reference {jobId} are unaffected.
-      id:            job.id,
-      orderRef:      job.order_number || '',
-      // Filename stem for the Darkroom Pro .txt output. Multi-job orders
-      // share order_number, so using order_number alone collides — the
-      // second job's file overwrites the first. Prefer job_name (matches
-      // the JOB NO column in the Jobs grid, e.g. "PXDEMO-9V0L91-1") so
-      // operators can correlate filenames to grid rows. Fall back to a
-      // stable composite when job_name isn't set.
-      outputFilenameStem: job.job_name || `${job.order_number || ''}_${job.id}`,
-      productCode:   job.product_code || '',
-      customer:      { firstName, lastName, email: job.customer_email || '' },
-      labCode:       job.website || '',
-      orderDate:     job.created_at ? new Date(job.created_at) : new Date(),
-      lineItems,
-      // Per-job manual overrides from the Assign modal (take priority over
-      // translation tables inside resolveSize / resolveMedia).
-      _sizeOverride:  job._darkroomProSize  || null,
-      _mediaOverride: job._darkroomProMedia || null,
-    };
-
     // Fetch the full controller record to get translation tables
     const { getControllers } = require('./routing-service');
     const fullController = getControllers().find(c => c.id === route.controllerId);
@@ -1992,15 +1960,192 @@ class PrintService {
       photoLines:          fullController?.photoLines        || [],
     };
 
-    const destPath = await generateDarkroomProFile(dpJob, controller);
+    // ── Build per-image dispatch records carrying quantity ──────────────────
+    // The splitter needs `.quantity` on each element (it counts prints, not
+    // images — see docs/batch-splitting-feasibility.md §2). Bundle everything
+    // the per-batch grouping will need so the loop below never has to
+    // re-index against manifestImages.
+    const dispatchRecords = manifestImages.map((manifestImg, i) => ({
+      filename:         imageFiles[i].filename,
+      sourcePath:       imageFiles[i].sourcePath,
+      // Customer original upload path (manifest-relative). Carried through so
+      // the {originalFilename} photo-line token resolves per image. null when
+      // the manifest didn't ship one — token then resolves blank.
+      originalFilename: manifestImg.originalFilename || null,
+      quantity:         manifestImg.quantity || 1,
+    }));
+
+    // ── Split ───────────────────────────────────────────────────────────────
+    // cap null / 0 / negative → single batch containing everything, and this
+    // whole method behaves byte-for-byte identically to v1.9.0. Regression
+    // guarantee for every existing Darkroom Pro lab that hasn't set the cap.
+    const cap     = route.maxPrintsPerJob;
+    const batches = splitIntoBatches(dispatchRecords, cap);
+    const isSplit = batches.length > 1;
+    const baseStem = job.job_name || `${job.order_number || ''}_${job.id}`;
+
+    // ── Per-batch emitter seam ──────────────────────────────────────────────
+    // Overridable on the singleton for tests (this._emitDarkroomProFile). In
+    // production it's the top-level import. Matches the reprint tests'
+    // monkey-patch pattern (see print-service-reprint-dispatch.test.js).
+    const emit = this._emitDarkroomProFile || generateDarkroomProFile;
+
+    // ── Persisted per-batch ledger ──────────────────────────────────────────
+    // Nothing today records that a job dispatched as N parts, so a mid-loop
+    // failure would leave files on the printer with no trace. Persist via
+    // jobService.updateJobLocally (writes to jobs-cache; survives restart).
+    // Only stamped on split jobs — single-batch dispatches keep the pre-M4
+    // shape byte-for-byte (regression guarantee).
+    const ledger = isSplit
+      ? {
+          cap,
+          totalBatches: batches.length,
+          totalPrints:  batchPrintCount(dispatchRecords),
+          startedAt:    new Date().toISOString(),
+          completedAt:  null,
+          batches:      [],
+        }
+      : null;
+    if (ledger) {
+      jobService.updateJobLocally(job.id, { _darkroomProBatchLedger: ledger });
+    }
+
+    // ── Dispatch loop ───────────────────────────────────────────────────────
+    const destPaths = [];
+    for (let i = 0; i < batches.length; i++) {
+      const batchImages   = batches[i];
+      const batchIndex1   = i + 1;
+      const totalBatches  = batches.length;
+      // Quantity-group inside the batch — same grouping logic as pre-M4,
+      // scoped to this batch's images only.
+      const imagesByQty = new Map();
+      for (const rec of batchImages) {
+        const qty = rec.quantity;
+        if (!imagesByQty.has(qty)) imagesByQty.set(qty, []);
+        imagesByQty.get(qty).push({
+          filename:         rec.filename,
+          sourcePath:       rec.sourcePath,
+          originalFilename: rec.originalFilename,
+        });
+      }
+      const lineItems = [];
+      for (const [qty, images] of imagesByQty) {
+        lineItems.push({ qty, options: jobOptions, images });
+      }
+
+      // Filename stem: single batch keeps the pre-M4 stem (no `_1`); split
+      // jobs get `_1..._N`. Changing the stem changes ExtOrderNum / Orderid
+      // inside the file too (darkroom-pro-output.js:238,284,307), so each
+      // split batch lands as a separate order in Darkroom Pro — that's the
+      // whole point: the operator schedules them in the DP queue.
+      const outputFilenameStem = isSplit ? `${baseStem}_${batchIndex1}` : baseStem;
+
+      const dpJob = {
+        // Job id is exposed so the {jobId} token resolves in configurable
+        // photo lines. Templates that don't reference {jobId} are unaffected.
+        id:                 job.id,
+        orderRef:           job.order_number || '',
+        outputFilenameStem,
+        productCode:        job.product_code || '',
+        customer:           { firstName, lastName, email: job.customer_email || '' },
+        labCode:            job.website || '',
+        orderDate:          job.created_at ? new Date(job.created_at) : new Date(),
+        lineItems,
+        // Per-job manual overrides from the Assign modal (take priority over
+        // translation tables inside resolveSize / resolveMedia).
+        _sizeOverride:  job._darkroomProSize  || null,
+        _mediaOverride: job._darkroomProMedia || null,
+      };
+
+      let destPath;
+      try {
+        destPath = await emit(dpJob, controller);
+      } catch (err) {
+        // Partial failure. Batches [1..i] already landed and are being
+        // printed — do NOT roll them back and do NOT pretend success.
+        // Stamp the ledger, mark the job errored with a message naming
+        // which batches went and which didn't, return {success:false}.
+        // Neither _markCompleted nor _markInProduction fires (M5 lifecycle
+        // rule: completion only when every batch succeeds).
+        logger.logError(`[dp-batch] batch ${batchIndex1}/${totalBatches} failed`, err, {
+          jobId:              job.id,
+          controller:         route.controllerName,
+          outputFilenameStem,
+        });
+        if (ledger) {
+          ledger.batches.push({
+            index:         batchIndex1,
+            total:         totalBatches,
+            filename:      `${outputFilenameStem}.txt`,
+            destPath:      null,
+            dispatchedAt:  new Date().toISOString(),
+            outcome:       'error',
+            error:         err.message,
+          });
+          jobService.updateJobLocally(job.id, { _darkroomProBatchLedger: ledger });
+        }
+        const succeeded = destPaths.length; // number that landed OK
+        const errorMessage = isSplit
+          ? `Darkroom Pro batch ${batchIndex1}/${totalBatches} failed: ${err.message}. ` +
+            `Batches 1..${succeeded} were written to the hot folder and are being printed; ` +
+            `batches ${batchIndex1}..${totalBatches} did NOT. Cancel the printed ones in Darkroom Pro if needed.`
+          : err.message;
+        jobService.updateJobLocally(job.id, {
+          _status:       'error',
+          _errorMessage: errorMessage,
+        });
+        return {
+          success:      false,
+          method:       'darkroompro-routed',
+          sourcePath:   jobFolderPath,
+          error:        errorMessage,
+          batchesSucceeded: succeeded,
+          batchesTotal:     totalBatches,
+          ledger:       ledger,
+        };
+      }
+
+      destPaths.push(destPath);
+      if (ledger) {
+        ledger.batches.push({
+          index:         batchIndex1,
+          total:         totalBatches,
+          filename:      `${outputFilenameStem}.txt`,
+          destPath,
+          dispatchedAt:  new Date().toISOString(),
+          outcome:       'success',
+        });
+        // Persist after every batch so a mid-loop process crash still
+        // leaves a record of what went out. Fuji PIC Pro monitor uses
+        // the same persist-on-every-mutation posture for the same reason.
+        jobService.updateJobLocally(job.id, { _darkroomProBatchLedger: ledger });
+        logger.info(`[dp-batch] batch ${batchIndex1}/${totalBatches} sent`, {
+          jobId:      job.id,
+          controller: route.controllerName,
+          destPath,
+          images:     batchImages.length,
+          prints:     batchPrintCount(batchImages),
+        });
+      }
+    }
+
+    // ── All batches landed ──────────────────────────────────────────────────
+    if (ledger) {
+      ledger.completedAt = new Date().toISOString();
+      jobService.updateJobLocally(job.id, { _darkroomProBatchLedger: ledger });
+    }
 
     logger.info('Job sent via Darkroom Pro (routed)', {
       jobId:      job.id,
       controller: route.controllerName,
-      destPath,
-      lineItems:  lineItems.length,
+      destPath:   destPaths[destPaths.length - 1],
+      lineItems:  batches.reduce((acc, b) => acc + b.length, 0),
+      batches:    batches.length,
     });
 
+    // Lifecycle. Only fires when every batch has been written successfully.
+    // (M5 formalises this behaviour with dedicated tests; M4 must implement
+    // it correctly so single-batch and split paths both settle the job.)
     if (route.checkOrderStatus === false) {
       logger.info('[DarkroomPro] checkOrderStatus disabled — marking job as completed immediately', { jobId: job.id });
       await this._markCompleted(job.id);
@@ -2012,7 +2157,11 @@ class PrintService {
       success:    true,
       method:     'darkroompro-routed',
       sourcePath: jobFolderPath,
-      destPath,
+      destPath:   destPaths[destPaths.length - 1],
+      // Extra fields on split dispatches so callers can observe what happened
+      // without re-reading the ledger. Absent on single-batch (byte-identical
+      // return shape for the regression guarantee).
+      ...(isSplit ? { batches: batches.length, destPaths, ledger } : {}),
     };
   }
 
