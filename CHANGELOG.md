@@ -1,3 +1,167 @@
+## Unreleased
+
+**Operator-triggered batch splitting for Darkroom Pro.** A lab can now set
+a maximum-prints-per-job cap on each Darkroom Pro controller so an over-cap
+job is held from auto-print for operator review, and clicking Send to Print
+writes the job as N separately-numbered Darkroom Pro `.txt` files that the
+operator schedules against urgent work inside Darkroom Pro's own queue.
+
+Darkroom Pro first because unlike the Epson SureLab OrderController it has
+no Interrupt Order / pause-mid-print facility, no queue-reordering hook
+that OHD or the operator can call, and no way to slip a 5-minute reprint
+past a 600-image order once the big job has started printing. Splitting is
+the only mechanism available — OHD writes N smaller orders, Darkroom Pro
+sees them as N independent jobs in its own queue, and the operator does
+the scheduling inside Darkroom Pro. This is not a scheduler in OHD; it is
+a mechanism to *let* the operator schedule. Design context in
+`docs/batch-splitting-feasibility.md` and the implementation brief in
+`docs/batch-splitting-darkroom-pro-brief.md`.
+
+### New: `maxPrintsPerJob` cap on Darkroom Pro controllers
+The Add Controller modal for `darkroompro` gains a "Maximum prints per
+job" numeric field (1–10000; blank = no cap = pre-release behaviour).
+Persisted via the read-time default idiom — no migration — and carried
+across every route shape a `darkroompro` job can take, including the
+`_channelMappingOverride` short-circuit used by hold-release and
+crop-to-size reassignment. Range-guarded in both the renderer's Save
+handler and the IPC save handler for defence-in-depth. Surfaced only on
+`darkroompro` — the Epson DPOF branch is deliberately untouched pending
+its own release.
+
+### New: `over-batch-threshold` hold reason
+When the on-disk manifest's total print count exceeds the controller's
+cap, the job is added to the hold-for-review set with a new reason
+`over-batch-threshold`, alongside the existing `manual-source`,
+`manual-file`, and `routing-hold` reasons. Auto-print skips the job; the
+operator's Send-to-Print click is the release trigger and bypasses the
+gate as it always has. Print count reads from the manifest — the same
+source the splitter reads at dispatch — rather than from `job.quantity`,
+which carries different meanings across job sources (Pixfizz vs manual
+vs film-development) and is empty on FTP-Pixfizz jobs until the manifest
+lands. A small first-write cache prevents per-poll re-reads against
+SMB-mounted download directories; a failed stamp leaves the field
+genuinely unset so cycle-one manifest-not-yet-arrived state cannot
+poison the cache. `runAutoPrint` deliberately re-reads fresh at the
+last gate before dispatch.
+
+### New: Split dispatch — one Darkroom Pro `.txt` file per batch
+When a routed `darkroompro` job's manifest print count exceeds the cap,
+the dispatch method writes N files named `{job_name}_1.txt` ...
+`{job_name}_N.txt` instead of a single `{job_name}.txt`. The stem
+suffix flows into `ExtOrderNum` and `Orderid` inside each file, so each
+batch lands as a separate order in Darkroom Pro and the operator can
+reorder them inside Darkroom Pro's own queue. Per-job preparation
+(manifest read, enhanced-path and corrections maps, and the
+`_applyCorrectionsToImageFiles` step which writes corrected JPEGs to
+`/working/`) runs exactly once regardless of batch count. Splitting
+happens after `_findJobInManifest` applies the operator-discarded
+filter, so batch boundaries reflect only images that will actually
+print. Reprints stay unbatched. **Single-batch dispatches are
+byte-for-byte identical to v1.9.0** — no `_1` suffix, no ledger, no
+return-shape change — so every lab that has not set a cap sees no
+change at all.
+
+### New: How batches are filled
+The cap counts **prints, not images**: 600 images at 2 copies each with
+a cap of 100 produces 12 batches of 50 images (100 prints each), not 6
+batches that each take double time on the printer. Batches fill image
+by image, in manifest order, until the next image's copies would push
+the batch over the cap; at that point the current batch closes and a
+new one opens with the next image. **An image's copies are never split
+across batches** — splitting them would reorder prints on the printer,
+which is precisely the thing the operator is buying by scheduling the
+batches inside Darkroom Pro. A consequence: an image whose own copy
+count exceeds the cap gets its own oversized batch of one image, and
+OHD writes it anyway (Darkroom Pro will still accept the file).
+
+Worked examples:
+
+- **40 images × 2 copies each, cap 20 → 4 batches.** Each batch fills to
+  10 images (20 prints, cap met exactly); the 11th image would take the
+  running total to 22 so a new batch opens. 40 / 10 = 4 batches of 10
+  images each.
+- **5 images × 21 copies each, cap 20 → 5 batches.** Each image already
+  exceeds the cap on its own. Splitting an image's copies is disallowed,
+  so every batch contains one image of 21 prints. All five batches are
+  oversized (21 > 20). The tooltip on the post-dispatch grid chip shows
+  each batch's print count so operators can see the oversize immediately.
+
+### New: Persisted per-batch ledger + partial-failure handling
+Every split dispatch stamps a `_darkroomProBatchLedger` onto the job
+record (via `jobService.updateJobLocally`, which lands in `jobs-cache`
+and survives restart) — cap, total batches, total prints, start /
+completion timestamps, and one entry per batch with `filename`,
+`destPath`, `outcome` (`success` / `error`), and error message on
+failure. **The ledger is persisted after every batch, not once at end**,
+so a process crash mid-loop still leaves a record on disk of which
+batches went out. On partial failure — e.g. batch 4 of 6 throws — the
+batches already written are being printed. OHD does not attempt to roll
+them back, stamps the ledger with the error entry, marks the job
+errored with a message that names which batches went and which did not
+(*"Darkroom Pro batch 4/6 failed: ENOSPC ... Batches 1..3 were written
+to the hot folder and are being printed; batches 4..6 did NOT. Cancel
+the printed ones in Darkroom Pro if needed."*), and returns
+immediately. Neither `_markCompleted` nor `_markInProduction` fires
+until every batch has been written successfully, so the job stays
+visible and recoverable in the operator's queue.
+
+Known limitation, recorded in `docs/BACKLOG.md`: the routed Darkroom
+Pro path has no printer acceptance signal — `darkroom-pro-monitor.js`
+only matches the legacy `Order{n}.TXT` filename shape, the routed
+emitter writes `{job_name}.txt` (and `{job_name}_N.txt` for batches),
+and the routed dispatch never calls `trackSubmission` or
+`startMonitoring`. Completion here therefore means "all batches
+written", not "all batches printed". A `.txt` that Darkroom Pro never
+consumes goes unnoticed. Not new in this release, but noted here
+because batch splitting depends on it and it is the reason the
+"completion" wording above is deliberately narrow.
+
+### New: Jobs-grid chips for the split lifecycle
+Two chips render in the Jobs-grid flags-cell to make the feature
+visible to the operator:
+
+- **Before dispatch:** the existing hold-review chip's label is now
+  derived from `_holdReasons` rather than hard-coded. A
+  batch-threshold-only hold reads *"Large job — review required"*; a
+  mixed-reason hold reads the generic *"Review required"*; existing
+  all-manual holds still read *"Manual — review required"* unchanged.
+  Forward-compatible — a future-added reason token never mislabels as
+  "Manual".
+- **After dispatch:** on split dispatches only, a *"Sent as N batches"*
+  chip in green, or *"Sent M/N batches"* chip in red on partial
+  failure. Tooltip carries per-batch filenames + outcomes + errors,
+  plus a header line with the cap and total prints, so operators can
+  reconcile against Darkroom Pro's queue without opening the Activity
+  Log. Absent on single-batch dispatches, so the grid stays visually
+  identical for every lab that has not set a cap.
+
+### Fixed: Reassigned Darkroom Pro jobs silently lost route fields
+`resolveRoute`'s `_channelMappingOverride` short-circuit had no
+`darkroompro` branch — reassigned `darkroompro` jobs (via
+`ohd:routing:release-hold`, or from crop-to-size) fell into the DPOF
+fallthrough and silently lost `artworkRootPath`, `orderLastNameFormat`,
+and `channelMappingId`. The routed dispatch method reads the first two
+directly off the route object, so operators saw broken artwork paths
+and default order-name formatting on reassigned jobs instead of the
+controller-configured values. Fixed by adding an explicit `darkroompro`
+branch that mirrors the main literal, locked by a key-set parity test
+between the two literals so this specific field-drop cannot recur.
+`docs/BACKLOG.md` notes the same shape-duplication hazard likely still
+applies to the Fuji branches.
+
+### Fixed: Hold-review chip mislabelled non-manual holds as "Manual"
+The pre-release Jobs-grid chip hard-coded *"Manual — review required"*
+for every `_holdForReview` job. When the batch-threshold reason arrived
+in this release, a large Pixfizz order on a real operator's queue
+rendered as *"Manual"* — implying manual artwork review, when in fact
+nothing was manual. Also fixed a pre-existing case where a
+`routing-hold`-only job rendered as *"Manual"*. Chip label now derives
+from `_holdReasons` via `deriveHoldChipLabel` in
+`src/shared/holdForReview.js`, pre-computed on job intake so the
+vanilla `renderer.js` reads a single `_holdChipLabel` field. Legacy-
+cache fallback preserves the old label for any job entry that predates
+this fix, until the next poll re-stamps.
+
 ## v1.9.0 - 2026-08-09
 
 Adopts ohd-api v1.4.0 to cut OHD's polling cost against OrderHub. In
