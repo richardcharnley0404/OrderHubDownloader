@@ -1,4 +1,4 @@
-## Unreleased
+## v1.10.0 - 2026-08-10
 
 **Operator-triggered batch splitting for Darkroom Pro.** A lab can now set
 a maximum-prints-per-job cap on each Darkroom Pro controller so an over-cap
