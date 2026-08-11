@@ -3105,3 +3105,33 @@ button {
   cursor: help;
   vertical-align: middle;
 }
+
+/* ── Darkroom Pro batched dispatch (M6, 2026-08-10) ──────────────────────
+   "Sent as N batches" chip on the job-list row. Rendered only when
+   job._darkroomProBatchLedger exists, i.e. when M4 split the dispatch —
+   single-batch dispatches leave no ledger, so unaffected labs see no
+   change. Green on full success, red on partial failure (ledger.completedAt
+   is null when the loop threw). Matches the M2 hold-chip geometry so the
+   two chips align in the flags-cell. Tooltip carries per-batch filenames
+   and outcomes. */
+.batch-dispatch-chip {
+  display: inline-block;
+  margin: 0 4px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: var(--app-green-weak);
+  color: var(--app-green);
+  border: 1px solid var(--app-green);
+  white-space: nowrap;
+  cursor: help;
+  vertical-align: middle;
+}
+.batch-dispatch-chip--error {
+  background: var(--app-red-weak);
+  color: var(--app-red);
+  border-color: var(--app-red);
+}

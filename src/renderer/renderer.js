@@ -983,6 +983,33 @@ function renderJobTable(jobs) {
       flagsHtml += `<span class="hold-review-chip" title="${escapeHtml(tipText)}">${escapeHtml(chipLabel)}</span>`;
     }
 
+    // Batched Darkroom Pro dispatch chip (M6). M4 populates
+    // job._darkroomProBatchLedger on split dispatches only — the byte-for-byte
+    // single-batch path leaves no ledger, so this chip is absent there and the
+    // grid stays visually identical for every lab that hasn't set a cap.
+    // completedAt is the pass/fail signal: only stamped once every batch has
+    // been written successfully; partial failure leaves it null and the
+    // batches array short (the loop stops at the throw). Tooltip carries the
+    // per-batch filenames + outcomes so the operator can reconcile against
+    // Darkroom Pro's queue without opening the Activity Log.
+    if (job._darkroomProBatchLedger) {
+      const ledger    = job._darkroomProBatchLedger;
+      const total     = ledger.totalBatches;
+      const batches   = Array.isArray(ledger.batches) ? ledger.batches : [];
+      const succeeded = batches.filter(b => b && b.outcome === 'success').length;
+      const partial   = !ledger.completedAt;
+      const chipClass = partial ? 'batch-dispatch-chip batch-dispatch-chip--error' : 'batch-dispatch-chip';
+      const chipText  = partial ? `Sent ${succeeded}/${total} batches` : `Sent as ${total} batches`;
+      const perBatch  = batches
+        .map(b => `${b.filename || '(unnamed)'} — ${b.outcome}${b.error ? `: ${b.error}` : ''}`)
+        .join('\n');
+      const header    = partial
+        ? `Darkroom Pro batches: ${succeeded} of ${total} written, ${total - succeeded} not written. Cap ${ledger.cap}, ${ledger.totalPrints} prints total.`
+        : `Darkroom Pro batches: ${total} of ${total} written. Cap ${ledger.cap}, ${ledger.totalPrints} prints total.`;
+      const tipText   = perBatch ? `${header}\n\n${perBatch}` : header;
+      flagsHtml += `<span class="${chipClass}" title="${escapeHtml(tipText)}">${escapeHtml(chipText)}</span>`;
+    }
+
     // For error-status jobs, surface the _errorMessage right next to the
     // badge (both as a tooltip and as a one-line truncated caption). Without
     // this the operator sees a red "error" pill and nothing else, and has
