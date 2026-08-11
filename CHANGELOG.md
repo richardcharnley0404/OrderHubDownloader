@@ -162,6 +162,26 @@ vanilla `renderer.js` reads a single `_holdChipLabel` field. Legacy-
 cache fallback preserves the old label for any job entry that predates
 this fix, until the next poll re-stamps.
 
+### Fixed: Fuji Assign on the Jobs grid did nothing on Save (v1.8.0 regression)
+The Save button on the Assign Channel Mapping modal — when opened from a
+`fujijobmaker` or `fujipicpro` job on the Jobs grid — threw a
+`ReferenceError` inside its click handler and returned before entering
+the try / catch. **The operator saw nothing at all**: no toast, no
+validation message, no error dialog. Save simply did not respond, and
+there was no way to complete the assignment from the Jobs grid — the
+only workaround was to open Settings → Channel Mappings and create the
+mapping there. Both Fuji controller types have been affected since
+v1.8.0. The handler referenced `route`, which is out of scope: it is
+registered once at page load inside `initAssignModal()` and closes over
+`modal` / `saveBtn` only, not the `(job, route)` args of the
+`openAssignModal` function that stamps the modal's dataset. Fixed by
+stashing the PIC Pro flag on `modal.dataset` in `openAssignModal`
+alongside the other context and reading it back in the handler — the
+same pattern the handler already uses for `isFuji` and `isDarkroomPro`.
+Only manifested from the Jobs-grid entry point; the Settings-side
+Channel Mapping modal was unaffected because its Save handler reads
+every input fresh from the DOM.
+
 ## v1.9.0 - 2026-08-09
 
 Adopts ohd-api v1.4.0 to cut OHD's polling cost against OrderHub. In
