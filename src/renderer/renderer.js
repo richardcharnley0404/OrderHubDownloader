@@ -1444,6 +1444,13 @@ function openAssignModal(job, route) {
     const isFujiPicPro = route.controller && route.controller.type === 'fujipicpro';
     document.getElementById('assignColorGroup').style.display = isFujiPicPro ? '' : 'none';
     document.getElementById('assignColor').value = 'C';
+    // Stash on the dataset for the save handler. The click handler at
+    // ~line 1591 must NOT read `route` — it's out of scope there (the
+    // handler is registered once in initAssignModal and only closes over
+    // `modal` / `saveBtn`, not this function's args). Reading it threw a
+    // ReferenceError before the try/catch and the operator saw nothing —
+    // every Fuji Assign has been broken since v1.8.0 (519e9f9).
+    modal.dataset.isPicPro = isFujiPicPro ? '1' : '';
   }
 
   if (isDarkroomPro) {
@@ -1587,8 +1594,10 @@ function openAssignModal(job, route) {
       const surfaceCode = surfaceCodeInput.value.trim();
 
       // Hoisted once — used by the printSize gate below and the
-      // color-field logic further down (fix 13).
-      const isPicProParent = route.controller && route.controller.type === 'fujipicpro';
+      // color-field logic further down (fix 13). Sourced from the dataset
+      // stamped in openAssignModal; `route` is out of scope in this handler
+      // (see the note there for the v1.8.0 regression this fixes).
+      const isPicProParent = modal.dataset.isPicPro === '1';
 
       // Same bare-WxH check the IPC handler enforces server-side.
       const BARE_WXH = /^\s*\d+(?:\.\d+)?\s*[x×]\s*\d+(?:\.\d+)?\s*$/i;
