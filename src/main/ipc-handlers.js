@@ -1235,6 +1235,52 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
     return parseChannelMappingsCsv(csv);
   });
 
+  // Operator-initiated retry on an errored job (M8 of
+  // missing-print-size-recovery). Resets _status back to 'received'
+  // and clears _errorMessage so the next runAutoPrint cycle picks
+  // the job up through the normal path — including every existing
+  // gate (AI quality hold, routing hold, hold-for-review). Do NOT
+  // dispatch directly from here; bypassing those gates would be a
+  // new hole. See the sticky-error comment in runAutoPrint for why
+  // auto-print itself never resets _status.
+  //
+  // Idempotent: retrying a non-errored job is a no-op that returns
+  // {success:true, changed:false} — a stale button click or a
+  // devtools invocation shouldn't fail loudly.
+  ipcMain.handle('ohd:job:retry', async (event, payload) => {
+    const jobId = payload && payload.jobId != null ? payload.jobId : payload;
+    try {
+      const { jobs } = jobService.getLocalJobs();
+      // String coercion on both sides — the renderer sends the id as
+      // a string via data-attribute; the local store carries the
+      // API's numeric id. Same pattern as ohd:reprint:create's
+      // apiJobId lookup at :2076.
+      const job = (jobs || []).find(j => String(j.id) === String(jobId));
+      if (!job) {
+        return { success: false, error: `Job ${jobId} not found in local cache.` };
+      }
+      if (job._status !== 'error') {
+        return { success: true, changed: false };
+      }
+      jobService.updateJobLocally(job.id, {
+        _status: 'received',
+        _errorMessage: null,
+      });
+      logger.info('[retry] Operator reset errored job — auto-print will pick up on next cycle', {
+        jobId: job.id,
+        previousError: job._errorMessage || '',
+      });
+      // Fire-and-forget — auto-print returns quickly if there's
+      // nothing to dispatch, and the renderer refreshes via loadJobs()
+      // after the retry response either way.
+      runAutoPrint().catch(err => logger.logError('[auto-print] post-retry check failed', err));
+      return { success: true, changed: true };
+    } catch (error) {
+      logger.logError('ohd:job:retry error', error, { jobId });
+      return { success: false, error: error.message };
+    }
+  });
+
   // Routing health check (M5/M6 of missing-print-size-recovery). Reads
   // the current routing store and returns the array of unroutable
   // mappings — DPOF-family with a blank printSizeCode that will fail at
@@ -3076,6 +3122,13 @@ async function runAutoPrint() {
         // filter at line 1704 excludes jobs in _status: 'error' from future
         // cycles, so propagating the error message AND setting status to
         // 'error' breaks the retry loop for ALL error classes consistently.
+        //
+        // M8 (missing-print-size-recovery) adds the operator escape hatch
+        // that was missing: `ohd:job:retry` resets _status back to
+        // 'received' so the next cycle picks the job up. Do NOT switch
+        // auto-print to reset _status itself — the sticky behaviour is
+        // deliberate and load-bearing, and an operator-initiated reset
+        // is the correct point to signal "the config is fixed now".
         logger.logError('[auto-print] Dispatch failed', err, { jobId: job.id });
         jobService.updateJobLocally(job.id, {
           _status: 'error',

@@ -1010,16 +1010,13 @@ function renderJobTable(jobs) {
       const msg = job._warningMessage || 'Unknown warning — check Activity Log';
       actionHtml = `<span class="route-unassigned-msg">⚠ ${escapeHtml(msg)}</span>`;
     } else if (job._status === 'error') {
-      // M7 (missing-print-size-recovery): pre-M7 an errored job showed
-      // grey `--` with no way to fix the underlying config from the
-      // Jobs grid. Now, when the specific "DPOF-family mapping with a
-      // blank printSizeCode" cause is detected (which the dispatch
-      // gate at print-service.js:253 rejects, and which the M5 health
-      // check flags), surface a "Fix mapping" button that opens the
-      // EXISTING mapping in the Channel Mappings modal via the M7
-      // channelMappingId now carried on DPOF routes. All other error
-      // causes still fall through to the `--` cell; Retry is added in
-      // M8 alongside this.
+      // M7 + M8 (missing-print-size-recovery): pre-M7 an errored job
+      // showed grey `--` with no in-app recovery. Now, Retry is
+      // available on EVERY error state (the operator may have fixed
+      // the underlying cause — SMB path reconnected, controller
+      // rebooted, config edited elsewhere) and "Fix mapping" is added
+      // specifically when the error is the "DPOF-family mapping with
+      // a blank printSizeCode" case that M5's health check flags.
       const route = jobRouteCache.get(String(job.id));
       // Same NON_DPOF list as src/shared/controllerTypes.js and the
       // Settings-side renderChannelMappings copy at :5780 (renderer
@@ -1030,6 +1027,11 @@ function renderJobTable(jobs) {
         && !NON_DPOF_TYPES.has(String(route.controllerType || ''));
       const hasBlankPrintSize = route
         && (!route.printSizeCode || String(route.printSizeCode).trim() === '');
+      // Retry: resets _status to 'received' via ohd:job:retry so
+      // auto-print picks the job up on its next cycle. Does NOT
+      // dispatch directly — routing hold, AI quality hold and every
+      // other gate must still apply.
+      const retryBtn = `<button class="btn-action btn-retry" data-job-id="${escapeHtml(String(job.id))}" title="Reset this errored job — auto-print will pick it up on the next cycle.">Retry</button>`;
       if (isDpofFamily && route.channelMappingId && hasBlankPrintSize) {
         // Label is deliberately "Fix mapping" not "Re-assign" — this
         // edits the existing mapping in place. "Re-assign" would imply
@@ -1038,9 +1040,9 @@ function renderJobTable(jobs) {
         // crypto.randomUUID()) would silently create a duplicate that
         // resolveRoute's first-match-wins would ignore.
         const fixBtn = `<button class="btn-action btn-fix-mapping" data-mapping-id="${escapeHtml(String(route.channelMappingId))}" title="Open the channel mapping for this product — the print size is missing.">Fix mapping</button>`;
-        actionHtml = `${reviewBtn}${fixBtn}`;
+        actionHtml = `${reviewBtn}${fixBtn}${retryBtn}`;
       } else {
-        actionHtml = '<span style="color:#a0aec0;font-size:11px">--</span>';
+        actionHtml = `${reviewBtn}${retryBtn}`;
       }
     } else {
       actionHtml = '<span style="color:#a0aec0;font-size:11px">--</span>';
@@ -1349,6 +1351,44 @@ function renderJobTable(jobs) {
       const jobId = btn.dataset.jobId;
       const job   = allJobs.find(j => String(j.id) === String(jobId));
       if (job) openResolveRoutingHoldModal(job);
+    });
+  });
+
+  // ── Retry button (M8 of missing-print-size-recovery) ─────────────────────
+  // Resets an errored job's _status back to 'received' via the
+  // ohd:job:retry IPC — auto-print's normal cycle picks it up. Does
+  // NOT dispatch here; every existing gate (AI quality, routing
+  // hold, hold-for-review) must still apply. After the IPC returns,
+  // fetch fresh jobs so the row re-renders — the reset alone doesn't
+  // trigger onJobsUpdated (that fires only on successful dispatch).
+  document.querySelectorAll('.btn-retry[data-job-id]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const jobId = btn.dataset.jobId;
+      btn.disabled = true;
+      const originalText = btn.textContent;
+      btn.textContent = 'Retrying...';
+      try {
+        const result = await window.electronAPI.retryJob(jobId);
+        if (result && result.success === false) {
+          showToast('Retry failed: ' + (result.error || 'Unknown error'), 'error', 8000);
+          btn.disabled = false;
+          btn.textContent = originalText;
+          return;
+        }
+        // Refresh the jobs list so the row re-renders with the reset
+        // status. loadJobs re-fetches, resolves routes, and re-renders
+        // the table in one call — no need to duplicate those steps.
+        await loadJobs();
+        // Only toast when we actually changed something — a no-op
+        // retry (job wasn't errored anymore) is silent.
+        if (result && result.changed) {
+          showToast('Job reset — auto-print will pick it up on the next cycle.', 'info', 4000);
+        }
+      } catch (err) {
+        showToast('Retry failed: ' + err.message, 'error', 8000);
+        btn.disabled = false;
+        btn.textContent = originalText;
+      }
     });
   });
 
