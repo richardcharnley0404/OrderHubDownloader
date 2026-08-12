@@ -1208,16 +1208,27 @@ const NON_DPOF_CONTROLLER_TYPES = new Set([
 
 /**
  * Save-time validation for `printSizeCode` on DPOF/Noritsu channel
- * mappings. For a DPOF-family controller, either `printSizeCode` or the
- * legacy `size` field must be non-blank — otherwise the dispatch gate in
- * print-service will reject every job routed through this mapping and the
- * operator will only see it at print time. Fail here so it can be fixed
- * before the mapping is persisted.
+ * mappings. For a DPOF-family controller, `printSizeCode` must be
+ * non-blank — otherwise the dispatch gate in print-service will reject
+ * every job routed through this mapping and the operator will only see
+ * it at print time. Fail here so it can be fixed before the mapping is
+ * persisted.
  *
- * Scope: mappings whose controller type is NOT one of the non-DPOF types
- * (darkroompro / fujijobmaker / frontline / folder_copy / pdf_copy).
- * Non-DPOF types get their size from their own dedicated fields and are
- * validated elsewhere (or don't need a print size at all).
+ * The legacy `mapping.size` field is NOT accepted as a substitute (M3
+ * of missing-print-size-recovery — the pre-M3 `|| size` fallback let a
+ * mapping with `size='KG'` and blank `printSizeCode` save cleanly, then
+ * fail loudly at dispatch because `resolvePrintSizeCode` reads only
+ * `printSizeCode`. Badge + validator + resolver now all agree). The
+ * bare-WxH backfill (`backfillLegacyPrintSizeCode`) still copies safe
+ * legacy `size` values into `printSizeCode` at startup so existing
+ * DPOF-family mappings whose legacy `size` was a bare WxH shape keep
+ * passing this validator after the tightening.
+ *
+ * Scope: mappings whose controller type is NOT one of the non-DPOF
+ * types (darkroompro / fujijobmaker / fujipicpro / frontline /
+ * folder_copy / pdf_copy). Non-DPOF types get their size from their
+ * own dedicated fields and are validated elsewhere (or don't need a
+ * print size at all).
  *
  * Covers both the modal save path AND the CSV import path — both go
  * through `ohd:routing:save-channel-mapping`, so this is the single
@@ -1237,9 +1248,7 @@ function validateDPOFPrintSizeCode(mapping, controllerType) {
     return { valid: true };
   }
   const raw = mapping
-    ? String((mapping.printSizeCode != null ? mapping.printSizeCode : '')
-             || (mapping.size != null         ? mapping.size         : ''))
-        .trim()
+    ? String(mapping.printSizeCode != null ? mapping.printSizeCode : '').trim()
     : '';
   if (!raw) {
     return {

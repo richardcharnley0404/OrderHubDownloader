@@ -44,10 +44,10 @@ const { validateDPOFPrintSizeCode } = require(
 );
 
 
-// ── Rejection cases: DPOF-family + blank field ───────────────────────────────
+// ── Rejection cases: DPOF-family + blank printSizeCode ───────────────────────
 
-test('validateDPOFPrintSizeCode: noritsu + blank printSizeCode + blank size → invalid', () => {
-  const result = validateDPOFPrintSizeCode({ printSizeCode: '', size: '' }, 'noritsu');
+test('validateDPOFPrintSizeCode: noritsu + blank printSizeCode → invalid', () => {
+  const result = validateDPOFPrintSizeCode({ printSizeCode: '' }, 'noritsu');
   assert.equal(result.valid, false);
   assert.match(result.error, /Print Size Code is required/);
 });
@@ -79,13 +79,49 @@ test('validateDPOFPrintSizeCode: noritsu + populated printSizeCode → valid', (
   assert.deepEqual(validateDPOFPrintSizeCode({ printSizeCode: 'NML -PSIZE "8x4"' }, 'noritsu'), { valid: true });
 });
 
-test('validateDPOFPrintSizeCode: noritsu + blank printSizeCode BUT populated legacy size → valid', () => {
-  // Belt-and-braces: legacy `size` counts as a source. This should be
-  // rare after the step-2 backfill (which copies bare-WxH `size` into
-  // `printSizeCode` at startup), but the check still passes so a
-  // save via a code path that predates the migration keeps working.
+// M3 (missing-print-size-recovery): the pre-M3 validator accepted
+// `printSizeCode || size` — a mapping with `size='4x6'` and blank
+// `printSizeCode` saved cleanly, then failed at dispatch because
+// `resolvePrintSizeCode` reads only `printSizeCode`. Removed. Badge,
+// validator, and resolver now all agree.
+//
+// The bare-WxH backfill (`backfillLegacyPrintSizeCode`) still runs at
+// startup, so an existing DPOF-family mapping whose legacy `size` was
+// a bare WxH shape has its `printSizeCode` populated by the backfill
+// before the first save call reaches this validator — so removing
+// the `|| size` fallback here does not break bare-WxH installs.
+// The case that WAS silently allowed and now is not: `size='KG'` (or
+// any non-bare-WxH string) with blank `printSizeCode`, which the
+// backfill never copies and would still fail at dispatch.
+
+test('validateDPOFPrintSizeCode: noritsu + blank printSizeCode + populated legacy `size` bare WxH → INVALID (M3)', () => {
+  // Pre-M3 this returned valid. Post-M3 it does not — the operator
+  // must type the code into `printSizeCode` proper, matching what the
+  // dispatch-time resolver reads.
   const result = validateDPOFPrintSizeCode({ printSizeCode: '', size: '4x6' }, 'noritsu');
-  assert.equal(result.valid, true);
+  assert.equal(result.valid, false);
+  assert.match(result.error, /Print Size Code is required/);
+});
+
+test('validateDPOFPrintSizeCode: noritsu + blank printSizeCode + populated legacy `size` short code → INVALID (M3)', () => {
+  // The pre-M3 leniency's real damage: `size='KG'` (not backfillable
+  // because the backfill only copies bare-WxH values) would pass the
+  // validator, save cleanly, show the amber badge, and then throw at
+  // dispatch. Post-M3 the operator sees the rejection at save time
+  // and can fix the mapping in place.
+  const result = validateDPOFPrintSizeCode({ printSizeCode: '', size: 'KG' }, 'noritsu');
+  assert.equal(result.valid, false);
+  assert.match(result.error, /Print Size Code is required/);
+});
+
+test('validateDPOFPrintSizeCode: legacy `size` field is IGNORED — presence does not affect the verdict', () => {
+  // Regression guard for the M3 tightening. `size` is no longer a
+  // fallback source under any circumstances; only `printSizeCode` is
+  // consulted.
+  assert.equal(validateDPOFPrintSizeCode({ printSizeCode: 'KG', size: 'wrong' }, 'noritsu').valid, true,
+    'populated printSizeCode passes even when legacy size disagrees');
+  assert.equal(validateDPOFPrintSizeCode({ printSizeCode: '',   size: 'KG'    }, 'noritsu').valid, false,
+    'blank printSizeCode fails even when legacy size is populated');
 });
 
 

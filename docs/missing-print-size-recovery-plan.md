@@ -174,6 +174,27 @@ deliberately removed.
 
 ---
 
+## 5.1 M9 changelog TODOs
+
+Cross-milestone notes to fold into the CHANGELOG when M9 lands. Each entry
+here describes an operator-visible behaviour change that they need telling
+about, even when the fix itself is technical / server-side.
+
+- **M3 (validator tightening):** DPOF-family channel mappings whose only
+  print-size source is the legacy `mapping.size` field can no longer be
+  saved unchanged. If `size` is a bare WxH (e.g. `4x6`, `8x10`), the
+  startup backfill (`backfillLegacyPrintSizeCode`) copies it into
+  `printSizeCode` before the operator touches the mapping — so those
+  installs are unaffected. The case that WAS silently allowed and now
+  fires an error at save: `size` is a non-bare-WxH string (e.g. `KG`,
+  `A4`, `NML -PSIZE "8x4"`) AND `printSizeCode` is blank. Pre-M3 that
+  saved cleanly and then threw at dispatch; post-M3 the save is
+  rejected with *"Print Size Code is required — it sets the print size
+  for this product code."* and the operator must type the code into the
+  Print Size Code field on the mapping. Intentional — the whole point
+  of M3 is that validator, badge, and dispatch resolver agree — but
+  it's the kind of thing labs open a ticket about, so call it out.
+
 ## 6. Decisions needed
 
 1. **Retry: explicit button, or auto-reset on mapping save, or both?**

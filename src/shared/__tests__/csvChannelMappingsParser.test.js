@@ -275,8 +275,11 @@ test('parseChannelMappingsCsv: header aliases — channelNumber, productCode, pr
 });
 
 test('parseChannelMappingsCsv: `size` header alias maps to printSizeCode', () => {
-  // Matches the dual-source read in validateDPOFPrintSizeCode which
-  // accepts either `printSizeCode` or the legacy `size` field.
+  // Recognises the legacy column name and normalises the value into
+  // `printSizeCode` before returning. Post-M3 the validator ignores
+  // `mapping.size` at save time, so an old export CSV that used the
+  // `size` column must still re-import cleanly by having its value
+  // land in `printSizeCode`.
   const csv = [
     'channel,product_code,size',
     '4,PROD-A,KG',

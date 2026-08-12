@@ -83,9 +83,11 @@ function parseCsvLine(line) {
 // column; cells at unrecognised header names stay in the positional
 // stream and become option candidates. Aliases exist because operators
 // hand-write CSVs and print-size in particular gets spelled
-// inconsistently in the wild — the `size` alias matches the dual-source
-// read in validateDPOFPrintSizeCode which accepts either `printSizeCode`
-// or the legacy `size` field.
+// inconsistently in the wild — the `size` alias here recognises the
+// legacy column name and normalises the value into `printSizeCode`
+// before returning, so old export CSVs that used `size` continue to
+// re-import cleanly even after M3 tightened validateDPOFPrintSizeCode
+// to reject the legacy `mapping.size` field as a save-time source.
 const KNOWN_HEADER_NAMES = {
   channel:                 'channel',
   channelnumber:           'channel',
