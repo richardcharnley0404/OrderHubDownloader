@@ -1,3 +1,136 @@
+## Unreleased
+
+**Recovery flow for channel mappings without a print size.** Channel
+mappings created before v1.7.22 may lack a Print Size Code. Since v1.7.22
+those mappings save fine but fail at dispatch, and until now the app gave
+you no way to find them, no way to fix them from the job row, and no way
+to revive the jobs that had already tried to print through them. A lab
+that upgraded straight into this state saw dozens of red rows with no
+in-app affordance to do anything about them. This release adds the
+recovery flow end-to-end, plus three related fixes for silent failure
+paths that made the original bug so hard to notice.
+
+**If you are that lab, here is what to do after installing this release:**
+
+1. **Look at the top of the app on launch.** A red banner appears saying
+   *"N channel mappings will fail at dispatch — no print size set"* when
+   any exist. Click **Open Settings** to go straight to Settings → Routing.
+2. **Above the Channel Mappings list**, the same count appears in a
+   warning-toned block with a *Jump to first* button that scrolls the
+   first offending mapping into view and briefly flashes it. The existing
+   amber ⚠ badge on each row shows which mappings are missing the field.
+3. **Click Edit on each flagged row**, enter the Print Size Code, save.
+   The banner and the roll-up count both drop as you go. Once every
+   mapping is fixed, both surfaces hide.
+4. **Errored jobs need Retry too.** Fixing the mapping alone doesn't
+   revive a job that already failed. Every errored job row now has a
+   **Retry** button that resets the job so the next auto-print cycle
+   picks it up. Where the error is specifically the missing-print-size
+   case, a **Fix mapping** button sits alongside Retry and opens the
+   offending channel mapping directly — no hunting through Settings.
+
+### New: Startup banner, Settings roll-up, Fix mapping, and Retry
+
+Four surfaces of one recovery flow, driven by a single health check that
+runs on every launch and every Settings → Routing open. Deliberately
+unguarded by any flag, so an install that hit this months ago sees the
+banner and the roll-up immediately after this update — the v1.7.22
+startup backfill only fires once per install, so its own log warnings
+(added in this release too, see below) never fire on those installs.
+
+- **Startup banner.** Red, dismissible for the app session; auto-hides
+  when the count reaches 0; reappears on next launch if any remain. A
+  config this broken should reassert itself.
+- **Settings → Routing roll-up.** Refreshes on every pane open and after
+  every mapping save, so it always reflects current state.
+- **Fix mapping** on errored DPOF-family job rows (Noritsu, Epson) when
+  the specific cause is a blank Print Size Code. Opens the *existing*
+  mapping in the Channel Mappings modal — deliberately not the Assign
+  modal, which always inserts a new mapping and would silently duplicate
+  the one you're trying to fix.
+- **Retry** on every errored job row. Resets the job's status so the
+  next auto-print cycle picks it up. Does not dispatch directly — every
+  existing gate (AI quality hold, routing hold, hold-for-review) still
+  applies. Any error cause is retryable, not just print-size ones —
+  the operator may have fixed an SMB path, rebooted a controller, or
+  edited a config value elsewhere.
+
+### New: Optional `print_size_code` column in the Channel Mappings CSV
+
+`Import CSV` and `Export CSV` in Settings → Routing now understand an
+optional `print_size_code` column so DPOF-family mappings round-trip
+losslessly through the CSV format. Format spec and an executable example
+live in `docs/csv-channel-mappings.md`. Backwards compatible on every axis:
+
+- **Header-less positional CSVs still parse byte-identically** to
+  pre-v1.10.1 — column zero is channel, column one is product, everything
+  else is options.
+- **Header rows with only the old columns still parse byte-identically.**
+  A CSV starting with `channel,product_code,option,option` imports the
+  same way it always did.
+- **New CSVs can use the new column** in any position. Header aliases
+  include `printSizeCode`, `printSize`, and the legacy `size` column
+  name; header names are case- and punctuation-insensitive.
+
+### Changed: Mappings whose only print-size source is a legacy non-WxH value can no longer save
+
+A DPOF-family channel mapping whose `printSizeCode` is blank AND whose
+legacy `size` field is a non-WxH string like `KG` (a Noritsu paper code,
+not a bare `4x6`-style dimension) used to save cleanly and then fail at
+dispatch. The save-time validator now rejects it with *"Print Size Code
+is required — it sets the print size for this product code."*, forcing
+the operator to type the code into the Print Size Code field where
+dispatch will actually read it.
+
+**Bare-WxH legacy values are unaffected.** The startup backfill copies
+them into `printSizeCode` automatically, so a mapping with `size: '4x6'`
+and blank `printSizeCode` migrates once at startup and continues to
+save cleanly. The case that IS newly rejected — `size: 'KG'` with blank
+`printSizeCode` — was already broken at dispatch; the change surfaces
+the failure at save time where the operator can fix it in place instead
+of finding out one job at a time.
+
+### Fixed: Reprint on a sizeless mapping fails loudly
+
+Pre-fix, `_sendReprintViaDPOF` went straight from the resolved route to
+the DPOF file generator with no print-size check. A sizeless DPOF-family
+mapping wrote a literal `PRT PSL=` line into the AUTPRINT.MRK, the folder
+writer succeeded, and OHD reported the reprint as sent — a green pill on
+a reprint that would either be rejected by the controller outright or,
+worse, print at the wrong size. The reprint path now enforces the same
+guard as first send and returns the *"No print size configured for
+product X"* error so the fix (set the code in Settings → Routing) is
+unambiguous whether the failure hits on first dispatch or on reprint.
+
+### Fixed: CSV import correctly counts DPOF rejections as skipped
+
+`saveChannelMapping`'s IPC contract returns `{success:false, error}` on
+validator failure rather than throwing. The CSV import loop's try/catch
+only caught throws, so validator rejections silently incremented the
+"imported" count while persisting nothing. A lab importing 40 Noritsu
+rows into a controller that mandated Print Size Code saw *"40 mappings
+imported, 0 skipped"* and could not tell that nothing had been saved.
+
+Rejected rows are now counted as skipped and named individually in the
+summary as `Line N (ch X, product Y): reason` so the operator can jump
+straight to the offending CSV row.
+
+### Fixed: Backfill summary counts unfixable mappings + logs a warning
+
+The one-time startup backfill's completion summary previously reported
+only `{backfilled, skippedNonWxH, totalMappings}`. A DPOF-family (or
+Fuji-family) mapping with both source fields blank returned silently,
+so 40 unfixable mappings on a real install looked identical to a healthy
+one in the info-level completion line. Both backfills now include an
+`unfixable` counter in the summary and emit a distinct warn-level log
+when the counter is greater than zero, so support triage can grep for
+the problem.
+
+Note: this warning fires only on launches where the backfill actually
+executes. Installs whose backfill flag was set by an older version never
+see it — which is exactly why the startup banner and Settings roll-up
+above are the primary recovery surface for existing installs.
+
 ## v1.10.0 - 2026-08-10
 
 **Operator-triggered batch splitting for Darkroom Pro.** A lab can now set

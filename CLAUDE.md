@@ -75,7 +75,13 @@ messages by subsystem: `[auto-print]`, `[backup]`, `[orientation]`,
 mocking pattern is `require.cache` injection so Electron-dependent modules load
 headless; many services also accept injected deps (fs, sharp, shell, clock, api
 client) for the same reason. Keep new tests inside one of the five globs in
-`package.json` or they will never run.
+`package.json` or they will never run. **Direct `node --test` invocations
+need `--test-force-exit`** — several tests transitively pull in electron-store
+and other modules with live timers that keep the event loop alive after the
+assertions complete; the `npm test` script already passes the flag, but a
+`node --test path/to/foo.test.js` call without it will hang. Match the
+package.json script:
+`node --test --test-force-exit --test-concurrency=1 <files>`.
 
 **Singletons.** Most services export a live instance (`module.exports = new
 Foo()`); some export `{ instance, Class }` so tests can construct their own.

@@ -73,6 +73,8 @@ recognise the routed filename shape (batched too) *and* the routed dispatch to
 register each submission with the monitor. Not release-blocking — the legacy
 non-routed path still has the acceptance signal for labs on that path.
 
+**Fuji PIC Pro's blank `printSize` still degrades Manual Crop to a 1:1 square silently.** Same class of bug as the DPOF `printSizeCode` recovery, different controller. When a `fujipicpro` (or `fujijobmaker`) channel mapping has a blank `printSize`, dispatch still succeeds (the field is a Manual Crop aspect indicator only — `print-service.js:2466-2478` is the docblock spelling out why the auto-print path deliberately doesn't gate on it), but Manual Crop falls back to a 1:1 square with only a `⚠` pill via `resolveTargetSize` to signal the issue. The M5 configHealth check in this release covers DPOF only; extending it to flag sizeless Fuji mappings the same way — and surfacing them in the startup banner + Settings roll-up — was deliberately kept out of scope for this release. Do when a lab reports it.
+
 **`dpof-generator.js` still emits `PRT PSL=` unvalidated.** M1 guards the reprint caller, but the three first-send callers (`print-service.js:319`, `:490`, `print-controller-service.js:37`) all rely on caller-side print-size guards. A generator-boundary throw would be defence-in-depth and align with the "fail loudly" spirit of v1.7.22, but needs its own audit across all five call sites before landing.
 
 **Settings polling-interval field on a fresh install shows editable until first check-in.**
