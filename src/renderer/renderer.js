@@ -1009,6 +1009,39 @@ function renderJobTable(jobs) {
     } else if (job._status === 'warning') {
       const msg = job._warningMessage || 'Unknown warning — check Activity Log';
       actionHtml = `<span class="route-unassigned-msg">⚠ ${escapeHtml(msg)}</span>`;
+    } else if (job._status === 'error') {
+      // M7 (missing-print-size-recovery): pre-M7 an errored job showed
+      // grey `--` with no way to fix the underlying config from the
+      // Jobs grid. Now, when the specific "DPOF-family mapping with a
+      // blank printSizeCode" cause is detected (which the dispatch
+      // gate at print-service.js:253 rejects, and which the M5 health
+      // check flags), surface a "Fix mapping" button that opens the
+      // EXISTING mapping in the Channel Mappings modal via the M7
+      // channelMappingId now carried on DPOF routes. All other error
+      // causes still fall through to the `--` cell; Retry is added in
+      // M8 alongside this.
+      const route = jobRouteCache.get(String(job.id));
+      // Same NON_DPOF list as src/shared/controllerTypes.js and the
+      // Settings-side renderChannelMappings copy at :5780 (renderer
+      // can't require — see the comment on that copy).
+      const NON_DPOF_TYPES = new Set(['darkroompro', 'fujijobmaker', 'fujipicpro', 'frontline', 'folder_copy', 'pdf_copy']);
+      const isDpofFamily = route
+        && route.type === 'controller'
+        && !NON_DPOF_TYPES.has(String(route.controllerType || ''));
+      const hasBlankPrintSize = route
+        && (!route.printSizeCode || String(route.printSizeCode).trim() === '');
+      if (isDpofFamily && route.channelMappingId && hasBlankPrintSize) {
+        // Label is deliberately "Fix mapping" not "Re-assign" — this
+        // edits the existing mapping in place. "Re-assign" would imply
+        // creating a new one, and the Assign modal's create-only
+        // semantics (renderer.js:1658, :1819 both hardcode
+        // crypto.randomUUID()) would silently create a duplicate that
+        // resolveRoute's first-match-wins would ignore.
+        const fixBtn = `<button class="btn-action btn-fix-mapping" data-mapping-id="${escapeHtml(String(route.channelMappingId))}" title="Open the channel mapping for this product — the print size is missing.">Fix mapping</button>`;
+        actionHtml = `${reviewBtn}${fixBtn}`;
+      } else {
+        actionHtml = '<span style="color:#a0aec0;font-size:11px">--</span>';
+      }
     } else {
       actionHtml = '<span style="color:#a0aec0;font-size:11px">--</span>';
     }
@@ -1316,6 +1349,36 @@ function renderJobTable(jobs) {
       const jobId = btn.dataset.jobId;
       const job   = allJobs.find(j => String(j.id) === String(jobId));
       if (job) openResolveRoutingHoldModal(job);
+    });
+  });
+
+  // ── Fix mapping button (M7 of missing-print-size-recovery) ────────────────
+  // Fetches the specific mapping + the controllers list, then opens the
+  // EXISTING mapping in the Channel Mappings modal. Reusing
+  // openChannelMappingModal here rather than the Assign modal is critical:
+  // the Assign modal hardcodes crypto.randomUUID() (renderer.js:1658,
+  // :1819) so it always INSERTs; the Channel Mappings modal preserves
+  // modal.dataset.editingId and cmSaveBtn upserts by that id (:6054,
+  // :6096). See docs/missing-print-size-recovery-brief.md §"THE TRAP".
+  document.querySelectorAll('.btn-fix-mapping[data-mapping-id]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const mappingId = btn.dataset.mappingId;
+      try {
+        const [mappings, controllers] = await Promise.all([
+          window.electronAPI.getChannelMappings(),
+          window.electronAPI.getOrderControllers(),
+        ]);
+        const mapping = (mappings || []).find(m => String(m.id) === String(mappingId));
+        if (!mapping) {
+          // Mapping was deleted between the row render and the click.
+          // Rare, but easier to surface than to guess at recovery.
+          showToast('Channel mapping no longer exists — reload the page to refresh routing state.', 'error', 8000);
+          return;
+        }
+        openChannelMappingModal(mapping, controllers || []);
+      } catch (err) {
+        showToast('Error opening channel mapping: ' + err.message, 'error', 8000);
+      }
     });
   });
 

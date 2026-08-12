@@ -584,12 +584,19 @@ function resolveRoute(job) {
   const printSizeCode = resolvePrintSizeCode(channelMapping);
 
   return {
-    type:           'controller',
-    controllerType: controller.type || 'dpof',
-    controllerId:   controller.id,
-    controllerName: controller.name,
-    outputPath:     controller.outputPath,
-    channelNumber:  channelMapping.channelNumber,
+    type:             'controller',
+    controllerType:   controller.type || 'dpof',
+    controllerId:     controller.id,
+    controllerName:   controller.name,
+    outputPath:       controller.outputPath,
+    // M7 (missing-print-size-recovery): carried through so the Jobs
+    // grid can open the specific mapping via "Fix mapping" when an
+    // errored DPOF-family job is routed to a blank-print-size
+    // mapping. Also mirrors what the darkroompro literal already sets
+    // at :410. Only added to DPOF here + the DPOF branch of
+    // resolveRouteForController — not the 19 other route literals.
+    channelMappingId: channelMapping.id,
+    channelNumber:    channelMapping.channelNumber,
     printSizeCode,
     bannerSheet:      controller.bannerSheet || false,
     skipAutoPrint:    channelMapping.skipAutoPrint || false,
@@ -696,13 +703,18 @@ function resolveRouteForController(job, controllerId) {
   // can be added later if the use case emerges — v1.7.8 ships with the
   // generic DPOF/Darkroom shape since that's the Lab use case.
   const shape = {
-    type:           'controller',
-    controllerType: controller.type || 'dpof',
-    controllerId:   controller.id,
-    controllerName: controller.name,
-    outputPath:     controller.outputPath,
-    channelNumber:  channelMapping.channelNumber,
-    printSizeCode:  resolvePrintSizeCode(channelMapping),
+    type:             'controller',
+    controllerType:   controller.type || 'dpof',
+    controllerId:     controller.id,
+    controllerName:   controller.name,
+    outputPath:       controller.outputPath,
+    // M7 (missing-print-size-recovery): see the matching field on the
+    // main resolveRoute Layer-3 DPOF literal for rationale. Kept
+    // symmetric so a reassignment route resolved here carries the
+    // same identifier as one resolved through the normal path.
+    channelMappingId: channelMapping.id,
+    channelNumber:    channelMapping.channelNumber,
+    printSizeCode:    resolvePrintSizeCode(channelMapping),
     bannerSheet:      controller.bannerSheet || false,
     skipAutoPrint:    channelMapping.skipAutoPrint || false,
     checkOrderStatus: controller.checkOrderStatus !== false,
