@@ -78,6 +78,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveChannelMapping:       (mapping)                        => ipcRenderer.invoke('ohd:routing:save-channel-mapping',  mapping),
   deleteChannelMapping:     (id)                             => ipcRenderer.invoke('ohd:routing:delete-channel-mapping', { id }),
   parseChannelMappingsCsv:  (csv)                            => ipcRenderer.invoke('ohd:routing:parse-mappings-csv', csv),
+  checkRoutingHealth:       ()                               => ipcRenderer.invoke('ohd:routing:check-health'),
   assignDarkroomChannel:    (jobId, channelMappingId)        => ipcRenderer.invoke('jobs:assignDarkroomChannel', { jobId, channelMappingId }),
   assignDarkroomSizeMedia:  (jobId, size, media)            => ipcRenderer.invoke('jobs:assignDarkroomSizeMedia', { jobId, size, media }),
   updateDarkroomTranslations: (payload)                     => ipcRenderer.invoke('controllers:updateDarkroomTranslations', payload),

@@ -47,6 +47,24 @@
       </div>
     </div>
 
+    <!-- Routing-health banner (M6 of missing-print-size-recovery). Shows
+         when the health check finds DPOF-family channel mappings without
+         a printSizeCode — jobs routed through those mappings will fail
+         at dispatch. Dismiss is per-app-run only (deliberately not
+         persisted); the check re-runs on the next launch. -->
+    <div id="healthBanner" class="health-banner hidden" role="alert">
+      <div class="health-banner-body">
+        <div class="health-banner-text">
+          <strong><span id="healthBannerCount">0</span> channel mappings will fail at dispatch</strong>
+          <span class="health-banner-notes">No print size set — open Settings → Routing to fix them.</span>
+        </div>
+        <div class="health-banner-actions">
+          <button type="button" id="healthBannerOpenBtn" class="btn-primary btn-sm">Open Settings</button>
+          <button type="button" id="healthBannerDismissBtn" class="btn-ghost btn-sm">Dismiss</button>
+        </div>
+      </div>
+    </div>
+
     <main class="app-body">
 
       <!-- Global toast notification (visible from any tab) -->
@@ -768,6 +786,20 @@
             <fieldset class="panel-section">
               <legend>Channel Mappings</legend>
               <p class="section-desc">Maps a product code + options combination to a specific channel number on a controller. Use the <strong>Assign</strong> button on a job to add mappings, or manage them here.</p>
+
+              <!-- Routing-health roll-up (M6 of missing-print-size-recovery).
+                   Populated by renderer.js whenever loadChannelMappings runs
+                   — every Settings → Routing open. Hidden when the count
+                   is zero. "Jump to first" scrolls the first flagged row
+                   into view. -->
+              <div id="channelMappingsHealthRollup" class="channel-mappings-health-rollup hidden">
+                <span class="channel-mappings-health-icon">⚠</span>
+                <span class="channel-mappings-health-text">
+                  <strong><span id="channelMappingsHealthCount">0</span> mappings will fail at dispatch</strong>
+                  — no print size set.
+                </span>
+                <button type="button" id="channelMappingsHealthJumpBtn" class="btn-ghost btn-sm">Jump to first</button>
+              </div>
 
               <div id="channelMappingsList">
                 <!-- Rendered by renderer.js -->

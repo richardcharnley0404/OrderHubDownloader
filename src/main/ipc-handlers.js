@@ -1235,6 +1235,25 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
     return parseChannelMappingsCsv(csv);
   });
 
+  // Routing health check (M5/M6 of missing-print-size-recovery). Reads
+  // the current routing store and returns the array of unroutable
+  // mappings — DPOF-family with a blank printSizeCode that will fail at
+  // dispatch. Called on every launch (fed into the startup banner) and
+  // every Settings → Routing open (fed into the roll-up). Deliberately
+  // unguarded and unmemoised — the M4 backfill's warning fires only on
+  // launches that actually run the backfill, so installs whose
+  // _backfill_* flag is already set never see it. This is the only
+  // mechanism that surfaces the problem on those installs, including
+  // the lab that triggered this piece of work. Lazy-require to keep
+  // ipc-handlers' load-time surface minimal.
+  ipcMain.handle('ohd:routing:check-health', async () => {
+    const { findUnroutableMappings } = require('../shared/configHealth');
+    return findUnroutableMappings(
+      routingService.getChannelMappings(),
+      routingService.getControllers(),
+    );
+  });
+
   // ohd-api v1.4.0 — server-capabilities snapshot. Used by the Settings
   // panel to decide whether the polling-interval input is operator-editable
   // or centrally-managed. Lazy-require: server-capabilities pulls

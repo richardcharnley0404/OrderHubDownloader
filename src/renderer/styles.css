@@ -2699,6 +2699,112 @@ button {
   color: #b91c1c;
 }
 
+/* ── Routing-health banner + Settings roll-up (M6, 2026-08-12) ─────────
+   Surfaces src/shared/configHealth.findUnroutableMappings on the
+   Jobs-grid frame (top-of-app banner, same slot as #updateBanner) and
+   above the Settings → Routing channel-mappings list. The banner is
+   dismissible per-run only — the check re-runs on the next launch, so
+   a config this broken reasserts itself. The roll-up refreshes on
+   every Settings → Routing open. Colours borrow the app-red tokens so
+   the semantic reads as "will fail" rather than "needs attention". */
+.health-banner {
+  background: var(--app-red);
+  color: #fff;
+  flex-shrink: 0;
+  padding: 10px 20px;
+  border-bottom: 1px solid #7a1a12;
+}
+.health-banner.hidden {
+  display: none;
+}
+.health-banner-body {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.health-banner-text {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+.health-banner-text strong {
+  white-space: nowrap;
+  font-size: 13px;
+}
+.health-banner-notes {
+  font-size: 12px;
+  opacity: 0.9;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.health-banner-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.health-banner .btn-ghost {
+  color: rgba(255, 255, 255, 0.85);
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+}
+.health-banner .btn-ghost:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.7);
+}
+.health-banner .btn-primary {
+  background: #fff;
+  color: var(--app-red);
+  border: none;
+}
+.health-banner .btn-primary:hover {
+  background: var(--app-surface-sunk);
+}
+
+/* Settings-side roll-up. Sits above #channelMappingsList inside the
+   Channel Mappings fieldset. Lower-key visual weight than the banner
+   because the operator is already looking at the list. */
+.channel-mappings-health-rollup {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  border: 1px solid var(--app-red);
+  background: var(--app-red-weak);
+  color: var(--app-red);
+  border-radius: 4px;
+  font-size: 12px;
+}
+.channel-mappings-health-rollup.hidden {
+  display: none;
+}
+.channel-mappings-health-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+.channel-mappings-health-text {
+  flex: 1;
+  min-width: 0;
+}
+.channel-mappings-health-text strong {
+  font-weight: 700;
+}
+
+/* Brief highlight applied to a mapping row when "Jump to first" scrolls
+   it into view. Fades so the effect draws the eye and then subsides. */
+.channel-mapping-row--highlight {
+  animation: channel-mapping-row-flash 1.8s ease-out;
+}
+@keyframes channel-mapping-row-flash {
+  0%   { background-color: var(--app-red-weak); box-shadow: 0 0 0 2px var(--app-red); }
+  100% { background-color: transparent;         box-shadow: none; }
+}
+
 /* ── PDF Pipeline Builder ──────────────────────────────────────────────────── */
 .pipeline-steps-list {
   display: flex;

@@ -379,6 +379,11 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   // Render print controller cards
   renderPrintControllers(cachedControllers);
+
+  // Routing-health check (M6). Fire-and-forget — the banner appears
+  // when it can, doesn't block startup. See refreshHealthBanner
+  // docstring for why this runs on every launch, unguarded.
+  refreshHealthBanner();
 });
 
 // ── Window controls ──
@@ -447,6 +452,122 @@ window.electronAPI.onUpdateReady(({ version }) => {
     versionEl.classList.add('update-ready');
   }
 });
+
+// ── Routing-health check + banner (M6 of missing-print-size-recovery) ──
+//
+// Runs on every launch and every Settings → Routing open, unguarded by
+// any flag. The M4 backfill's warning fires only on launches that
+// actually run the backfill — installs whose _backfill_* flag is
+// already set never see it. The health check is the only mechanism
+// that surfaces the problem on those installs, so it must stay cheap
+// and unconditional. Two consumers:
+//   - Startup: `refreshHealthBanner()` below runs after DOMContentLoaded
+//     and shows the top-of-app banner when findings.length > 0.
+//   - Settings → Routing: `loadChannelMappings()` calls
+//     `refreshChannelMappingsHealthRollup()` to update the roll-up above
+//     the list every time the pane opens.
+//
+// Both call sites re-fetch. Do not memoise or gate on any flag.
+
+// Per-run dismissal flag. Set to true by either the Dismiss or Open
+// Settings action. Reset naturally on app restart (module reload) —
+// deliberately NOT persisted, per the M6 brief: a config this broken
+// should reassert itself on the next launch. Once dismissed,
+// refreshHealthBanner is a no-op for the rest of the session so
+// re-invocations from loadChannelMappings after every save don't
+// resurrect the banner the operator has already engaged with.
+let _healthBannerDismissed = false;
+
+async function refreshHealthBanner() {
+  const banner    = document.getElementById('healthBanner');
+  const countEl   = document.getElementById('healthBannerCount');
+  const openBtn   = document.getElementById('healthBannerOpenBtn');
+  const dismissBtn = document.getElementById('healthBannerDismissBtn');
+  if (!banner || !countEl || !openBtn || !dismissBtn) return;
+  // Dismissed → don't touch the banner state at all. This handles two
+  // cases at once: (a) count stays > 0 across a save cycle — banner
+  // stays hidden, not reasserted; (b) count drops to 0 — banner is
+  // already hidden from the dismiss, no work needed.
+  if (_healthBannerDismissed) return;
+  try {
+    const findings = await window.electronAPI.checkRoutingHealth();
+    const count = Array.isArray(findings) ? findings.length : 0;
+    if (count === 0) {
+      // Banner auto-hides when the count reaches 0 — the operator
+      // fixed everything, no reason to keep showing the alert. Not a
+      // dismissal (flag stays false) so if a fresh mapping later
+      // breaks the config, the banner will reappear on the next
+      // refresh.
+      banner.classList.add('hidden');
+      return;
+    }
+    countEl.textContent = String(count);
+    banner.classList.remove('hidden');
+    openBtn.onclick = () => {
+      // Dismiss the banner AND navigate — the roll-up on the Settings
+      // pane provides the ongoing surface, so the banner has done its
+      // job once the operator is looking at the list. Set the flag so
+      // subsequent loadChannelMappings-triggered refreshes don't
+      // resurrect the banner across the tab switch.
+      _healthBannerDismissed = true;
+      banner.classList.add('hidden');
+      const settingsTab = document.querySelector('.tab[data-tab="settings"]');
+      if (settingsTab) settingsTab.click();
+      // Scroll the mappings list into view once the tab has painted.
+      // 100ms is enough for the tab switch on every install we ship
+      // to; if a slower render race turns up, hook into the tab-click
+      // handler rather than growing this timeout.
+      setTimeout(() => {
+        const list = document.getElementById('channelMappingsList');
+        if (list) list.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 100);
+    };
+    dismissBtn.onclick = () => {
+      _healthBannerDismissed = true;
+      banner.classList.add('hidden');
+    };
+  } catch (err) {
+    console.error('[health] check failed', err);
+  }
+}
+
+async function refreshChannelMappingsHealthRollup() {
+  const rollup   = document.getElementById('channelMappingsHealthRollup');
+  const countEl  = document.getElementById('channelMappingsHealthCount');
+  const jumpBtn  = document.getElementById('channelMappingsHealthJumpBtn');
+  if (!rollup || !countEl || !jumpBtn) return;
+  try {
+    const findings = await window.electronAPI.checkRoutingHealth();
+    const count = Array.isArray(findings) ? findings.length : 0;
+    if (count === 0) {
+      rollup.classList.add('hidden');
+      return;
+    }
+    countEl.textContent = String(count);
+    rollup.classList.remove('hidden');
+    jumpBtn.onclick = () => jumpToChannelMappingRow(findings[0].mappingId);
+  } catch (err) {
+    console.error('[health] rollup refresh failed', err);
+  }
+}
+
+function jumpToChannelMappingRow(mappingId) {
+  if (!mappingId) return;
+  // Attribute selector — mapping ids are UUIDs so no CSS-escape
+  // concerns, but use CSS.escape() defensively since a legacy row
+  // could carry a non-UUID id from the pre-uuid era of the store.
+  const escapedId = window.CSS && typeof window.CSS.escape === 'function'
+    ? window.CSS.escape(mappingId)
+    : String(mappingId).replace(/[^\w-]/g, '');
+  const row = document.querySelector(`.channel-mapping-row[data-mapping-id="${escapedId}"]`);
+  if (!row) return;
+  row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  row.classList.remove('channel-mapping-row--highlight');
+  // Re-add on the next frame so the animation restarts if the button
+  // is clicked twice.
+  requestAnimationFrame(() => row.classList.add('channel-mapping-row--highlight'));
+  setTimeout(() => row.classList.remove('channel-mapping-row--highlight'), 2000);
+}
 
 // ── Update available banner ──
 window.electronAPI.onUpdateAvailable(({ latest_version, download_url, release_notes, mandatory }) => {
@@ -5729,6 +5850,17 @@ async function loadChannelMappings() {
       window.electronAPI.getOrderControllers(),
     ]);
     renderChannelMappings(mappings, controllers);
+    // Refresh BOTH the top-of-app banner and the Settings roll-up on
+    // every load. loadChannelMappings runs after every save / delete /
+    // CSV import as well as on Settings → Routing open, so both
+    // surfaces stay in sync — without this, the roll-up would drop
+    // to 0 after a fix while the banner still showed the stale count
+    // until app restart. Fire-and-forget for the same reason as the
+    // startup banner call — neither surface needs to block the render.
+    // refreshHealthBanner is a no-op if the operator has already
+    // dismissed the banner this session.
+    refreshHealthBanner();
+    refreshChannelMappingsHealthRollup();
   } catch (err) {
     console.error('Error loading channel mappings:', err);
   }
@@ -5801,6 +5933,9 @@ function renderChannelMappings(mappings, controllers) {
 
       const row = document.createElement('div');
       row.className = 'channel-mapping-row';
+      // M6: enables "Jump to first" in the health roll-up to scroll
+      // this row into view via querySelector on the mapping id.
+      if (mapping.id != null) row.dataset.mappingId = String(mapping.id);
 
       const infoDiv = document.createElement('div');
       infoDiv.className = 'channel-mapping-info';
