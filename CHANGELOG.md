@@ -1,4 +1,4 @@
-## Unreleased
+## v1.11.0 - 2026-08-10
 
 **Recovery flow for channel mappings without a print size.** Channel
 mappings created before v1.7.22 may lack a Print Size Code. Since v1.7.22
