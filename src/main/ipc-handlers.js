@@ -1222,6 +1222,18 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
     return routingService.getAllSizeOptions();
   });
 
+  // Parse a Channel Mappings CSV. Called by the Settings → Routing CSV
+  // import handler in the renderer. The parser is a pure module
+  // (src/shared/csvChannelMappingsParser.js) — kept out of the renderer
+  // because renderer.js loads under context isolation and cannot
+  // require(), which would have forced a second inline copy of the
+  // logic. Lazy-require so ipc-handlers' load-time surface doesn't
+  // widen for this rarely-used code path.
+  ipcMain.handle('ohd:routing:parse-mappings-csv', async (event, csv) => {
+    const { parseChannelMappingsCsv } = require('../shared/csvChannelMappingsParser');
+    return parseChannelMappingsCsv(csv);
+  });
+
   // ohd-api v1.4.0 — server-capabilities snapshot. Used by the Settings
   // panel to decide whether the polling-interval input is operator-editable
   // or centrally-managed. Lazy-require: server-capabilities pulls

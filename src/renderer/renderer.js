@@ -6143,76 +6143,6 @@ document.getElementById('cmSaveBtn').addEventListener('click', async () => {
 
 // --- CSV parsing helpers ---
 
-function parseCsvLine(line) {
-  const result = [];
-  let field = '';
-  let inQuotes = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (ch === '"') {
-      if (inQuotes && line[i + 1] === '"') { field += '"'; i++; }
-      else inQuotes = !inQuotes;
-    } else if (ch === ',' && !inQuotes) {
-      result.push(field);
-      field = '';
-    } else {
-      field += ch;
-    }
-  }
-  result.push(field);
-  return result;
-}
-
-function parseChannelMappingsCsv(content) {
-  const lines = content.split(/\r?\n/);
-  const rows    = [];
-  const skipped = [];
-  let firstDataLine = true;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line || line.startsWith('#')) continue;
-
-    const cols       = parseCsvLine(line);
-    const channelRaw = (cols[0] || '').trim();
-
-    // Skip header row (first cell non-numeric or literally "channel")
-    if (firstDataLine && (isNaN(parseInt(channelRaw, 10)) || channelRaw.toLowerCase() === 'channel')) {
-      firstDataLine = false;
-      continue;
-    }
-    firstDataLine = false;
-
-    const channelNumber = parseInt(channelRaw, 10);
-    const productCode   = (cols[1] || '').trim();
-
-    if (!channelRaw || isNaN(channelNumber)) {
-      skipped.push({ lineNum: i + 1, raw: line, reason: 'Channel number missing or non-numeric' });
-      continue;
-    }
-    if (!productCode) {
-      skipped.push({ lineNum: i + 1, raw: line, reason: 'Product code is empty' });
-      continue;
-    }
-
-    const options = [];
-    for (let j = 2; j < cols.length; j++) {
-      const val = (cols[j] || '').trim();
-      if (!val) continue;
-      const colonIdx = val.indexOf(':');
-      if (colonIdx > 0) {
-        options.push({ name: val.slice(0, colonIdx).trim(), value: val.slice(colonIdx + 1).trim() });
-      }
-    }
-
-    // lineNum carried through so the import loop can name IPC-rejected
-    // rows in the summary — matches the parser-side `skipped` shape.
-    rows.push({ lineNum: i + 1, channelNumber, productCode, options });
-  }
-
-  return { rows, skipped };
-}
-
 // --- Import modal state ---
 let csvImportFileContent = null;
 let csvImportDone = false;
@@ -6281,7 +6211,13 @@ document.getElementById('csvImportDoBtn').addEventListener('click', async () => 
   const controllerId = document.getElementById('csvImportControllerId').value;
   if (!controllerId || !csvImportFileContent) return;
 
-  const { rows, skipped } = parseChannelMappingsCsv(csvImportFileContent);
+  // Parse in the main process via ohd:routing:parse-mappings-csv — the
+  // parser lives in src/shared/csvChannelMappingsParser.js. renderer.js
+  // loads under context isolation and cannot require() a shared module,
+  // so keeping the parser in main is the way to have ONE tested
+  // implementation that actually runs. Sub-millisecond round-trip at
+  // realistic CSV sizes (labs import <500 rows).
+  const { rows, skipped } = await window.electronAPI.parseChannelMappingsCsv(csvImportFileContent);
 
   // Disable button during import
   const importBtn = document.getElementById('csvImportDoBtn');
