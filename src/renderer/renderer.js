@@ -6205,7 +6205,9 @@ function parseChannelMappingsCsv(content) {
       }
     }
 
-    rows.push({ channelNumber, productCode, options });
+    // lineNum carried through so the import loop can name IPC-rejected
+    // rows in the summary — matches the parser-side `skipped` shape.
+    rows.push({ lineNum: i + 1, channelNumber, productCode, options });
   }
 
   return { rows, skipped };
@@ -6302,7 +6304,16 @@ document.getElementById('csvImportDoBtn').addEventListener('click', async () => 
     try {
       const key = `${controllerId}\0${row.productCode}\0${optionsKey(row.options)}`;
       const existingId = existingByKey[key];
-      await window.electronAPI.saveChannelMapping({
+      // saveChannelMapping's IPC contract is {success:true} | {success:false,error}
+      // — validator failures RETURN {success:false} rather than throwing (see
+      // ipc-handlers.js:1301-1311 for the DPOF print-size validator). Pre-M2
+      // this loop only caught thrown errors and bumped `imported++`
+      // unconditionally, so every rejected row silently passed and the
+      // summary reported "N imported, 0 skipped" while persisting nothing —
+      // exactly the bug that stranded a lab's Noritsu CSV import in
+      // v1.7.22+. Match the shape the modal and Assign handlers use
+      // (renderer.js:6128, :1678, :1826).
+      const result = await window.electronAPI.saveChannelMapping({
         id: existingId || crypto.randomUUID(),
         controllerId,
         productCode: row.productCode,
@@ -6310,16 +6321,24 @@ document.getElementById('csvImportDoBtn').addEventListener('click', async () => 
         channelNumber: row.channelNumber,
         printSizeCode: '',
       });
+      if (result && result.success === false) {
+        importErrors.push({ ...row, reason: result.error || 'Rejected by save handler' });
+        continue;
+      }
       imported++;
     } catch (err) {
       importErrors.push({ ...row, reason: err.message });
     }
   }
 
-  // Build summary
+  // Build summary. Both parser-side skips and IPC-side rejections are named
+  // by line number so the operator can jump to the offending CSV row —
+  // channel + product code carried in parentheses for the IPC-side entries
+  // since a single line can be rejected for reasons unrelated to those
+  // fields (e.g. missing printSizeCode on a DPOF row).
   const allSkipped = [
     ...skipped.map(s => `Line ${s.lineNum}: ${s.reason}`),
-    ...importErrors.map(e => `Ch ${e.channelNumber} ${e.productCode}: ${e.reason}`),
+    ...importErrors.map(e => `Line ${e.lineNum} (ch ${e.channelNumber}, product ${e.productCode}): ${e.reason}`),
   ];
   const totalSkipped = skipped.length + importErrors.length;
 
