@@ -1317,6 +1317,7 @@ function backfillLegacyPrintSizeCode() {
 
     let backfilled    = 0;
     let skippedNonWxH = 0;
+    let unfixable     = 0;
     const nextMappings = mappings.map(m => {
       const type = controllerTypeById.get(m.controllerId) || '';
       if (NON_DPOF_CONTROLLER_TYPES.has(type)) return m;
@@ -1325,7 +1326,19 @@ function backfillLegacyPrintSizeCode() {
       if (existing) return m;
 
       const legacy = String(m.size || '').trim();
-      if (!legacy) return m;
+      if (!legacy) {
+        // M4 (missing-print-size-recovery): DPOF-family mapping with
+        // BOTH `printSizeCode` and legacy `size` blank. Pre-M4 this
+        // returned silently and 40 unfixable mappings on a real install
+        // looked identical to a healthy one in the completion summary —
+        // the operator only found out at dispatch when every routed
+        // job failed the print-size gate. Count them so the summary
+        // can name the problem and the follow-up warn log can flag it.
+        // Eligibility is unchanged (still returns the mapping as-is,
+        // still no backfill) — this is observability only.
+        unfixable++;
+        return m;
+      }
 
       if (!isBareWxH(legacy)) {
         // Non-WxH legacy value — see docblock. Warn per mapping so the
@@ -1355,8 +1368,22 @@ function backfillLegacyPrintSizeCode() {
     logger.info('routing-service: printSizeCode backfill complete', {
       backfilled,
       skippedNonWxH,
+      unfixable,
       totalMappings: mappings.length,
     });
+
+    // M4: warn-level summary when any DPOF-family mapping is unfixable.
+    // The info-level completion line above is easy to miss in a healthy
+    // install; a warn-level line with `unfixable` in the fields is what
+    // grep in support triage catches. The routing-list amber badge,
+    // Settings roll-up (M6), and startup banner (M6) surface the same
+    // information to the operator in the UI.
+    if (unfixable > 0) {
+      logger.logWarning('routing-service: DPOF-family mappings need a Print Size Code — they will fail at dispatch', {
+        unfixable,
+        totalMappings: mappings.length,
+      });
+    }
   } catch (err) {
     logger.logError('routing-service: printSizeCode backfill failed', err);
     // Do NOT set the flag so it retries next startup
@@ -1418,6 +1445,7 @@ function backfillFujiPrintSize() {
 
     let backfilled       = 0;
     let skippedNonWxH    = 0;
+    let unfixable        = 0;
     const nextMappings = mappings.map(m => {
       const type = controllerTypeById.get(m.controllerId) || '';
       if (!FUJI_FAMILY_CONTROLLER_TYPES.has(type)) return m;
@@ -1426,7 +1454,17 @@ function backfillFujiPrintSize() {
       if (existing) return m;
 
       const printCode = String(m.printCode || '').trim();
-      if (!printCode) return m;
+      if (!printCode) {
+        // M4 (missing-print-size-recovery): Fuji-family mapping with
+        // BOTH `printSize` and `printCode` blank — no source at all
+        // to derive the crop aspect from. Pre-M4 this returned silently
+        // and the operator only found out later when Manual Crop
+        // silently fell back to a 1:1 square. Count so the summary
+        // exposes the problem. Eligibility unchanged — observability
+        // only.
+        unfixable++;
+        return m;
+      }
 
       if (!isBareWxH(printCode)) {
         skippedNonWxH++;
@@ -1452,8 +1490,21 @@ function backfillFujiPrintSize() {
     logger.info('routing-service: Fuji printSize backfill complete', {
       backfilled,
       skippedNonWxH,
+      unfixable,
       totalMappings: mappings.length,
     });
+
+    // M4: warn-level summary when any Fuji-family mapping is unfixable.
+    // Same rationale as backfillLegacyPrintSizeCode's warn — the
+    // info-level completion line disappears in a healthy install; a
+    // warn-level line with `unfixable` in the fields is what grep in
+    // support triage catches.
+    if (unfixable > 0) {
+      logger.logWarning('routing-service: Fuji-family mappings need a Print Size or Print Code — Manual Crop will fall back to a square', {
+        unfixable,
+        totalMappings: mappings.length,
+      });
+    }
   } catch (err) {
     logger.logError('routing-service: Fuji printSize backfill failed', err);
     // Do NOT set the flag so it retries next startup

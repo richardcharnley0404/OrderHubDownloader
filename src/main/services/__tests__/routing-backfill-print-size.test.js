@@ -48,14 +48,20 @@ function __seed(data) {
   for (const k of Object.keys(__storeData)) delete __storeData[k];
   Object.assign(__storeData, data);
   __warnings.length = 0;
+  __infoLines.length = 0;
 }
 
 // Warning-capturing logger stub — required so the non-WxH warning
-// assertion has something to inspect. Every other log method is a no-op.
+// assertion has something to inspect, and (M4) so the summary-level
+// warn and info summary can be inspected. Every other log method is a
+// no-op.
 const __warnings = [];
+const __infoLines = [];
 const fakeLogger = {
-  info:    () => {}, warn:  () => {}, error:    () => {}, debug:    () => {},
-  logInfo: () => {}, logError: () => {}, logDebug: () => {},
+  info:    (message, meta = {}) => __infoLines.push({ message, meta }),
+  warn:    () => {}, error: () => {}, debug: () => {},
+  logInfo: (message, meta = {}) => __infoLines.push({ message, meta }),
+  logError: () => {}, logDebug: () => {},
   logWarning: (message, meta = {}) => __warnings.push({ message, meta }),
 };
 
@@ -456,6 +462,110 @@ test('backfill: pre-formatted NML legacy size is also not backfilled (not bare W
   assert.equal(__warnings.length, 1);
 });
 
+
+// ── M4: unfixable counter + summary-level warn ───────────────────────────────
+//
+// Pre-M4 a DPOF-family mapping with BOTH blank printSizeCode and blank
+// legacy size returned silently — no counter, no log. On a real install
+// with 40 such mappings, the completion summary looked identical to a
+// healthy one, and the operator only found out at dispatch. These tests
+// pin that the summary now names the count and a warn-level log fires
+// when it's > 0.
+
+test('M4: healthy store — unfixable=0 in summary, no warn-level log fires', () => {
+  __seed({
+    orderControllers: [NORITSU_CTRL],
+    channelMappings: [
+      { id: 'cm-ok',      controllerId: 'ctrl-noritsu', printSizeCode: 'KG', size: '' },
+      { id: 'cm-bwxh',    controllerId: 'ctrl-noritsu', printSizeCode: '',   size: '4x6' },
+    ],
+  });
+
+  backfillLegacyPrintSizeCode();
+
+  const summary = __infoLines.find(l => /printSizeCode backfill complete/.test(l.message));
+  assert.ok(summary, 'info-level summary line still fires');
+  assert.equal(summary.meta.unfixable, 0, 'healthy store → unfixable=0');
+  assert.equal(summary.meta.backfilled, 1);
+  assert.equal(summary.meta.totalMappings, 2);
+
+  const dispatchWarn = __warnings.find(w => /need a Print Size Code/.test(w.message));
+  assert.equal(dispatchWarn, undefined, 'summary-level dispatch warn must not fire when unfixable=0');
+});
+
+test('M4: N sizeless DPOF mappings — summary counts them + warn fires with total', () => {
+  // Reproduces the real lab case: several DPOF mappings with neither
+  // printSizeCode nor legacy size. Pre-M4 these were invisible in the
+  // summary; post-M4 the count and the warn line surface them.
+  __seed({
+    orderControllers: [NORITSU_CTRL, EPSON_CTRL],
+    channelMappings: [
+      { id: 'cm-n1', controllerId: 'ctrl-noritsu', productCode: 'A', printSizeCode: '', size: '' },
+      { id: 'cm-n2', controllerId: 'ctrl-noritsu', productCode: 'B', printSizeCode: '', size: '' },
+      { id: 'cm-n3', controllerId: 'ctrl-noritsu', productCode: 'C', printSizeCode: '', size: '' },
+      { id: 'cm-e1', controllerId: 'ctrl-epson',   productCode: 'D', printSizeCode: '', size: '' },
+      // Healthy mapping alongside — proves the counter doesn't double-count
+      // or accidentally include mappings that already have a value.
+      { id: 'cm-ok', controllerId: 'ctrl-noritsu', productCode: 'E', printSizeCode: 'KG' },
+    ],
+  });
+
+  backfillLegacyPrintSizeCode();
+
+  const summary = __infoLines.find(l => /printSizeCode backfill complete/.test(l.message));
+  assert.equal(summary.meta.unfixable,     4, 'each blank+blank DPOF-family row counts once');
+  assert.equal(summary.meta.backfilled,    0);
+  assert.equal(summary.meta.skippedNonWxH, 0);
+  assert.equal(summary.meta.totalMappings, 5);
+
+  const dispatchWarn = __warnings.find(w => /need a Print Size Code/.test(w.message));
+  assert.ok(dispatchWarn, 'summary-level dispatch warn must fire when unfixable > 0');
+  assert.equal(dispatchWarn.meta.unfixable,     4);
+  assert.equal(dispatchWarn.meta.totalMappings, 5);
+});
+
+test('M4: eligibility unchanged — an unfixable mapping is returned untouched (no phantom backfill)', () => {
+  // Explicit lock on the "observability only, no eligibility change"
+  // rule from the brief. The counter increments, the warn fires, but
+  // the mapping itself is unchanged.
+  __seed({
+    orderControllers: [NORITSU_CTRL],
+    channelMappings: [
+      { id: 'cm-unfix', controllerId: 'ctrl-noritsu', productCode: 'X',
+        options: [], channelNumber: 1, printSizeCode: '', size: '' },
+    ],
+  });
+
+  backfillLegacyPrintSizeCode();
+
+  const [m] = __storeData.channelMappings;
+  assert.equal(m.printSizeCode, '', 'unfixable mapping stays blank — no phantom value');
+  assert.equal(m.size,          '', 'legacy size stays blank');
+  assert.equal(m.channelNumber, 1,  'other fields untouched');
+});
+
+test('M4: unfixable count excludes non-DPOF controllers (scope preserved)', () => {
+  // Non-DPOF mappings return before the blank/blank check even runs,
+  // so they must NOT contribute to unfixable no matter their field
+  // shape. The scope rule from step 2 is unchanged; M4 is observability
+  // only within that scope.
+  __seed({
+    orderControllers: [FUJI_CTRL, DARKROOM_CTRL, FRONTLINE_CTRL],
+    channelMappings: [
+      { id: 'cm-fuji', controllerId: 'ctrl-fuji',    printSizeCode: '', size: '' },
+      { id: 'cm-dark', controllerId: 'ctrl-dark',    printSizeCode: '', size: '' },
+      { id: 'cm-fl',   controllerId: 'ctrl-front',   printSizeCode: '', size: '' },
+    ],
+  });
+
+  backfillLegacyPrintSizeCode();
+
+  const summary = __infoLines.find(l => /printSizeCode backfill complete/.test(l.message));
+  assert.equal(summary.meta.unfixable, 0, 'non-DPOF blank+blank rows must not count as unfixable — their size lives elsewhere');
+
+  const dispatchWarn = __warnings.find(w => /need a Print Size Code/.test(w.message));
+  assert.equal(dispatchWarn, undefined);
+});
 
 // Restore require shim hygiene so unrelated tests in the same worker aren't
 // affected by our electron/electron-store swaps.

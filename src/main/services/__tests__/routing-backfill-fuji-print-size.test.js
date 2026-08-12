@@ -47,12 +47,16 @@ function __seed(data) {
   for (const k of Object.keys(__storeData)) delete __storeData[k];
   Object.assign(__storeData, data);
   __warnings.length = 0;
+  __infoLines.length = 0;
 }
 
 const __warnings = [];
+const __infoLines = [];
 const fakeLogger = {
-  info:    () => {}, warn:  () => {}, error:    () => {}, debug:    () => {},
-  logInfo: () => {}, logError: () => {}, logDebug: () => {},
+  info:    (message, meta = {}) => __infoLines.push({ message, meta }),
+  warn:    () => {}, error: () => {}, debug: () => {},
+  logInfo: (message, meta = {}) => __infoLines.push({ message, meta }),
+  logError: () => {}, logDebug: () => {},
   logWarning: (message, meta = {}) => __warnings.push({ message, meta }),
 };
 
@@ -352,6 +356,95 @@ test('backfillFuji: whitespace / uppercase-X / Unicode-× printCode variants ARE
   assert.equal(__warnings.length, 0, 'these are eligible → no non-WxH warning');
 });
 
+
+// ── M4: unfixable counter + summary-level warn ───────────────────────────────
+//
+// Same shape as the DPOF backfill's M4 tests. Pre-M4 a Fuji-family
+// mapping with BOTH blank printSize and blank printCode returned
+// silently — no counter, no log. The operator only found out later
+// when Manual Crop silently fell back to a 1:1 square. These tests
+// pin that the summary now names the count and a warn-level log
+// mentioning Manual Crop fires when it's > 0.
+
+test('M4: healthy Fuji store — unfixable=0 in summary, no warn-level log fires', () => {
+  __seed({
+    orderControllers: [FUJI_JM_CTRL],
+    channelMappings: [
+      { id: 'cm-ok', controllerId: 'ctrl-fj', printCode: '6x4', printSize: '' },
+    ],
+  });
+
+  backfillFujiPrintSize();
+
+  const summary = __infoLines.find(l => /Fuji printSize backfill complete/.test(l.message));
+  assert.ok(summary, 'info-level summary line still fires');
+  assert.equal(summary.meta.unfixable, 0);
+  assert.equal(summary.meta.backfilled, 1);
+
+  const cropWarn = __warnings.find(w => /Manual Crop will fall back to a square/.test(w.message));
+  assert.equal(cropWarn, undefined, 'summary-level Manual Crop warn must not fire when unfixable=0');
+});
+
+test('M4: N sizeless Fuji mappings — summary counts them + warn fires with total', () => {
+  __seed({
+    orderControllers: [FUJI_JM_CTRL, FUJI_PICPRO_CTRL],
+    channelMappings: [
+      { id: 'cm-fj1',  controllerId: 'ctrl-fj', productCode: 'A', printSize: '', printCode: '' },
+      { id: 'cm-fj2',  controllerId: 'ctrl-fj', productCode: 'B', printSize: '', printCode: '' },
+      { id: 'cm-pp1',  controllerId: 'ctrl-pp', productCode: 'C', printSize: '', printCode: '' },
+      // Healthy alongside — proves the counter doesn't double-count.
+      { id: 'cm-ok',   controllerId: 'ctrl-fj', productCode: 'D', printSize: '6x4' },
+    ],
+  });
+
+  backfillFujiPrintSize();
+
+  const summary = __infoLines.find(l => /Fuji printSize backfill complete/.test(l.message));
+  assert.equal(summary.meta.unfixable,     3, 'each blank+blank Fuji-family row counts once');
+  assert.equal(summary.meta.backfilled,    0);
+  assert.equal(summary.meta.skippedNonWxH, 0);
+  assert.equal(summary.meta.totalMappings, 4);
+
+  const cropWarn = __warnings.find(w => /Manual Crop will fall back to a square/.test(w.message));
+  assert.ok(cropWarn, 'summary-level Manual Crop warn must fire when unfixable > 0');
+  assert.equal(cropWarn.meta.unfixable,     3);
+  assert.equal(cropWarn.meta.totalMappings, 4);
+});
+
+test('M4: eligibility unchanged — an unfixable Fuji mapping is returned untouched', () => {
+  __seed({
+    orderControllers: [FUJI_JM_CTRL],
+    channelMappings: [
+      { id: 'cm-unfix', controllerId: 'ctrl-fj', productCode: 'X',
+        options: [], printSize: '', printCode: '', surface: 'Lustre' },
+    ],
+  });
+
+  backfillFujiPrintSize();
+
+  const [m] = __storeData.channelMappings;
+  assert.equal(m.printSize, '', 'unfixable mapping stays blank — no phantom value');
+  assert.equal(m.printCode, '', 'printCode stays blank');
+  assert.equal(m.surface,   'Lustre', 'other fields untouched');
+});
+
+test('M4: unfixable count excludes non-Fuji controllers (scope preserved)', () => {
+  __seed({
+    orderControllers: [NORITSU_CTRL, DARKROOM_CTRL],
+    channelMappings: [
+      { id: 'cm-nor',  controllerId: 'ctrl-nor', printSize: '', printCode: '' },
+      { id: 'cm-dark', controllerId: 'ctrl-dr',  printSize: '', printCode: '' },
+    ],
+  });
+
+  backfillFujiPrintSize();
+
+  const summary = __infoLines.find(l => /Fuji printSize backfill complete/.test(l.message));
+  assert.equal(summary.meta.unfixable, 0, 'non-Fuji rows must not count as unfixable');
+
+  const cropWarn = __warnings.find(w => /Manual Crop will fall back to a square/.test(w.message));
+  assert.equal(cropWarn, undefined);
+});
 
 // Restore require shim hygiene so unrelated tests in the same worker aren't
 // affected by our electron/electron-store swaps.
