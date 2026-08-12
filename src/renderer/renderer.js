@@ -5774,8 +5774,11 @@ function renderChannelMappings(mappings, controllers) {
     );
 
     // Controller types that don't consult `printSizeCode` — same list as
-    // routing-service.NON_DPOF_CONTROLLER_TYPES. Only DPOF-family rows
-    // get the "no print size" warning badge for the DPOF `printSizeCode`
+    // src/shared/controllerTypes.NON_DPOF_CONTROLLER_TYPES (the canonical
+    // source both routing-service and configHealth import). Duplicated
+    // here because renderer.js loads under context isolation and cannot
+    // require(); keep the two in sync by grep. Only DPOF-family rows get
+    // the "no print size" warning badge for the DPOF `printSizeCode`
     // field (non-DPOF types don't have the field at all).
     const NON_DPOF_TYPES = new Set(['darkroompro', 'fujijobmaker', 'fujipicpro', 'frontline', 'folder_copy', 'pdf_copy']);
     const ctrlType     = ctrl && ctrl.type ? String(ctrl.type) : '';

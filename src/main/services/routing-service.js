@@ -1198,13 +1198,12 @@ function migrateFromPrintControllerStore() {
 
 // ── Legacy `size` → `printSizeCode` backfill ─────────────────────────────────
 
-// Controller types that do NOT consult `size` / `printSizeCode` at all. The
-// backfill below is DPOF/Noritsu-only; every other type derives its print
-// size from its own dedicated fields. Shared by the save-time validator
-// (`validateDPOFPrintSizeCode`) so the two lists can't drift apart.
-const NON_DPOF_CONTROLLER_TYPES = new Set([
-  'darkroompro', 'fujijobmaker', 'fujipicpro', 'frontline', 'folder_copy', 'pdf_copy',
-]);
+// Controller types that do NOT consult `size` / `printSizeCode` at all.
+// The backfill below is DPOF/Noritsu-only; every other type derives its
+// print size from its own dedicated fields. Sourced from src/shared so
+// the save-time validator (`validateDPOFPrintSizeCode`), both backfills,
+// and configHealth.findUnroutableMappings all see the same list.
+const { NON_DPOF_CONTROLLER_TYPES } = require('../../shared/controllerTypes');
 
 /**
  * Save-time validation for `printSizeCode` on DPOF/Noritsu channel
