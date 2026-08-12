@@ -73,6 +73,8 @@ recognise the routed filename shape (batched too) *and* the routed dispatch to
 register each submission with the monitor. Not release-blocking — the legacy
 non-routed path still has the acceptance signal for labs on that path.
 
+**`dpof-generator.js` still emits `PRT PSL=` unvalidated.** M1 guards the reprint caller, but the three first-send callers (`print-service.js:319`, `:490`, `print-controller-service.js:37`) all rely on caller-side print-size guards. A generator-boundary throw would be defence-in-depth and align with the "fail loudly" spirit of v1.7.22, but needs its own audit across all five call sites before landing.
+
 **Settings polling-interval field on a fresh install shows editable until first check-in.**
 The Settings panel reads `ohd:server:get-capabilities` once when the panel opens (see
 `renderer.js` — `populateForm`), so the first time an operator installs OHD v1.9.0 and opens

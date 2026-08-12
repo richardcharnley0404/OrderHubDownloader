@@ -267,6 +267,88 @@ test('reprint via DPOF: route missing channelNumber → success:false', async (t
   assert.match(result.error, /channelNumber: missing/);
 });
 
+// ── Print-size guard (M1, missing-print-size-recovery-brief.md) ────────────
+//
+// Pre-M1 a reprint against a sizeless DPOF-family mapping wrote a literal
+// `PRT PSL=` line to the AUTPRINT.MRK, orderFolderWriter succeeded, and OHD
+// reported the reprint as sent. Post-M1 the reprint fails with the same
+// operator-facing message shape as first send, and never touches the
+// generator or the writer. These tests pin that.
+
+test('reprint via DPOF: blank printSizeCode → success:false naming the product, no file written, generator not called', async (t) => {
+  resetCaptures();
+  __routeForReturn = noritsuRoute({ printSizeCode: '' });
+  const reprintPath = await makeReprintFolder();
+  t.after(() => fs.rmSync(reprintPath, { recursive: true, force: true }));
+
+  const result = await printService.sendReprint(PARENT, reprintPath, 'r1', [{ filename: 'a.jpg', qtyCurrent: 1 }]);
+
+  assert.equal(result.success, false);
+  assert.match(result.error, /No print size configured/i, 'error message uses the first-send guard shape');
+  assert.match(result.error, /"PHOTO4X6"/,               'error names the product_code so operators know which mapping to fix');
+  assert.match(result.error, /Settings → Routing/,        'error tells the operator where to fix it');
+  assert.equal(__generateCalls.length, 0, 'must not reach dpofGenerator with a sizeless route');
+  assert.equal(__writeCalls.length,    0, 'must not reach orderFolderWriter with a sizeless route');
+});
+
+test('reprint via DPOF: whitespace-only printSizeCode is treated as blank', async (t) => {
+  resetCaptures();
+  __routeForReturn = noritsuRoute({ printSizeCode: '   ' });
+  const reprintPath = await makeReprintFolder();
+  t.after(() => fs.rmSync(reprintPath, { recursive: true, force: true }));
+
+  const result = await printService.sendReprint(PARENT, reprintPath, 'r1', [{ filename: 'a.jpg', qtyCurrent: 1 }]);
+
+  assert.equal(result.success, false);
+  assert.match(result.error, /No print size configured/i);
+  assert.equal(__generateCalls.length, 0);
+});
+
+test('reprint via DPOF: null printSizeCode is treated as blank', async (t) => {
+  resetCaptures();
+  __routeForReturn = noritsuRoute({ printSizeCode: null });
+  const reprintPath = await makeReprintFolder();
+  t.after(() => fs.rmSync(reprintPath, { recursive: true, force: true }));
+
+  const result = await printService.sendReprint(PARENT, reprintPath, 'r1', [{ filename: 'a.jpg', qtyCurrent: 1 }]);
+
+  assert.equal(result.success, false);
+  assert.match(result.error, /No print size configured/i);
+});
+
+test('reprint via DPOF: parent with no product_code renders the "(none)" fallback', async (t) => {
+  // Matches the first-send guard's `job.product_code || '(none)'` shape so
+  // the operator sees a coherent error even for a job whose product_code
+  // failed to hydrate onto the cache entry — an edge, but the first-send
+  // guard covers it too and this parity keeps operator training uniform.
+  resetCaptures();
+  __routeForReturn = noritsuRoute({ printSizeCode: '' });
+  const reprintPath = await makeReprintFolder();
+  t.after(() => fs.rmSync(reprintPath, { recursive: true, force: true }));
+
+  const parentNoProduct = { ...PARENT, product_code: '' };
+  const result = await printService.sendReprint(parentNoProduct, reprintPath, 'r1', [{ filename: 'a.jpg', qtyCurrent: 1 }]);
+
+  assert.equal(result.success, false);
+  assert.match(result.error, /"\(none\)"/);
+});
+
+test('reprint via DPOF: valid printSizeCode still dispatches (guard does not misfire)', async (t) => {
+  // Guarantees the guard rejects blanks without spuriously rejecting a
+  // valid code — the existing suite's success-path tests already imply this,
+  // but an explicit regression pin makes the intent obvious.
+  resetCaptures();
+  __routeForReturn = noritsuRoute({ printSizeCode: 'KG' });
+  const reprintPath = await makeReprintFolder();
+  t.after(() => fs.rmSync(reprintPath, { recursive: true, force: true }));
+
+  const result = await printService.sendReprint(PARENT, reprintPath, 'r1', [{ filename: 'a.jpg', qtyCurrent: 1 }]);
+
+  assert.equal(result.success, true, `unexpected failure: ${result.error}`);
+  assert.equal(__generateCalls.length, 1);
+  assert.equal(__generateCalls[0].printSizeCode, 'KG');
+});
+
 test('reprint via DPOF: darkroompro route received by this method (defensive) returns clean error', async () => {
   resetCaptures();
   const result = await printService._sendReprintViaDPOF(

@@ -591,6 +591,24 @@ class PrintService {
       };
     }
 
+    // Print-size guard — mirrors the first-send guard at :253-258. Pre-M1
+    // (missing-print-size-recovery-brief.md) this method went straight to
+    // dpofGenerator.generate with whatever route.printSizeCode was; a blank
+    // wrote a literal `PRT PSL=` line into the AUTPRINT.MRK and OHD
+    // reported success. Same operator-facing message shape as first send
+    // so the fix (Settings → Routing) is unambiguous whether the failure
+    // hit on first dispatch or on reprint. Returns the {success:false}
+    // reprint contract; ohd:reprint:create wraps this into a
+    // "folder created but dispatch failed" surface for the renderer.
+    if (!route.printSizeCode || String(route.printSizeCode).trim() === '') {
+      return {
+        success: false,
+        error:
+          `No print size configured for product "${parentJob.product_code || '(none)'}". ` +
+          `Set the Print Size Code on this product's channel mapping in Settings → Routing.`
+      };
+    }
+
     // Images come from the reprint job's /originals/ folder
     const originalsPath = path.join(reprintJobPath, 'originals');
 
