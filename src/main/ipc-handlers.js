@@ -1227,8 +1227,9 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
   // (src/shared/csvChannelMappingsParser.js) — kept out of the renderer
   // because renderer.js loads under context isolation and cannot
   // require(), which would have forced a second inline copy of the
-  // logic. Lazy-require so ipc-handlers' load-time surface doesn't
-  // widen for this rarely-used code path.
+  // logic. See docs/csv-channel-mappings.md for the format contract.
+  // Lazy-require so ipc-handlers' load-time surface doesn't widen for
+  // this rarely-used code path.
   ipcMain.handle('ohd:routing:parse-mappings-csv', async (event, csv) => {
     const { parseChannelMappingsCsv } = require('../shared/csvChannelMappingsParser');
     return parseChannelMappingsCsv(csv);

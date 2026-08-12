@@ -1,0 +1,10 @@
+channel,product_code,print_size_code,option,option
+# Noritsu QSS-37
+1,PHOTO4X6,KG,finish:lustre,paper:matte
+1,PHOTO4X6,KG,finish:glossy,paper:matte
+2,PHOTO5X7,2L,finish:lustre,
+3,PHOTO8X10,8L,,
+# Fuji PIC Pro
+1,PHOTO4X6,,finish:matte,
+# Darkroom Pro
+1,PHOTO4X6,,,

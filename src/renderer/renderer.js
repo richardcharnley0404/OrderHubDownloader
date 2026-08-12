@@ -6255,7 +6255,14 @@ document.getElementById('csvImportDoBtn').addEventListener('click', async () => 
         productCode: row.productCode,
         options: row.options,
         channelNumber: row.channelNumber,
-        printSizeCode: '',
+        // Optional print_size_code CSV column (v1.10.1+). Absent → ''
+        // from the parser (pre-v1.10.1 byte-identical). Populated →
+        // passes through to the IPC handler; DPOF-family controllers
+        // require it, non-DPOF (Fuji / DarkroomPro / Frontline /
+        // folder_copy / pdf_copy) ignore it — validateDPOFPrintSizeCode
+        // early-returns {valid:true} for those types (see
+        // routing-service.js:1236).
+        printSizeCode: row.printSizeCode || '',
       });
       if (result && result.success === false) {
         importErrors.push({ ...row, reason: result.error || 'Rejected by save handler' });
@@ -6316,9 +6323,13 @@ document.getElementById('exportChannelMappingsCsvBtn').addEventListener('click',
       if ((m.options || []).length > maxOptions) maxOptions = m.options.length;
     }
 
-    // Build header — controller column omitted so the file is a clean round-trip with import
+    // Build header — controller column omitted so the file is a clean round-trip with import.
+    // print_size_code column emitted from v1.10.1 onward so DPOF-family
+    // mappings round-trip losslessly. Non-DPOF controllers leave the
+    // cell blank; the parser tolerates the blank cell and the IPC
+    // validator ignores populated printSizeCode for non-DPOF types.
     const optionHeaders = Array.from({ length: maxOptions }, () => 'option');
-    const header = ['channel', 'product_code', ...optionHeaders].join(',');
+    const header = ['channel', 'product_code', 'print_size_code', ...optionHeaders].join(',');
 
     // Group by controller so mappings from different controllers stay organised
     const byController = {};
@@ -6338,6 +6349,7 @@ document.getElementById('exportChannelMappingsCsvBtn').addEventListener('click',
         const cols = [
           String(m.channelNumber),
           csvEscape(m.productCode),
+          csvEscape(m.printSizeCode || ''),
           ...options.map(csvEscape),
         ];
         csvRows.push(cols.join(','));
