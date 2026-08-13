@@ -131,6 +131,43 @@ executes. Installs whose backfill flag was set by an older version never
 see it — which is exactly why the startup banner and Settings roll-up
 above are the primary recovery surface for existing installs.
 
+### Fixed: XML hot-folder imports now carry the ShipTo recipient name
+
+Both XML parsers — Photo Finale and ROES — used to drop
+`ShipToFirstName` / `ShipToLastName` entirely. The comment beside the
+code said "OrderInput has no first/last recipient field anyway",
+which was true on 2026-05-13 when it was written and stopped being
+true on 2026-08-05 when OrderHub added `shipping_recipient_name`. In
+the meantime, 374 XML orders across the whole database shipped with
+a null recipient.
+
+The visible case was Etsy marketplace forwards: the XML carries
+`BillToFirstName="Etsy"` and the real recipient only in
+`ShipToFirstName` / `ShipToLastName`, so the delivery address on
+those orders read *"Etsy"* instead of the actual person the order
+was for. On other XML sources the customer and the recipient
+usually match, which is why the bug hid for months.
+
+Both parsers now emit `shipping_recipient_name` from `ShipToFirstName`
++ `ShipToLastName` whenever the ShipTo carries a real delivery
+address. Pickup orders and name-only marketplace forwards without an
+address never emit the field — a name alone does not count as a
+delivery, so a name-only order stays classified as pickup.
+
+**Not touched, on purpose:**
+
+- **`customer_name`** stays as the BillTo-derived value ("Etsy" on
+  the Etsy fixtures). The OrderHub shipping-label builder already
+  prefers `shipping_recipient_name` over `customer_name`, so the
+  label reads "Julie Johnson" without erasing the marketplace-origin
+  signal from the customer field. Overwriting would change behaviour
+  for every existing XML lab, not just marketplace ones.
+- **`shipping_company`** already worked and already ships via
+  `ShipToCompany` — no change. If a lab expected to see "ETSY" in
+  the shipping company on Etsy orders, that's `BillToCompany`
+  (billing) and mapping billing into a shipping field would be
+  wrong. Confirm the intended source before treating this as a bug.
+
 ## v1.10.0 - 2026-08-10
 
 **Operator-triggered batch splitting for Darkroom Pro.** A lab can now set
