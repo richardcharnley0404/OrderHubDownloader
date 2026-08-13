@@ -47,7 +47,14 @@ the flag can be set.
 
 **Flaky test.** `perfectlyClearClient.test.js` — "stability polling" and "hard wall-clock
 deadline" fail intermittently under full-suite load. A ~30 ms write race, pre-existing,
-untouched by 1.8.0. Re-run before believing a red suite.
+untouched by 1.8.0. Re-run before believing a red suite. **Escalating (2026-08-13):**
+the same 1-ms deadline race at `:482` / `:487` now needs ~4 full-suite reruns to land
+green (was 1-2 previously), each rerun costs ~40 s so a green suite currently takes
+several minutes. Two operational concerns follow: (a) release preflights get slower and
+easier to short-cut, (b) a genuine regression that happens to land in an unrelated
+file would be masked as "just the flake" and re-run through until it accidentally
+green'd. Worth tightening the deadline logic or increasing the base timeout before
+the noise-to-signal ratio drops further.
 
 **`resolveRoute`'s `_channelMappingOverride` block duplicates the route shape per
 controller type.** There is a hand-written literal per known type (`fujijobmaker`,

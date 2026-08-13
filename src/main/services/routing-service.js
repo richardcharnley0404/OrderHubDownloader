@@ -88,6 +88,48 @@ function resolvePrintSizeCode(mapping) {
 
 // ── Route resolution ──────────────────────────────────────────────────────────
 
+// Dedup guard for the fujipicpro orderMergeWaitMinutes read-time
+// coercion warn. resolveRoute runs on every auto-print cycle (10-60s
+// depending on config) so warning-per-resolve on a single corrupt
+// controller would produce ~1440 warns/day; dedup on
+// `${controllerId}:${JSON.stringify(value)}` keeps operator-visible
+// noise to one line per unique bad value per session. Cleared on
+// module reload (app restart) so a subsequent misconfiguration after
+// restart still surfaces.
+const _picproWaitCoercionWarned = new Set();
+
+/**
+ * Read `controller.orderMergeWaitMinutes` at route resolution time,
+ * clamping / defaulting per M1 (order-level-submission-picpro-brief).
+ *
+ * Rules:
+ *   - `undefined` / `null` → default 30, silently. Both are the
+ *     legitimate "use the default" states, not a misconfiguration.
+ *   - integer in [1..1440]   → returned as-is, silently.
+ *   - anything else (non-integer, out-of-range, wrong type) → default
+ *     30 AND warn once per (controllerId, value). The IPC-boundary
+ *     validator rejects these at save time, so a corrupt value at
+ *     read time means either an older version wrote it, a direct
+ *     JSON edit, or an external caller bypassed the guard — worth
+ *     surfacing rather than silently coercing.
+ */
+function _readOrderMergeWaitMinutes(controller) {
+  const raw = controller.orderMergeWaitMinutes;
+  if (raw === undefined || raw === null) return 30;
+  if (Number.isInteger(raw) && raw >= 1 && raw <= 1440) return raw;
+  const key = `${controller.id}:${JSON.stringify(raw)}`;
+  if (!_picproWaitCoercionWarned.has(key)) {
+    _picproWaitCoercionWarned.add(key);
+    logger.logWarning('[routing] fujipicpro orderMergeWaitMinutes coerced to default 30 — stored value is out of range or non-integer', {
+      controllerId:          controller.id,
+      name:                  controller.name,
+      orderMergeWaitMinutes: raw,
+      appliedDefault:        30,
+    });
+  }
+  return 30;
+}
+
 /**
  * Resolve the routing destination for a job.
  *
@@ -183,17 +225,12 @@ function resolveRoute(job) {
               backprintTemplate2:  overrideCtrl.backprintTemplate2 || '',
               includeCustomerName: overrideCtrl.includeCustomerName === true,
               // M1 (order-level-submission-picpro-brief): kept in exact
-              // parity with the main fujipicpro literal below. See there
-              // for the read-time default rationale (null → 30, not
-              // "wait forever"). Drift here silently breaks reassigned
-              // jobs on this controller.
-              mergeOrderJobs:      overrideCtrl.mergeOrderJobs === true,
-              orderMergeWaitMinutes:
-                Number.isInteger(overrideCtrl.orderMergeWaitMinutes)
-                  && overrideCtrl.orderMergeWaitMinutes >= 1
-                  && overrideCtrl.orderMergeWaitMinutes <= 1440
-                    ? overrideCtrl.orderMergeWaitMinutes
-                    : 30,
+              // parity with the main fujipicpro literal below. Coercion
+              // helper handles the default and the warn-once-per-corrupt-
+              // value log. Drift here silently breaks reassigned jobs on
+              // this controller.
+              mergeOrderJobs:        overrideCtrl.mergeOrderJobs === true,
+              orderMergeWaitMinutes: _readOrderMergeWaitMinutes(overrideCtrl),
               surface:             overrideMapping.surface,
               surfaceCode:         overrideSurfaceCode,
               printCode:           overrideMapping.printCode,
@@ -535,20 +572,16 @@ function resolveRoute(job) {
       backprintTemplate:   controller.backprintTemplate  || '',
       backprintTemplate2:  controller.backprintTemplate2 || '',
       includeCustomerName: controller.includeCustomerName === true,
-      // M1 (order-level-submission-picpro-brief): read-time defaults —
-      // absent, non-boolean or non-integer store values surface as the
-      // feature-off shape (`mergeOrderJobs:false`, `orderMergeWaitMinutes:30`).
-      // Null and undefined for the wait cap both mean "use the 30-minute
-      // default" — deliberately not treated as "wait forever" per the
-      // brief. Kept identical to the _channelMappingOverride branch below;
-      // any drift silently breaks reassigned jobs on this controller.
-      mergeOrderJobs:      controller.mergeOrderJobs === true,
-      orderMergeWaitMinutes:
-        Number.isInteger(controller.orderMergeWaitMinutes)
-          && controller.orderMergeWaitMinutes >= 1
-          && controller.orderMergeWaitMinutes <= 1440
-            ? controller.orderMergeWaitMinutes
-            : 30,
+      // M1 (order-level-submission-picpro-brief): read-time defaults.
+      // `mergeOrderJobs` is strict-boolean so a truthy string/number in
+      // the store can't silently enable merging. `orderMergeWaitMinutes`
+      // resolution + warn-on-coercion sit in _readOrderMergeWaitMinutes;
+      // null and undefined both mean "use the 30-minute default",
+      // deliberately not treated as "wait forever" per the brief. Kept
+      // identical to the _channelMappingOverride branch above; any
+      // drift silently breaks reassigned jobs on this controller.
+      mergeOrderJobs:        controller.mergeOrderJobs === true,
+      orderMergeWaitMinutes: _readOrderMergeWaitMinutes(controller),
       // Channel-resolved fields
       surface:             channelMapping.surface,
       surfaceCode,

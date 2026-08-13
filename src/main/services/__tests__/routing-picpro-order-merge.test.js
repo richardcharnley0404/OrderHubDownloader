@@ -46,10 +46,25 @@ function FakeStore() {
 function __seed(data) {
   for (const k of Object.keys(__storeData)) delete __storeData[k];
   Object.assign(__storeData, data);
+  __warnings.length = 0;
 }
 
 const fakeElectron = {
   app: { getPath: () => os.tmpdir(), on: () => {} },
+};
+
+// Warning-capturing logger stub — required for the M1 coercion warn
+// assertions. Every other log method is a no-op.
+const __warnings = [];
+const fakeLogger = {
+  info:       () => {},
+  warn:       () => {},
+  error:      () => {},
+  debug:      () => {},
+  logInfo:    () => {},
+  logError:   () => {},
+  logDebug:   () => {},
+  logWarning: (message, meta = {}) => __warnings.push({ message, meta }),
 };
 
 const __originalRequire = Module.prototype.require;
@@ -60,6 +75,16 @@ Module.prototype.require = function (req) {
 };
 
 const REPO = path.resolve(__dirname, '..', '..', '..', '..');
+
+// Route the logger require to our spy BEFORE requiring routing-service
+// so the spy is what routing-service sees at module load. require.cache
+// is keyed by resolved absolute path — same pattern as
+// routing-backfill-print-size.test.js.
+{
+  const loggerPath = require.resolve(path.join(REPO, 'src', 'main', 'services', 'logger.js'));
+  require.cache[loggerPath] = { id: loggerPath, filename: loggerPath, loaded: true, exports: fakeLogger };
+}
+
 const routingService = require(
   path.join(REPO, 'src', 'main', 'services', 'routing-service.js'),
 );
@@ -206,6 +231,140 @@ test('_channelMappingOverride fujipicpro branch defaults match the main branch d
   const route = resolveRoute(overrideJob);
   assert.equal(route.mergeOrderJobs,          false);
   assert.equal(route.orderMergeWaitMinutes,   30);
+});
+
+// ── Read-time coercion warn (M1 follow-up) ──────────────────────────────────
+//
+// A silent coercion of orderMergeWaitMinutes to 30 hides a
+// misconfiguration. Read-time warn fires when the stored value is
+// defined-but-invalid; null / undefined / valid values stay silent.
+// Deduped per (controllerId, value) so a corrupt controller doesn't
+// flood the log across the ~1440 resolveRoute calls in a 24h period.
+//
+// Each test that exercises the warn uses a distinct controller id so
+// the module-level dedup Set doesn't cross-contaminate tests.
+
+function seedPicProWithId(id, overrides = {}) {
+  const controller = {
+    id,
+    name:              `PIC Pro ${id}`,
+    type:              'fujipicpro',
+    orderDataPath:     'C:\\pp\\order',
+    diginPath:         'C:\\pp\\digin',
+    mergeDataPath:     'C:\\pp\\merge',
+    imageStagingRoot:  'C:\\pp\\stage',
+    ...overrides,
+  };
+  __seed({
+    processControllerMappings: [{ process: 'Lab', controllerId: id }],
+    orderControllers:          [controller],
+    channelMappings:           [{
+      id: `cm-${id}`, controllerId: id, productCode: PRODUCT, options: [],
+      surface: 'Lustre', surfaceCode: 'L', printCode: 'KG', color: 'C', printSize: '6x4',
+    }],
+  });
+}
+
+test('read-time coercion warn: corrupt orderMergeWaitMinutes → warn with meta, route still resolves to 30', () => {
+  seedPicProWithId('ctrl-pp-warn-1', { orderMergeWaitMinutes: 9999 });
+  const route = resolveRoute(JOB);
+  assert.equal(route.orderMergeWaitMinutes, 30, 'route still coerces to 30');
+  const warn = __warnings.find(w => /orderMergeWaitMinutes coerced/i.test(w.message));
+  assert.ok(warn, 'a warn must fire when the stored value is out of range');
+  assert.equal(warn.meta.controllerId,          'ctrl-pp-warn-1');
+  assert.equal(warn.meta.name,                  'PIC Pro ctrl-pp-warn-1');
+  assert.equal(warn.meta.orderMergeWaitMinutes, 9999);
+  assert.equal(warn.meta.appliedDefault,        30);
+});
+
+test('read-time coercion warn: null does NOT warn (legitimate "use default")', () => {
+  seedPicProWithId('ctrl-pp-warn-null', { orderMergeWaitMinutes: null });
+  resolveRoute(JOB);
+  const warn = __warnings.find(w => /orderMergeWaitMinutes coerced/i.test(w.message));
+  assert.equal(warn, undefined, 'null is the explicit "use default" — no warn');
+});
+
+test('read-time coercion warn: undefined does NOT warn (absent field)', () => {
+  seedPicProWithId('ctrl-pp-warn-absent');   // no orderMergeWaitMinutes at all
+  resolveRoute(JOB);
+  const warn = __warnings.find(w => /orderMergeWaitMinutes coerced/i.test(w.message));
+  assert.equal(warn, undefined, 'absent field is the "use default" state — no warn');
+});
+
+test('read-time coercion warn: valid value does NOT warn', () => {
+  seedPicProWithId('ctrl-pp-warn-valid', { orderMergeWaitMinutes: 60 });
+  resolveRoute(JOB);
+  const warn = __warnings.find(w => /orderMergeWaitMinutes coerced/i.test(w.message));
+  assert.equal(warn, undefined, 'a valid in-range integer is fine — no warn');
+});
+
+test('read-time coercion warn: dedup — same (controllerId, value) warns once across many resolves', () => {
+  // Dedup prevents ~1440 warns/day on a single stuck controller.
+  seedPicProWithId('ctrl-pp-warn-dedup', { orderMergeWaitMinutes: 5000 });
+  for (let i = 0; i < 10; i++) resolveRoute(JOB);
+  const warns = __warnings.filter(w => /orderMergeWaitMinutes coerced/i.test(w.message));
+  assert.equal(warns.length, 1, '10 resolves on the same corrupt config must produce exactly 1 warn');
+});
+
+test('read-time coercion warn: dedup key includes VALUE — a changed corrupt value warns again', () => {
+  // If the store is edited between resolves (e.g. an external process
+  // wrote a different bad value), the new value should re-warn. The
+  // dedup key is (controllerId, JSON.stringify(value)) — different
+  // values on the same controller are treated as separate misconfigs.
+  const id = 'ctrl-pp-warn-changing';
+  seedPicProWithId(id, { orderMergeWaitMinutes: 2000 });
+  resolveRoute(JOB);
+  // Mutate the stored value in place (simulating a corrupt config
+  // change without a full re-seed, so the earlier dedup entry stays
+  // recorded).
+  __storeData.orderControllers[0].orderMergeWaitMinutes = 3000;
+  resolveRoute(JOB);
+  const warns = __warnings.filter(w =>
+    /orderMergeWaitMinutes coerced/i.test(w.message)
+    && w.meta.controllerId === id
+  );
+  assert.equal(warns.length, 2, 'a different bad value must produce a fresh warn');
+  assert.deepEqual(warns.map(w => w.meta.orderMergeWaitMinutes), [2000, 3000]);
+});
+
+test('read-time coercion warn: two different controllers with the same corrupt value each warn once', () => {
+  // Prove the dedup key includes controllerId — otherwise a shared
+  // corrupt value across two controllers would surface only one.
+  const id1 = 'ctrl-pp-warn-multi-a';
+  const id2 = 'ctrl-pp-warn-multi-b';
+  const controllers = [
+    { id: id1, name: `PIC Pro ${id1}`, type: 'fujipicpro',
+      orderDataPath: '/o', diginPath: '/d', mergeDataPath: '/m', imageStagingRoot: '/s',
+      orderMergeWaitMinutes: 7777 },
+    { id: id2, name: `PIC Pro ${id2}`, type: 'fujipicpro',
+      orderDataPath: '/o', diginPath: '/d', mergeDataPath: '/m', imageStagingRoot: '/s',
+      orderMergeWaitMinutes: 7777 },
+  ];
+  const mappings = controllers.map(c => ({
+    id: `cm-${c.id}`, controllerId: c.id, productCode: PRODUCT, options: [],
+    surface: 'Lustre', surfaceCode: 'L', printCode: 'KG', color: 'C', printSize: '6x4',
+  }));
+  __seed({
+    processControllerMappings: [{ process: 'Lab', controllerId: id1 }],
+    orderControllers:          controllers,
+    channelMappings:           mappings,
+  });
+  resolveRoute({ ...JOB, process: 'Lab' });
+  // resolveRouteForController not exercised here — the second one
+  // rides in via the same resolveRoute path by targeting a different
+  // process mapping. Easier: swap the process mapping to id2 and
+  // resolve again.
+  __storeData.processControllerMappings = [{ process: 'Lab', controllerId: id2 }];
+  resolveRoute({ ...JOB, process: 'Lab' });
+
+  const warnsA = __warnings.filter(w =>
+    /orderMergeWaitMinutes coerced/i.test(w.message) && w.meta.controllerId === id1
+  );
+  const warnsB = __warnings.filter(w =>
+    /orderMergeWaitMinutes coerced/i.test(w.message) && w.meta.controllerId === id2
+  );
+  assert.equal(warnsA.length, 1, `${id1} must warn exactly once`);
+  assert.equal(warnsB.length, 1, `${id2} must warn exactly once (different controller, same value → separate dedup key)`);
 });
 
 // Restore require shim hygiene so unrelated tests in the same worker
