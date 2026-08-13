@@ -1697,13 +1697,26 @@ function openAssignModal(job, route) {
     const jobOptions     = job.options || [];
     let resolvedMediaValue = '';
     let mediaOptionEntry   = null; // the raw job option that looks like a paper type
+    // M2 (darkroom-media-lock-brief): tracked explicitly at assignment
+    // time. TRUE only when the entry came from a real mediaOptionKey
+    // name match; the jobOptions[0] fallback below is a HINT-only
+    // guess and never sets this true. Do not re-infer later by
+    // re-comparing strings — that's how the pre-fix path guessed
+    // wrong (jobOptions[0] was `layout-options: full bleed` for a lab
+    // without paper-type options) and persisted the guess into
+    // mediaTranslations, freezing the controller. See
+    // docs/darkroom-media-lock-plan.md §3.
+    let mediaOptionEntryFromKey = false;
 
     if (mediaOptionKey) {
       mediaOptionEntry = jobOptions.find(
         o => o.name && o.name.toLowerCase() === mediaOptionKey.toLowerCase()
       );
+      if (mediaOptionEntry) mediaOptionEntryFromKey = true;
     }
-    // Fall back to first option when key not configured or not found on job
+    // Fall back to first option when key not configured or not found on job —
+    // HINT DISPLAY only. mediaOptionEntryFromKey stays false so the save
+    // path skips the corrupt persist (see dpMediaFrom stash below).
     if (!mediaOptionEntry && jobOptions.length > 0) {
       mediaOptionEntry = jobOptions[0];
     }
@@ -1741,12 +1754,28 @@ function openAssignModal(job, route) {
       mediaInput.value = '';
       mediaInput.setCustomValidity('');
       document.getElementById('dpSaveMediaTranslation').checked = false;
+      // M2: hide the "Save media translation for future orders" tick
+      // when this controller has no Paper Type Option Key. The tick
+      // offers to persist a rule; with no key the persisted rule
+      // would be unreachable by resolveMedia AND the corrupt persist
+      // would freeze the controller (M1 rejects it at the IPC
+      // boundary, but that fires a warning toast rather than saving —
+      // so the button must not be there to click in the first place).
+      // Manual media input stays. Toggle both ways because the modal
+      // is a singleton reused across controllers.
+      document.getElementById('dpSaveMediaTranslationLabel').style.display =
+        mediaOptionKey ? '' : 'none';
     }
 
-    // Stash context for save handler
+    // Stash context for save handler. dpMediaFrom is `''` unless the
+    // entry came from a real mediaOptionKey match — the tracked
+    // boolean is the source of truth. Even if the tick were somehow
+    // ticked (stale UI state, devtools), an empty `from` would trip
+    // ipc-handlers.js's `mediaTranslation.from` check and the save
+    // would be skipped without hitting the M1 rejection path at all.
     modal.dataset.dpMediaAutoResolved  = mediaAutoResolved ? '1' : '0';
     modal.dataset.dpMediaResolvedValue = resolvedMediaValue;
-    modal.dataset.dpMediaFrom          = mediaOptionEntry ? (mediaOptionEntry.value || '') : '';
+    modal.dataset.dpMediaFrom          = mediaOptionEntryFromKey ? (mediaOptionEntry.value || '') : '';
   } else {
     // Clear DPOF inputs
     const chanInput = document.getElementById('assignChannelNumber');
@@ -1962,24 +1991,37 @@ function openAssignModal(job, route) {
           await reconcileControllerIgnore(controllerId, tickedIgnore, untickedNames);
         }
 
-        // 1. Optionally persist translation entries to the controller
-
+        // 1. Optionally persist translation entries to the controller.
+        //    Ancillary — a "remember this for next time" write, not the
+        //    per-job action the operator asked for. Never abandon the
+        //    assignment because of a failure here (M2a).
+        let translationWarning = null;
         if (saveSizeTick || saveMediaTick) {
           const transResult = await window.electronAPI.updateDarkroomTranslations({
             controllerId,
             sizeTranslation:  saveSizeTick  ? { productCodePrefix: productCode, darkroomSize: sizeValue } : null,
             mediaTranslation: saveMediaTick ? { from: modal.dataset.dpMediaFrom, to: mediaValue }         : null,
           });
-          if (transResult && transResult.success === false) {
-            throw new Error(transResult.error || 'Failed to save translations');
-          }
-          // Keep cachedOrderControllers in sync and re-render the controller cards
-          // so the translation summary in Settings updates without a restart.
+          // M2a: sync cachedOrderControllers BEFORE branching on success.
+          // M1 returns the controller on both paths — including on
+          // {success:false} where a sizeTranslation was persisted while
+          // media was rejected. Pre-M2a this sync sat after the throw,
+          // so a partial success wrote to disk and left the renderer
+          // cards showing the old state until restart.
           if (transResult && transResult.controller) {
             cachedOrderControllers = cachedOrderControllers.map(c =>
               c.id === transResult.controller.id ? transResult.controller : c
             );
             renderOrderControllers(cachedOrderControllers);
+          }
+          if (transResult && transResult.success === false) {
+            // M2a: capture instead of throwing. The translation save is
+            // ancillary; aborting the operator's per-job assignment
+            // because of it is the exact eating-the-job failure the M1
+            // rejection made possible. Continue to
+            // assignDarkroomSizeMedia and surface the failure in the
+            // final toast with which part failed AND which succeeded.
+            translationWarning = transResult.error || 'Failed to save translations';
           }
         }
 
@@ -1996,7 +2038,15 @@ function openAssignModal(job, route) {
         }
 
         modal.classList.add('hidden');
-        showToast('Darkroom Pro assignment saved', 'success');
+        if (translationWarning) {
+          // The M1 error text already reads "Media translation not
+          // saved — ... Set the Paper Type Option Key ... The size
+          // translation was saved." Appending the assignment status
+          // gives the operator a complete picture in one toast.
+          showToast(`${translationWarning} The job assignment completed.`, 'error', 10000);
+        } else {
+          showToast('Darkroom Pro assignment saved', 'success');
+        }
         await resolveRoutesForReceivedJobs(allJobs);
         renderJobTable(getFilteredJobs());
       } catch (err) {
