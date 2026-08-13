@@ -330,6 +330,117 @@ test('rejects missing customer email', () => {
 });
 
 // ---------------------------------------------------------------------------
+// shipping_recipient_name (docs/xml-shipto-name-brief.md)
+// ---------------------------------------------------------------------------
+//
+// Pre-fix, both parsers deliberately dropped ShipToFirstName / ShipToLastName
+// on the grounds that "OrderInput has no first/last recipient field anyway".
+// That was true when written on 2026-05-13; it stopped being true on
+// 2026-08-05 when OrderHub gained `shipping_recipient_name`. These tests pin
+// the fix and the invariants that keep it safe.
+//
+// Invariants (both parsers):
+//   - The recipient name rides ONLY when a real shipping address is
+//     present. A name alone must not flip a pickup order to shipping.
+//   - customer_name is NOT touched. On the Etsy fixtures the BillTo-derived
+//     value is "Etsy"; OrderHub uses shipping_recipient_name in preference
+//     to customer_name on the label anyway (per the pixfizz-oms plan
+//     referenced in the brief), so leaving customer_name alone preserves
+//     the marketplace-origin signal.
+//   - Both blank → the field is OMITTED entirely (not sent as '' or ' ').
+//     setIfPresent's length check enforces this — same convention every
+//     other optional string field on this parser follows.
+
+test('Etsy fixture (order_4141229168 — Julie Johnson): ShipToFirst/Last both present → recipient_name mapped, customer_name unchanged', () => {
+  // This is the file that surfaced the bug in production. BillToFirstName
+  // = "Etsy", so pre-fix customer_name was "Etsy" and the actual recipient
+  // "Julie Johnson" appeared nowhere. The fix maps ShipToFirstName +
+  // ShipToLastName into shipping_recipient_name while leaving customer_name
+  // as "Etsy" — the pixfizz-oms label builder prefers shipping_recipient_name
+  // over customer_name on the shipping label, so this makes the address
+  // correct without erasing the marketplace-origin signal.
+  const productMap = new Map([
+    ['ETSYFILM',      { pixfizzCode: 'PX-ETSYFILM',      label: 'Etsy Film' }],
+    ['USPS-PRIORITY', { pixfizzCode: 'PX-USPS-PRIORITY', label: 'USPS Priority' }],
+  ]);
+  const cfg = { ...HOT_FOLDER, productMap };
+  const { request } = parser.parse(fixture('order_4141229168.xml'), cfg);
+  assert.equal(request.order.shipping_recipient_name, 'Julie Johnson');
+  assert.equal(request.order.customer_name,           'Etsy',
+    'customer_name stays as the BillTo-derived value — no overwrite from ShipTo');
+  assert.equal(request.order.shipping_street,         '171 Gable Ave');
+  assert.equal(request.order.shipping_city,           'POTTSTOWN');
+});
+
+test('Etsy fixture (order_4141030858 — Corina Bardwell): same shape, second regression sample', () => {
+  const productMap = new Map([
+    ['ETSY-YARDSIGN', { pixfizzCode: 'PX-ETSY-YARDSIGN', label: 'Etsy Yard Sign' }],
+    ['UPS-GROUND',    { pixfizzCode: 'PX-UPS-GROUND',    label: 'UPS Ground' }],
+  ]);
+  const { request } = parser.parse(fixture('order_4141030858.xml'), { ...HOT_FOLDER, productMap });
+  assert.equal(request.order.shipping_recipient_name, 'Corina Bardwell');
+  assert.equal(request.order.customer_name,           'Etsy');
+});
+
+test('RO068727 fixture: ShipToFirstName only (LastName blank) → recipient_name = first name alone', () => {
+  // Existing canonical fixture — ShipToFirstName is "Adam Thomas" (the
+  // whole name landed in the first field on this one; a common
+  // marketplace shape), ShipToLastName is empty. Locks the first-only
+  // branch on real data.
+  const { request } = parser.parse(fixture('RO068727_ROESS-PixFizz-2026.xml'), HOT_FOLDER);
+  assert.equal(request.order.shipping_recipient_name, 'Adam Thomas');
+});
+
+test('synth: ShipToLastName only (FirstName blank) → recipient_name = last name alone', () => {
+  const xml = parser.parse(
+    makeRoesXml({ shipToFirstName: '', shipToLastName: 'Solo', shipToAddress: '1 Main' }),
+    HOT_FOLDER,
+  );
+  assert.equal(xml.request.order.shipping_recipient_name, 'Solo');
+});
+
+test('synth: both ShipTo name fields blank on a shipping order → field OMITTED (not sent as empty string)', () => {
+  // Real shipping order (address present) but no recipient names. Must
+  // not send shipping_recipient_name at all — matches how every other
+  // optional string field is handled via setIfPresent's length check.
+  const { request } = parser.parse(
+    makeRoesXml({ shipToFirstName: '', shipToLastName: '', shipToAddress: '1 Main' }),
+    HOT_FOLDER,
+  );
+  assert.equal('shipping_recipient_name' in request.order, false);
+  assert.equal(request.order.shipping_street, '1 Main');
+});
+
+test('RO068726 fixture (pickup, empty ShipTo): shipping_recipient_name is absent', () => {
+  // Pickup branch must not emit shipping_recipient_name even when the
+  // XML happens to contain ShipToFirst/LastName. RO068726's ShipTo
+  // name fields are empty AND the whole ShipTo block is empty, so
+  // this is really the pickup-branch omission that matters.
+  const { request } = parser.parse(fixture('RO068726_ROESS-PixFizz-2026.xml'), HOT_FOLDER);
+  assert.equal('shipping_recipient_name' in request.order, false);
+  assert.equal(request.order.pickup_location_id, HOT_FOLDER.pickupLocationId);
+});
+
+test('synth: name present but NO address → still pickup, recipient_name absent', () => {
+  // The load-bearing invariant. If ShipToFirstName / ShipToLastName were
+  // counted toward `hasAnyShipTo`, a name-only marketplace forward would
+  // flip from pickup to shipping and emit recipient_name without any
+  // delivery address. The `shipTo` object below the fix deliberately
+  // excludes the name fields for this reason — this test pins that.
+  const { request } = parser.parse(
+    makeRoesXml({ shipToFirstName: 'Ghost', shipToLastName: 'Recipient' }),
+    HOT_FOLDER,
+  );
+  assert.equal(request.order.pickup_location_id, HOT_FOLDER.pickupLocationId,
+    'name-only order must still be treated as pickup');
+  assert.equal('shipping_recipient_name' in request.order, false,
+    'no address → no recipient_name, even when a name is present in the XML');
+  for (const k of ['shipping_street', 'shipping_city', 'shipping_state', 'shipping_zipcode', 'shipping_country', 'shipping_company']) {
+    assert.equal(k in request.order, false);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -344,6 +455,14 @@ function makeRoesXml({
   omitPaymentStatus = false,
   omitIdOrder = false,
   omitEmail = false,
+  // Ship-to controls added for shipping_recipient_name coverage. Pass a
+  // string (including the empty string) to emit the tag with that value;
+  // pass null to OMIT the tag entirely — the parser must treat both as
+  // "no value" but only one shape may exercise the code path in the wild.
+  shipToFirstName = null,
+  shipToLastName  = null,
+  shipToAddress   = null,
+  shipToCity      = null,
 } = {}) {
   const unitPriceLine = unitPrice === null ? '' : `<UnitPrice>${unitPrice}</UnitPrice>`;
   const psLine = omitPaymentStatus
@@ -351,6 +470,10 @@ function makeRoesXml({
     : `<PaymentStatus>${paymentStatus}</PaymentStatus>`;
   const idOrderLine = omitIdOrder ? '' : '<idOrder>RO000099</idOrder>';
   const emailLine   = omitEmail   ? '' : '<BillToEmail>t@e.com</BillToEmail>';
+  const stFirst  = shipToFirstName === null ? '' : `<ShipToFirstName>${shipToFirstName}</ShipToFirstName>`;
+  const stLast   = shipToLastName  === null ? '' : `<ShipToLastName>${shipToLastName}</ShipToLastName>`;
+  const stStreet = shipToAddress   === null ? '' : `<ShipToAddress>${shipToAddress}</ShipToAddress>`;
+  const stCity   = shipToCity      === null ? '' : `<ShipToCity>${shipToCity}</ShipToCity>`;
   return `<OrderDataSet xmlns="http://www.trevoli.com/OrderDataSet.xsd">
     <OrderLineItem>
       <idOrderLineItem>1.0</idOrderLineItem>
@@ -363,6 +486,10 @@ function makeRoesXml({
       <BillToFirstName>Test</BillToFirstName>
       ${emailLine}
       ${psLine}
+      ${stFirst}
+      ${stLast}
+      ${stStreet}
+      ${stCity}
     </Order>
   </OrderDataSet>`;
 }

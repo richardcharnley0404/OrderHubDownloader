@@ -304,10 +304,21 @@ function parse(xmlString, hotFolderConfig = {}) {
   // order is in-store pickup — pickup_location_id is set from
   // hotFolderConfig.pickupLocationId (mirroring photo-finale.js's pickup
   // branch). Partial ShipTo (e.g. city without street) still counts as
-  // shipping; ShipToFirstName / ShipToLastName are intentionally NOT in the
-  // shipTo object — a recipient name without an address is not a delivery
-  // address (OrderInput has no first/last recipient field anyway; the
-  // addressed-to name is customer_name).
+  // shipping.
+  //
+  // ShipToFirstName / ShipToLastName are deliberately NOT part of the
+  // `shipTo` object below — a recipient name alone is not a delivery
+  // address. A name-only order stays pickup. The recipient name rides
+  // along only when a real address is present, mapped into
+  // shipping_recipient_name inside the shipping branch. See
+  // docs/xml-shipto-name-brief.md — this parenthetical used to assert
+  // "OrderInput has no first/last recipient field anyway"; that was
+  // true when written on 2026-05-13 and stopped being true on 2026-08-05
+  // when OrderHub gained shipping_recipient_name. The Etsy marketplace
+  // path was the one that surfaced the miss (BillTo names read "Etsy",
+  // ShipTo carries the real recipient) — customer_name intentionally
+  // stays as the BillTo-derived value; recipient rides on the shipping
+  // address only.
   const shipTo = {
     street:  strField(orderRaw.ShipToAddress),
     city:    strField(orderRaw.ShipToCity),
@@ -329,7 +340,8 @@ function parse(xmlString, hotFolderConfig = {}) {
   if (isPickup) {
     setIfPresent(order, 'pickup_location_id', strField(hotFolderConfig.pickupLocationId));
     // Shipping fields deliberately omitted on pickup — see photo-finale.js
-    // for the parallel rationale.
+    // for the parallel rationale. shipping_recipient_name is likewise
+    // omitted here: a name without an address is not a delivery.
   } else {
     setIfPresent(order, 'shipping_street',  shipTo.street);
     setIfPresent(order, 'shipping_city',    shipTo.city);
@@ -337,6 +349,14 @@ function parse(xmlString, hotFolderConfig = {}) {
     setIfPresent(order, 'shipping_zipcode', shipTo.zip);
     setIfPresent(order, 'shipping_country', shipTo.country);
     setIfPresent(order, 'shipping_company', shipTo.company);
+    // shipping_recipient_name — join first + last, drop either side if
+    // blank so a first-only or last-only order still surfaces the name
+    // it does have. Both blank → the empty result trips setIfPresent's
+    // length check and the field is omitted entirely (not sent as ''),
+    // matching every other optional string field's convention.
+    setIfPresent(order, 'shipping_recipient_name',
+      [strField(orderRaw.ShipToFirstName), strField(orderRaw.ShipToLastName)]
+        .filter(Boolean).join(' ').trim());
   }
 
   setIfPresent(order, 'website_code', strField(hotFolderConfig.websiteCode));

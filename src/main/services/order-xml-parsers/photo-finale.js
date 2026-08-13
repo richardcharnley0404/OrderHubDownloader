@@ -415,9 +415,10 @@ function parse(xmlString, hotFolderConfig = {}) {
 
   if (isPickup) {
     setIfPresent(order, 'pickup_location_id', strField(hotFolderConfig.pickupLocationId));
-    // Deliberately omit shipping_street/city/state/zip/country/company — the
-    // values would be the retailer's own address, which is misleading on a
-    // pickup order.
+    // Deliberately omit shipping_street/city/state/zip/country/company/
+    // recipient_name — the address values would be the retailer's own
+    // address (misleading on pickup), and a recipient name without an
+    // address is not a delivery.
   } else {
     setIfPresent(order, 'shipping_street',   shipToAddress);
     setIfPresent(order, 'shipping_city',     strField(orderRaw.ShipToCity));
@@ -425,6 +426,20 @@ function parse(xmlString, hotFolderConfig = {}) {
     setIfPresent(order, 'shipping_zipcode',  strField(orderRaw.ShipToZip));
     setIfPresent(order, 'shipping_country',  strField(orderRaw.ShipToCountry));
     setIfPresent(order, 'shipping_company',  strField(orderRaw.ShipToCompany));
+    // shipping_recipient_name — join first + last, drop either side if
+    // blank so a first-only or last-only order still surfaces the name
+    // it does have. Both blank → the empty result trips setIfPresent's
+    // length check and the field is omitted entirely, matching every
+    // other optional string field's convention. Pre-fix this mapping
+    // was missing — the OrderHub column has existed since 2026-08-05
+    // (api-webhook `shipping_recipient_name`) but neither XML parser
+    // wrote it, so 374 XML orders shipped with null recipient. The
+    // Etsy marketplace path made the miss visible because the BillTo
+    // name reads "Etsy" and the real recipient lives only in ShipTo.
+    // See docs/xml-shipto-name-brief.md.
+    setIfPresent(order, 'shipping_recipient_name',
+      [strField(orderRaw.ShipToFirstName), strField(orderRaw.ShipToLastName)]
+        .filter(Boolean).join(' ').trim());
   }
 
   setIfPresent(order, 'website_code',      strField(hotFolderConfig.websiteCode));

@@ -509,6 +509,10 @@ function makeMinimalXml({
   retailerCode = null,
   retailerStreet = null,
   shipToAddress = null,
+  // Ship-to name controls added for shipping_recipient_name coverage.
+  // null → tag omitted entirely; '' → tag emitted with empty text.
+  shipToFirstName = null,
+  shipToLastName  = null,
 } = {}) {
   const externalId = omit === 'ExternalId'    ? '' : '<ExternalId>9999</ExternalId>';
   const firstName  = omit === 'CustomerName'  ? '' : '<CustomerFirstName>Jane</CustomerFirstName>';
@@ -517,6 +521,8 @@ function makeMinimalXml({
   const retailer   = retailerCode   === null  ? '' : `<RetailerDealerCode>${retailerCode}</RetailerDealerCode>`;
   const street     = retailerStreet === null  ? '' : `<RetailerStreet>${retailerStreet}</RetailerStreet>`;
   const shipTo     = shipToAddress  === null  ? '' : `<ShipToAddress>${shipToAddress}</ShipToAddress>`;
+  const stFirst    = shipToFirstName === null ? '' : `<ShipToFirstName>${shipToFirstName}</ShipToFirstName>`;
+  const stLast     = shipToLastName  === null ? '' : `<ShipToLastName>${shipToLastName}</ShipToLastName>`;
   const liInner    = liOverride
     || '<idOrderLineItem>1</idOrderLineItem><idSourceProduct>123</idSourceProduct><Quantity>1</Quantity>';
   return `<OrderDataSet xmlns="http://www.trevoli.com/OrderDataSet.xsd">
@@ -529,6 +535,8 @@ function makeMinimalXml({
     ${retailer}
     ${street}
     ${shipTo}
+    ${stFirst}
+    ${stLast}
   </Order>
 </OrderDataSet>`;
 }
@@ -654,6 +662,82 @@ test('throws MISSING_PICKUP_LOCATION when a pickup is detected but no locationId
     assert.match(err.message, /Pickup order detected/);
     assert.equal(err.details.retailerStreet, '5 W Mendenhall');
   }
+});
+
+// ---------------------------------------------------------------------------
+// shipping_recipient_name (docs/xml-shipto-name-brief.md)
+// ---------------------------------------------------------------------------
+//
+// Pre-fix, the parser deliberately dropped ShipToFirstName / ShipToLastName
+// on the grounds that "OrderInput has no first/last recipient field
+// anyway" — true when written on 2026-05-13, no longer true from
+// 2026-08-05. Same fix as roes.js, same invariants apply.
+//
+// PhotoFinale detects pickup by RetailerStreet === ShipToAddress (rather
+// than the "any ShipTo address field present" rule ROES uses), but the
+// recipient-name emission gate is the same: recipient only rides inside
+// the shipping branch, never on pickup, so a name-only marketplace
+// forward never lands as a shipping order.
+
+test('43192748 fixture: ShipToFirstName + ShipToLastName both present → shipping_recipient_name is "Jackie Art"', () => {
+  // Existing canonical PF fixture — Jackie / Art. Pre-fix the recipient
+  // never appeared in the OrderInput; post-fix it maps into
+  // shipping_recipient_name, and customer_name stays as the CustomerName-
+  // derived value ("Jackie Art" here — see the primary test at :80).
+  const { request } = parser.parse(fixture('43192748.xml'), HOT_FOLDER);
+  assert.equal(request.order.shipping_recipient_name, 'Jackie Art');
+});
+
+test('synth: PF ShipToFirstName only → recipient_name = first name alone', () => {
+  const xml = makeMinimalXml({
+    shipToAddress:   '405 North 6th St.',
+    shipToFirstName: 'Julie',
+    shipToLastName:  '',
+  });
+  const { request } = parser.parse(xml, HOT_FOLDER_MINIMAL);
+  assert.equal(request.order.shipping_recipient_name, 'Julie');
+});
+
+test('synth: PF ShipToLastName only → recipient_name = last name alone', () => {
+  const xml = makeMinimalXml({
+    shipToAddress:   '405 North 6th St.',
+    shipToFirstName: '',
+    shipToLastName:  'Johnson',
+  });
+  const { request } = parser.parse(xml, HOT_FOLDER_MINIMAL);
+  assert.equal(request.order.shipping_recipient_name, 'Johnson');
+});
+
+test('synth: PF both ShipTo name fields blank on a shipping order → field OMITTED', () => {
+  // Real shipping address, no recipient names. Must not emit
+  // shipping_recipient_name at all — matches every other optional
+  // string field on the parser (setIfPresent's length check).
+  const xml = makeMinimalXml({
+    shipToAddress:   '405 North 6th St.',
+    shipToFirstName: '',
+    shipToLastName:  '',
+  });
+  const { request } = parser.parse(xml, HOT_FOLDER_MINIMAL);
+  assert.equal('shipping_recipient_name' in request.order, false);
+  assert.equal(request.order.shipping_street, '405 North 6th St.');
+});
+
+test('synth: PF pickup order (RetailerStreet == ShipToAddress) → recipient_name is absent even when ShipTo names are populated', () => {
+  // The load-bearing invariant on the pickup branch — the parser must
+  // omit shipping_recipient_name on pickup for the same reason it
+  // omits the address fields: a pickup order isn't being delivered
+  // anywhere, so a recipient label would be misleading. Populate the
+  // ShipTo names deliberately to prove they don't leak through the
+  // pickup gate.
+  const xml = makeMinimalXml({
+    retailerStreet:  '5 W Mendenhall Suite 200',
+    shipToAddress:   '5 W Mendenhall Suite 200',
+    shipToFirstName: 'Julie',
+    shipToLastName:  'Johnson',
+  });
+  const { request } = parser.parse(xml, { ...HOT_FOLDER_MINIMAL, pickupLocationId: 'loc-uuid' });
+  assert.equal(request.order.pickup_location_id, 'loc-uuid');
+  assert.equal('shipping_recipient_name' in request.order, false);
 });
 
 // ---------------------------------------------------------------------------

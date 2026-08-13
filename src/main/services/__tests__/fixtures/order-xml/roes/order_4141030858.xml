@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OrderDataSet xmlns="http://www.trevoli.com/OrderDataSet.xsd">
+  <OrderLineItem>
+    <idOrderLineItem>1.0</idOrderLineItem>
+    <idProduct>ETSY-YARDSIGN</idProduct>
+    <Quantity>1</Quantity>
+    <UnitPrice>24.00</UnitPrice>
+  </OrderLineItem>
+  <OrderLineItem>
+    <idOrderLineItem>2.0</idOrderLineItem>
+    <idProduct>ETSY-YARDSIGN</idProduct>
+    <Quantity>1</Quantity>
+    <UnitPrice>24.00</UnitPrice>
+  </OrderLineItem>
+  <OrderLineItem>
+    <idOrderLineItem>3.0</idOrderLineItem>
+    <idProduct>UPS-GROUND</idProduct>
+    <Quantity>1</Quantity>
+    <UnitPrice>12.00</UnitPrice>
+  </OrderLineItem>
+  <Order>
+    <idOrder>4141030858</idOrder>
+    <SpecialInstructions></SpecialInstructions>
+    <ShipToFirstName>Corina</ShipToFirstName>
+    <ShipToLastName>Bardwell</ShipToLastName>
+    <ShipToAddress>88 Beauview Ave</ShipToAddress>
+    <ShipToCity>NASHUA</ShipToCity>
+    <ShipToState>NH</ShipToState>
+    <ShipToZip>03064</ShipToZip>
+    <ShipToCountry>US</ShipToCountry>
+    <ShipToPhone></ShipToPhone>
+    <ShipToCompany></ShipToCompany>
+    <ShipToEmail></ShipToEmail>
+    <BillToFirstName>Etsy</BillToFirstName>
+    <BillToLastName></BillToLastName>
+    <BillToCompany>ETSY</BillToCompany>
+    <BillToAddress></BillToAddress>
+    <BillToCity></BillToCity>
+    <BillToState></BillToState>
+    <BillToZip></BillToZip>
+    <BillToCountry></BillToCountry>
+    <BillToPhone>555-555-5555</BillToPhone>
+    <BillToEmail>tk+etsy@theprintrefinery.com</BillToEmail>
+    <PaymentMethod></PaymentMethod>
+    <PaymentStatus>Paid</PaymentStatus>
+  </Order>
+</OrderDataSet>
