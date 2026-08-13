@@ -1562,6 +1562,32 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
       const sizeBefore  = (controller.sizeTranslations  || []).length;
       const mediaBefore = (controller.mediaTranslations || []).length;
 
+      // M1 (darkroom-media-lock-brief): refuse a media translation when
+      // this controller has no Paper Type Option Key. Same rule the
+      // controller-save guard at ipc-handlers.js:1057-1073 enforces; the
+      // reason this back door needs its own copy is that this handler
+      // calls routingService.saveController directly and bypasses the
+      // guard, which is how a controller with translations + blank key
+      // was getting created in the first place. See
+      // docs/darkroom-media-lock-plan.md §3 for the full path.
+      //
+      // Size and media are independent: a size translation in the same
+      // call is still applied. Silently dropping it would be a new
+      // instance of the same "back door that skips validation" bug
+      // class this milestone exists to close.
+      const mediaOptionKey    = String(controller.mediaOptionKey || '').trim();
+      const wantsMediaWrite   = !!(mediaTranslation && mediaTranslation.from);
+      const mediaRejected     = wantsMediaWrite && !mediaOptionKey;
+
+      if (mediaRejected) {
+        logger.logWarning('[DarkroomPro] updateDarkroomTranslations: media translation rejected — controller has no mediaOptionKey', {
+          controllerId,
+          controllerName: controller.name,
+          from:           mediaTranslation.from,
+          to:             mediaTranslation.to,
+        });
+      }
+
       if (sizeTranslation && sizeTranslation.productCodePrefix) {
         if (!Array.isArray(controller.sizeTranslations)) controller.sizeTranslations = [];
         const alreadyExists = controller.sizeTranslations.some(
@@ -1575,7 +1601,7 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
         }
       }
 
-      if (mediaTranslation && mediaTranslation.from) {
+      if (wantsMediaWrite && !mediaRejected) {
         if (!Array.isArray(controller.mediaTranslations)) controller.mediaTranslations = [];
         const alreadyExists = controller.mediaTranslations.some(
           t => t.from && t.from.toLowerCase() === mediaTranslation.from.toLowerCase()
@@ -1592,11 +1618,27 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
         controllerId,
         sizeTranslation,
         mediaTranslation,
+        mediaRejected,
         sizeCountBefore:  sizeBefore,
         sizeCountAfter:   (controller.sizeTranslations  || []).length,
         mediaCountBefore: mediaBefore,
         mediaCountAfter:  (controller.mediaTranslations || []).length,
       });
+
+      if (mediaRejected) {
+        // Success:false so the caller surfaces the media problem
+        // (renderer.js:1973 throws on this branch). The controller is
+        // still returned so the caller's cache-update logic can pick up
+        // the size change on the branches that don't throw. Error text
+        // names the remedy AND states whether the size translation was
+        // saved, so the operator isn't left wondering.
+        const sizeApplied = !!(sizeTranslation && sizeTranslation.productCodePrefix);
+        const remedy = 'Set the Paper Type Option Key on this controller in Settings → Routing first, then try again.';
+        const error = sizeApplied
+          ? `Media translation not saved — this controller has no Paper Type Option Key. ${remedy} The size translation was saved.`
+          : `Media translation not saved — this controller has no Paper Type Option Key. ${remedy}`;
+        return { success: false, error, controller };
+      }
       return { success: true, controller };
     } catch (error) {
       logger.logError('controllers:updateDarkroomTranslations error', error);
