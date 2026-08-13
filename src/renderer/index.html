@@ -1416,6 +1416,20 @@
         <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Jobs whose total print count exceeds this are held for operator review and, when released, are written as multiple <code>{job_name}_1.txt</code>, <code>{job_name}_2.txt</code>… files so Darkroom Pro treats them as separate orders. Leave blank for no limit. Counts prints (image × copies), not images.</small>
       </div>
 
+      <!-- Fuji PIC Pro-only: order-level submission. Off by default. -->
+      <div class="form-group" id="ocMergeOrderJobsGroup" style="display:none">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+          <input type="checkbox" id="ocMergeOrderJobs">
+          <span>Merge sibling jobs into one submission</span>
+        </label>
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">When on, every job in the same OrderHub order is written as a single PIC Pro <code>order.txt</code>, identified by the order number rather than the job name. Applies to every submission from this controller — including single-job orders. Reprints stay per-job. Off by default: behaviour is byte-identical to today when unchecked.</small>
+      </div>
+      <div class="form-group" id="ocOrderMergeWaitMinutesGroup" style="display:none">
+        <label for="ocOrderMergeWaitMinutes">Order-merge wait cap (minutes) <span style="font-weight:normal;color:#888">(optional)</span></label>
+        <input type="number" id="ocOrderMergeWaitMinutes" placeholder="30" min="1" max="1440" style="width:120px;">
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Max time to wait for all sibling jobs in an order to be ready. When the cap expires, the ready jobs go and any straggler dispatches later as <code>{orderNumber}-2</code>. Leave blank for the 30-minute default. Ignored when merging is off.</small>
+      </div>
+
       <!-- PDF Pipeline Builder (pdf_copy controllers only) -->
       <div class="form-group" id="ocPipelineGroup" style="display:none">
         <label style="font-weight:600;margin-bottom:8px;display:block">PDF Pipeline</label>

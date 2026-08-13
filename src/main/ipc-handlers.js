@@ -1095,6 +1095,31 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
         }
       }
 
+      // Fuji PIC Pro — order-level submission wait cap. Same posture as
+      // the darkroompro cap above: renderer already validates, the IPC
+      // mirror stops a malformed payload (future renderer bug, external
+      // caller) from persisting a value that would silently stretch
+      // every order merge to hours. Null is a valid value meaning
+      // "use the default" — do NOT reject it, and do not conflate it
+      // with "wait forever".
+      if (
+        controller &&
+        controller.type === 'fujipicpro' &&
+        controller.orderMergeWaitMinutes !== undefined &&
+        controller.orderMergeWaitMinutes !== null
+      ) {
+        const n = controller.orderMergeWaitMinutes;
+        if (!Number.isInteger(n) || n < 1 || n > 1440) {
+          const msg = 'Order-merge wait cap must be an integer between 1 and 1440 minutes, or null for the default.';
+          logger.logWarning('[routing] save-controller rejected — invalid orderMergeWaitMinutes', {
+            controllerId:          controller.id,
+            name:                  controller.name,
+            orderMergeWaitMinutes: n,
+          });
+          return { success: false, error: msg };
+        }
+      }
+
       // Fuji JobMaker — single source of truth for required-field rules and
       // defaults lives in fuji-jobmaker-config.js. Run it at the save boundary
       // so a malformed payload (from a future renderer bug, an external IPC

@@ -5122,6 +5122,9 @@ function updateOcTypeFields() {
   document.getElementById('ocCheckOrderStatusGroup').style.display   = (type === 'noritsu' || type === 'epson' || type === 'dpof' || type === 'darkroompro') ? '' : 'none';
   document.getElementById('ocIncludeCustomerNameGroup').style.display = (type === 'noritsu' || type === 'epson' || type === 'dpof') ? '' : 'none';
   document.getElementById('ocMaxPrintsPerJobGroup').style.display     = type === 'darkroompro' ? '' : 'none';
+  // Fuji PIC Pro-only: order-level submission (mergeOrderJobs + wait cap).
+  document.getElementById('ocMergeOrderJobsGroup').style.display       = type === 'fujipicpro' ? '' : 'none';
+  document.getElementById('ocOrderMergeWaitMinutesGroup').style.display = type === 'fujipicpro' ? '' : 'none';
   // Frontline-specific fields
   document.getElementById('ocDeviceGroup').style.display     = type === 'frontline' ? '' : 'none';
   document.getElementById('ocBackPrint1Group').style.display = type === 'frontline' ? '' : 'none';
@@ -5234,6 +5237,21 @@ function openOrderControllerModal(ctrl = null) {
   document.getElementById('ocMaxPrintsPerJob').value =
     isDarkroomProCtrl && Number.isFinite(ctrl.maxPrintsPerJob) && ctrl.maxPrintsPerJob > 0
       ? String(ctrl.maxPrintsPerJob)
+      : '';
+  // Order-level submission — Fuji PIC Pro only. Checkbox is boolean;
+  // blank number field = "use the default" (do not treat null as
+  // "wait forever" per the brief). A stray non-numeric or out-of-range
+  // stored value is displayed as blank so the operator sees the default
+  // hint text rather than being locked into a corrupt value.
+  const isFujiPicProCtrl = ctrl && ctrl.type === 'fujipicpro';
+  document.getElementById('ocMergeOrderJobs').checked =
+    isFujiPicProCtrl ? !!ctrl.mergeOrderJobs : false;
+  document.getElementById('ocOrderMergeWaitMinutes').value =
+    isFujiPicProCtrl
+      && Number.isInteger(ctrl.orderMergeWaitMinutes)
+      && ctrl.orderMergeWaitMinutes >= 1
+      && ctrl.orderMergeWaitMinutes <= 1440
+      ? String(ctrl.orderMergeWaitMinutes)
       : '';
   // Load pipeline steps
   pipelineSteps = (ctrl && ctrl.pdfPipeline && ctrl.pdfPipeline.steps) ? JSON.parse(JSON.stringify(ctrl.pdfPipeline.steps)) : [];
@@ -5708,6 +5726,28 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
         return;
       }
       controller.maxPrintsPerJob = n;
+    }
+
+    // Order-level submission — Fuji PIC Pro only. Persisted on every
+    // controller shape (they simply live unused on non-picpro types),
+    // matching how the darkroompro cap sits alongside a dpof/fuji
+    // controller without harm. Reject a typo rather than clamping so
+    // an operator meaning "30" but typing "300" doesn't silently
+    // stretch every merge wait to 5 hours.
+    controller.mergeOrderJobs = !!document.getElementById('ocMergeOrderJobs').checked;
+    const orderWaitRaw = document.getElementById('ocOrderMergeWaitMinutes').value.trim();
+    if (orderWaitRaw === '') {
+      // Null = "use the default"; per the brief, null is NOT "wait
+      // forever". The 30-minute default is applied on read at
+      // dispatch time.
+      controller.orderMergeWaitMinutes = null;
+    } else {
+      const n = parseInt(orderWaitRaw, 10);
+      if (!Number.isFinite(n) || n < 1 || n > 1440 || String(n) !== orderWaitRaw) {
+        alert('Order-merge wait cap must be a whole number of minutes between 1 and 1440, or blank for the 30-minute default.');
+        return;
+      }
+      controller.orderMergeWaitMinutes = n;
     }
 
     // Misconfiguration guard: defining translations without a Paper Type

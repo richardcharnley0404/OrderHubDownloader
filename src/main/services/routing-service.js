@@ -182,6 +182,18 @@ function resolveRoute(job) {
               backprintTemplate:   overrideCtrl.backprintTemplate  || '',
               backprintTemplate2:  overrideCtrl.backprintTemplate2 || '',
               includeCustomerName: overrideCtrl.includeCustomerName === true,
+              // M1 (order-level-submission-picpro-brief): kept in exact
+              // parity with the main fujipicpro literal below. See there
+              // for the read-time default rationale (null → 30, not
+              // "wait forever"). Drift here silently breaks reassigned
+              // jobs on this controller.
+              mergeOrderJobs:      overrideCtrl.mergeOrderJobs === true,
+              orderMergeWaitMinutes:
+                Number.isInteger(overrideCtrl.orderMergeWaitMinutes)
+                  && overrideCtrl.orderMergeWaitMinutes >= 1
+                  && overrideCtrl.orderMergeWaitMinutes <= 1440
+                    ? overrideCtrl.orderMergeWaitMinutes
+                    : 30,
               surface:             overrideMapping.surface,
               surfaceCode:         overrideSurfaceCode,
               printCode:           overrideMapping.printCode,
@@ -523,6 +535,20 @@ function resolveRoute(job) {
       backprintTemplate:   controller.backprintTemplate  || '',
       backprintTemplate2:  controller.backprintTemplate2 || '',
       includeCustomerName: controller.includeCustomerName === true,
+      // M1 (order-level-submission-picpro-brief): read-time defaults —
+      // absent, non-boolean or non-integer store values surface as the
+      // feature-off shape (`mergeOrderJobs:false`, `orderMergeWaitMinutes:30`).
+      // Null and undefined for the wait cap both mean "use the 30-minute
+      // default" — deliberately not treated as "wait forever" per the
+      // brief. Kept identical to the _channelMappingOverride branch below;
+      // any drift silently breaks reassigned jobs on this controller.
+      mergeOrderJobs:      controller.mergeOrderJobs === true,
+      orderMergeWaitMinutes:
+        Number.isInteger(controller.orderMergeWaitMinutes)
+          && controller.orderMergeWaitMinutes >= 1
+          && controller.orderMergeWaitMinutes <= 1440
+            ? controller.orderMergeWaitMinutes
+            : 30,
       // Channel-resolved fields
       surface:             channelMapping.surface,
       surfaceCode,
