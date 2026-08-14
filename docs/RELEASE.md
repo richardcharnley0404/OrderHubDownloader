@@ -3,7 +3,15 @@
 The only artifact this repo produces is a single Windows NSIS installer:
 
 - **File**: `OrderHub Desktop Setup {version}.exe`
-- **Size**: ~576 MB (Electron + Chromium + bundled AI models)
+- **Size**: ~576 MB (Electron + Chromium + bundled AI models). Recorded
+  as exact bytes per release (see below) so verification compares like
+  with like — PowerShell's `Length / 1MB` reports **MiB** (base-1024,
+  1,048,576-byte units), not decimal MB. A 576,000,000-byte file reads
+  as `~549.3 MB` in PowerShell but `576 MB` in the AWS console and in
+  a `du --si` listing; both are correct, they are different units.
+  When investigating a size delta always compare byte counts, not
+  displayed unit strings.
+  - `1.12.0` — 576,578,602 bytes (`Get-Item | Select Length`)
 - **Signing**: none (see [Unsigned installer — SmartScreen](#unsigned-installer--smartscreen))
 - **Distribution**: Richard uploads the `.exe` to S3 by hand and pastes
   the link into OrderHub. Labs download from that link and install it
