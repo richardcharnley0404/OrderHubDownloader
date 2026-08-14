@@ -28,7 +28,7 @@ blank). Then press **Save**. Nothing writes to disk until you save —
 Cancel still discards. Once unstuck, the auto-print tick saves and
 per-job Save & Assign completes as normal.
 
-### The four fixes
+### The five fixes
 
 - **`controllers:updateDarkroomTranslations` now runs the guard.** The
   Assign modal's *"Save media translation for future orders"* tick calls
