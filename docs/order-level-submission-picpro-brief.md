@@ -208,6 +208,14 @@ controller fails loudly.
 - Stamp `_orderMergeHeldSince` (ISO) on a job the first time it is eligible but
   held for merging. That is the clock the cap measures from, and it must survive
   a restart. Clear it on dispatch.
+- **`_orderMergeHeldSince` must never be unparseable.** `evaluateOrderGroup`
+  takes numeric ms and deliberately skips the cap check when `heldSince` is
+  missing or not a number — fail-closed. That means a corrupt or unparseable
+  stamp would make the order wait **forever**, which is the outcome decision 1
+  explicitly ruled out. So the caller must treat a missing *or* `NaN`
+  `Date.parse(_orderMergeHeldSince)` as "not stamped yet" and re-stamp it to
+  now, rather than passing `NaN` through. Cover it with a test.
+
 - Add an `order-merge-waiting` reason to `computeHoldForReview`
   (`src/shared/holdForReview.js`) via a caller-supplied check, in the same style
   as the existing `batchThresholdCheck`. That gets the hold chip machinery for

@@ -353,6 +353,48 @@ test('Batch threshold: OVER_BATCH_THRESHOLD has operator-readable text in REASON
   assert.ok(/send to print/i.test(t), 'tooltip should tell the operator what to do next');
 });
 
+// ── Order-merge-waiting (M5, 2026-08-14) ────────────────────────────────────
+//
+// Fires for a Fuji PIC Pro job that routes to a merge-enabled controller and
+// has passed its per-job gates, but whose order-level group isn't ready yet
+// (siblings still arriving, siblings still held, or the wait cap hasn't
+// elapsed). The auto-print pre-pass stamps _orderMergeHeldSince on the job;
+// the resolver here is a trivial "does this stamp exist?" — the module
+// stays count-agnostic (M6 handles the "X of Y" tooltip in the renderer).
+// Same shape as batchThresholdCheck: absent resolver, or one returning
+// falsy, keeps the reason quiet (feature-off / non-merge controller).
+
+test('Order-merge-waiting: resolver returns true → ORDER_MERGE_WAITING in _holdReasons', () => {
+  const r = computeHoldForReview(baseJob, { orderMergeCheck: () => true });
+  assert.equal(r._holdForReview, true);
+  assert.deepEqual(r._holdReasons, [REASON.ORDER_MERGE_WAITING]);
+});
+
+test('Order-merge-waiting: resolver returns false → NOT held', () => {
+  const r = computeHoldForReview(baseJob, { orderMergeCheck: () => false });
+  assert.equal(r._holdForReview, false);
+  assert.deepEqual(r._holdReasons, []);
+});
+
+test('Order-merge-waiting: omitting the resolver is backward-compatible', () => {
+  const r = computeHoldForReview(baseJob, {});
+  assert.equal(r._holdForReview, false);
+});
+
+test('Order-merge-waiting: stacks with manual-source', () => {
+  const r = computeHoldForReview(
+    { artwork_source: 'manual', artwork_files: [] },
+    { orderMergeCheck: () => true },
+  );
+  assert.deepEqual(r._holdReasons, [REASON.MANUAL_SOURCE, REASON.ORDER_MERGE_WAITING]);
+});
+
+test('Order-merge-waiting: ORDER_MERGE_WAITING has operator-readable text in REASON_TEXT', () => {
+  const t = REASON_TEXT[REASON.ORDER_MERGE_WAITING];
+  assert.ok(typeof t === 'string' && t.length > 0);
+  assert.ok(/waiting/i.test(t) && /order/i.test(t), 'tooltip should name the wait reason');
+});
+
 // ── deriveHoldChipLabel — short label for the Jobs-grid chip ────────────────
 //
 // Fix for a live bug: the pre-M3 renderer hard-coded "Manual — review
@@ -375,6 +417,24 @@ test('deriveHoldChipLabel: both manual reasons → "Manual — review required" 
 
 test('deriveHoldChipLabel: over-batch-threshold only → "Large job — review required" (the M3 fix)', () => {
   assert.equal(deriveHoldChipLabel([REASON.OVER_BATCH_THRESHOLD]), 'Large job — review required');
+});
+
+test('deriveHoldChipLabel: order-merge-waiting only → "Waiting for order" (M5)', () => {
+  // M5 label: a merge-held job must NOT fall through to "Manual — review
+  // required". M6 refines this in the renderer to "Waiting for order —
+  // X of Y jobs" using sibling-count stamps on the job.
+  assert.equal(deriveHoldChipLabel([REASON.ORDER_MERGE_WAITING]), 'Waiting for order');
+});
+
+test('deriveHoldChipLabel: order-merge-waiting stacked with any other reason → generic "Review required"', () => {
+  assert.equal(
+    deriveHoldChipLabel([REASON.MANUAL_SOURCE, REASON.ORDER_MERGE_WAITING]),
+    'Review required',
+  );
+  assert.equal(
+    deriveHoldChipLabel([REASON.ORDER_MERGE_WAITING, REASON.ROUTING_HOLD]),
+    'Review required',
+  );
 });
 
 test('deriveHoldChipLabel: routing-hold only → "Review required" (generic, not "Manual")', () => {

@@ -577,48 +577,7 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
         }
       }
 
-      // Manual Crop redesign (2026-06-02). Stamp the operator-discarded
-      // basename set onto the job as a non-enumerable property so the
-      // print pipelines filter it out without needing a signature change.
-      // The set is read at every _findJobInManifest call (central
-      // manifest filter) plus _copyFolder + processFolderService's
-      // direct file iteration. Stamping is a no-op for jobs without
-      // sidecars or without any discarded images.
-      try {
-        const sidecarJobId = _resolveSidecarJobId(job);
-        const jobFolderPath = _resolveJobPath(job);
-        if (sidecarJobId && jobFolderPath && fsPromises) {
-          const sidecarPath = path.join(jobFolderPath, `${sidecarJobId}.json`);
-          let raw;
-          try {
-            raw = await fsPromises.readFile(sidecarPath, 'utf8');
-          } catch (readErr) {
-            if (readErr.code !== 'ENOENT') throw readErr;
-          }
-          if (raw) {
-            const sc = JSON.parse(raw);
-            const discardedBasenames = (sc.images || [])
-              .filter((img) => img && img.discarded === true && typeof img.filename === 'string')
-              .map((img) => img.filename);
-            if (discardedBasenames.length > 0) {
-              Object.defineProperty(job, '_excludedFilenames', {
-                value:        new Set(discardedBasenames),
-                enumerable:   false,
-                configurable: true,
-              });
-              logger.info('[send-to-print] applying discarded-image filter', {
-                jobId:           job.id,
-                discardedCount:  discardedBasenames.length,
-              });
-            }
-          }
-        }
-      } catch (err) {
-        logger.logWarning('[send-to-print] failed to load discarded-image set; proceeding without filter', {
-          jobId: job.id,
-          error: err.message,
-        });
-      }
+      await _stampDiscardedImageFilter(job);
 
       // ── New routing system ─────────────────────────────────────────────────
       // Attempt to resolve via the routing-service decision tree first.
@@ -626,7 +585,24 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
       const route = routingService.resolveRoute(job);
       let result;
 
-      if (route.type === 'process-folder') {
+      // M5 (order-level-submission-picpro-brief): if the clicked job
+      // routes to a merge-enabled Fuji PIC Pro controller, dispatch all
+      // currently-eligible siblings from the same order as one
+      // submission. Operator Process is the manual escape hatch — no
+      // new button, and the clicked job is always included even if the
+      // per-job hold gates would have blocked it (existing manual
+      // Send-to-Print contract). Siblings only join if they'd pass the
+      // gates in the auto-print loop.
+      const mergeController = route && route.type === 'controller'
+        && route.controllerType === 'fujipicpro'
+        && (() => {
+          const ctrl = routingService.getControllers().find(c => c.id === route.controllerId);
+          return ctrl && ctrl.mergeOrderJobs === true ? ctrl : null;
+        })();
+
+      if (mergeController) {
+        result = await _dispatchFujiPicProOrderMerge_Manual(job, route, jobs);
+      } else if (route.type === 'process-folder') {
         result = await processFolderService.copyToFolder(job, route.folderPath);
       } else if (route.type === 'controller') {
         // Route resolved by the new routing engine — pass the full route so
@@ -3028,6 +3004,415 @@ let _autoPrintWindowManager = null;
 
 let _autoPrintRunning = false;
 
+/**
+ * Manual Crop redesign (2026-06-02). Stamp the operator-discarded
+ * basename set onto the job as a non-enumerable property so the print
+ * pipelines filter it out without needing a signature change. The set
+ * is read at every _findJobInManifest call plus _copyFolder + process-
+ * folder-service. No-op for jobs without sidecars or without any
+ * discarded images.
+ *
+ * Extracted from jobs:sendToPrint for reuse in the M5 order-level PIC
+ * Pro merge dispatch — siblings pulled into a merge group need the
+ * same filter applied so their discards don't leak into the shared
+ * order.txt.
+ */
+async function _stampDiscardedImageFilter(job) {
+  try {
+    const sidecarJobId  = _resolveSidecarJobId(job);
+    const jobFolderPath = _resolveJobPath(job);
+    if (!sidecarJobId || !jobFolderPath || !fsPromises) return;
+    const sidecarPath = path.join(jobFolderPath, `${sidecarJobId}.json`);
+    let raw;
+    try {
+      raw = await fsPromises.readFile(sidecarPath, 'utf8');
+    } catch (readErr) {
+      if (readErr.code !== 'ENOENT') throw readErr;
+      return;
+    }
+    if (!raw) return;
+    const sc = JSON.parse(raw);
+    const discardedBasenames = (sc.images || [])
+      .filter((img) => img && img.discarded === true && typeof img.filename === 'string')
+      .map((img) => img.filename);
+    if (discardedBasenames.length === 0) return;
+    Object.defineProperty(job, '_excludedFilenames', {
+      value:        new Set(discardedBasenames),
+      enumerable:   false,
+      configurable: true,
+    });
+    logger.info('[send-to-print] applying discarded-image filter', {
+      jobId:          job.id,
+      discardedCount: discardedBasenames.length,
+    });
+  } catch (err) {
+    logger.logWarning('[send-to-print] failed to load discarded-image set; proceeding without filter', {
+      jobId: job.id,
+      error: err.message,
+    });
+  }
+}
+
+/**
+ * M5 Manual Process for order-level PIC Pro merge. The operator clicked
+ * Process on ONE job in a merge-enabled Fuji PIC Pro order; dispatch
+ * that job + every currently-eligible sibling as a single submission.
+ *
+ * Contract from the brief:
+ *   - The clicked job is always included (matches Send-to-Print's
+ *     existing hold-gate bypass — the operator explicitly asked).
+ *   - Siblings only join if they'd pass the auto-print gates:
+ *     received/pending status, not film-dev, has local files, AI
+ *     Quality passes (if enabled), computeHoldForReview clears,
+ *     controller autoprint doesn't matter (this is a manual click),
+ *     route.printCode present.
+ *   - Discarded-image filter is stamped on every included job.
+ *   - _orderMergeHeldSince is cleared on dispatch success for every
+ *     active member so the next late-arriver group starts a fresh clock.
+ *
+ * autoprint OFF: honour it for SIBLINGS (they wouldn't be caught by
+ * auto-print anyway); the clicked job is exempt because the operator's
+ * click IS the "print now" signal.
+ */
+async function _dispatchFujiPicProOrderMerge_Manual(clickedJob, clickedRoute, allJobs) {
+  const items = [{ job: clickedJob, route: clickedRoute }];
+
+  const { computeHoldForReview } = require('../shared/holdForReview');
+  const routingHeldProcesses = routingService.getRoutingHeldProcesses();
+
+  for (const other of allJobs) {
+    if (!other || other.id === clickedJob.id) continue;
+    if (other.order_number !== clickedJob.order_number) continue;
+    if (other._status !== 'received' && other._status !== 'pending') continue;
+    if (other.is_film_development) continue;
+    if (other._awaitingManifest) continue;
+
+    const otherRoute = routingService.resolveRoute(other);
+    if (!(otherRoute && otherRoute.type === 'controller')) continue;
+    if (otherRoute.controllerId !== clickedRoute.controllerId) continue;
+    if (!otherRoute.printCode) continue;
+
+    // AI Quality gate on siblings — parity with auto-print. If the
+    // sibling is held, it stays behind; the operator can Process it
+    // later on its own.
+    if (configService.get('aiQualityEnabled')) {
+      const local = jobDownloadService.checkLocalFiles(other);
+      if (!local.found) continue;
+      try {
+        const sidecarJobId = _resolveSidecarJobId(other);
+        const scoring = await aiJobQualityOrchestrator.scoreJob(sidecarJobId, local.localPath);
+        if (scoring.held) continue;
+      } catch (err) {
+        logger.logError('[send-to-print][merge] sibling scoreJob threw — skipping', err, { jobId: other.id });
+        continue;
+      }
+    }
+
+    // computeHoldForReview WITHOUT orderMergeCheck — the whole point of
+    // the manual click is to bypass the "waiting for order" hold, so we
+    // must not consult it here. All other reasons (manual-source,
+    // routing-hold, batch-threshold) still hold the sibling back.
+    const hold = computeHoldForReview(other, { routingHeldProcesses });
+    if (hold._holdForReview) continue;
+
+    await _stampDiscardedImageFilter(other);
+    items.push({ job: other, route: otherRoute });
+  }
+
+  // Clicked job also gets the filter (the caller already did this for
+  // the sendToPrint path, but _dispatchFujiPicProOrderMerge_Manual
+  // may be invoked from other paths in future — cheap idempotent call).
+  await _stampDiscardedImageFilter(clickedJob);
+
+  logger.info('[send-to-print][merge] manual order-level dispatch', {
+    orderNumber:  clickedJob.order_number,
+    controllerId: clickedRoute.controllerId,
+    memberJobIds: items.map(it => it.job.id),
+  });
+
+  // Clear stamps up front — the wait is over as soon as we decide to
+  // dispatch, regardless of success/failure. Same reasoning as the
+  // auto-print pre-pass: an errored member should not keep a "Waiting
+  // for order" chip.
+  for (const it of items) {
+    jobService.updateJobLocally(it.job.id, { _orderMergeHeldSince: null });
+  }
+
+  return await printService._sendViaFujiPicProOrderRouted(items);
+}
+
+/**
+ * M5 (order-level-submission-picpro-brief) — pre-pass for Fuji PIC Pro
+ * order-level merging. For every fujipicpro controller with
+ * `mergeOrderJobs` on, bucket local jobs by (order_number, controllerId),
+ * evaluate per-job eligibility using the same gates the per-job loop
+ * uses (awaiting-manifest, AI Quality, computeHoldForReview,
+ * autoprint/skipAutoPrint/channel-mapping), then hand each bucket to
+ * `evaluateOrderGroup`. If ready, dispatch as one order-level
+ * submission and clear `_orderMergeHeldSince` on the members that
+ * went out. If not ready, stamp `_orderMergeHeldSince` on eligible
+ * members so the wait cap has a start time.
+ *
+ * The per-job loop in runAutoPrint skips merge-eligible controllers
+ * (see the isMergeEligible gate at the dispatch site) so this pre-pass
+ * is the ONLY dispatch path for them when the setting is on. With the
+ * setting off, this function is a no-op and the per-job loop takes
+ * every fujipicpro job unchanged (byte-identical to today).
+ *
+ * NaN-safe _orderMergeHeldSince: `evaluateOrderGroup` skips the cap
+ * check when heldSince is not a finite number — that would make a
+ * corrupt stamp wait forever, which the brief explicitly rules out.
+ * So any eligible member whose stamp is missing or unparseable is
+ * re-stamped to now BEFORE the check, giving the cap a real starting
+ * point.
+ *
+ * Manifest-read failures are logged and the bucket is deferred to the
+ * next auto-print pass — safer than guessing sibling counts.
+ */
+async function _runFujiPicProOrderMergePass(jobs, controllers, cutoff) {
+  const mergeControllers = controllers.filter(
+    c => c && c.type === 'fujipicpro' && c.mergeOrderJobs === true,
+  );
+  if (mergeControllers.length === 0) return;   // feature off — no-op path
+  const mergeControllerIds = new Set(mergeControllers.map(c => c.id));
+
+  const { evaluateOrderGroup } = require('../shared/orderGrouping');
+  const { computeHoldForReview } = require('../shared/holdForReview');
+
+  // ── Bucketing + per-job eligibility ────────────────────────────────────
+  // Same gates as the per-job loop, in the same order, so a job's
+  // eligibility is identical to what the per-job path would decide —
+  // the merge feature must never dispatch a job the per-job path
+  // would have held. Do NOT pass `orderMergeCheck` into
+  // computeHoldForReview here: that ctx hook exists so downstream
+  // callers can SURFACE order-merge-waiting as a hold reason; letting
+  // the pre-pass consult it would re-hold every merge-waiting job as
+  // ineligible on the next cycle.
+  const routingHeldProcesses = routingService.getRoutingHeldProcesses();
+  const batchThresholdCheck = (j) => {
+    try {
+      const r = routingService.resolveRoute(j);
+      if (!(r && r.type === 'controller'
+          && Number.isFinite(r.maxPrintsPerJob) && r.maxPrintsPerJob > 0)) return null;
+      const { readManifestPrintCountSync } = require('./services/manifest-print-count');
+      const prints = readManifestPrintCountSync(j);
+      if (prints == null) return null;
+      return { cap: r.maxPrintsPerJob, prints };
+    } catch (_e) {
+      return null;
+    }
+  };
+
+  const buckets = new Map();   // key -> { orderNumber, controllerId, controller, items[], eligibility Map }
+
+  for (const job of jobs) {
+    if (job._status !== 'received' && job._status !== 'pending') continue;
+    if (job.is_film_development) continue;
+    if (job.created_at && new Date(job.created_at) < cutoff) continue;
+
+    const route = routingService.resolveRoute(job);
+    if (!(route && route.type === 'controller')) continue;
+    if (!mergeControllerIds.has(route.controllerId)) continue;
+
+    const ctrl = mergeControllers.find(c => c.id === route.controllerId);
+
+    // Per-job eligibility — every gate the per-job loop applies before
+    // dispatch. Any false → this job is a member but not eligible;
+    // group readiness treats it as a blocker.
+    let eligible = true;
+
+    if (job._awaitingManifest) eligible = false;
+
+    if (eligible && configService.get('aiQualityEnabled')) {
+      const local = jobDownloadService.checkLocalFiles(job);
+      if (!local.found) {
+        eligible = false;
+      } else {
+        try {
+          const sidecarJobId = _resolveSidecarJobId(job);
+          const scoring = await aiJobQualityOrchestrator.scoreJob(sidecarJobId, local.localPath);
+          if (scoring.held) eligible = false;
+        } catch (err) {
+          logger.logError('[ai-quality][merge] scoreJob threw — treating as ineligible', err, { jobId: job.id });
+          eligible = false;
+        }
+      }
+    }
+
+    if (eligible) {
+      const hold = computeHoldForReview(job, {
+        routingHeldProcesses,
+        batchThresholdCheck,
+      });
+      if (hold._holdForReview) eligible = false;
+    }
+
+    if (eligible) {
+      if (!ctrl || !ctrl.autoprint) eligible = false;
+      if (route.skipAutoPrint)       eligible = false;
+      if (!route.printCode)          eligible = false;   // no channel mapping
+    }
+
+    const key = `${job.order_number}::${route.controllerId}`;
+    if (!buckets.has(key)) {
+      buckets.set(key, {
+        orderNumber:  job.order_number,
+        controllerId: route.controllerId,
+        controller:   ctrl,
+        items:        [],
+        eligibility:  new Map(),
+      });
+    }
+    const b = buckets.get(key);
+    b.items.push({ job, route });
+    b.eligibility.set(String(job.id), eligible);
+  }
+
+  if (buckets.size === 0) return;
+
+  const NOW    = Date.now();
+  const nowIso = new Date(NOW).toISOString();
+
+  for (const bucket of buckets.values()) {
+    // Read the order manifest to know every sibling jobId — including
+    // ones that route to a different controller (they still block this
+    // group's readiness until they have a local record).
+    let manifestJobIds = [];
+    try {
+      const downloadDirectory = configService.get('downloadDirectory');
+      if (!downloadDirectory) {
+        logger.logWarning('[auto-print][order-merge] downloadDirectory not configured — deferring group', {
+          orderNumber: bucket.orderNumber, controllerId: bucket.controllerId,
+        });
+        continue;
+      }
+      const orderFolderName = `${bucket.orderNumber}_${bucket.items[0].job.order_id}`;
+      const orderFolderPath = path.join(downloadDirectory, orderFolderName);
+      const manifest = await printService._readManifest(orderFolderPath, bucket.orderNumber);
+      manifestJobIds = (manifest && Array.isArray(manifest.jobs) ? manifest.jobs : [])
+        .map(j => j.jobId)
+        .filter(id => id != null);
+    } catch (readErr) {
+      logger.logWarning('[auto-print][order-merge] manifest read failed — deferring group evaluation', {
+        orderNumber:  bucket.orderNumber,
+        controllerId: bucket.controllerId,
+        error:        readErr.message,
+      });
+      continue;
+    }
+
+    // NaN-safe stamp handling. Any eligible member with a missing or
+    // unparseable _orderMergeHeldSince gets re-stamped to now; the
+    // brief update spells out why (never wait forever). After this
+    // loop every eligible member has a finite ms parse.
+    const eligibleItems = bucket.items.filter(it => bucket.eligibility.get(String(it.job.id)) === true);
+    for (const it of eligibleItems) {
+      const raw = it.job._orderMergeHeldSince;
+      const ms  = typeof raw === 'string' ? Date.parse(raw) : NaN;
+      if (!Number.isFinite(ms)) {
+        jobService.updateJobLocally(it.job.id, { _orderMergeHeldSince: nowIso });
+        it.job._orderMergeHeldSince = nowIso;   // local mirror for the check below
+      }
+    }
+    // Oldest stamp across eligible members is the group's clock.
+    const heldSince = eligibleItems.length > 0
+      ? Math.min(...eligibleItems.map(it => Date.parse(it.job._orderMergeHeldSince)))
+      : NaN;
+
+    // Cap: minutes → ms. Null/absent/invalid → 30-minute default (per
+    // the brief; null is NOT "wait forever"). Same rule the routing
+    // read-time coercion applies.
+    const rawCap = bucket.controller && bucket.controller.orderMergeWaitMinutes;
+    const capMinutes = Number.isFinite(rawCap) && rawCap > 0 ? rawCap : 30;
+    const capMs = capMinutes * 60 * 1000;
+
+    const result = evaluateOrderGroup({
+      manifestJobIds,
+      localJobs:    bucket.items.map(it => it.job),
+      eligibility:  bucket.eligibility,
+      controllerId: bucket.controllerId,
+      heldSince,
+      nowMs:        NOW,
+      capMs,
+    });
+
+    if (!result.ready) {
+      // Nothing else to do this pass — eligible members carry the
+      // stamp so the cap can measure from it, ineligible members
+      // stay stamp-free (they're not "waiting for the order" from
+      // the operator's viewpoint; they're waiting for their own
+      // per-job gate to clear).
+      continue;
+    }
+
+    // Ready — dispatch.
+    const memberSet = new Set(result.memberJobIds.map(String));
+    const dispatchItems = bucket.items.filter(it => memberSet.has(String(it.job.id)));
+
+    logger.info('[auto-print][order-merge] dispatching order-level group', {
+      orderNumber:  bucket.orderNumber,
+      controllerId: bucket.controllerId,
+      reason:       result.reason,
+      memberJobIds: result.memberJobIds,
+      missing:      result.missingJobIds,
+      capMinutes,
+    });
+
+    // Once we decide to dispatch, the wait is over regardless of the
+    // outcome. Clear _orderMergeHeldSince on every dispatched item up
+    // front — this covers both the success path (member goes to
+    // in_production / completed) and the failure paths (member is
+    // errored inside _sendViaFujiPicProOrderRouted). Leaving the stamp
+    // on an errored member would keep it showing "Waiting for order"
+    // in the Jobs grid even though it's not waiting for anything.
+    for (const it of dispatchItems) {
+      jobService.updateJobLocally(it.job.id, { _orderMergeHeldSince: null });
+    }
+
+    let dispatchResult;
+    try {
+      dispatchResult = await printService._sendViaFujiPicProOrderRouted(dispatchItems);
+    } catch (dispatchErr) {
+      logger.logError('[auto-print][order-merge] dispatch threw', dispatchErr, {
+        orderNumber:  bucket.orderNumber,
+        controllerId: bucket.controllerId,
+        memberJobIds: result.memberJobIds,
+      });
+      // The method already errors its members via _markGroupErrored,
+      // but if the throw is BEFORE that (e.g. downloadDirectory not
+      // set), fall back to stamping errored ourselves.
+      for (const it of dispatchItems) {
+        jobService.updateJobLocally(it.job.id, {
+          _status:       'error',
+          _errorMessage: dispatchErr.message || 'Order-level dispatch threw',
+        });
+      }
+      continue;
+    }
+
+    if (dispatchResult && dispatchResult.success
+        && result.reason === 'cap-expired' && result.missingJobIds.length > 0) {
+      // A silent partial dispatch is the failure mode most likely to
+      // be blamed on the printer. Warn loudly with both halves so the
+      // audit log carries what went and what did not.
+      logger.logWarning('[auto-print][order-merge] cap expired — partial dispatch, stragglers will follow separately', {
+        orderNumber:     bucket.orderNumber,
+        controllerId:    bucket.controllerId,
+        capMinutes,
+        dispatched:      dispatchResult.activeJobIds,
+        stragglerJobIds: result.missingJobIds,
+      });
+    }
+
+    if (_autoPrintWindowManager) {
+      const mainWindow = _autoPrintWindowManager.getWindow();
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('jobs:updated', jobService.getLocalJobs());
+      }
+    }
+  }
+}
+
 async function runAutoPrint() {
   if (_autoPrintRunning) return;
   _autoPrintRunning = true;
@@ -3039,7 +3424,21 @@ async function runAutoPrint() {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - daysBack);
 
-    for (const job of jobs) {
+    // M5 order-level PIC Pro merging pre-pass. No-op when no controller
+    // has mergeOrderJobs on — the byte-identical-when-off contract.
+    // Runs BEFORE the per-job loop so any dispatch or stamp writes
+    // land in the jobs cache before the per-job loop re-fetches
+    // (via the skip check that reads route.controllerId).
+    await _runFujiPicProOrderMergePass(jobs, controllers, cutoff);
+
+    // Re-fetch after the pre-pass so the per-job loop sees any
+    // _orderMergeHeldSince / _status updates the pre-pass made.
+    const jobsAfterMergePass = jobService.getLocalJobs().jobs;
+    const mergeControllerIds = new Set(
+      controllers.filter(c => c && c.type === 'fujipicpro' && c.mergeOrderJobs === true).map(c => c.id),
+    );
+
+    for (const job of jobsAfterMergePass) {
       if (job._status !== 'received' && job._status !== 'pending') continue;
       // Belt-and-braces: film-dev jobs are already filtered out by
       // getLocalJobs, but a future direct caller (or a stale in-memory
@@ -3105,6 +3504,27 @@ async function runAutoPrint() {
         }
       }
 
+      // Route resolution moved earlier (from the original position below
+      // computeHoldForReview) so the stale-stamp clear + orderMergeCheck
+      // can consult it. Cheap — resolveRoute is memoised on the routing
+      // decision tree, not an fs call.
+      const route = routingService.resolveRoute(job);
+      const isOnMergeEnabledCtrl = !!(route && route.type === 'controller'
+        && mergeControllerIds.has(route.controllerId));
+
+      // M5 fix: clear a stale _orderMergeHeldSince if the job is no
+      // longer routing to a merge-enabled controller. Without this,
+      // disabling mergeOrderJobs on a controller strands every job
+      // stamped during the prior enabled period — the stamp holds it
+      // via order-merge-waiting, the per-job loop skips it, and it
+      // never dispatches until the operator manually clears the field.
+      // Also covers a job whose route changed to a different controller
+      // (e.g. reprocess mapping) that isn't merge-enabled.
+      if (job._orderMergeHeldSince && !isOnMergeEnabledCtrl) {
+        jobService.updateJobLocally(job.id, { _orderMergeHeldSince: null });
+        job._orderMergeHeldSince = null;   // local mirror for the check below
+      }
+
       // S3 Artwork Channel M2 (2026-05-24): per-job manual-review hold.
       // Derive fresh from artwork_source + artwork_files instead of trusting
       // the pre-set `_holdForReview` on the job object. job-service does set
@@ -3143,6 +3563,14 @@ async function runAutoPrint() {
             return null;
           }
         },
+        // M5 order-merge-waiting: a stamped _orderMergeHeldSince means
+        // the pre-pass decided this job is waiting for siblings on a
+        // merge-enabled PIC Pro controller. Gated on the current
+        // controller state (isOnMergeEnabledCtrl) so a stale stamp from
+        // a period when the setting was on can't hold the job — the
+        // stale-stamp branch above will also have cleared it, this
+        // check is defence-in-depth.
+        orderMergeCheck: (j) => !!(j && j._orderMergeHeldSince) && isOnMergeEnabledCtrl,
       });
       if (hold._holdForReview) {
         logger.info('[auto-print] job held for review', {
@@ -3152,7 +3580,17 @@ async function runAutoPrint() {
         continue;
       }
 
-      const route = routingService.resolveRoute(job);
+      // M5: hard-skip merge-eligible fujipicpro controllers here as a
+      // belt-and-braces guard against the pre-pass deferring a bucket
+      // (e.g. manifest read failed). Without this, a merge-enabled job
+      // with no _orderMergeHeldSince stamp would fall through to
+      // sendViaDPOFRouted below and get dispatched as a SINGLE-job PIC
+      // Pro submission — violating the "when on, every submission is
+      // identified by the order number" contract. The pre-pass owns
+      // the ONLY dispatch path for these controllers.
+      if (isOnMergeEnabledCtrl) {
+        continue;
+      }
 
       // --- NEW: default-folder / process-folder dispatch ---
       if (route.type === 'default-folder' || route.type === 'process-folder') {

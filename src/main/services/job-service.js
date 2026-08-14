@@ -60,6 +60,30 @@ function _getBatchThresholdCheck(job) {
   }
 }
 
+// M5 (order-level-submission-picpro-brief): the runAutoPrint pre-pass
+// stamps `_orderMergeHeldSince` on jobs waiting for their order's
+// siblings. Surfacing it here gets the "Waiting for order" hold chip
+// onto the Jobs grid without waiting for the next auto-print tick.
+//
+// Gated on the job's controller CURRENTLY having mergeOrderJobs on —
+// otherwise a stamp left over from a prior period when merging was
+// enabled would show "Waiting for order" indefinitely after the
+// operator disables the setting. The per-job auto-print loop clears
+// those stale stamps on its next tick; this check just makes sure
+// the chip doesn't display in the meantime.
+function _getOrderMergeCheck(job) {
+  if (!job || !job._orderMergeHeldSince) return false;
+  try {
+    const routingService = require('./routing-service');
+    const route = routingService.resolveRoute(job);
+    if (!(route && route.type === 'controller')) return false;
+    const ctrl = routingService.getControllers().find(c => c.id === route.controllerId);
+    return !!(ctrl && ctrl.type === 'fujipicpro' && ctrl.mergeOrderJobs === true);
+  } catch (_) {
+    return false;
+  }
+}
+
 // Tenant date-format enum used by the renderer's formatDueDate helper.
 // OrderHub's /jobs/pending returns this at response level (e.g. "MDY"),
 // not per-job. We normalise here so a stray casing/whitespace from the API
@@ -230,7 +254,7 @@ class JobService {
         // polls, so we must re-derive them here or the operator's hold
         // changes would silently no-op until the next 200.
         const routingHeldProcesses = _getRoutingHeldProcesses();
-        const ctx = { routingHeldProcesses, batchThresholdCheck: _getBatchThresholdCheck };
+        const ctx = { routingHeldProcesses, batchThresholdCheck: _getBatchThresholdCheck, orderMergeCheck: _getOrderMergeCheck };
         this.jobs = this.jobs.map(j => {
           // _totalPrintCount is usually already cached from a prior poll —
           // this call is a no-op fast path in the common case.
@@ -271,6 +295,7 @@ class JobService {
         const mappedJobs = apiJobs.map(apiJob => this._mapApiJob(apiJob, {
           routingHeldProcesses,
           batchThresholdCheck: _getBatchThresholdCheck,
+          orderMergeCheck:     _getOrderMergeCheck,
           dateFormat,
         }));
 
@@ -454,7 +479,7 @@ class JobService {
     // below so the routing-hold reason is consistent across newly-mapped and
     // kept-local jobs and honours any preserved _routingHoldReleased flag.
     const routingHeldProcesses = _getRoutingHeldProcesses();
-    const ctx = { routingHeldProcesses, batchThresholdCheck: _getBatchThresholdCheck };
+    const ctx = { routingHeldProcesses, batchThresholdCheck: _getBatchThresholdCheck, orderMergeCheck: _getOrderMergeCheck };
 
     // Map new jobs, preserving local-only fields where appropriate
     const merged = newJobs.map(newJob => {

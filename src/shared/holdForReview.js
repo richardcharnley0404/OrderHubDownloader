@@ -48,6 +48,7 @@ const REASON = Object.freeze({
   MANUAL_FILE:          'manual-file',
   ROUTING_HOLD:         'routing-hold',
   OVER_BATCH_THRESHOLD: 'over-batch-threshold',
+  ORDER_MERGE_WAITING:  'order-merge-waiting',
 });
 
 // Operator-readable text for each reason, used by the renderer to build the
@@ -58,6 +59,7 @@ const REASON_TEXT = Object.freeze({
   [REASON.MANUAL_FILE]:          'Contains a manually-uploaded file',
   [REASON.ROUTING_HOLD]:         'Held for manual routing — pick a controller',
   [REASON.OVER_BATCH_THRESHOLD]: 'Large job — total prints exceed this printer’s batch limit. Send to Print when ready.',
+  [REASON.ORDER_MERGE_WAITING]:  'Waiting for other jobs in this order to be ready — will dispatch as one submission',
 });
 
 /**
@@ -166,6 +168,26 @@ function computeHoldForReview(job, ctx = {}) {
     }
   }
 
+  // Order-merge-waiting (M5, 2026-08-14): the job routes to a Fuji PIC Pro
+  // controller with mergeOrderJobs enabled, has passed its per-job gates,
+  // but the order-level readiness gate is waiting on siblings (either
+  // still-arriving jobs, still-held siblings, or the wait cap has not
+  // elapsed). The auto-print pre-pass stamps `_orderMergeHeldSince` on
+  // the job and the caller supplies a check that simply asks "does the
+  // job carry that stamp?"; we don't re-evaluate the group here.
+  //
+  // Same shape as batchThresholdCheck: absent resolver, or one returning
+  // falsy, keeps the reason quiet (feature-off / non-merge controller).
+  // The renderer surfaces "Waiting for order — X of Y jobs" via the
+  // deriveHoldChipLabel path, reading the sibling-count stamps the M6
+  // work adds separately; this module stays count-agnostic.
+  const orderMergeCheck = ctx && ctx.orderMergeCheck;
+  if (typeof orderMergeCheck === 'function') {
+    if (orderMergeCheck(job)) {
+      reasons.push(REASON.ORDER_MERGE_WAITING);
+    }
+  }
+
   return { _holdForReview: reasons.length > 0, _holdReasons: reasons };
 }
 
@@ -220,6 +242,12 @@ function deriveHoldChipLabel(reasons) {
   if (isManualOnly) return 'Manual — review required';
   const isBatchOnly = reasons.length === 1 && reasons[0] === REASON.OVER_BATCH_THRESHOLD;
   if (isBatchOnly) return 'Large job — review required';
+  // M5, 2026-08-14: distinguish order-merge-waiting from generic review so
+  // operators don't mistake a merge-hold for a manual-artwork hold. M6
+  // (renderer) refines this to "Waiting for order — X of Y jobs" using
+  // sibling-count stamps on the job.
+  const isOrderMergeOnly = reasons.length === 1 && reasons[0] === REASON.ORDER_MERGE_WAITING;
+  if (isOrderMergeOnly) return 'Waiting for order';
   return 'Review required';
 }
 
