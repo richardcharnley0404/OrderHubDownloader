@@ -12,6 +12,7 @@ The only artifact this repo produces is a single Windows NSIS installer:
   When investigating a size delta always compare byte counts, not
   displayed unit strings.
   - `1.12.0` — 576,578,602 bytes (`Get-Item | Select Length`)
+  - `1.12.1` — 576,578,833 bytes (+231 vs 1.12.0 — renderer.js fix only)
 - **Signing**: none (see [Unsigned installer — SmartScreen](#unsigned-installer--smartscreen))
 - **Distribution**: Richard uploads the `.exe` to S3 by hand and pastes
   the link into OrderHub. Labs download from that link and install it
