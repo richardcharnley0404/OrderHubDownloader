@@ -82,6 +82,36 @@ non-routed path still has the acceptance signal for labs on that path.
 
 **Fuji PIC Pro's blank `printSize` still degrades Manual Crop to a 1:1 square silently.** Same class of bug as the DPOF `printSizeCode` recovery, different controller. When a `fujipicpro` (or `fujijobmaker`) channel mapping has a blank `printSize`, dispatch still succeeds (the field is a Manual Crop aspect indicator only — `print-service.js:2466-2478` is the docblock spelling out why the auto-print path deliberately doesn't gate on it), but Manual Crop falls back to a 1:1 square with only a `⚠` pill via `resolveTargetSize` to signal the issue. The M5 configHealth check in this release covers DPOF only; extending it to flag sizeless Fuji mappings the same way — and surfacing them in the startup banner + Settings roll-up — was deliberately kept out of scope for this release. Do when a lab reports it.
 
+**Order-level submission — Phase 2 (Darkroom Pro) not started.** Phase 1
+shipped for Fuji PIC Pro (`docs/order-level-submission-picpro-brief.md`
+— off by default, per-controller `mergeOrderJobs` setting, wait cap +
+suffixed-id late-arriver scheme). Phase 2 would extend the same
+grouping/dispatch machinery to `darkroompro`; the format change needed is
+smaller than PIC Pro's was — `darkroom-pro-output.js` already writes
+`Media=` per image block, but `Size=` is resolved once from
+`job.productCode` at `:193` and reused (see feasibility doc §1). Making
+size per-block mirrors what media already does. The identity fields
+(`ExtOrderNum`, `Orderid`, filename) all derive from
+`outputFilenameStem` and would move from per-job to per-order.
+
+**Merge + batch-cap interaction on the same darkroompro controller is
+unresolved.** Phase 1 controllers (`fujipicpro`) don't have a batch cap,
+so the two features don't collide today — but if Phase 2 ships
+`mergeOrderJobs` for Darkroom Pro alongside its existing `maxPrintsPerJob`
+cap, someone needs to decide the semantics: merge-then-split (apply the
+cap to the merged print count), split-per-job-then-never-merge, or make
+the two features mutually exclusive per controller. Recommend
+merge-then-split (feasibility doc §3) — anything else produces output
+the operator can't predict. Either way `computeHoldForReview`'s
+`over-batch-threshold` reason becomes order-aware in the merged case, or
+it holds on per-job counts that no longer mean the same thing.
+
+**Neither PIC Pro nor Darkroom Pro's actual behaviour with mixed sizes
+in one submission has been tested against real hardware.** The Phase 1
+CHANGELOG entry calls this out for operators. One hand-built order file
+with two different print codes, dropped in a lab's Order Data hot
+folder, settles the format question for good.
+
 **`reconcileControllerIgnore` still performs a whole-controller save on the Fuji and DPOF Assign branches.** M3 of the darkroom-media-lock release repointed the function at the narrow `ohd:routing:set-ignored-options` IPC, but the Fuji (`renderer.js:1910`) and DPOF (`:2124`) call sites still throw on ignore-write failure — that behaviour is preserved because their channel-mapping match logic depends on `optionsMatchWithIgnore` seeing the ignore set as current before the mapping save runs, and any reordering (mapping first, ignore second — or making the ignore write ancillary) needs its own analysis before it can land. If either branch grows the same locked-controller scenario the darkroompro branch had, or if a lab reports a Fuji/DPOF Save & Assign eating jobs, this is the first place to look. The narrow IPC is already available; only the call-site behaviour needs deciding.
 
 **`dpof-generator.js` still emits `PRT PSL=` unvalidated.** M1 guards the reprint caller, but the three first-send callers (`print-service.js:319`, `:490`, `print-controller-service.js:37`) all rely on caller-side print-size guards. A generator-boundary throw would be defence-in-depth and align with the "fail loudly" spirit of v1.7.22, but needs its own audit across all five call sites before landing.

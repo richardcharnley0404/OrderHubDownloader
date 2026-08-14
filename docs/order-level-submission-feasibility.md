@@ -1,6 +1,13 @@
 # Order-level submission — Darkroom Pro + Fuji PIC Pro
 
-**Status:** feasibility investigation, 2026-08-13. Nothing built.
+**Status:** feasibility investigation, 2026-08-13.
+**Phase 1 (Fuji PIC Pro) built 2026-08-14** — see
+`docs/order-level-submission-picpro-brief.md` for the milestone list and
+the CHANGELOG Unreleased entry for operator-facing behaviour. Off by
+default per controller; every guardrail in §3 is enforced or explicitly
+deferred (see `docs/BACKLOG.md` for the merge-vs-batch-cap decision that
+Phase 2 will need to make).
+**Phase 2 (Darkroom Pro) not started.**
 **Ask:** two labs (one Darkroom Pro, one Fuji PIC Pro) want every job in an
 order to reach the controller as a **single submission**, with mixed print
 sizes in that one submission. Both controllers support multiple sizes per
@@ -163,11 +170,11 @@ per-block.
 
 ## 4. Shape and rough cost
 
-| Phase | Scope | Relative cost |
-|---|---|---|
-| Prerequisite | Order grouping + readiness gate + operator visibility + escape hatch | **Most of the work** |
-| Phase 1 | Fuji PIC Pro — caller + staging + per-image printCode. No generator change. | Moderate |
-| Phase 2 | Darkroom Pro — per-block Size, order-level stem, batch-cap interaction | Moderate |
+| Phase | Scope | Relative cost | Status |
+|---|---|---|---|
+| Prerequisite | Order grouping + readiness gate + operator visibility + escape hatch | **Most of the work** | **Built 2026-08-14** (part of Phase 1) |
+| Phase 1 | Fuji PIC Pro — caller + staging + per-image printCode. No generator change. | Moderate | **Built 2026-08-14** |
+| Phase 2 | Darkroom Pro — per-block Size, order-level stem, batch-cap interaction | Moderate | Not started |
 
 Overall comparable to batch splitting, possibly a little more, because the
 waiting logic is new and operator-visible whereas batch splitting was mostly a

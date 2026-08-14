@@ -90,6 +90,68 @@ lives.
 
 ---
 
+**Fuji PIC Pro — order-level submission (opt-in per controller).** A
+lab that wanted every job in an order to reach PIC Pro as one
+submission — with mixed print sizes across the jobs — now can. Off
+by default: with the setting off, dispatch behaviour is byte-identical
+to today. When on, every submission from that controller is
+identified by the order number (including single-job orders), the
+per-image `Code=` carries each job's print code, and NegNumber
+sequences (`0001…000N`) continue across the whole order. The
+`fuji-pic-pro-generator.js` file itself is unchanged — the format
+already supported this, only the caller had to.
+
+**Turning it on.** Settings → Routing → edit a Fuji PIC Pro
+controller. Two new fields sit alongside the auto-print tick:
+
+- **Merge orders into one submission.** Off by default.
+- **Order-merge wait cap (minutes).** 1–1440, or blank for the
+  30-minute default. This is the maximum time an order will wait for
+  its stragglers to become eligible before dispatching the ready
+  members separately. Null is *not* "wait forever" — the default
+  applies.
+
+**How the wait works.** When any member of an order becomes eligible
+for auto-print but at least one sibling is still missing (not yet
+downloaded) or held (AI Quality, awaiting-manifest, hold-for-review),
+the ready members wait. Every held member shows a *"Waiting for
+order — X of Y jobs missing"* chip on the Jobs grid; hovering the
+chip lists the outstanding sibling job ids. The wait cap measures
+from the *first* eligible member's stamp. Once every sibling is
+ready OR the cap elapses, dispatch happens.
+
+**What "cap expired" looks like.** The ready subset dispatches as one
+submission and gets logged at warn naming both halves — the jobs
+that went AND the jobs that did not — so a silent partial dispatch
+is not blamed on the printer. Each straggler then dispatches on its
+own later, with a **suffixed id**: the first submission for
+`ORD-1234` is `ORD-1234`, the next is `ORD-1234-2`, then `-3`, and
+so on. **IDs are never reused** — that is a load-bearing invariant:
+`stageImages` `rm -rf`'s the staging folder named after the id, so
+reissuing would destroy the previous submission's staged files (which
+PIC Pro may not have moved into DIGIN yet). The counter is persisted
+per order number and pruned after `max(jobDateRange, 90)` days.
+
+**Operator escape hatch: manual Process on any merge-waiting member
+dispatches every currently-eligible sibling as one submission.**
+Same result as a cap-expired partial dispatch, but instantly on the
+operator's click. Send-to-Print's existing hold-gate bypass still
+applies to the clicked job; siblings only join if they'd pass the
+auto-print gates themselves.
+
+**Reprints are unchanged.** The reprint paths deliberately stay
+per-job and don't merge — a reprint is a sibling of the original,
+and merging them would break the parent-lifecycle guarantees the
+reprint code has always maintained.
+
+**Manual test to run before rolling it out to a lab.** Neither
+controller's actual behaviour with mixed sizes in one submission has
+been tested against real hardware from this project. One hand-built
+order file with two different print codes, dropped in a lab's Order
+Data hot folder, settles the format question for good.
+
+---
+
 ## v1.11.0 - 2026-08-10
 
 **Recovery flow for channel mappings without a print size.** Channel
