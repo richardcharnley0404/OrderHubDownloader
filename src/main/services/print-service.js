@@ -2717,6 +2717,509 @@ class PrintService {
   }
 
   /**
+   * Fuji PIC Pro — order-level dispatch. M4 of the order-level
+   * submission brief (docs/order-level-submission-picpro-brief.md).
+   *
+   * Sits alongside `_sendViaFujiPicProRouted` deliberately parallel to
+   * it. The single-job method must remain byte-identical when the
+   * `mergeOrderJobs` setting is off; this method is only reached when
+   * it is on. Sharing helpers between the two would risk regressing
+   * the byte-identical guarantee (the whole point of an opt-in
+   * feature), so this is a lift-not-refactor.
+   *
+   * The group's jobs share:
+   *   - one order manifest (read once, not per-job)
+   *   - one staging folder ({imageStagingRoot}/{orderId})
+   *   - one order.txt (with per-image `Code=` and `NegNumber=`)
+   *   - one enqueue → write → markCommitted transaction
+   *   - controller-level fields (paths, backprint config,
+   *     includeCustomerName) — asserted to agree
+   *
+   * The group's jobs differ in:
+   *   - route.printCode (per-image `Code=` — the entire point of the
+   *     feature)
+   *   - route.color   (per-image `Color=`)
+   *   - manifest quantity + originalFilename (per-image)
+   *
+   * `orderId` is allocated from the persistent submission-sequence
+   * store (M3) — first submission for this order number is the
+   * unsuffixed order number, subsequent ones (late-arriver batches
+   * after cap-expiry, retries after a failed dispatch) get `-2`,
+   * `-3`, … The store persists on every allocation, so a failed
+   * dispatch consumes an id and the next attempt is `-N+1`. That is
+   * intentional: reusing an id would let stageImages `rm -rf` the
+   * previous submission's staging folder (see M3 module doc).
+   *
+   * Failure posture: mark EVERY member errored with a single
+   * message that names the order and the member jobs, so the
+   * operator sees the blast radius. Never mark some completed and
+   * some errored — that would misrepresent what happened.
+   *
+   * @param {Array<{ job: object, route: object }>} items
+   * @returns {Promise<{success:true, method:string, orderId:string, memberJobIds:Array,
+   *                   orderFilePath:string, stagedFolder:string, negNumberMap:Array}
+   *                 | {success:false, error:string}>}
+   */
+  async _sendViaFujiPicProOrderRouted(items) {
+    const downloadDirectory = configService.get('downloadDirectory');
+    if (!downloadDirectory) {
+      throw new Error('Download directory is not configured.');
+    }
+
+    // ── Guard: non-empty, well-shaped group ────────────────────────────────
+    if (!Array.isArray(items) || items.length === 0) {
+      throw new Error('_sendViaFujiPicProOrderRouted: empty group — the caller must never dispatch an empty submission');
+    }
+    for (const it of items) {
+      if (!it || !it.job || !it.route) {
+        throw new Error('_sendViaFujiPicProOrderRouted: malformed group item — expected {job, route}');
+      }
+    }
+
+    const memberJobIds = items.map(it => it.job.id);
+    const sharedRoute  = items[0].route;
+
+    // ── Assert group agreement on controller-level fields ──────────────────
+    // Backprint config and includeCustomerName ride on the controller too,
+    // but the load-bearing ones are the paths and controllerId: a group
+    // whose members target different DIGIN or Order Data folders would
+    // mis-deliver silently. Fail loudly BEFORE any staging.
+    for (const field of ['controllerId', 'controllerType', 'orderDataPath', 'diginPath', 'imageStagingRoot']) {
+      for (const it of items) {
+        if (it.route[field] !== sharedRoute[field]) {
+          const msg =
+            `Fuji PIC Pro order-level dispatch: group members disagree on controller field "${field}" ` +
+            `(job ${it.job.id}: ${JSON.stringify(it.route[field])} vs group: ${JSON.stringify(sharedRoute[field])}). ` +
+            `Refusing to merge. Member jobs: ${memberJobIds.join(', ')}.`;
+          logger.logError(msg, new Error('order-group-controller-disagreement'), {
+            field, memberJobIds,
+          });
+          this._markGroupErrored(items, msg);
+          return { success: false, error: msg };
+        }
+      }
+    }
+
+    // All jobs must share order_number too — this is the merge key.
+    const orderNumber = items[0].job.order_number;
+    for (const it of items) {
+      if (it.job.order_number !== orderNumber) {
+        const msg =
+          `Fuji PIC Pro order-level dispatch: group members disagree on order_number ` +
+          `(job ${it.job.id}: ${JSON.stringify(it.job.order_number)} vs group: ${JSON.stringify(orderNumber)}). ` +
+          `Refusing to merge. Member jobs: ${memberJobIds.join(', ')}.`;
+        logger.logError(msg, new Error('order-group-order-number-disagreement'), { memberJobIds });
+        this._markGroupErrored(items, msg);
+        return { success: false, error: msg };
+      }
+    }
+
+    // ── Allocate the order-level id from the persistent store ──────────────
+    // Persisted on allocation. If we crash or fail below, the next
+    // attempt gets -N+1 and stageImages does NOT rm -rf a folder from
+    // a previous attempt — the whole reason M3 exists.
+    //
+    // Lazy-required (same pattern as server-capabilities in
+    // job-service) so require-ing print-service.js doesn't force the
+    // electron-store singleton at module load — needed for the
+    // node:test harness which stubs orderSubmissionSeq in require.cache.
+    let orderId;
+    try {
+      const { orderSubmissionSeq } = require('./order-submission-seq');
+      orderId = orderSubmissionSeq.nextSubmissionId(orderNumber);
+    } catch (seqErr) {
+      const msg = `Fuji PIC Pro order-level dispatch: failed to allocate submission id for order ${orderNumber}: ${seqErr.message}`;
+      logger.logError(msg, seqErr, { memberJobIds });
+      this._markGroupErrored(items, msg);
+      return { success: false, error: msg };
+    }
+
+    // ── Read the manifest ONCE per order ───────────────────────────────────
+    const orderFolderName = `${orderNumber}_${items[0].job.order_id}`;
+    const orderFolderPath = path.join(downloadDirectory, orderFolderName);
+
+    let manifest;
+    try {
+      manifest = await this._readManifest(orderFolderPath, orderNumber);
+    } catch (readErr) {
+      const msg = `Fuji PIC Pro order-level dispatch: manifest read failed for order ${orderId}: ${readErr.message}. Member jobs: ${memberJobIds.join(', ')}.`;
+      logger.logError(msg, readErr, { orderId, memberJobIds });
+      this._markGroupErrored(items, msg);
+      return { success: false, error: msg };
+    }
+
+    // ── Per-job image resolution + parallel metadata capture ───────────────
+    // Concatenate every member's images into one array, with a parallel
+    // metadata array carrying the originating jobId + per-image
+    // printCode/color/quantity/originalFilename. The single-job method
+    // zips stageResult.negNumberMap[i] with jobManifest.images[i]; here
+    // we zip against this concatenated metadata array.
+    const concatenated = [];   // [{ sourcePath, filename, jobId, printCode, color, quantity, originalFilename }]
+    // Members whose images were ALL removed by the operator-discard
+    // filter (job._excludedFilenames, applied inside _findJobInManifest).
+    // These get dropped from the dispatch, their status is deliberately
+    // NOT touched, and their printCode never reaches the .txt — the
+    // operator has already said "don't print this one". See the
+    // per-member handling below for the reasoning.
+    const droppedByExclusion = [];
+
+    for (const item of items) {
+      const { job, route } = item;
+
+      // Folder existence + manifest lookup happen FIRST so the exclusion
+      // decision (below) has real manifest data to inspect. These are
+      // hard errors, not exclusion candidates — a missing folder or an
+      // absent manifest entry is a data issue we fail the whole group on
+      // regardless of what the operator excluded.
+      const jobFolderName = `${job.order_number}_${job.id}`;
+      const jobFolderPath = path.join(orderFolderPath, jobFolderName);
+      if (!fs.existsSync(jobFolderPath)) {
+        const msg = `Fuji PIC Pro order-level dispatch: member job folder not found: ${jobFolderPath}. Order ${orderId}, member jobs: ${memberJobIds.join(', ')}.`;
+        this._markGroupErrored(items, msg);
+        return { success: false, error: msg };
+      }
+
+      const jobManifest = this._findJobInManifest(manifest, job);
+      if (!jobManifest) {
+        const msg = `Fuji PIC Pro order-level dispatch: member job ${job.id} not found in order manifest. Order ${orderId}, member jobs: ${memberJobIds.join(', ')}.`;
+        this._markGroupErrored(items, msg);
+        return { success: false, error: msg };
+      }
+
+      // Operator-discard drop: _findJobInManifest has already applied
+      // `job._excludedFilenames`. If that filter emptied the images
+      // array, the operator has explicitly said "don't print any of
+      // this member's images" — drop the whole member from this
+      // dispatch, log at warn, and leave its status untouched so the
+      // existing per-job path or the operator handles it. This is
+      // distinct from a legitimately-empty manifest (no exclusion
+      // applied) — that stays a hard error via the collective empty
+      // check further down.
+      const excluded      = job && job._excludedFilenames;
+      const excludedCount = (excluded && typeof excluded.size === 'number') ? excluded.size : 0;
+      if (jobManifest.images.length === 0 && excludedCount > 0) {
+        logger.logWarning('[fuji-pic-pro] order-level member dropped — all images excluded by operator', {
+          jobId:       job.id,
+          orderId,
+          orderNumber,
+          excludedCount,
+          controller:  route.controllerName,
+        });
+        droppedByExclusion.push(item);
+        // Deliberately no _markInProduction / _markCompleted call, no
+        // errored stamp — the member's status is left untouched.
+        continue;
+      }
+
+      // From here the member IS active in the dispatch. Route
+      // validation applies only to active members — a would-be-dropped
+      // member with a broken printCode is a config issue the operator
+      // will see on the next per-job attempt, not something to fail
+      // the whole group's Save & Assign for.
+      if (!route.printCode) {
+        const msg =
+          `Fuji PIC Pro order-level dispatch: member job ${job.id} (product "${job.product_code || '(none)'}") ` +
+          `is missing route.printCode. Add a channel mapping in Settings → Routing. ` +
+          `The whole order-level group failed. Member jobs: ${memberJobIds.join(', ')}.`;
+        this._markGroupErrored(items, msg);
+        return { success: false, error: msg };
+      }
+      // Blank printSize is a warning, not a failure — same rationale as
+      // the single-job method (crop-aspect indicator only; not written
+      // to order.txt).
+      if (!route.printSize) {
+        logger.logWarning('[fuji-pic-pro] route.printSize blank on order-level member — dispatch proceeding (crop-aspect only)', {
+          jobId:       job.id,
+          controller:  route.controllerName,
+          productCode: job.product_code,
+          orderId,
+        });
+      }
+
+      // Image resolution — enhanced → cropped → corrected → raw. Same
+      // shape as the single-job method so the cropped file in /working/
+      // wins over the raw at the flat root.
+      const enhancedMap    = await this._getEnhancedPathMap(jobFolderName, jobFolderPath);
+      const correctionsMap = await this._getCorrectionsMap(jobFolderName, jobFolderPath);
+
+      let imageFiles = jobManifest.images.map(img => {
+        const basename     = path.basename(img.filename);
+        const enhancedPath = enhancedMap.get(basename);
+        if (enhancedPath) {
+          logger.info('Using enhanced image for Fuji PIC Pro order-level member', {
+            jobId: job.id, filename: basename, enhancedPath, orderId,
+          });
+        }
+        return {
+          sourcePath: resolveDispatchImageSource({
+            rootPath:     path.join(orderFolderPath, img.filename),
+            jobFolderPath, basename, enhancedPath,
+          }),
+          filename:   basename,
+        };
+      });
+
+      imageFiles = await this._applyCorrectionsToImageFiles(
+        imageFiles,
+        path.join(jobFolderPath, 'working'),
+        correctionsMap,
+      );
+
+      for (const img of imageFiles) {
+        if (!fs.existsSync(img.sourcePath)) {
+          const msg = `Fuji PIC Pro order-level dispatch: image not found: ${img.sourcePath} (member job ${job.id}). Order ${orderId}, member jobs: ${memberJobIds.join(', ')}.`;
+          this._markGroupErrored(items, msg);
+          return { success: false, error: msg };
+        }
+      }
+
+      // Concatenate, capturing per-image identity + per-job route
+      // fields. Read quantity + originalFilename from the MANIFEST,
+      // not from imageFiles — `_applyCorrectionsToImageFiles` strips
+      // those keys whenever a CMY correction is applied (same rationale
+      // as the single-job method at :2508-2515).
+      for (let i = 0; i < imageFiles.length; i++) {
+        concatenated.push({
+          sourcePath:       imageFiles[i].sourcePath,
+          filename:         imageFiles[i].filename,
+          jobId:            job.id,
+          printCode:        route.printCode,
+          color:            route.color || 'C',
+          quantity:         jobManifest.images[i].quantity || 1,
+          originalFilename: jobManifest.images[i].originalFilename || null,
+        });
+      }
+    }
+
+    // Active items = every member NOT dropped by the exclusion filter.
+    // Downstream failure paths (staging fail, write fail, enqueue fail,
+    // etc.) must error only the active members — the dropped ones have
+    // their status deliberately untouched.
+    const activeItems  = items.filter(it => !droppedByExclusion.includes(it));
+    const activeJobIds = activeItems.map(it => it.job.id);
+    const droppedIds   = droppedByExclusion.map(it => it.job.id);
+
+    // Never-empty invariant. Two flavours:
+    //   (a) every member was dropped by the operator's exclusion filter —
+    //       not a failure, just nothing to do. Leave every status
+    //       untouched and log at warn.
+    //   (b) at least one active member yielded zero images without
+    //       exclusion (bad manifest, empty images[] in the source
+    //       data) — that IS a data error, so mark the active members
+    //       errored (the dropped ones still stay untouched).
+    if (concatenated.length === 0) {
+      if (activeItems.length === 0) {
+        const msg = `Fuji PIC Pro order-level dispatch: every member of order ${orderId} had all images excluded by the operator — not dispatching. Statuses untouched. Dropped jobs: ${droppedIds.join(', ')}.`;
+        logger.logWarning(msg, { orderId, droppedByExclusion: droppedIds });
+        return { success: false, error: msg, reason: 'all-members-excluded' };
+      }
+      const msg = `Fuji PIC Pro order-level dispatch: no images across ${activeItems.length} active member jobs (${droppedByExclusion.length} dropped by exclusion). Refusing to dispatch. Order ${orderId}, active jobs: ${activeJobIds.join(', ')}.`;
+      logger.logError(msg, new Error('empty-order-group'), { orderId, activeJobIds, droppedByExclusion: droppedIds });
+      this._markGroupErrored(items, msg);
+      return { success: false, error: msg };
+    }
+
+    // ── ONE stageImages call for the whole group ───────────────────────────
+    // NegNumber sequences across the concatenated array so 0001…000N
+    // spans every member job.
+    let stageResult;
+    try {
+      stageResult = await fujiPicProFileWriter.stageImages({
+        imageStagingRoot: sharedRoute.imageStagingRoot,
+        orderId,
+        imageFiles: concatenated.map(m => ({
+          sourcePath:       m.sourcePath,
+          originalFilename: m.originalFilename,
+        })),
+      });
+    } catch (stageErr) {
+      logger.logError('Fuji PIC Pro order-level image staging failed', stageErr, {
+        orderId, activeJobIds, droppedByExclusion: droppedIds, controller: sharedRoute.controllerName,
+      });
+      // Post-drop failure: error only the active members. Members that
+      // were dropped by the operator's exclusion filter had their
+      // status left untouched above and stay untouched here.
+      this._markGroupErrored(activeItems, stageErr.message);
+      return { success: false, error: stageErr.message };
+    }
+
+    // ── Build the generator input ──────────────────────────────────────────
+    // Each image carries its OWN job's printCode + color from the
+    // parallel metadata array. Customer info is taken from the first
+    // ACTIVE member — with the setting on, the .txt is per-order and
+    // the customer is shared across the order anyway. (Using
+    // activeItems[0] rather than items[0] keeps the customer info
+    // consistent even if the first item was dropped by exclusion.)
+    const firstJob = activeItems[0].job;
+    const fullName = (firstJob.customer_name || '').trim();
+    const picProJob = {
+      orderId,
+      // `id` isn't consumed by the generator (it inspects orderId
+      // for the filename + [order]) but the shape is kept for parity
+      // with the single-job builder. Nominally the first member's id.
+      id:       firstJob.id,
+      jobName:  orderId,
+      customer: {
+        fullName,
+        email: firstJob.customer_email || '',
+        phone: firstJob.customer_phone || '',
+      },
+      images: stageResult.negNumberMap.map((staged, i) => ({
+        negNumber:        staged.negNumber,
+        printCode:        concatenated[i].printCode,
+        quantity:         concatenated[i].quantity,
+        color:            concatenated[i].color,
+        originalFilename: concatenated[i].originalFilename || staged.originalFilename || '',
+        filename:         staged.stagedName,
+      })),
+    };
+
+    // Controller-level config — the group already agreed on it.
+    const controllerCfg = {
+      backprintMode:       sharedRoute.backprintMode      || 'none',
+      backprintTemplate:   sharedRoute.backprintTemplate  || '',
+      backprintTemplate2:  sharedRoute.backprintTemplate2 || '',
+      includeCustomerName: sharedRoute.includeCustomerName === true,
+    };
+
+    let orderFile;
+    try {
+      orderFile = generateFujiPicProOrderFile(picProJob, controllerCfg);
+    } catch (genErr) {
+      logger.logError('Fuji PIC Pro order-level generation failed', genErr, {
+        orderId, activeJobIds, droppedByExclusion: droppedIds,
+      });
+      this._markGroupErrored(activeItems, genErr.message);
+      return { success: false, error: genErr.message };
+    }
+
+    // ── Enqueue → write → markCommitted (rollback on write failure) ────────
+    // Same order and same rationale as the single-job method (review
+    // fix 11). Reordering these breaks the recovery guarantee against
+    // OrderGateway consuming a .txt with no monitor entry to drive
+    // the DIGIN handshake.
+    printControllerService.startMonitoring(sharedRoute.controllerId);
+    const monitor = printControllerService.getMonitor(sharedRoute.controllerId);
+    if (!monitor || typeof monitor.enqueueSubmission !== 'function') {
+      const msg = `Fuji PIC Pro monitor unavailable for controller ${sharedRoute.controllerId} — refusing to dispatch order-level group. DIGIN delivery + release would not happen. Order ${orderId}, active jobs: ${activeJobIds.join(', ')}.`;
+      logger.logError(msg, new Error('no-monitor'), { controllerId: sharedRoute.controllerId, orderId, activeJobIds });
+      this._markGroupErrored(activeItems, msg);
+      return { success: false, error: msg };
+    }
+
+    try {
+      monitor.enqueueSubmission({
+        orderRef:            orderId,
+        orderId,
+        stagingFolder:       stageResult.stagingFolder,
+        controllerId:        sharedRoute.controllerId,
+        orderDataPath:       sharedRoute.orderDataPath,
+        diginPath:           sharedRoute.diginPath,
+        mergeDataPath:       sharedRoute.mergeDataPath || '',
+        gatewayTimeoutMs:    sharedRoute.gatewayTimeoutMs,
+        buildTimeoutMs:      sharedRoute.buildTimeoutMs,
+        sendReleaseCommand:  sharedRoute.sendReleaseCommand === true,
+      });
+    } catch (enqueueErr) {
+      logger.logError('Fuji PIC Pro order-level enqueue failed — refusing to write .txt', enqueueErr, {
+        orderId, activeJobIds, droppedByExclusion: droppedIds, controller: sharedRoute.controllerName,
+        code: enqueueErr && enqueueErr.code,
+      });
+      this._markGroupErrored(activeItems, enqueueErr.message);
+      return { success: false, error: enqueueErr.message };
+    }
+
+    let writtenPath;
+    try {
+      ({ writtenPath } = await fujiPicProFileWriter.writeOrderFile({
+        orderDataPath: sharedRoute.orderDataPath,
+        filename:      orderFile.filename,
+        contents:      orderFile.contents,
+      }));
+    } catch (writeErr) {
+      // Fix 11 rollback — dequeue the entry so the monitor doesn't sit
+      // in awaiting-gateway waiting for a .txt that never lands.
+      try { monitor.dequeue(orderId); } catch (_) { /* best-effort */ }
+      logger.logError('Fuji PIC Pro order-level file write failed — staged images may remain', writeErr, {
+        orderId, activeJobIds, droppedByExclusion: droppedIds, controller: sharedRoute.controllerName,
+      });
+      this._markGroupErrored(activeItems, writeErr.message);
+      return { success: false, error: writeErr.message };
+    }
+
+    // Signal the monitor that the .txt is on disk.
+    monitor.markCommitted(orderId);
+
+    logger.info('Order-level Fuji PIC Pro dispatch — enqueued for OrderGateway handshake', {
+      orderId,
+      activeJobIds,
+      droppedByExclusion: droppedIds,
+      controller:   sharedRoute.controllerName,
+      orderFile:    writtenPath,
+      stagedImages: stageResult.negNumberMap.length,
+      // Per-image printCode breakdown, for the operator's audit log.
+      printCodes:   Array.from(new Set(concatenated.map(m => m.printCode))).sort(),
+    });
+
+    // ── Per-member lifecycle — same rule as the single-job method ──────────
+    // checkOrderStatus is a controller-level field, so every member's
+    // route reports the same value; we still resolve it per-member to
+    // make the intent unambiguous and to survive a future per-route
+    // override without silent behaviour change. Iterates activeItems
+    // only — members dropped by the operator's exclusion filter
+    // deliberately do NOT get a lifecycle transition here (their
+    // status is left untouched for the next per-job path or the
+    // operator to handle).
+    for (const { job, route } of activeItems) {
+      if (route.checkOrderStatus === false) {
+        logger.info('[Fuji PIC Pro] checkOrderStatus disabled — marking order-level member completed immediately', { jobId: job.id, orderId });
+        await this._markCompleted(job.id);
+      } else {
+        await this._markInProduction(job.id);
+      }
+    }
+
+    return {
+      success:       true,
+      method:        'fujipicpro-order-routed',
+      orderId,
+      // memberJobIds is the ORIGINAL group; activeJobIds is what
+      // actually dispatched. Kept separate so a caller comparing
+      // dispatch record to input can see which members were dropped.
+      memberJobIds,
+      activeJobIds,
+      droppedByExclusion: droppedIds,
+      orderFilePath: writtenPath,
+      stagedFolder:  stageResult.stagingFolder,
+      // Handy for a later "which physical file went out as NegNumber X"
+      // debug session — includes the member jobId per row so the
+      // dispatch record shows which job contributed which frame.
+      negNumberMap:  stageResult.negNumberMap.map((e, i) => ({
+        negNumber:        e.negNumber,
+        stagedName:       e.stagedName,
+        originalFilename: e.originalFilename,
+        jobId:            concatenated[i].jobId,
+        printCode:        concatenated[i].printCode,
+      })),
+    };
+  }
+
+  /**
+   * Mark every member job in an order-level group errored with the
+   * same message, so the operator can see the blast radius rather
+   * than seeing some jobs succeed and some fail. Only used by
+   * `_sendViaFujiPicProOrderRouted`.
+   *
+   * @param {Array<{ job: object }>} items
+   * @param {string} message
+   */
+  _markGroupErrored(items, message) {
+    for (const { job } of items) {
+      jobService.updateJobLocally(job.id, { _status: 'error', _errorMessage: message });
+    }
+  }
+
+  /**
    * PDF-copy pipeline for "pdf_copy" controllers.
    *
    * Locates PDF files in the job manifest and copies them to
