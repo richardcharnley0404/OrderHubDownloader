@@ -4962,8 +4962,28 @@ function addMediaTranslationRow(container, from = '', to = '') {
     <input type="text" class="dp-media-to" placeholder="Darkroom value (e.g. Luster)" value="${escapeHtml(to)}" style="flex:1">
     <button type="button" style="background:none;border:none;color:#c0392b;cursor:pointer;font-size:18px;line-height:1;padding:0 4px">&times;</button>
   `;
-  row.querySelector('button').addEventListener('click', () => row.remove());
+  row.querySelector('button').addEventListener('click', () => {
+    row.remove();
+    _refreshClearMediaTranslationsBtnState();
+  });
   container.appendChild(row);
+  _refreshClearMediaTranslationsBtnState();
+}
+
+// M4 (darkroom-media-lock-brief): the Clear-media-translations rescue
+// button. Visible ONLY when translation rows exist AND the Paper Type
+// Option Key is blank — that is the locked state (translations without
+// a key are unreachable and the save-controller guard rejects them).
+// The button clears the rendered rows in the modal only; the operator
+// still has to press Save to persist. Cancel discards. Deliberately
+// does NOT auto-clear on load or on save under any circumstances —
+// operator data does not disappear without a click.
+function _refreshClearMediaTranslationsBtnState() {
+  const btn = document.getElementById('ocClearMediaTranslationsBtn');
+  if (!btn) return;
+  const key      = (document.getElementById('ocMediaOptionKey')?.value || '').trim();
+  const rowCount = document.querySelectorAll('#ocMediaTranslationsList .mapping-row').length;
+  btn.style.display = (!key && rowCount > 0) ? '' : 'none';
 }
 
 // ── Darkroom Pro: configurable Photo Lines ─────────────────────────────────
@@ -5113,6 +5133,7 @@ function renderMediaTranslations(translations) {
   for (const t of sorted) {
     addMediaTranslationRow(container, t.from, t.to);
   }
+  _refreshClearMediaTranslationsBtnState();
 }
 
 function readSizeTranslations() {
@@ -5692,6 +5713,21 @@ document.getElementById('ocAddSizeTranslationBtn').addEventListener('click', () 
 document.getElementById('ocAddMediaTranslationBtn').addEventListener('click', () => {
   addMediaTranslationRow(document.getElementById('ocMediaTranslationsList'));
 });
+
+// M4 (darkroom-media-lock-brief): the Clear-media-translations rescue
+// path. Wipes the rendered rows in the modal only — the operator still
+// has to press Save to persist, and Cancel still discards.
+// _refreshClearMediaTranslationsBtnState hides the button afterwards
+// (both preconditions collapse: rowCount goes to zero).
+document.getElementById('ocClearMediaTranslationsBtn').addEventListener('click', () => {
+  document.getElementById('ocMediaTranslationsList').innerHTML = '';
+  _refreshClearMediaTranslationsBtnState();
+});
+
+// The button's visibility depends on the key field too — reveal it when
+// the operator blanks out the key on a controller that still has
+// translation rows, hide it again if they type a key back in.
+document.getElementById('ocMediaOptionKey').addEventListener('input', _refreshClearMediaTranslationsBtnState);
 
 document.getElementById('ocAddPhotoLineBtn').addEventListener('click', () => {
   addPhotoLineRow(document.getElementById('ocPhotoLinesList'));

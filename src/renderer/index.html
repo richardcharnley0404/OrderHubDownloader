@@ -1375,7 +1375,10 @@
         <small style="color:var(--text-muted,#888);display:block;margin-bottom:8px">Specify which job option carries the paper type, and translate its values.</small>
         <div style="margin-bottom:8px">
           <label for="ocMediaOptionKey" style="font-size:12px;display:block;margin-bottom:3px">Paper Type Option Key</label>
-          <input type="text" id="ocMediaOptionKey" placeholder="e.g. finish-options" style="width:200px">
+          <div style="display:flex;align-items:center;gap:8px">
+            <input type="text" id="ocMediaOptionKey" placeholder="e.g. finish-options" style="width:200px">
+            <button type="button" id="ocClearMediaTranslationsBtn" class="btn-secondary btn-sm" style="display:none" title="Clear the media translation rows so this controller can be saved with a blank Paper Type Option Key. The rows are only cleared in this modal — Save still writes, Cancel still discards.">Clear media translations</button>
+          </div>
         </div>
         <div id="ocMediaTranslationsList"></div>
         <button type="button" id="ocAddMediaTranslationBtn" class="btn-secondary btn-sm" style="margin-top:6px">+ Add Media Translation</button>
