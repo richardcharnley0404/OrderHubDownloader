@@ -1,4 +1,4 @@
-## Unreleased
+## v1.12.0 - 2026-08-14
 
 **Darkroom Pro media-translation lock — end-to-end fix.** A lab that does
 not use Finish Options had a Darkroom Pro controller with `mediaTranslations`
