@@ -1,3 +1,27 @@
+## v1.12.1 - 2026-08-14
+
+**Fix: the "Merge orders into one submission" tick on a Fuji PIC Pro
+controller now persists.** In 1.12.0 the M5 renderer save handler put
+the `mergeOrderJobs` and `orderMergeWaitMinutes` assignments inside
+the Darkroom Pro branch of the controller-modal Save button, so
+saving a Fuji PIC Pro controller never wrote the merge fields at
+all — ticking the box did nothing after Save, and the feature was
+effectively unreachable via the modal. Saving a Darkroom Pro
+controller also wrote a spurious `mergeOrderJobs: false` onto the
+darkroompro shape (harmless at runtime — nothing on Darkroom Pro
+reads the field — but noise in `routing.json`).
+
+Both assignments have moved into the Fuji PIC Pro branch where they
+belong. Existing controllers with the spurious darkroompro field are
+left as-is; the field has no runtime effect there and any subsequent
+Darkroom Pro save leaves it alone rather than overwriting it.
+
+If you tried to enable order-level merging on a PIC Pro controller
+in 1.12.0 and it appeared to do nothing, this is why. Edit the
+controller in 1.12.1, tick the box, Save — it will persist now.
+
+---
+
 ## v1.12.0 - 2026-08-14
 
 **Darkroom Pro media-translation lock — end-to-end fix.** A lab that does
