@@ -1062,7 +1062,7 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
       ) {
         const msg =
           'Paper Type Option Key is required when Media Translations are defined. ' +
-          'Either set the option key on the controller or clear the translations.';
+          'Either set the option key on the controller, or delete the Media Translation rows in Settings → Routing.';
         logger.logWarning('[routing] save-controller rejected — translations without option key', {
           controllerId:        controller.id,
           name:                controller.name,

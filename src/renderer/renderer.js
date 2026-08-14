@@ -5831,7 +5831,7 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
       const optionKeyInput = document.getElementById('ocMediaOptionKey');
       optionKeyInput.setCustomValidity(
         'Paper Type Option Key is required when Media Translations are defined. ' +
-        'Either fill in the option key (e.g. "finish-options") or delete the translation rows.'
+        'Either fill in the option key (e.g. "finish-options"), or delete the Media Translation rows in Settings → Routing.'
       );
       optionKeyInput.reportValidity();
       optionKeyInput.focus();

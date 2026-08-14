@@ -1,3 +1,95 @@
+## Unreleased
+
+**Darkroom Pro media-translation lock — end-to-end fix.** A lab that does
+not use Finish Options had a Darkroom Pro controller with `mediaTranslations`
+rows but a blank Paper Type Option Key. That combination is unreachable
+by the dispatch-time resolver, so the controller-save guard rejects it —
+correctly — with *"Paper Type Option Key is required when Media
+Translations are defined."*  The app then wedged: every Settings edit
+(including the auto-print tick) and every per-job **Save & Assign** click
+failed with the same message, and the operator had no in-app path to
+recover. The state was created by the app itself, through two write paths
+that did not run the guard. This release closes both paths, keeps the
+guard intact, un-eats the per-job assignment, and adds a rescue for
+controllers that are already locked.
+
+**Correct configuration.** A Darkroom Pro controller for a lab that does
+not sell a paper-type option should have **both** the Paper Type Option
+Key **and** the Media Translations empty. Media Translations are only
+meaningful when the controller has an option key naming the job field
+they translate from — one without the other is nonsense the guard now
+prevents you from creating.
+
+**If your controller is already locked**, open Settings → Routing, edit
+the Darkroom Pro controller, and click **Clear media translations**
+beside the Paper Type Option Key field (the button is new in this
+release and appears only when translation rows exist and the key is
+blank). Then press **Save**. Nothing writes to disk until you save —
+Cancel still discards. Once unstuck, the auto-print tick saves and
+per-job Save & Assign completes as normal.
+
+### The four fixes
+
+- **`controllers:updateDarkroomTranslations` now runs the guard.** The
+  Assign modal's *"Save media translation for future orders"* tick calls
+  this handler, which used to write directly to disk without validating —
+  the back door that created the locked state in the first place. It now
+  rejects a media translation when the controller has no Paper Type
+  Option Key and returns the concrete remedy in the error message. A
+  size translation in the same call is still persisted (size and media
+  are independent), and the response distinguishes which half was saved.
+
+- **The Assign modal no longer invents a media option.** When the
+  controller has no Paper Type Option Key, the modal used to fall back
+  to whichever job option happened to be first — typically
+  `layout-options: full bleed` — and stamp that as the translation
+  source. Ticking *Save media translation* then wrote
+  `{from:"full bleed", to:"Luster"}` into the paper-type table, which is
+  how the bad rows arrived in the wild. The modal now hides the
+  *"Save media translation for future orders"* checkbox entirely when
+  the controller has no key configured, and the manual media input is
+  still available for a per-job override.
+
+- **A rejected translation no longer eats the job assignment.** The
+  Darkroom Pro branch of Save & Assign used to throw on any
+  translation-save failure and skip the per-job assignment, so the
+  operator lost the action they actually clicked. The failure is now
+  captured as a warning; the assignment still completes, and the toast
+  says which half failed and which half succeeded. The renderer's
+  controller cache also refreshes before that branch, so partial-success
+  results are never left on disk while Settings shows the old state.
+
+- **Ignore-tick edits no longer route through the whole-controller
+  save.** `reconcileControllerIgnore` was re-saving the entire
+  controller purely to update `ignoredOptionNames`, which dragged the
+  media-lock guard, the max-prints validator and the Fuji validators
+  into a per-job Ignore-tick edit — a Darkroom Pro controller in the
+  locked state consequently rejected every Save & Assign click. A new
+  narrow IPC `ohd:routing:set-ignored-options` patches only that field.
+  On the Darkroom Pro Assign branch, an ignore-write failure now
+  surfaces as a warning and the assignment still completes; the Fuji
+  and DPOF branches deliberately keep the throw-on-failure behaviour
+  because their channel-mapping match logic depends on the ignore set
+  being current before the mapping save runs.
+
+- **Rescue button for already-locked controllers.** Beside the Paper
+  Type Option Key field in the controller modal, a new **Clear media
+  translations** button appears only when translation rows exist and
+  the key is blank — the exact locked state. Clicking it wipes the
+  rendered rows in the modal; the operator still has to press Save to
+  persist, and Cancel still discards. It never auto-clears on load or
+  on save. Operator data does not disappear without a click.
+
+### Error text
+
+The guard's rejection message in both the IPC handler and the
+controller modal now names the concrete remedy — *"delete the Media
+Translation rows in Settings → Routing"* — rather than the vaguer *"clear
+the translations"*, since the location is where the new rescue button
+lives.
+
+---
+
 ## v1.11.0 - 2026-08-10
 
 **Recovery flow for channel mappings without a print size.** Channel
