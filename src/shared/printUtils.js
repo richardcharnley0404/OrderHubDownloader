@@ -88,4 +88,47 @@ function buildFolderName(prefix, job, reprintSuffix = null, opts = {}) {
   return `${prefix}${jobId}_${segments}`;
 }
 
-module.exports = { buildFolderName, extractSurname };
+/**
+ * Strip a leading, case-insensitive prefix from an order number when
+ * building the submission id that becomes the filesystem path in
+ * `{imageStagingRoot}/{id}`, `{orderDataPath}/{id}.txt`, and
+ * `{diginPath}/{id}`. Purely a display / naming transform — the caller
+ * (order-submission-seq) still keys its counter on the ORIGINAL order
+ * number so two prefixed orders that strip to the same base can't
+ * collide.
+ *
+ * Rules (matching the per-controller Strip Order Number Prefix field):
+ *   - Blank / null / undefined prefix → return the order number unchanged.
+ *     (Blank is the default — the field is opt-in per controller.)
+ *   - Non-string order number → return it verbatim (defensive; caller
+ *     shape errors are the caller's problem, not ours).
+ *   - Leading match only. `stripOrderNumberPrefix('AAA-1', 'AAA-')` → `'1'`;
+ *     `stripOrderNumberPrefix('X-AAA-1', 'AAA-')` → `'X-AAA-1'` (prefix is
+ *     not at the start).
+ *   - Case-insensitive on the prefix match — but the returned value
+ *     preserves the ORIGINAL order-number casing for whatever survives
+ *     the strip. So `stripOrderNumberPrefix('pxdemo-1234', 'PXDEMO-')`
+ *     → `'1234'`; `stripOrderNumberPrefix('PXDEMO-Abc9', 'pxdemo-')`
+ *     → `'Abc9'`.
+ *   - Never strip down to an empty string. If the prefix matches the
+ *     whole order number (e.g. `'PXDEMO-'` against `'PXDEMO-'`), return
+ *     the order number unchanged — a submission id must have SOMETHING
+ *     to name the folder after.
+ *
+ * @param {string} orderNumber
+ * @param {string} [prefix] — the per-controller Strip Order Number
+ *   Prefix. Blank / null / undefined means "no stripping".
+ * @returns {string}
+ */
+function stripOrderNumberPrefix(orderNumber, prefix) {
+  if (typeof orderNumber !== 'string' || orderNumber.length === 0) return orderNumber;
+  if (typeof prefix !== 'string' || prefix.length === 0) return orderNumber;
+  if (orderNumber.length < prefix.length) return orderNumber;
+  const head = orderNumber.slice(0, prefix.length);
+  if (head.toLowerCase() !== prefix.toLowerCase()) return orderNumber;
+  const stripped = orderNumber.slice(prefix.length);
+  if (stripped.length === 0) return orderNumber;   // never strip to empty
+  return stripped;
+}
+
+module.exports = { buildFolderName, extractSurname, stripOrderNumberPrefix };

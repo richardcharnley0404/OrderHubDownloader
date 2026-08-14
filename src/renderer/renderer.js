@@ -5209,9 +5209,11 @@ function updateOcTypeFields() {
   document.getElementById('ocCheckOrderStatusGroup').style.display   = (type === 'noritsu' || type === 'epson' || type === 'dpof' || type === 'darkroompro') ? '' : 'none';
   document.getElementById('ocIncludeCustomerNameGroup').style.display = (type === 'noritsu' || type === 'epson' || type === 'dpof') ? '' : 'none';
   document.getElementById('ocMaxPrintsPerJobGroup').style.display     = type === 'darkroompro' ? '' : 'none';
-  // Fuji PIC Pro-only: order-level submission (mergeOrderJobs + wait cap).
-  document.getElementById('ocMergeOrderJobsGroup').style.display       = type === 'fujipicpro' ? '' : 'none';
-  document.getElementById('ocOrderMergeWaitMinutesGroup').style.display = type === 'fujipicpro' ? '' : 'none';
+  // Fuji PIC Pro-only: order-level submission (mergeOrderJobs + wait cap)
+  // and per-controller Strip Order Number Prefix (v1.13.0).
+  document.getElementById('ocMergeOrderJobsGroup').style.display          = type === 'fujipicpro' ? '' : 'none';
+  document.getElementById('ocOrderMergeWaitMinutesGroup').style.display    = type === 'fujipicpro' ? '' : 'none';
+  document.getElementById('ocStripOrderNumberPrefixGroup').style.display   = type === 'fujipicpro' ? '' : 'none';
   // Frontline-specific fields
   document.getElementById('ocDeviceGroup').style.display     = type === 'frontline' ? '' : 'none';
   document.getElementById('ocBackPrint1Group').style.display = type === 'frontline' ? '' : 'none';
@@ -5339,6 +5341,13 @@ function openOrderControllerModal(ctrl = null) {
       && ctrl.orderMergeWaitMinutes >= 1
       && ctrl.orderMergeWaitMinutes <= 1440
       ? String(ctrl.orderMergeWaitMinutes)
+      : '';
+  // v1.13.0 — per-controller Strip Order Number Prefix. Blank on
+  // non-picpro types (the field is hidden anyway; this keeps the
+  // input value in sync with what the controller actually stores).
+  document.getElementById('ocStripOrderNumberPrefix').value =
+    isFujiPicProCtrl && typeof ctrl.stripOrderNumberPrefix === 'string'
+      ? ctrl.stripOrderNumberPrefix
       : '';
   // Load pipeline steps
   pipelineSteps = (ctrl && ctrl.pdfPipeline && ctrl.pdfPipeline.steps) ? JSON.parse(JSON.stringify(ctrl.pdfPipeline.steps)) : [];
@@ -5945,6 +5954,12 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
     controller.includeCustomerName = document.getElementById('ocPicProIncludeCustomerName').checked;
     controller.mergeOrderJobs        = !!mergeOrderJobs;
     controller.orderMergeWaitMinutes = orderMergeWaitMinutes;
+    // v1.13.0 — per-controller Strip Order Number Prefix. Free string,
+    // trimmed; blank is the "no strip" default. Semantic validation
+    // (leading-match, case-insensitive, never-strip-to-empty) is in
+    // src/shared/printUtils.stripOrderNumberPrefix — no renderer-side
+    // check needed here.
+    controller.stripOrderNumberPrefix = document.getElementById('ocStripOrderNumberPrefix').value.trim();
     // `outputPath` is deliberately forced to '' at the top of the
     // handler for fujipicpro — the three explicit paths above are
     // what the writer consumes, and persisting a non-empty value

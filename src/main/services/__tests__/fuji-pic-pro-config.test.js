@@ -96,6 +96,7 @@ test('valid full controller — every field set', () => {
     backprintTemplate:  '{firstName}/{filename}',
     backprintTemplate2: '{jobId}',
     includeCustomerName: true,
+    stripOrderNumberPrefix: 'PXDEMO-',
     isActive:           false,
   });
   assert.equal(result.valid, true, result.errors.join('; '));
@@ -113,8 +114,31 @@ test('valid full controller — every field set', () => {
     backprintTemplate:  '{firstName}/{filename}',
     backprintTemplate2: '{jobId}',
     includeCustomerName: true,
+    stripOrderNumberPrefix: 'PXDEMO-',
     isActive:           false,
   });
+});
+
+test('stripOrderNumberPrefix defaults to "" when absent, null, or non-string; trims a stored string', () => {
+  // Field default and coercion. Semantic validation
+  // (leading-match, case-insensitive, never-strip-to-empty) is
+  // enforced by stripOrderNumberPrefix() in src/shared/printUtils,
+  // covered separately in printUtils.test.js — this test only
+  // checks the validator's normalisation contract.
+  const base = {
+    type: 'fujipicpro', name: 'x',
+    orderDataPath: 'a', diginPath: 'b', imageStagingRoot: 'c',
+  };
+  assert.equal(validateControllerConfig(base).normalized.stripOrderNumberPrefix, '',
+    'absent field → ""');
+  assert.equal(validateControllerConfig({ ...base, stripOrderNumberPrefix: null }).normalized.stripOrderNumberPrefix, '',
+    'null → ""');
+  assert.equal(validateControllerConfig({ ...base, stripOrderNumberPrefix: undefined }).normalized.stripOrderNumberPrefix, '',
+    'undefined → ""');
+  assert.equal(validateControllerConfig({ ...base, stripOrderNumberPrefix: '  PXDEMO-  ' }).normalized.stripOrderNumberPrefix, 'PXDEMO-',
+    'string is trimmed (matches other free-string field handling)');
+  assert.equal(validateControllerConfig({ ...base, stripOrderNumberPrefix: 42 }).normalized.stripOrderNumberPrefix, '42',
+    'non-string coerced via _trim → String() (defensive; no validation error)');
 });
 
 test('type must be fujipicpro', () => {

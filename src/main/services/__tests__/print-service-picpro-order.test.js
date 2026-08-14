@@ -162,21 +162,31 @@ const fakePrintControllerService = {
   },
 };
 
-// The M3 module. Simple in-memory counter — matches the real API
-// (nextSubmissionId returns unsuffixed first, then -2/-3…).
+// The M3 module. Simple in-memory counter — matches the real API:
+// nextSubmissionId returns the base (displayBase if supplied, else
+// orderNumber) for the first call, then -2/-3… appended for
+// subsequent calls sharing the same base. The counter is keyed on
+// the base, NOT on the raw order number — this is the v1.12.2
+// collision-prevention fix: two orders that strip to the same base
+// MUST share a counter, otherwise both would issue the unsuffixed
+// base and stageImages would rm -rf the first submission's folder.
 const fakeOrderSubmissionSeq = {
   orderSubmissionSeq: {
-    nextSubmissionId: (orderNumber) => {
-      __seqCalls.push(orderNumber);
-      const prev = __seqCounters[orderNumber] || 0;
+    nextSubmissionId: (orderNumber, displayBase) => {
+      __seqCalls.push({ orderNumber, displayBase });
+      const base = (typeof displayBase === 'string' && displayBase.length > 0)
+        ? displayBase
+        : orderNumber;
+      const key = base;
+      const prev = __seqCounters[key] || 0;
       const next = prev + 1;
-      __seqCounters[orderNumber] = next;
-      return next === 1 ? orderNumber : `${orderNumber}-${next}`;
+      __seqCounters[key] = next;
+      return next === 1 ? base : `${base}-${next}`;
     },
-    peek: (orderNumber) => {
-      const lastSeq = __seqCounters[orderNumber] || null;
+    peek: (key) => {
+      const lastSeq = __seqCounters[key] || null;
       return lastSeq
-        ? { lastSeq, lastIssuedAt: '2026-01-01T00:00:00.000Z', lastId: lastSeq === 1 ? orderNumber : `${orderNumber}-${lastSeq}` }
+        ? { lastSeq, lastIssuedAt: '2026-01-01T00:00:00.000Z', lastId: lastSeq === 1 ? key : `${key}-${lastSeq}` }
         : null;
     },
   },
@@ -639,7 +649,7 @@ test('the first submission for an order uses the unsuffixed order number as its 
 
   const result = await printService._sendViaFujiPicProOrderRouted(items);
   assert.equal(result.orderId, orderNumber);
-  assert.equal(__seqCalls[0],  orderNumber, 'seq store consulted with the order number');
+  assert.equal(__seqCalls[0].orderNumber, orderNumber, 'seq store consulted with the order number');
   assert.equal(__stageCalls[0].orderId, orderNumber,
     'stageImages folder is named for the order id (the rm -rf target)');
   assert.equal(__writeOrderFileCalls[0].filename, `${orderNumber}.txt`);
@@ -857,4 +867,128 @@ test('successful dispatch enqueues + markCommitted in the correct order', async 
   assert.ok(__enqueueCalls.length === 1);
   assert.ok(__writeOrderFileCalls.length === 1);
   assert.ok(__markCommittedCalls.length === 1);
+});
+
+// ── stripOrderNumberPrefix — v1.13.0 ────────────────────────────────────────
+//
+// Per-controller Strip Order Number Prefix on a Fuji PIC Pro
+// controller. All three consumers of `orderId` — the staging folder
+// (stageImages), the .txt filename (via the generator), and the enqueue
+// orderId that drives DIGIN delivery — MUST see the same value.
+// Divergence breaks the OrderGateway handshake (the .txt names one
+// folder and the images end up in another). The tests below assert
+// all three in the same call so a future refactor that pipes any of
+// them from a different source blows up loudly.
+//
+// The pure `stripOrderNumberPrefix` helper is covered in
+// printUtils.test.js; the `nextSubmissionId(orderNumber, displayBase)`
+// invariant is covered in order-submission-seq.test.js. These tests
+// pin the end-to-end wiring.
+
+function stripAllThree(result, expectedId) {
+  // Assert every plumbing carries the same orderId.
+  assert.equal(result.orderId,                              expectedId, 'result.orderId');
+  assert.equal(__generateCalls[0].job.orderId,              expectedId, 'generator was told orderId');
+  assert.equal(__stageCalls[0].orderId,                     expectedId, 'stageImages folder = {imageStagingRoot}/{orderId}');
+  assert.equal(__enqueueCalls[0].orderId,                   expectedId, 'enqueue orderId — the monitor uses this to build the DIGIN folder path');
+  assert.equal(__writeOrderFileCalls[0].filename,           `${expectedId}.txt`, 'writeOrderFile filename');
+  assert.equal(__markCommittedCalls[0],                     expectedId, 'markCommitted also names the same id');
+}
+
+test('stripOrderNumberPrefix: no prefix set → id is the full order number (default behaviour)', async (t) => {
+  const { items, orderNumber } = await setupTwoJobGroup(t);
+  // picProRoute() default does not set stripOrderNumberPrefix — verify
+  // the field is absent on the route and the resulting id is untouched.
+  assert.equal(items[0].route.stripOrderNumberPrefix, undefined,
+    'the test fixture defaults to no prefix — this is the byte-identical-when-off contract');
+
+  const result = await printService._sendViaFujiPicProOrderRouted(items);
+  assert.equal(result.success, true, `unexpected failure: ${result.error}`);
+  stripAllThree(result, orderNumber);
+});
+
+test('stripOrderNumberPrefix: matching leading prefix → id has the prefix stripped in all three plumbings', async (t) => {
+  const { items } = await setupTwoJobGroup(t, { orderNumber: 'PXDEMO-M6-A' });
+  for (const it of items) it.route.stripOrderNumberPrefix = 'PXDEMO-';
+
+  const result = await printService._sendViaFujiPicProOrderRouted(items);
+  assert.equal(result.success, true, `unexpected failure: ${result.error}`);
+  // Order number was "PXDEMO-M6-A"; stripped id is "M6-A". All three
+  // plumbings carry the stripped form — that is the load-bearing
+  // OrderGateway-handshake invariant.
+  stripAllThree(result, 'M6-A');
+
+  // The counter is keyed on displayBase — uniqueness of the RETURNED
+  // id is what matters (that string names the staging folder, the
+  // .txt and the DIGIN folder). Two raw orders stripping to the same
+  // base MUST share a counter; that shared-counter guarantee is
+  // covered directly in the M3 unit tests. Here just verify what the
+  // caller (print-service) passes to nextSubmissionId.
+  assert.equal(__seqCalls[0].orderNumber, 'PXDEMO-M6-A',
+    'orderNumber arg is the raw value from the manifest');
+  assert.equal(__seqCalls[0].displayBase, 'M6-A',
+    'displayBase arg is the post-strip form — used both for the returned id AND as the counter key');
+});
+
+test('stripOrderNumberPrefix: prefix set but not matching → id is the full order number', async (t) => {
+  // Order number does not start with the prefix — stripping is a no-op.
+  const { items, orderNumber } = await setupTwoJobGroup(t, { orderNumber: 'DIVPRINTS-99' });
+  for (const it of items) it.route.stripOrderNumberPrefix = 'PXDEMO-';
+
+  const result = await printService._sendViaFujiPicProOrderRouted(items);
+  assert.equal(result.success, true);
+  stripAllThree(result, orderNumber);
+});
+
+test('stripOrderNumberPrefix: prefix equal to the whole order number → NOT stripped (never empty)', async (t) => {
+  // Would strip to '' — which would name folders '' and break every
+  // filesystem operation. The stripping helper refuses; verify that
+  // refusal reaches the dispatch id.
+  const { items, orderNumber } = await setupTwoJobGroup(t, { orderNumber: 'PXDEMO-' });
+  for (const it of items) it.route.stripOrderNumberPrefix = 'PXDEMO-';
+
+  const result = await printService._sendViaFujiPicProOrderRouted(items);
+  assert.equal(result.success, true);
+  // The id is the FULL order number, not empty.
+  stripAllThree(result, orderNumber);
+  assert.equal(result.orderId, 'PXDEMO-',
+    'never-strip-to-empty guardrail must be honoured at dispatch time');
+});
+
+test('stripOrderNumberPrefix: suffixed resubmission — the -N suffix is appended to the stripped base', async (t) => {
+  // Dispatch twice; the second call must get -2 on the STRIPPED form,
+  // and every plumbing must carry it consistently. The M3 counter is
+  // still keyed on the raw order number so a fresh dispatch after this
+  // (for a different raw order that strips to the same base) would
+  // start from 1 again — covered in the M3 unit tests.
+  const { items } = await setupTwoJobGroup(t, { orderNumber: 'PXDEMO-Q9' });
+  for (const it of items) it.route.stripOrderNumberPrefix = 'PXDEMO-';
+
+  const first = await printService._sendViaFujiPicProOrderRouted(items);
+  assert.equal(first.success, true);
+  stripAllThree(first, 'Q9');
+
+  // Reset per-call captures BUT NOT the seq counter — that's the whole
+  // point of the persistent counter across attempts.
+  __stageCalls.length          = 0;
+  __generateCalls.length       = 0;
+  __writeOrderFileCalls.length = 0;
+  __enqueueCalls.length        = 0;
+  __markCommittedCalls.length  = 0;
+
+  const second = await printService._sendViaFujiPicProOrderRouted(items);
+  assert.equal(second.success, true);
+  stripAllThree(second, 'Q9-2');
+});
+
+test('stripOrderNumberPrefix: case-insensitive match — casing of the tail is preserved', async (t) => {
+  // Lowercase order number, uppercase prefix — match still fires and
+  // the tail keeps its original casing (matches the pure-helper
+  // contract in printUtils.test.js).
+  const { items } = await setupTwoJobGroup(t, { orderNumber: 'pxdemo-AbC9' });
+  for (const it of items) it.route.stripOrderNumberPrefix = 'PXDEMO-';
+
+  const result = await printService._sendViaFujiPicProOrderRouted(items);
+  assert.equal(result.success, true);
+  stripAllThree(result, 'AbC9');
 });

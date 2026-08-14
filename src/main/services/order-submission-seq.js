@@ -97,20 +97,53 @@ class OrderSubmissionSeq {
 
   /**
    * Allocate the next submission id for this order number, persistently.
-   * First call → `orderNumber` verbatim. Subsequent calls → `-2`, `-3`…
+   * First call → `displayBase` verbatim (defaults to `orderNumber`).
+   * Subsequent calls → `-2`, `-3`… appended to `displayBase`.
    *
-   * @param {string} orderNumber e.g. 'ORD-1234'
+   * The counter is keyed on `base` — i.e. on `displayBase` if supplied,
+   * otherwise on `orderNumber`. That is deliberate: the returned id
+   * names the staging folder, the .txt filename, and the DIGIN folder,
+   * so uniqueness has to be enforced on the returned string. Two
+   * different raw orders that strip to the same displayBase MUST share
+   * a counter — otherwise both would get the unsuffixed base, both
+   * would name the same folder, and stageImages would `rm -rf` the
+   * previous submission's staging directory. That collision is exactly
+   * what the -2/-3 suffix scheme exists to prevent.
+   *
+   * @param {string} orderNumber   e.g. 'ORD-1234' — used as the default
+   *   base when no displayBase is supplied. Passing the raw order
+   *   number here is required by the argument shape but the counter is
+   *   NOT keyed on it when displayBase is supplied.
+   * @param {string} [displayBase] optional display base for the returned
+   *   id. Defaults to `orderNumber`. When supplied (typically the
+   *   post-strip form for the fujipicpro controller's Strip Order
+   *   Number Prefix field), the id reads
+   *   `displayBase` / `displayBase-2` / `displayBase-3`, and the
+   *   counter is keyed on `displayBase` too so uniqueness holds on
+   *   the returned string.
    * @returns {string}
    * @throws {Error} on missing/blank orderNumber — this is a caller bug,
    *   not a runtime condition. The alternative (silently generate a
    *   nonsense id) is exactly the class of hazard this whole module
    *   exists to prevent.
    */
-  nextSubmissionId(orderNumber) {
+  nextSubmissionId(orderNumber, displayBase) {
     if (typeof orderNumber !== 'string' || orderNumber.trim().length === 0) {
       throw new Error('nextSubmissionId requires a non-empty orderNumber string');
     }
-    const key = orderNumber;
+    // displayBase, when supplied, must also be a non-empty string —
+    // defence-in-depth against a caller passing '' or a non-string
+    // (the whole point of the caller-side stripPrefix guard is that it
+    // never returns empty, but this module can't rely on that).
+    const base = (typeof displayBase === 'string' && displayBase.length > 0)
+      ? displayBase
+      : orderNumber;
+    // Key on the RETURNED id's base — see method doc-comment for why.
+    // Prior to v1.12.2 this was keyed on `orderNumber`; the bug was
+    // that two orders stripping to the same displayBase each got their
+    // own counter, both issued the unsuffixed base as the id, and the
+    // second staging call rm -rf'd the first's folder.
+    const key = base;
     const entry = this._entries[key];
 
     // If entry exists but lastSeq is corrupt, assume seq 1 was already
@@ -124,7 +157,7 @@ class OrderSubmissionSeq {
       } else {
         this._logger.logWarning(
           '[order-submission-seq] corrupt entry — assuming seq 1 already issued',
-          { orderNumber, entry },
+          { orderNumber, key, entry },
         );
         lastSeq = 1;
       }
@@ -133,7 +166,7 @@ class OrderSubmissionSeq {
     }
 
     const nextSeq = lastSeq + 1;
-    const id = nextSeq === 1 ? orderNumber : `${orderNumber}-${nextSeq}`;
+    const id = nextSeq === 1 ? base : `${base}-${nextSeq}`;
 
     this._entries[key] = {
       lastSeq:      nextSeq,
@@ -144,24 +177,36 @@ class OrderSubmissionSeq {
   }
 
   /**
-   * Read-only snapshot of the counter for one order number, for
-   * logging and tests. Returns null if no id has ever been issued.
+   * Read-only snapshot of the counter for one key, for logging and
+   * tests. Returns null if no id has ever been issued under that key.
    * Never mutates.
    *
-   * @param {string} orderNumber
+   * The parameter is the counter KEY — same string the caller passed
+   * (or would pass) to nextSubmissionId as its effective base. When a
+   * caller allocated with `nextSubmissionId(orderNumber, displayBase)`
+   * the counter is keyed on `displayBase`, so `peek(displayBase)` is
+   * what returns the entry. When no displayBase was used the key
+   * equals the raw order number, so `peek(orderNumber)` works as it
+   * always has.
+   *
+   * `lastId` derives from that key + suffix — matching what
+   * nextSubmissionId would return for the equivalent next-call state.
+   *
+   * @param {string} key  the counter key — displayBase if that was
+   *   used at allocation time, otherwise the raw order number.
    * @returns {null | { lastSeq: number, lastIssuedAt: string, lastId: string }}
    */
-  peek(orderNumber) {
-    if (typeof orderNumber !== 'string' || orderNumber.length === 0) return null;
-    const entry = this._entries[orderNumber];
+  peek(key) {
+    if (typeof key !== 'string' || key.length === 0) return null;
+    const entry = this._entries[key];
     if (!entry) return null;
     const lastSeq = Number.isInteger(entry.lastSeq) && entry.lastSeq >= 1
       ? entry.lastSeq : null;
     return {
       lastSeq,
       lastIssuedAt: entry.lastIssuedAt || null,
-      lastId:       lastSeq === 1 ? orderNumber
-                  : lastSeq       ? `${orderNumber}-${lastSeq}`
+      lastId:       lastSeq === 1 ? key
+                  : lastSeq       ? `${key}-${lastSeq}`
                   : null,
     };
   }

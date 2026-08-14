@@ -231,6 +231,11 @@ function resolveRoute(job) {
               // this controller.
               mergeOrderJobs:        overrideCtrl.mergeOrderJobs === true,
               orderMergeWaitMinutes: _readOrderMergeWaitMinutes(overrideCtrl),
+              // v1.13.0 — per-controller Strip Order Number Prefix.
+              // String or ''; the stripping helper handles blank as
+              // "no strip" so passing '' here is equivalent to absent.
+              stripOrderNumberPrefix: typeof overrideCtrl.stripOrderNumberPrefix === 'string'
+                ? overrideCtrl.stripOrderNumberPrefix : '',
               surface:             overrideMapping.surface,
               surfaceCode:         overrideSurfaceCode,
               printCode:           overrideMapping.printCode,
@@ -582,6 +587,12 @@ function resolveRoute(job) {
       // drift silently breaks reassigned jobs on this controller.
       mergeOrderJobs:        controller.mergeOrderJobs === true,
       orderMergeWaitMinutes: _readOrderMergeWaitMinutes(controller),
+      // v1.13.0 — per-controller Strip Order Number Prefix. Kept in
+      // exact parity with the override branch above. String or '';
+      // stripOrderNumberPrefix in src/shared/printUtils treats blank
+      // as "no strip".
+      stripOrderNumberPrefix: typeof controller.stripOrderNumberPrefix === 'string'
+        ? controller.stripOrderNumberPrefix : '',
       // Channel-resolved fields
       surface:             channelMapping.surface,
       surfaceCode,

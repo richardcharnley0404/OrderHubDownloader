@@ -11,7 +11,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildFolderName, extractSurname } = require('../printUtils.js');
+const { buildFolderName, extractSurname, stripOrderNumberPrefix } = require('../printUtils.js');
 
 const baseJob = {
   id: 38461218,
@@ -142,4 +142,64 @@ test('buildFolderName preserves the p-prefix for the in-progress folder', () => 
     customerName:        'Richard Charnley',
   });
   assert.equal(name, 'p38461218_PXDEMO-DR2PE0-1_Charnley_4x6 Photo Print_lustre_full-bleed');
+});
+
+// ── stripOrderNumberPrefix — Fuji PIC Pro per-controller prefix strip ─────
+//
+// The per-controller "Strip Order Number Prefix" text field on a Fuji
+// PIC Pro controller. Applied when building the submission id that
+// becomes the {imageStagingRoot}/{id}, {orderDataPath}/{id}.txt, and
+// {diginPath}/{id} filesystem names. Purely a display transform — the
+// M3 sequence counter still keys on the ORIGINAL order number so two
+// prefixed orders can't collide when they strip to the same base.
+
+test('stripOrderNumberPrefix: blank prefix → order number unchanged (default behaviour)', () => {
+  assert.equal(stripOrderNumberPrefix('PXDEMO-1234', ''),         'PXDEMO-1234');
+  assert.equal(stripOrderNumberPrefix('PXDEMO-1234', null),       'PXDEMO-1234');
+  assert.equal(stripOrderNumberPrefix('PXDEMO-1234', undefined),  'PXDEMO-1234');
+});
+
+test('stripOrderNumberPrefix: matching leading prefix is stripped', () => {
+  assert.equal(stripOrderNumberPrefix('PXDEMO-1234',      'PXDEMO-'),      '1234');
+  assert.equal(stripOrderNumberPrefix('DIVPRINTS-A9F2',   'DIVPRINTS-'),   'A9F2');
+  assert.equal(stripOrderNumberPrefix('PXDEMO-XYZ-2',     'PXDEMO-'),      'XYZ-2',
+    'suffix-shaped tail (looks like a resubmission suffix, but it is not) survives — this is on the raw order number, not the built id');
+});
+
+test('stripOrderNumberPrefix: non-matching prefix leaves the order number unchanged', () => {
+  assert.equal(stripOrderNumberPrefix('DIVPRINTS-A9F2', 'PXDEMO-'), 'DIVPRINTS-A9F2',
+    'prefix does not match this order number, so pass through');
+  assert.equal(stripOrderNumberPrefix('X-PXDEMO-1', 'PXDEMO-'), 'X-PXDEMO-1',
+    'the prefix appears inside the order number but not at the start — leading match only');
+});
+
+test('stripOrderNumberPrefix: prefix equal to the whole order number → NOT stripped (never empty)', () => {
+  // A submission id must have SOMETHING to name the staging + Order
+  // Data + DIGIN folder with. Falling through to '' would break the
+  // whole PIC Pro handshake.
+  assert.equal(stripOrderNumberPrefix('PXDEMO-', 'PXDEMO-'), 'PXDEMO-',
+    'refuse to strip down to the empty string — return the input verbatim');
+  assert.equal(stripOrderNumberPrefix('AAA',    'AAA'),      'AAA');
+});
+
+test('stripOrderNumberPrefix: case-insensitive match; result preserves the ORIGINAL order-number casing', () => {
+  assert.equal(stripOrderNumberPrefix('pxdemo-1234', 'PXDEMO-'), '1234',
+    'lowercase order number, uppercase prefix — match still fires');
+  assert.equal(stripOrderNumberPrefix('PXDEMO-Abc9', 'pxdemo-'), 'Abc9',
+    'uppercase order number, lowercase prefix — match fires, tail preserves its original case');
+  assert.equal(stripOrderNumberPrefix('PxDeMo-42', 'pXdEmO-'),   '42',
+    'mixed case both sides');
+});
+
+test('stripOrderNumberPrefix: prefix longer than the order number → unchanged (defensive)', () => {
+  assert.equal(stripOrderNumberPrefix('ABC', 'PXDEMO-'), 'ABC');
+  assert.equal(stripOrderNumberPrefix('', 'PXDEMO-'),    '');
+});
+
+test('stripOrderNumberPrefix: non-string order number returned verbatim (defensive)', () => {
+  // Shape errors from the caller are not our problem to translate;
+  // the intent of the guard is only "do not throw, do not crash".
+  assert.equal(stripOrderNumberPrefix(null,      'X-'), null);
+  assert.equal(stripOrderNumberPrefix(undefined, 'X-'), undefined);
+  assert.equal(stripOrderNumberPrefix(1234,      'X-'), 1234);
 });

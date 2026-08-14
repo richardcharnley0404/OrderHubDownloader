@@ -394,3 +394,108 @@ test('requiring the module does not construct the singleton (electron-free load)
   // Deliberately NOT accessing `mod.orderSubmissionSeq` here — that
   // getter constructs on first access and would pull electron.
 });
+
+// ── displayBase — v1.13.0 (per-controller Strip Order Number Prefix) ───────
+//
+// The optional second arg lets a caller supply a display base for the
+// returned id (typically the post-strip form). The counter is keyed
+// on the base — i.e. on displayBase when supplied, else orderNumber —
+// so uniqueness is enforced on the string that becomes the folder
+// name. Two orders stripping to the same base SHARE the counter and
+// get base, base-2, base-3, … in dispatch order. That is the load-
+// bearing invariant against the stageImages rm -rf hazard: without
+// it, two orders with the same stripped base would both try to
+// stage into the same folder.
+
+test('displayBase: first call returns displayBase verbatim (not the raw order number)', () => {
+  const seq = makeSeq();
+  assert.equal(seq.nextSubmissionId('PXDEMO-1234', '1234'), '1234',
+    'operator-facing id uses the stripped display base');
+});
+
+test('displayBase: subsequent calls append -N to the displayBase, not the order number', () => {
+  const seq = makeSeq();
+  assert.equal(seq.nextSubmissionId('PXDEMO-1234', '1234'), '1234');
+  assert.equal(seq.nextSubmissionId('PXDEMO-1234', '1234'), '1234-2');
+  assert.equal(seq.nextSubmissionId('PXDEMO-1234', '1234'), '1234-3');
+});
+
+test('displayBase: two orders stripping to the same base SHARE the counter — never emit the same id twice', () => {
+  // Load-bearing collision test. The returned id names the staging
+  // folder, the .txt filename and the DIGIN folder. If two different
+  // raw orders both stripped to base '1234' each got their own
+  // counter, both would return '1234' as their first id — the second
+  // stageImages call would rm -rf the first submission's staging
+  // folder. This is exactly the collision the suffix scheme exists
+  // to prevent, so the counter is keyed on the RETURNED id's base.
+  const seq = makeSeq();
+  assert.equal(seq.nextSubmissionId('PXDEMO-1234',    '1234'), '1234',
+    'first submission stripping to base "1234"');
+  assert.equal(seq.nextSubmissionId('DIVPRINTS-1234', '1234'), '1234-2',
+    'second submission stripping to the same base MUST get -2 — same folder name would rm -rf the first');
+  assert.equal(seq.nextSubmissionId('PXDEMO-1234',    '1234'), '1234-3',
+    'a third submission (either raw order) keeps incrementing the shared counter');
+  assert.equal(seq.nextSubmissionId('DIVPRINTS-1234', '1234'), '1234-4');
+});
+
+test('displayBase: an order using a UNIQUE base has its own counter (isolation between distinct bases)', () => {
+  // The counter is keyed on base, not on raw order number — so two
+  // orders that strip to DIFFERENT bases don't interfere.
+  const seq = makeSeq();
+  assert.equal(seq.nextSubmissionId('PXDEMO-1234',    '1234'), '1234');
+  assert.equal(seq.nextSubmissionId('PXDEMO-9999',    '9999'), '9999',
+    'different base → fresh counter');
+  assert.equal(seq.nextSubmissionId('PXDEMO-1234',    '1234'), '1234-2',
+    'first base still increments independently');
+});
+
+test('displayBase: absent / null / undefined → falls back to the raw order number (backward compat)', () => {
+  const seq = makeSeq();
+  assert.equal(seq.nextSubmissionId('ORD-A', null),      'ORD-A');
+  assert.equal(seq.nextSubmissionId('ORD-B', undefined), 'ORD-B');
+  assert.equal(seq.nextSubmissionId('ORD-C'),            'ORD-C');
+  // And these all increment normally on subsequent calls.
+  assert.equal(seq.nextSubmissionId('ORD-A'), 'ORD-A-2');
+});
+
+test('displayBase: empty string / non-string → falls back to the raw order number (defence-in-depth)', () => {
+  const seq = makeSeq();
+  // The caller's stripPrefix guard is supposed to never return '',
+  // but if it slips through, we must not emit an id like '' or '-2'
+  // (which would name the folder ''/'./-2' — either a rename crash
+  // or a security hole).
+  assert.equal(seq.nextSubmissionId('ORD-EMPTY-BASE', ''),    'ORD-EMPTY-BASE');
+  assert.equal(seq.nextSubmissionId('ORD-NUMBER-BASE', 1234), 'ORD-NUMBER-BASE');
+  assert.equal(seq.nextSubmissionId('ORD-BOOL-BASE', true),   'ORD-BOOL-BASE');
+});
+
+test('displayBase: counter survives reload (same base across restarts increments correctly)', () => {
+  // Restart between two submissions of the same order — the shared
+  // counter (keyed on base) is loaded from the store on the second
+  // instance's construction, so subsequent id is base-2.
+  const store = makeFakeStore();
+  const first = makeSeq({ store });
+  assert.equal(first.nextSubmissionId('PXDEMO-1234', '1234'), '1234');
+
+  const second = makeSeq({ store });
+  assert.equal(second.nextSubmissionId('PXDEMO-1234', '1234'), '1234-2',
+    'counter under base "1234" persisted across the restart');
+});
+
+test('displayBase: changing the prefix mid-lifecycle creates a fresh id under the NEW base — no collision', () => {
+  // Operator submits raw order 'PXDEMO-1234' with no prefix first
+  // (base = raw order number). Then sets prefix 'PXDEMO-' and
+  // resubmits the SAME raw order. The new base is '1234' — a
+  // different counter key, so the id is '1234' (fresh), NOT '1234-2'.
+  // No collision because the folder names are different
+  // ('PXDEMO-1234' vs '1234').
+  //
+  // This is the deliberate consequence of keying on base: the counter
+  // enforces uniqueness on the returned string, not on the raw order.
+  // Changing the prefix creates a distinct namespace.
+  const seq = makeSeq();
+  assert.equal(seq.nextSubmissionId('PXDEMO-1234', 'PXDEMO-1234'), 'PXDEMO-1234',
+    'first submission with no prefix — base equals raw order number');
+  assert.equal(seq.nextSubmissionId('PXDEMO-1234', '1234'), '1234',
+    'second submission with prefix now set — different base, fresh counter, distinct folder name');
+});

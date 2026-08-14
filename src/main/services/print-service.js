@@ -25,7 +25,7 @@ const { ManifestNotFoundError } = require('./awaiting-manifest');
 const { resolveManifestPath } = require('./manifest-path');
 const { resolveDispatchImageSource } = require('./dispatch-image-source');
 const logger = require('./logger');
-const { buildFolderName } = require('../../shared/printUtils');
+const { buildFolderName, stripOrderNumberPrefix } = require('../../shared/printUtils');
 
 // Manifest filename is {orderNumber}.json (e.g. PXDEMO-K9MYDG.json)
 
@@ -2532,7 +2532,15 @@ class PrintService {
     // orderId is per-job (job_name, e.g. ORD-O4YK5Z-1) — matches
     // JobMaker's convention so two jobs from one order can't collide
     // in PIC Pro's staging or Order Data folders.
-    const orderId = job.job_name || job.order_number || '';
+    //
+    // v1.13.0: apply the per-controller Strip Order Number Prefix, if
+    // any. The same helper is used by the order-level dispatch method
+    // and both must strip identically — otherwise switching
+    // mergeOrderJobs on/off on a controller would change the id shape
+    // partway through the wait window. Blank prefix (the default) is
+    // a no-op.
+    const rawOrderId = job.job_name || job.order_number || '';
+    const orderId    = stripOrderNumberPrefix(rawOrderId, route.stripOrderNumberPrefix);
 
     let stageResult;
     try {
@@ -2819,6 +2827,15 @@ class PrintService {
     // attempt gets -N+1 and stageImages does NOT rm -rf a folder from
     // a previous attempt — the whole reason M3 exists.
     //
+    // v1.13.0: apply the per-controller Strip Order Number Prefix
+    // BEFORE handing to nextSubmissionId as its displayBase. The
+    // counter stays keyed on the raw order number so two orders that
+    // strip to the same base still get independent counters (see the
+    // M3 module's "counter isolation" test); the returned id uses the
+    // stripped form for the staging folder / .txt filename / DIGIN
+    // folder — all three names come from this single `orderId`, so
+    // they cannot diverge.
+    //
     // Lazy-required (same pattern as server-capabilities in
     // job-service) so require-ing print-service.js doesn't force the
     // electron-store singleton at module load — needed for the
@@ -2826,7 +2843,8 @@ class PrintService {
     let orderId;
     try {
       const { orderSubmissionSeq } = require('./order-submission-seq');
-      orderId = orderSubmissionSeq.nextSubmissionId(orderNumber);
+      const displayBase = stripOrderNumberPrefix(orderNumber, sharedRoute.stripOrderNumberPrefix);
+      orderId = orderSubmissionSeq.nextSubmissionId(orderNumber, displayBase);
     } catch (seqErr) {
       const msg = `Fuji PIC Pro order-level dispatch: failed to allocate submission id for order ${orderNumber}: ${seqErr.message}`;
       logger.logError(msg, seqErr, { memberJobIds });

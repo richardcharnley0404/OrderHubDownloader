@@ -79,6 +79,14 @@ const DEFAULT_COLOR  = 'C';
  *   backprintTemplate    ''      — required when backprintMode === 'text'
  *   backprintTemplate2   ''      — optional second line
  *   includeCustomerName  false   — emit CustomerName= (off by default; see docstring)
+ *   stripOrderNumberPrefix ''    — v1.13.0: per-controller prefix trimmed
+ *                                  off the leading edge of the order
+ *                                  number when the submission id is built
+ *                                  (staging folder / order.txt / DIGIN
+ *                                  folder). Blank = no stripping (default).
+ *                                  Case-insensitive leading match; never
+ *                                  strips down to an empty string. See
+ *                                  src/shared/printUtils.stripOrderNumberPrefix.
  *   isActive             true
  */
 function validateControllerConfig(controller) {
@@ -165,6 +173,15 @@ function validateControllerConfig(controller) {
   // investigation doc (docs/fuji-pic-pro-investigation-and-plan.md §2)
   // for the "back of every print" side effect that motivates the default.
   out.includeCustomerName = controller.includeCustomerName === true;
+
+  // v1.13.0 — per-controller Strip Order Number Prefix. Blank = no
+  // stripping (the default). _trim coerces null/undefined/non-string
+  // to '' safely; no range validation because the field is a free
+  // string with any operator-chosen prefix (e.g. 'PXDEMO-',
+  // 'DIVPRINTS-'). Semantics enforced by
+  // src/shared/printUtils.stripOrderNumberPrefix — leading match only,
+  // case-insensitive, never strips down to empty.
+  out.stripOrderNumberPrefix = _trim(controller.stripOrderNumberPrefix);
 
   out.isActive = controller.isActive === undefined ? true : Boolean(controller.isActive);
 

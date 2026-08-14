@@ -1432,6 +1432,14 @@
         <input type="number" id="ocOrderMergeWaitMinutes" placeholder="30" min="1" max="1440" style="width:120px;">
         <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Max time to wait for all sibling jobs in an order to be ready. When the cap expires, the ready jobs go and any straggler dispatches later as <code>{orderNumber}-2</code>. Leave blank for the 30-minute default. Ignored when merging is off.</small>
       </div>
+      <!-- v1.13.0: per-controller Strip Order Number Prefix. Applies to every
+           submission from this controller (single-job and merged), never a
+           reprint. -->
+      <div class="form-group" id="ocStripOrderNumberPrefixGroup" style="display:none">
+        <label for="ocStripOrderNumberPrefix">Strip order number prefix <span style="font-weight:normal;color:#888">(optional)</span></label>
+        <input type="text" id="ocStripOrderNumberPrefix" placeholder="e.g. PXDEMO-" style="width:220px;">
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">If your OrderHub order numbers start with a fixed tag (e.g. <code>PXDEMO-</code>, <code>DIVPRINTS-</code>), enter it here to trim the tag off the submission id — the folder names in Image Staging, Order Data, and DIGIN, and the <code>OrderId=</code> written into <code>order.txt</code>. Leading match only, case-insensitive. Leave blank to keep the full order number. Never strips down to an empty string; the <code>-2</code>/<code>-3</code> resubmission suffix still applies after stripping.</small>
+      </div>
 
       <!-- PDF Pipeline Builder (pdf_copy controllers only) -->
       <div class="form-group" id="ocPipelineGroup" style="display:none">
