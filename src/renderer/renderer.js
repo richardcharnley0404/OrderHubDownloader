@@ -5830,28 +5830,6 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
       controller.maxPrintsPerJob = n;
     }
 
-    // Order-level submission — Fuji PIC Pro only. Persisted on every
-    // controller shape (they simply live unused on non-picpro types),
-    // matching how the darkroompro cap sits alongside a dpof/fuji
-    // controller without harm. Reject a typo rather than clamping so
-    // an operator meaning "30" but typing "300" doesn't silently
-    // stretch every merge wait to 5 hours.
-    controller.mergeOrderJobs = !!document.getElementById('ocMergeOrderJobs').checked;
-    const orderWaitRaw = document.getElementById('ocOrderMergeWaitMinutes').value.trim();
-    if (orderWaitRaw === '') {
-      // Null = "use the default"; per the brief, null is NOT "wait
-      // forever". The 30-minute default is applied on read at
-      // dispatch time.
-      controller.orderMergeWaitMinutes = null;
-    } else {
-      const n = parseInt(orderWaitRaw, 10);
-      if (!Number.isFinite(n) || n < 1 || n > 1440 || String(n) !== orderWaitRaw) {
-        alert('Order-merge wait cap must be a whole number of minutes between 1 and 1440, or blank for the 30-minute default.');
-        return;
-      }
-      controller.orderMergeWaitMinutes = n;
-    }
-
     // Misconfiguration guard: defining translations without a Paper Type
     // Option Key is meaningless — resolveMedia short-circuits at line 129
     // (`if (!mediaOptionKey ...) return ''`) before it ever consults the
@@ -5920,6 +5898,13 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
     const gatewayTimeoutSec = parseInt(document.getElementById('ocGatewayTimeoutSec').value, 10);
     const buildTimeoutMin   = parseInt(document.getElementById('ocBuildTimeoutMin').value, 10);
 
+    // Order-level submission (M5 order-level-submission-picpro-brief).
+    // Reject an out-of-range wait cap rather than clamping so an
+    // operator meaning "30" but typing "300" doesn't silently stretch
+    // every merge wait to 5 hours.
+    const mergeOrderJobs = document.getElementById('ocMergeOrderJobs').checked;
+    const orderWaitRaw   = document.getElementById('ocOrderMergeWaitMinutes').value.trim();
+
     if (!orderDataPath)    { alert('Order Data Path is required for Fuji PIC Pro controllers.'); return; }
     if (!diginPath)        { alert('DIGIN Path is required for Fuji PIC Pro controllers.'); return; }
     if (!imageStagingRoot) { alert('Image Staging Root is required for Fuji PIC Pro controllers.'); return; }
@@ -5931,6 +5916,20 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
     }
     if (!Number.isFinite(buildTimeoutMin) || buildTimeoutMin < 1 || buildTimeoutMin > 1440) {
       alert('Build Timeout must be between 1 and 1440 minutes.'); return;
+    }
+    // Wait cap: blank → null ("use the 30-minute default"; null is NOT
+    // "wait forever" — see the brief). Non-blank must parse as an
+    // integer in [1, 1440].
+    let orderMergeWaitMinutes;
+    if (orderWaitRaw === '') {
+      orderMergeWaitMinutes = null;
+    } else {
+      const n = parseInt(orderWaitRaw, 10);
+      if (!Number.isFinite(n) || n < 1 || n > 1440 || String(n) !== orderWaitRaw) {
+        alert('Order-merge wait cap must be a whole number of minutes between 1 and 1440, or blank for the 30-minute default.');
+        return;
+      }
+      orderMergeWaitMinutes = n;
     }
 
     controller.orderDataPath      = orderDataPath;
@@ -5944,6 +5943,8 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
     controller.buildTimeoutMs     = buildTimeoutMin * 60 * 1000;
     controller.sendReleaseCommand = document.getElementById('ocSendReleaseCommand').checked;
     controller.includeCustomerName = document.getElementById('ocPicProIncludeCustomerName').checked;
+    controller.mergeOrderJobs        = !!mergeOrderJobs;
+    controller.orderMergeWaitMinutes = orderMergeWaitMinutes;
     // `outputPath` is deliberately forced to '' at the top of the
     // handler for fujipicpro — the three explicit paths above are
     // what the writer consumes, and persisting a non-empty value
