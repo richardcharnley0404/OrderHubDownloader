@@ -1,3 +1,41 @@
+## v1.12.2 - 2026-08-14
+
+**New: per-controller "Strip order number prefix" for Fuji PIC Pro.**
+A new text field on the Fuji PIC Pro controller settings, alongside
+"Merge orders into one submission" and the wait-cap. Set it to the
+prefix your OrderHub org uses on every order number (e.g. `PXDEMO-`
+or `DIVPRINTS-`) and OHD will trim it off the leading edge of the
+submission id — the string that names the image staging folder, the
+`{orderId}.txt` filename in Order Data, and the DIGIN folder. The
+`OrderId=` written inside `order.txt` uses the same stripped form.
+Blank is the default, and off — behaviour is byte-identical to
+1.12.1 until you set the field on a controller.
+
+**Guardrails.** Leading match only (a prefix that appears in the
+middle of the order number is ignored). Case-insensitive on the
+match, but the tail keeps its original casing (`pxdemo-AbC9` with
+prefix `PXDEMO-` → `AbC9`). If the prefix equals the whole order
+number the strip is refused — a submission id must have something
+to name the folder after. The `-2` / `-3` late-arriver suffix
+scheme still applies after stripping.
+
+**Never-collide invariant.** Two different raw orders whose stripped
+forms happen to match get consecutive suffixes (`base`, `base-2`,
+`base-3`, …). Without this the second submission's `stageImages`
+call would `rm -rf` the first submission's staging folder while its
+images were still waiting to be moved into DIGIN. The counter that
+enforces uniqueness is persisted per stripped base and pruned after
+`max(jobDateRange, 90)` days, same window the 1.12.0 order-level
+merging scheme uses.
+
+**Reprints and manual Send-to-Print are unchanged.** The strip
+applies to every automatic and merge-Process dispatch from a
+configured controller, single-job or multi-job. Reprints continue
+to derive their id from the parent's job name and are not affected —
+consistent with the "reprints stay per-job" contract from 1.12.0.
+
+---
+
 ## v1.12.1 - 2026-08-14
 
 **Fix: the "Merge orders into one submission" tick on a Fuji PIC Pro
