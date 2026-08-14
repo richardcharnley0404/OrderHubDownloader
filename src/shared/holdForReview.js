@@ -178,9 +178,9 @@ function computeHoldForReview(job, ctx = {}) {
   //
   // Same shape as batchThresholdCheck: absent resolver, or one returning
   // falsy, keeps the reason quiet (feature-off / non-merge controller).
-  // The renderer surfaces "Waiting for order — X of Y jobs" via the
-  // deriveHoldChipLabel path, reading the sibling-count stamps the M6
-  // work adds separately; this module stays count-agnostic.
+  // The renderer surfaces "Waiting for order — X of Y jobs missing" via
+  // the deriveHoldChipLabel path, reading the sibling-count stamps the
+  // M6 work adds separately; this module stays count-agnostic.
   const orderMergeCheck = ctx && ctx.orderMergeCheck;
   if (typeof orderMergeCheck === 'function') {
     if (orderMergeCheck(job)) {
@@ -244,8 +244,8 @@ function deriveHoldChipLabel(reasons) {
   if (isBatchOnly) return 'Large job — review required';
   // M5, 2026-08-14: distinguish order-merge-waiting from generic review so
   // operators don't mistake a merge-hold for a manual-artwork hold. M6
-  // (renderer) refines this to "Waiting for order — X of Y jobs" using
-  // sibling-count stamps on the job.
+  // (renderer) refines this to "Waiting for order — X of Y jobs missing"
+  // using sibling-count stamps on the job.
   const isOrderMergeOnly = reasons.length === 1 && reasons[0] === REASON.ORDER_MERGE_WAITING;
   if (isOrderMergeOnly) return 'Waiting for order';
   return 'Review required';

@@ -634,6 +634,113 @@ test('failed group dispatch clears _orderMergeHeldSince on every dispatched memb
     'both members had their stamps cleared even though the dispatch failed — errored jobs must not keep the Waiting-for-order chip');
 });
 
+// ── M6 (2026-08-14): sibling-count stamps for the renderer chip ───────────
+//
+// The pre-pass stamps _orderMergeTotalCount, _orderMergeMissingCount, and
+// _orderMergeMissingJobIds on eligible members so the renderer can build
+// "Waiting for order — X of Y jobs" and the tooltip listing outstanding
+// siblings. These stamps travel with _orderMergeHeldSince and get cleared
+// together (both on dispatch and on stale-stamp clear).
+
+test('partial group stamps sibling-count fields on eligible members (M6)', async () => {
+  resetState();
+  const orderNumber = 'ORD-M6';
+  __jobs = [
+    makeJob(101, orderNumber),
+    makeJob(102, orderNumber),
+    // 103 will be missing from local — a straggler.
+  ];
+  __controllers = [picProController()];
+  for (const j of __jobs) __routeByJobId.set(j.id, picProRoute());
+  __manifestByOrderNumber.set(orderNumber, {
+    jobs: [{ jobId: 101 }, { jobId: 102 }, { jobId: 103 }],
+  });
+
+  await _runAutoPrint();
+
+  // Both eligible members carry the sibling-count stamps for the
+  // renderer's "Waiting for order — X of Y jobs" chip.
+  for (const jobId of [101, 102]) {
+    const stamped = __updateCalls.filter(c => c.jobId === jobId
+      && Number.isFinite(c.updates._orderMergeTotalCount));
+    assert.ok(stamped.length >= 1, `job ${jobId} must have _orderMergeTotalCount stamped`);
+    const last = stamped[stamped.length - 1];
+    assert.equal(last.updates._orderMergeTotalCount,   3, 'total = manifest sibling count');
+    assert.equal(last.updates._orderMergeMissingCount, 1, 'missing = evaluateOrderGroup missing count');
+    assert.deepEqual(last.updates._orderMergeMissingJobIds, ['103'],
+      'missing ids let the tooltip name the outstanding siblings');
+  }
+});
+
+test('successful dispatch clears sibling-count stamps alongside _orderMergeHeldSince (M6)', async () => {
+  resetState();
+  const orderNumber = 'ORD-M6-DISPATCH';
+  const stamp = new Date(Date.now() - 60_000).toISOString();
+  __jobs = [
+    makeJob(101, orderNumber, {
+      _orderMergeHeldSince:     stamp,
+      _orderMergeTotalCount:    2,
+      _orderMergeMissingCount:  1,
+      _orderMergeMissingJobIds: ['102'],
+    }),
+    makeJob(102, orderNumber, {
+      _orderMergeHeldSince:     stamp,
+      _orderMergeTotalCount:    2,
+      _orderMergeMissingCount:  1,
+      _orderMergeMissingJobIds: ['101'],
+    }),
+  ];
+  __controllers = [picProController()];
+  for (const j of __jobs) __routeByJobId.set(j.id, picProRoute());
+  __manifestByOrderNumber.set(orderNumber, { jobs: [{ jobId: 101 }, { jobId: 102 }] });
+
+  await _runAutoPrint();
+
+  assert.equal(__orderDispatchCalls.length, 1);
+  // On dispatch, every count field on the dispatched members is cleared
+  // together with _orderMergeHeldSince. Otherwise the chip would linger.
+  for (const jobId of [101, 102]) {
+    const clearedTotal = __updateCalls.some(c => c.jobId === jobId
+      && c.updates._orderMergeTotalCount === null);
+    const clearedMissing = __updateCalls.some(c => c.jobId === jobId
+      && c.updates._orderMergeMissingCount === null);
+    const clearedIds = __updateCalls.some(c => c.jobId === jobId
+      && c.updates._orderMergeMissingJobIds === null);
+    assert.ok(clearedTotal,   `job ${jobId} _orderMergeTotalCount must be cleared`);
+    assert.ok(clearedMissing, `job ${jobId} _orderMergeMissingCount must be cleared`);
+    assert.ok(clearedIds,     `job ${jobId} _orderMergeMissingJobIds must be cleared`);
+  }
+});
+
+test('stale-stamp clear also clears the sibling-count fields (M6)', async () => {
+  resetState();
+  const orderNumber = 'ORD-M6-STALE';
+  const stamp = new Date(Date.now() - 60_000).toISOString();
+  __jobs = [
+    makeJob(101, orderNumber, {
+      _orderMergeHeldSince:     stamp,
+      _orderMergeTotalCount:    3,
+      _orderMergeMissingCount:  2,
+      _orderMergeMissingJobIds: ['102', '103'],
+    }),
+  ];
+  __controllers = [picProController({ mergeOrderJobs: false })];   // setting turned off
+  __routeByJobId.set(101, picProRoute());
+  __manifestByOrderNumber.set(orderNumber, { jobs: [{ jobId: 101 }] });
+
+  await _runAutoPrint();
+
+  // Clearing the stale hold stamp must also clear the count fields —
+  // otherwise the chip would show "Waiting for order — 2 of 3 jobs"
+  // with no hold reason and no way to make it go away.
+  const cleared = __updateCalls.find(c => c.jobId === 101
+    && c.updates._orderMergeHeldSince === null);
+  assert.ok(cleared, 'stale hold stamp cleared');
+  assert.equal(cleared.updates._orderMergeTotalCount,    null);
+  assert.equal(cleared.updates._orderMergeMissingCount,  null);
+  assert.equal(cleared.updates._orderMergeMissingJobIds, null);
+});
+
 test('a group dispatch that throws also clears the stamps', async () => {
   resetState();
   const orderNumber = 'ORD-THROW';

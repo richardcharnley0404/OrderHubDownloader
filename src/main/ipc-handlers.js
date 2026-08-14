@@ -3133,9 +3133,14 @@ async function _dispatchFujiPicProOrderMerge_Manual(clickedJob, clickedRoute, al
   // Clear stamps up front — the wait is over as soon as we decide to
   // dispatch, regardless of success/failure. Same reasoning as the
   // auto-print pre-pass: an errored member should not keep a "Waiting
-  // for order" chip.
+  // for order" chip. Also clears the M6 sibling-count stamps.
   for (const it of items) {
-    jobService.updateJobLocally(it.job.id, { _orderMergeHeldSince: null });
+    jobService.updateJobLocally(it.job.id, {
+      _orderMergeHeldSince:     null,
+      _orderMergeTotalCount:    null,
+      _orderMergeMissingCount:  null,
+      _orderMergeMissingJobIds: null,
+    });
   }
 
   return await printService._sendViaFujiPicProOrderRouted(items);
@@ -3342,6 +3347,29 @@ async function _runFujiPicProOrderMergePass(jobs, controllers, cutoff) {
       // stay stamp-free (they're not "waiting for the order" from
       // the operator's viewpoint; they're waiting for their own
       // per-job gate to clear).
+      //
+      // M6: stamp the sibling-count fields the renderer reads to build
+      // "Waiting for order — X of Y jobs" and the tooltip listing
+      // outstanding sibling job ids. Total is the manifest sibling
+      // count (all jobs in the order per the manifest, regardless of
+      // which controller they route to) — matches the operator's
+      // mental model of "how many jobs are in this order". Missing is
+      // whatever evaluateOrderGroup identified as blocking readiness
+      // (ineligible members + manifest ids with no local record).
+      // Stamped on ELIGIBLE members only — a member that's ineligible
+      // for its own reason (AI Quality, awaiting-manifest, etc.) is
+      // not the one waiting for siblings, and its own hold reason
+      // already tells the operator what's up with it.
+      const totalCount   = manifestJobIds.length;
+      const missingCount = result.missingJobIds.length;
+      const missingIds   = result.missingJobIds;
+      for (const it of eligibleItems) {
+        jobService.updateJobLocally(it.job.id, {
+          _orderMergeTotalCount:   totalCount,
+          _orderMergeMissingCount: missingCount,
+          _orderMergeMissingJobIds: missingIds,
+        });
+      }
       continue;
     }
 
@@ -3359,14 +3387,20 @@ async function _runFujiPicProOrderMergePass(jobs, controllers, cutoff) {
     });
 
     // Once we decide to dispatch, the wait is over regardless of the
-    // outcome. Clear _orderMergeHeldSince on every dispatched item up
-    // front — this covers both the success path (member goes to
-    // in_production / completed) and the failure paths (member is
-    // errored inside _sendViaFujiPicProOrderRouted). Leaving the stamp
-    // on an errored member would keep it showing "Waiting for order"
-    // in the Jobs grid even though it's not waiting for anything.
+    // outcome. Clear _orderMergeHeldSince AND the M6 sibling-count
+    // stamps on every dispatched item up front — this covers both the
+    // success path (member goes to in_production / completed) and the
+    // failure paths (member is errored inside
+    // _sendViaFujiPicProOrderRouted). Leaving the stamps on an errored
+    // member would keep it showing "Waiting for order" in the Jobs
+    // grid even though it's not waiting for anything.
     for (const it of dispatchItems) {
-      jobService.updateJobLocally(it.job.id, { _orderMergeHeldSince: null });
+      jobService.updateJobLocally(it.job.id, {
+        _orderMergeHeldSince:     null,
+        _orderMergeTotalCount:    null,
+        _orderMergeMissingCount:  null,
+        _orderMergeMissingJobIds: null,
+      });
     }
 
     let dispatchResult;
@@ -3520,8 +3554,16 @@ async function runAutoPrint() {
       // never dispatches until the operator manually clears the field.
       // Also covers a job whose route changed to a different controller
       // (e.g. reprocess mapping) that isn't merge-enabled.
+      //
+      // M6: also clear the sibling-count stamps so the "Waiting for
+      // order — X of Y jobs" chip goes with them.
       if (job._orderMergeHeldSince && !isOnMergeEnabledCtrl) {
-        jobService.updateJobLocally(job.id, { _orderMergeHeldSince: null });
+        jobService.updateJobLocally(job.id, {
+          _orderMergeHeldSince:     null,
+          _orderMergeTotalCount:    null,
+          _orderMergeMissingCount:  null,
+          _orderMergeMissingJobIds: null,
+        });
         job._orderMergeHeldSince = null;   // local mirror for the check below
       }
 

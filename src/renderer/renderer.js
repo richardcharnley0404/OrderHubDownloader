@@ -1133,9 +1133,41 @@ function renderJobTable(jobs) {
     // legacy jobs-cache entry that lacks _holdChipLabel — the next poll
     // stamps it and the badge updates.
     if (job._holdForReview) {
-      const chipLabel  = job._holdChipLabel   || 'Manual — review required';
-      const reasonText = job._holdReasonsText || 'Manual artwork — review before printing';
-      const tipText    = `Auto-print held: ${reasonText}. Click Send to Print to dispatch anyway.`;
+      let chipLabel  = job._holdChipLabel   || 'Manual — review required';
+      let reasonText = job._holdReasonsText || 'Manual artwork — review before printing';
+      let tipText    = `Auto-print held: ${reasonText}. Click Send to Print to dispatch anyway.`;
+
+      // M6 (order-level-submission-picpro-brief): for a job held ONLY by
+      // order-merge-waiting, override the chip + tooltip with the
+      // count-bearing form the brief spelled out ("Waiting for order —
+      // 2 of 4 jobs"). The stamps come from runAutoPrint's pre-pass
+      // (see ipc-handlers.js _runFujiPicProOrderMergePass). Mixed-reason
+      // jobs keep the generic "Review required" label the shared
+      // deriveHoldChipLabel produces — the specific counts only make
+      // sense when merge-waiting is the sole reason.
+      //
+      // Manual Process on any merge-waiting member dispatches every
+      // currently-eligible sibling as one submission (M5 handler
+      // _dispatchFujiPicProOrderMerge_Manual), so the "Click Send to
+      // Print" instruction is accurate: the ready members go, the
+      // stragglers keep waiting.
+      const reasons = Array.isArray(job._holdReasons) ? job._holdReasons : [];
+      const isOrderMergeOnly = reasons.length === 1 && reasons[0] === 'order-merge-waiting';
+      if (isOrderMergeOnly) {
+        const missing = Number.isFinite(job._orderMergeMissingCount) ? job._orderMergeMissingCount : null;
+        const total   = Number.isFinite(job._orderMergeTotalCount)   ? job._orderMergeTotalCount   : null;
+        if (missing != null && total != null) {
+          chipLabel = `Waiting for order — ${missing} of ${total} jobs missing`;
+        }
+        const missingIds = Array.isArray(job._orderMergeMissingJobIds) ? job._orderMergeMissingJobIds : [];
+        if (missingIds.length > 0) {
+          const noun = missingIds.length === 1 ? 'sibling job' : 'sibling jobs';
+          const list = missingIds.join(', ');
+          tipText = `Auto-print held: waiting on ${missingIds.length} ${noun} (${list}). ` +
+                    `Click Send to Print to dispatch the ready members as one submission.`;
+        }
+      }
+
       flagsHtml += `<span class="hold-review-chip" title="${escapeHtml(tipText)}">${escapeHtml(chipLabel)}</span>`;
     }
 
