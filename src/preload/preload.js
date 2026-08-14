@@ -70,6 +70,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getOrderControllers:   ()        => ipcRenderer.invoke('ohd:routing:get-controllers'),
   saveOrderController:   (ctrl)    => ipcRenderer.invoke('ohd:routing:save-controller',       ctrl),
   deleteOrderController: (id)      => ipcRenderer.invoke('ohd:routing:delete-controller',     { id }),
+  setIgnoredOptions:     (controllerId, ignoredOptionNames) => ipcRenderer.invoke('ohd:routing:set-ignored-options', { controllerId, ignoredOptionNames }),
   getProcessMappings:    ()        => ipcRenderer.invoke('ohd:routing:get-process-mappings'),
   saveProcessMapping:    (mapping) => ipcRenderer.invoke('ohd:routing:save-process-mapping',  mapping),
   deleteProcessMapping:  (process) => ipcRenderer.invoke('ohd:routing:delete-process-mapping', { process }),

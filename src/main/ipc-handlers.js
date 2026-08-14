@@ -1213,6 +1213,68 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
     }
   });
 
+  // Narrow ignore-list write for reconcileControllerIgnore (M3 of
+  // docs/darkroom-media-lock-brief.md). Patches only
+  // `ignoredOptionNames` on the stored controller — deliberately
+  // BYPASSES the whole-controller media / max-prints / Fuji guards
+  // in ohd:routing:save-controller. That is the entire point: a
+  // per-job Ignore-tick edit must not fail because the operator's
+  // controller has an unrelated misconfiguration (translations +
+  // blank Paper Type Option Key is the reported one). See §2 of
+  // docs/darkroom-media-lock-plan.md for the failure trace.
+  //
+  // Validation is scoped to the payload only: array of non-empty
+  // strings, deduplicated case-insensitively, controller must exist.
+  ipcMain.handle('ohd:routing:set-ignored-options', async (event, payload) => {
+    try {
+      const controllerId       = payload && payload.controllerId;
+      const ignoredOptionNames = payload && payload.ignoredOptionNames;
+
+      if (typeof controllerId !== 'string' || controllerId.length === 0) {
+        return { success: false, error: 'controllerId is required' };
+      }
+      if (!Array.isArray(ignoredOptionNames)) {
+        return { success: false, error: 'ignoredOptionNames must be an array' };
+      }
+      // Every entry must be a non-empty trimmed string. Reject rather
+      // than filter-and-continue so a malformed payload doesn't get
+      // silently coerced — same posture as the darkroompro cap guard.
+      for (const n of ignoredOptionNames) {
+        if (typeof n !== 'string' || n.trim().length === 0) {
+          return { success: false, error: 'ignoredOptionNames entries must be non-empty strings' };
+        }
+      }
+      // Dedup case-insensitively while preserving the first-seen
+      // display form (mirrors the display-form preservation
+      // reconcileControllerIgnore uses on the renderer side).
+      const byLower = new Map();
+      for (const n of ignoredOptionNames) {
+        const trimmed = n.trim();
+        const key = trimmed.toLowerCase();
+        if (!byLower.has(key)) byLower.set(key, trimmed);
+      }
+      const normalised = Array.from(byLower.values());
+
+      const controllers = routingService.getControllers();
+      const controller  = controllers.find(c => c.id === controllerId);
+      if (!controller) {
+        return { success: false, error: `Controller ${controllerId} not found` };
+      }
+
+      const patched = { ...controller, ignoredOptionNames: normalised };
+      routingService.saveController(patched);
+      logger.info('[routing] set-ignored-options', {
+        controllerId,
+        name:  controller.name,
+        count: normalised.length,
+      });
+      return { success: true, controller: patched };
+    } catch (error) {
+      logger.logError('ohd:routing:set-ignored-options error', error);
+      return { success: false, error: error.message };
+    }
+  });
+
   ipcMain.handle('ohd:routing:get-process-mappings', async () => {
     return routingService.getProcessMappings();
   });

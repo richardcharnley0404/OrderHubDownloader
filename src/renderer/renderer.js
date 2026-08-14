@@ -1572,9 +1572,19 @@ async function reconcileControllerIgnore(controllerId, tickedIgnore, untickedNam
   const newSet      = new Set(newIgnore.map(x => x.toLowerCase()));
   const changed = existingSet.size !== newSet.size || [...newSet].some(k => !existingSet.has(k));
   if (!changed) return;
-  const updated = { ...ctrl, ignoredOptionNames: newIgnore };
-  const res = await window.electronAPI.saveOrderController(updated);
+  // M3 (darkroom-media-lock-brief): narrow write via ohd:routing:set-
+  // ignored-options that patches only `ignoredOptionNames`. The prior
+  // implementation re-saved the whole controller through
+  // saveOrderController, which drags the media-key guard, the
+  // max-prints validator and the Fuji validators into a per-job Ignore
+  // edit — the reason a Darkroom Pro controller in the media-lock
+  // state ate every Save & Assign click. This function still throws
+  // on failure so the Fuji and DPOF assign branches keep their
+  // existing behaviour; the darkroompro branch wraps the call and
+  // continues on failure (see :1991).
+  const res = await window.electronAPI.setIgnoredOptions(controllerId, newIgnore);
   if (res && res.success === false) throw new Error(res.error || 'Failed to save ignored options');
+  const updated = { ...ctrl, ignoredOptionNames: newIgnore };
   cachedOrderControllers = cachedOrderControllers.map(c => c.id === updated.id ? updated : c);
 }
 
@@ -1986,9 +1996,28 @@ function openAssignModal(job, route) {
 
       try {
         // 0. Persist any per-option Ignore ticks to the controller.
+        //    M3 (darkroom-media-lock-brief): capture the failure
+        //    instead of throwing. Same principle as M2a — an
+        //    ancillary "remember this for next time" write must not
+        //    abandon the per-job assignment. Before M3 this failure
+        //    path was reachable because the write ran through the
+        //    whole-controller save which fired the media-lock guard;
+        //    the new narrow IPC bypasses that. If it still fails
+        //    (controller deleted mid-modal, malformed payload,
+        //    storage error) the assignment still completes and the
+        //    final toast tells the operator which half failed. The
+        //    Fuji (:1900) and DPOF (:2090) branches deliberately
+        //    stay on the throw-on-failure behaviour — their channel-
+        //    mapping match depends on the ignore set being current
+        //    and reordering there is unanalysed (see BACKLOG).
+        let ignoreWarning = null;
         {
           const { tickedIgnore, untickedNames } = _collectAssignModalIgnore();
-          await reconcileControllerIgnore(controllerId, tickedIgnore, untickedNames);
+          try {
+            await reconcileControllerIgnore(controllerId, tickedIgnore, untickedNames);
+          } catch (err) {
+            ignoreWarning = err.message || 'Failed to save ignored options';
+          }
         }
 
         // 1. Optionally persist translation entries to the controller.
@@ -2038,12 +2067,17 @@ function openAssignModal(job, route) {
         }
 
         modal.classList.add('hidden');
-        if (translationWarning) {
-          // The M1 error text already reads "Media translation not
-          // saved — ... Set the Paper Type Option Key ... The size
-          // translation was saved." Appending the assignment status
-          // gives the operator a complete picture in one toast.
-          showToast(`${translationWarning} The job assignment completed.`, 'error', 10000);
+        // M2a + M3: one toast summarising both ancillary writes. Ignore
+        // and translation are independent — either or both can fail
+        // while the per-job assignment completes. Compose the message
+        // so the operator sees exactly which half failed rather than
+        // a generic "error" that sends them hunting.
+        if (translationWarning || ignoreWarning) {
+          const parts = [];
+          if (translationWarning) parts.push(translationWarning);
+          if (ignoreWarning)      parts.push(`Job assigned, but the Ignore settings could not be saved: ${ignoreWarning}`);
+          parts.push('The job assignment completed.');
+          showToast(parts.join(' '), 'error', 10000);
         } else {
           showToast('Darkroom Pro assignment saved', 'success');
         }
