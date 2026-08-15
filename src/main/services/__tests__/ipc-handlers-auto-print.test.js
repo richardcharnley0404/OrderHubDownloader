@@ -60,6 +60,7 @@ function resetState() {
   __scoreJobCalls = [];
   __scoreJobResult = { ok: true, held: false };
   __checkLocalFilesResult = { found: false };
+  __manifestPrintCountResult = 0;
 }
 
 // ----- Stubs registered into require.cache -----
@@ -150,6 +151,27 @@ stubInCache(path.join(SVC,  'ai-job-quality-orchestrator.js'),       { scoreJob:
 stubInCache(path.join(SVC,  'ai-quality-store.js'),                  { getJobQuality: async () => [], deriveHeld: () => false });
 stubInCache(path.join(MAIN, 'updater.js'),                           { setMainWindow: () => {}, startUpdateSchedule: () => {} });
 
+// M3 batch-splitting hold — the runAutoPrint gate's `batchThresholdCheck`
+// closure lazily requires this module every time it's invoked. Stubbing it
+// here matters for TWO reasons:
+//
+//   (1) Semantic — tests pick the return value per case (a `Number` for a
+//       sized job, `null` for the fail-safe unsizable path) to exercise the
+//       four branches of the batch-hold contract without needing a real
+//       manifest on disk.
+//   (2) Structural — a stub is only reached if ipc-handlers' `require(…)`
+//       for this module resolves at all. A path typo (as shipped in
+//       v1.10.0 as `require('../services/manifest-print-count')`) throws
+//       MODULE_NOT_FOUND before node consults `require.cache`, so the
+//       resolver's catch would swallow it and every batch-hold test below
+//       would fail with dispatch happening when it shouldn't. The failure
+//       signal is deliberate: this file is the tripwire that fires on the
+//       next path typo instead of costing another silent-in-production day.
+let __manifestPrintCountResult = 0;
+stubInCache(path.join(SVC, 'manifest-print-count.js'), {
+  readManifestPrintCountSync: (_job) => __manifestPrintCountResult,
+});
+
 // Override electron + electron-store via Module.prototype.require so
 // ipc-handlers' top-level imports resolve to no-ops without triggering
 // the real Electron runtime.
@@ -208,6 +230,31 @@ function makeFolderCopyRoute(overrides = {}) {
   return {
     type:             'process-folder',
     folderPath:       '/tmp/folder',
+    ...overrides,
+  };
+}
+
+// Mirror of the shape the real routing-service returns for a darkroompro
+// route (see src/main/services/routing-service.js `resolveRoute` layer-3
+// darkroompro literal). The two fields the M3 batch-hold gate consults on
+// the route are `maxPrintsPerJob` and `autoSendBatches`; every other field
+// here matches the production shape for future tests that consume them.
+function makeDarkroomProRoute(overrides = {}) {
+  return {
+    type:                'controller',
+    controllerType:      'darkroompro',
+    controllerId:        'CTRL-DP',
+    controllerName:      'Test Darkroom',
+    outputPath:          '/tmp/dp-out',
+    artworkRootPath:     '',
+    orderLastNameFormat: 'orderRef_lastName',
+    channelMappingId:    null,
+    channelNumber:       null,
+    printSizeCode:       null,
+    bannerSheet:         false,
+    checkOrderStatus:    false,
+    maxPrintsPerJob:     null,
+    autoSendBatches:     false,
     ...overrides,
   };
 }
@@ -636,4 +683,109 @@ test('awaiting-manifest gate: flag cleared → job dispatches normally', async (
   await _runAutoPrint();
 
   assert.equal(__dispatchCalls.length, 1, 'cleared flag → normal dispatch path');
+});
+
+
+// ─────────────────────────────────────────────────────────────────────────
+// M3 batch-splitting hold — end-to-end through the wired runAutoPrint gate
+// ─────────────────────────────────────────────────────────────────────────
+//
+// Regression tripwire for the 2026-08-15 fix: a path typo in the resolver's
+// lazy `require('../services/manifest-print-count')` (should have been
+// `./services/…`) threw MODULE_NOT_FOUND every cycle since M3 shipped in
+// v1.10.0. The pre-fix catch swallowed the error and returned null; the
+// derivation then said "not held" and every over-cap Darkroom Pro job
+// dispatched unheld, regardless of `autoSendBatches`. The shared-module
+// tests in src/shared/__tests__/holdForReview.test.js exercise the
+// derivation directly with a mock resolver — they can never catch a wired
+// require-path bug. These four tests do: they invoke _runAutoPrint end-to-
+// end, which forces the real resolver closure to run its real
+// `require('./services/manifest-print-count')`. Any future typo in that
+// path fails MODULE_NOT_FOUND before the stub in require.cache is
+// consulted, and the assertions below will flip.
+
+test('batch-hold gate (wired): cap=20 + prints=40 + autoSendBatches=false → HOLD, no dispatch', async () => {
+  resetState();
+  __jobs = [makeJob({ id: 'JOB-DP-OVER' })];
+  __controllers = [{ id: 'CTRL-DP', autoprint: true, type: 'darkroompro' }];
+  __routeForJob = makeDarkroomProRoute({ maxPrintsPerJob: 20, autoSendBatches: false });
+  __manifestPrintCountResult = 40;
+  __dispatchBehavior = 'success';
+
+  await _runAutoPrint();
+
+  assert.equal(__dispatchCalls.length, 0,
+    'over-cap job with autoSendBatches OFF must be held — dispatch is a bug the pre-2026-08-15 path shipped for six days');
+  const errorUpdate = __updateCalls.find((c) => c.updates && c.updates._status === 'error');
+  assert.equal(errorUpdate, undefined, 'hold path never flips to error — only continues to the next cycle');
+});
+
+test('batch-hold gate (wired): cap=20 + prints=40 + autoSendBatches=true → dispatch (M2 auto-send-batches happy path)', async () => {
+  resetState();
+  __jobs = [makeJob({ id: 'JOB-DP-AUTO' })];
+  __controllers = [{ id: 'CTRL-DP', autoprint: true, type: 'darkroompro' }];
+  __routeForJob = makeDarkroomProRoute({ maxPrintsPerJob: 20, autoSendBatches: true });
+  __manifestPrintCountResult = 40;
+  __dispatchBehavior = 'success';
+
+  await _runAutoPrint();
+
+  assert.equal(__dispatchCalls.length, 1,
+    'autoSendBatches=true must suppress OVER_BATCH_THRESHOLD — the whole point of M2 (2026-08-15)');
+  assert.equal(__dispatchCalls[0].jobId, 'JOB-DP-AUTO');
+});
+
+test('batch-hold gate (wired): cap=20 + prints=null (unsizable) → HOLD via fail-safe, no dispatch', async () => {
+  // Bug fix 2026-08-15: when the manifest read comes back null AT dispatch
+  // time (past the _awaitingManifest gate) but the cap is configured, the
+  // resolver returns { unsizable: true } and holdForReview HOLDS the job
+  // rather than dispatching a size-unknown Darkroom Pro job past the cap.
+  // autoSendBatches does NOT bypass this (see shared tests) — we won't
+  // split-dispatch a job we can't size.
+  resetState();
+  __jobs = [makeJob({ id: 'JOB-DP-UNSIZABLE' })];
+  __controllers = [{ id: 'CTRL-DP', autoprint: true, type: 'darkroompro' }];
+  __routeForJob = makeDarkroomProRoute({ maxPrintsPerJob: 20, autoSendBatches: true });
+  __manifestPrintCountResult = null;
+  __dispatchBehavior = 'success';
+
+  await _runAutoPrint();
+
+  assert.equal(__dispatchCalls.length, 0,
+    'unsizable-with-cap must HOLD even under autoSendBatches — the fail-safe invariant');
+});
+
+test('batch-hold gate (wired): cap=20 + prints=10 (under cap) → dispatch, no hold', async () => {
+  // Regression baseline. Ensures the wiring correctly reads the resolver's
+  // prints value; if the require were broken the resolver would return null
+  // and the derivation would ALSO not hold — but for the wrong reason.
+  // Pairing this with the over-cap test above pins the resolver to the
+  // right branch: hold when over cap, dispatch when under cap.
+  resetState();
+  __jobs = [makeJob({ id: 'JOB-DP-UNDER' })];
+  __controllers = [{ id: 'CTRL-DP', autoprint: true, type: 'darkroompro' }];
+  __routeForJob = makeDarkroomProRoute({ maxPrintsPerJob: 20, autoSendBatches: false });
+  __manifestPrintCountResult = 10;
+  __dispatchBehavior = 'success';
+
+  await _runAutoPrint();
+
+  assert.equal(__dispatchCalls.length, 1, 'under-cap job dispatches — batch feature only bites over cap');
+  assert.equal(__dispatchCalls[0].jobId, 'JOB-DP-UNDER');
+});
+
+test('batch-hold gate (wired): no cap configured on route → dispatch regardless of prints (feature off)', async () => {
+  // Backward-compat: the vast majority of Darkroom Pro installs have no
+  // cap set. Those must dispatch every job of any size, exactly as before
+  // M3 shipped. Resolver returns null in this case; derivation stays silent.
+  resetState();
+  __jobs = [makeJob({ id: 'JOB-DP-NOCAP' })];
+  __controllers = [{ id: 'CTRL-DP', autoprint: true, type: 'darkroompro' }];
+  __routeForJob = makeDarkroomProRoute({ maxPrintsPerJob: null, autoSendBatches: false });
+  __manifestPrintCountResult = 9999;   // huge, but no cap → dispatched
+  __dispatchBehavior = 'success';
+
+  await _runAutoPrint();
+
+  assert.equal(__dispatchCalls.length, 1, 'no cap on route → feature off, dispatch proceeds');
 });
