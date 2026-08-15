@@ -1,3 +1,11 @@
+// SEE ALSO src/main/services/ftp-source-service.js — it holds its own
+// basic-ftp session (one per pass, list + download-each + delete-each,
+// for the generic FTP-sources file mover). Any change to how sessions
+// are constructed here (client options, `client.access` arguments —
+// timeouts, secure/TLS, encoding, passive-mode) MUST be mirrored there
+// or one FTP server will silently work only via whichever caller
+// happens to match its expectations. BACKLOG.md notes the eventual
+// fix (a shared `withSession(credentials, fn)` helper) — not now.
 const ftp = require('basic-ftp');
 const path = require('path');
 const fs = require('fs');
