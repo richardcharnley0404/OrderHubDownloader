@@ -1,3 +1,71 @@
+## Unreleased
+
+**New: FTP Sources — a plain "watch a folder, move files down" service.**
+Independent of everything else OHD does. If your lab receives files
+over FTP that have nothing to do with an OrderHub job — Labworks XML,
+vendor drops, reprint queues — you can configure OHD to pull them
+down onto a local (or UNC) folder on a schedule you choose. Whatever
+picks the files up on your end (a print controller, an import script,
+someone's inbox) never has to touch the FTP server itself.
+
+**These files never become jobs.** They do not appear in the Jobs
+grid. They are not routed. They are not dispatched. They are not
+uploaded to S3. They do not go through any of the OrderHub artwork
+pipeline. This service ends the moment a file lands at your chosen
+local path. If you set up an FTP Source and expect to see the files
+in Jobs, they will not appear there — that is by design.
+
+**Off by default.** Nothing polls until you add a source AND enable
+the tick. Existing installs see a new empty "FTP Sources" section
+under Settings → Downloads and no other change to behaviour.
+
+**Setup at a glance.** Settings → Downloads → FTP Sources → Add.
+Name it, tick Enabled, fill in host / username / password / remote
+path / local path / poll interval (minutes). Click Test connection
+to confirm credentials and see how many files the remote folder
+holds right now. Save. That source starts polling on its own timer.
+See `docs/ftp-sources.md` for the full guide, including move-vs-copy
+semantics and the SMB/UNC-destination note.
+
+**Move by default, copy on request.** The tick "Delete files from
+the FTP server after successful download" is ON by default — files
+are moved (downloaded, then removed from the server). Untick it to
+copy — the server keeps its copies, and on every subsequent pass
+OHD sees the same files already on disk locally and skips them
+(with a warn log) rather than clobbering. Never overwrites an
+existing file at the destination.
+
+**Passwords are encrypted.** OHD stores FTP-source passwords via
+Windows' built-in credential encryption (DPAPI). They never appear
+in plaintext in the config file, never in the logs, and never in
+error messages — the Test-connection button will show "530 Login
+incorrect" but redact any occurrence of the actual password even if
+the FTP server echoes it back. The Settings modal deliberately
+never re-displays a saved password; the hint below the field says
+"Leave blank to keep it, or type a new one to replace it."
+
+**Visibility.** Every pass logs a one-line summary in the Activity
+Log ("3 moved, 0 skipped, 0 failed"). Whole-pass failures
+(connection refused, auth rejected, remote path missing) log once
+per pass at ERROR — not once per file. Per-file failures log at
+WARN with the filename and reason. The Settings list also shows
+last-run time and last result per source and refreshes every 5
+seconds while you're on the Downloads tab, so you can watch a pass
+complete without leaving the tab. Rows whose last pass failed get
+a coloured left border — red for a whole-pass failure, amber for
+per-file failures.
+
+**Two current limitations worth knowing.** (1) The remote listing
+is non-recursive for now — sub-folders on the FTP server are
+ignored; only files at the top of the configured remote path are
+picked up. (2) The Test-connection button always attempts plain
+FTP; FTPS as a transport isn't wired through yet even if you tick
+Secure in the config. Both are on the backlog for follow-up
+releases and neither affects labs whose sources are plain-FTP
+folders with files at the top level (the common case).
+
+---
+
 ## v1.13.0 - 2026-08-15
 
 **Critical fix: auto-print's batch-splitting hold has not worked since
