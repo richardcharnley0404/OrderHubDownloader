@@ -3248,7 +3248,15 @@ async function _runFujiPicProOrderMergePass(jobs, controllers, cutoff) {
       // an autosendable job is dispatched immediately, not treated as
       // ineligible for the merge-order pre-pass).
       return { cap: r.maxPrintsPerJob, prints, autoSendBatches: r.autoSendBatches === true };
-    } catch (_e) {
+    } catch (err) {
+      // Parity with the runAutoPrint gate resolver below. Silent catches
+      // hid a MODULE_NOT_FOUND for ~six days in the sibling; the same
+      // failure mode here would silently skip the batch gate for merge
+      // buckets. Log at ERROR so programmer errors are audible on the
+      // first cycle.
+      logger.logError('[auto-print][merge] batchThresholdCheck threw — returning null (bucket eligibility may be wrong)', err, {
+        jobId: j && j.id,
+      });
       return null;
     }
   };
@@ -3647,7 +3655,15 @@ async function runAutoPrint() {
             const r = routingService.resolveRoute(j);
             if (!(r && r.type === 'controller'
                 && Number.isFinite(r.maxPrintsPerJob) && r.maxPrintsPerJob > 0)) return null;
-            const { readManifestPrintCountSync } = require('../services/manifest-print-count');
+            // Path fix (2026-08-15): was `../services/manifest-print-count`,
+            // which resolved to src/services/manifest-print-count (nonexistent)
+            // and threw MODULE_NOT_FOUND every cycle since M3 shipped in
+            // v1.10.0. The pre-fix catch below silently returned null, so the
+            // over-batch-threshold reason never fired in production and every
+            // over-cap Darkroom Pro job dispatched unheld. All 31 other
+            // require() sites in this file use the correct `./services/…`
+            // prefix — this was the odd one out.
+            const { readManifestPrintCountSync } = require('./services/manifest-print-count');
             const prints = readManifestPrintCountSync(j);
             if (prints == null) {
               logger.logWarning('[auto-print] batch cap set but manifest print-count unreadable — holding job', {
@@ -3668,7 +3684,19 @@ async function runAutoPrint() {
             // splitter writes _1.txt, _2.txt… unchanged. Strict === true
             // so a malformed stored value defaults to feature-off.
             return { cap: r.maxPrintsPerJob, prints, autoSendBatches: r.autoSendBatches === true };
-          } catch (_e) {
+          } catch (err) {
+            // Do NOT swallow silently. The pre-fix catch here masked the
+            // MODULE_NOT_FOUND above for ~six days in production. Anything
+            // that lands here is either a programmer error (bad require
+            // path, undefined method on a stubbed service) or an
+            // unexpected runtime failure — both classes are worth an
+            // ERROR log so the next occurrence is audible on the first
+            // cycle. Return null to preserve the caller contract (feature
+            // off when we can't evaluate); the log makes the silence
+            // visible.
+            logger.logError('[auto-print] batchThresholdCheck threw — returning null (job may dispatch unheld)', err, {
+              jobId: j && j.id,
+            });
             return null;
           }
         },
