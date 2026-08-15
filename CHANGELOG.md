@@ -1,4 +1,4 @@
-## Unreleased
+## v1.13.0 - 2026-08-15
 
 **Critical fix: auto-print's batch-splitting hold has not worked since
 v1.10.0 (2026-08-10).** If you set a "Maximum prints per job" cap on a
