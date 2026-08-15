@@ -385,5 +385,139 @@ test('test-connection: forwards the exact source payload to testSourceConnection
   await testConnection(null, source);
   assert.equal(__testConnectionCalls.length, 1);
   assert.strictEqual(__testConnectionCalls[0], source,
-    'handler forwards the source object as-is — no filtering that would drop fields');
+    'handler forwards the source object as-is when no id-lookup path applies');
+});
+
+// ── test-connection: id-lookup for saved sources without a re-typed password ─
+
+test('test-connection: saved source without re-typed password → looks up stored ciphertext by id', async () => {
+  // The M4b UX flow: operator opens edit modal for a saved source,
+  // clicks Test WITHOUT typing the password again. Renderer sends
+  // {id, host, username, remotePath, ...} with NO password field
+  // (the renderer never has the ciphertext). Handler must look up
+  // the stored ciphertext by id, merge it in, and pass the enriched
+  // payload to testSourceConnection.
+  resetState();
+  __sourcesInStore = [
+    { id: 'saved-1', name: 'Saved', enabled: true, host: 'h', username: 'u', localPath: 'C:/x', remotePath: '/x', passwordEncrypted: 'ENC[stored-cipher]', intervalMinutes: 5, deleteAfterDownload: true, port: 21, secure: false },
+  ];
+  const payload = { id: 'saved-1', name: 'Saved', host: 'h', username: 'u', remotePath: '/x' };
+  await testConnection(null, payload);
+
+  assert.equal(__testConnectionCalls.length, 1);
+  const forwarded = __testConnectionCalls[0];
+  assert.equal(forwarded.passwordEncrypted, 'ENC[stored-cipher]',
+    'stored ciphertext must be merged in when payload has no password material');
+  assert.equal(forwarded.password, undefined, 'no plaintext appears just because we merged the ciphertext');
+});
+
+test('test-connection: freshly-typed password wins over stored ciphertext (Test-before-Save flow)', async () => {
+  // Operator rotates the credential in the modal, clicks Test before
+  // Save. Payload has BOTH the new plaintext AND an id (edit mode).
+  // The handler must NOT merge the stored ciphertext (which would go
+  // ignored anyway due to testSourceConnection's precedence, but
+  // sending it is a data-flow noise). The plaintext wins cleanly.
+  resetState();
+  __sourcesInStore = [
+    { id: 'saved-1', name: 'Saved', enabled: true, passwordEncrypted: 'ENC[STALE-cipher]', host: 'h', username: 'u', localPath: 'C:/x', remotePath: '/x', intervalMinutes: 5, deleteAfterDownload: true, port: 21, secure: false },
+  ];
+  const payload = { id: 'saved-1', host: 'h', username: 'u', remotePath: '/x', password: 'FRESH-TYPED-PLAINTEXT' };
+  await testConnection(null, payload);
+
+  assert.equal(__testConnectionCalls[0].password,          'FRESH-TYPED-PLAINTEXT');
+  assert.equal(__testConnectionCalls[0].passwordEncrypted, undefined,
+    'handler must NOT merge stored ciphertext when the payload already carries a plaintext');
+});
+
+test('test-connection: id lookup on an unknown id → payload forwarded as-is, testSourceConnection returns no-password error', async () => {
+  // If the id doesn't match any stored source, the handler just
+  // forwards the payload. testSourceConnection then returns the
+  // "No password supplied" error — the operator sees a clear message
+  // instead of a cryptic auth failure.
+  resetState();
+  __sourcesInStore = [];   // empty store
+  __testConnectionResult = { success: false, error: 'No password supplied' };
+  const payload = { id: 'unknown', host: 'h', username: 'u', remotePath: '/x' };
+  const result = await testConnection(null, payload);
+  assert.equal(__testConnectionCalls[0].passwordEncrypted, undefined,
+    'no merge happens when the id isn\'t found');
+  assert.equal(result.success, false);
+  assert.match(result.error, /No password supplied/);
+});
+
+test('test-connection: id-lookup takes ONLY the ciphertext from the store — every other field comes from the payload', async () => {
+  // The specific concern: operator edits a saved source's host from
+  // A to B (fixing a typo), clicks Test WITHOUT re-typing the
+  // password. The enriched payload passed to testSourceConnection
+  // must carry host B (not the stored host A). If a future refactor
+  // ever swapped the spread order — `{ ...stored, ...source }`
+  // vs `{ ...source, passwordEncrypted: stored.pwEnc }` — the typed
+  // fields would be silently overwritten by stale stored values and
+  // the operator would get a green tick from the wrong host.
+  //
+  // Test locks: only passwordEncrypted comes from the store. Every
+  // other field flows from the payload verbatim.
+  resetState();
+  __sourcesInStore = [{
+    id:                'saved-1',
+    name:              'Saved (stale name)',
+    enabled:           true,
+    host:              'STORED-HOST.example.com',
+    port:              9999,
+    username:          'stored-user',
+    remotePath:        '/stored/remote/path',
+    localPath:         'C:/stored-local',
+    passwordEncrypted: 'ENC[stored-cipher]',
+    intervalMinutes:   30,
+    deleteAfterDownload: false,
+    secure:            false,
+  }];
+  // Renderer sends the currently-edited fields with NO password.
+  const typedPayload = {
+    id:              'saved-1',
+    name:            'Saved (fresh name)',
+    host:            'TYPED-HOST.example.com',   // ← changed from stored
+    port:            2121,                        // ← changed from stored
+    username:        'typed-user',                // ← changed from stored
+    remotePath:      '/typed/remote/path',        // ← changed from stored
+    localPath:       'D:/typed-local',            // ← changed from stored
+    intervalMinutes: 5,
+    deleteAfterDownload: true,
+    // No password / passwordEncrypted on payload — triggers the
+    // id-lookup path.
+  };
+  await testConnection(null, typedPayload);
+
+  assert.equal(__testConnectionCalls.length, 1);
+  const forwarded = __testConnectionCalls[0];
+
+  // Every field from the TYPED payload — the operator's current edit
+  // must win. If any of these read `STORED-...` values the fix
+  // failed and an operator gets a green tick from the wrong config.
+  assert.equal(forwarded.host,                'TYPED-HOST.example.com', 'host must come from the typed payload');
+  assert.equal(forwarded.port,                2121,                     'port must come from the typed payload');
+  assert.equal(forwarded.username,            'typed-user',             'username must come from the typed payload');
+  assert.equal(forwarded.remotePath,          '/typed/remote/path',     'remotePath must come from the typed payload');
+  assert.equal(forwarded.localPath,           'D:/typed-local',         'localPath must come from the typed payload');
+  assert.equal(forwarded.name,                'Saved (fresh name)',     'name must come from the typed payload');
+  assert.equal(forwarded.intervalMinutes,     5,                        'intervalMinutes must come from the typed payload');
+  assert.equal(forwarded.deleteAfterDownload, true,                     'deleteAfterDownload must come from the typed payload');
+
+  // ONLY the ciphertext is grafted from the store.
+  assert.equal(forwarded.passwordEncrypted, 'ENC[stored-cipher]',
+    'passwordEncrypted (the only field the renderer never has) must come from the store');
+  assert.equal(forwarded.password, undefined,
+    'no plaintext appears just because we merged the ciphertext');
+});
+
+test('test-connection: source with no id and no password → forwarded as-is (create-mode with empty pw field)', async () => {
+  // Create-mode Test click before typing a password. No id, no
+  // password → handler forwards the payload untouched; the service
+  // returns the no-password error.
+  resetState();
+  __testConnectionResult = { success: false, error: 'No password supplied' };
+  const payload = { name: 'New', host: 'h', username: 'u', remotePath: '/x' };
+  await testConnection(null, payload);
+  assert.strictEqual(__testConnectionCalls[0], payload,
+    'no id-lookup, no mutation — payload forwarded as-is');
 });

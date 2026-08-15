@@ -536,6 +536,20 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
   // `password` plaintext OR stored `passwordEncrypted` — see
   // testSourceConnection docblock for the precedence rule.
   //
+  // Saved-source lookup by id (M4b UX fix). The renderer never receives
+  // the stored ciphertext (list-sources strips it — the "never render
+  // a stored password back into the DOM" invariant). So when the
+  // operator opens an edit modal for a saved source and clicks Test
+  // WITHOUT re-typing the password, the payload has neither `password`
+  // nor `passwordEncrypted`. Without the lookup below, the response
+  // would be "No password supplied" — the most common test-connection
+  // flow ("something is failing, let me test the config as saved")
+  // silently unusable. Fix: when `id` is present and no password
+  // material is on the payload, look up the ciphertext by id from the
+  // store and merge it in before calling testSourceConnection. New
+  // passwords typed in the modal still take precedence (the payload's
+  // `password` field wins — see testSourceConnection's precedence).
+  //
   // PLAINTEXT-IN-FLIGHT: this is the one place in the feature where the
   // password crosses the IPC boundary in the clear. The service function
   // handles scrubbing on every error path; this handler adds a defensive
@@ -547,7 +561,23 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
       if (!source || typeof source !== 'object') {
         return { success: false, error: 'source is required' };
       }
-      return await testSourceConnection(source);
+      let payload = source;
+      const hasPlaintext  = typeof source.password === 'string' && source.password.length > 0;
+      const hasCiphertext = Boolean(source.passwordEncrypted);
+      if (source.id && !hasPlaintext && !hasCiphertext) {
+        const stored = configService.getFtpSources().find((s) => s.id === source.id);
+        if (stored && stored.passwordEncrypted) {
+          // Merge WITHOUT mutating the caller's object. testSourceConnection
+          // will decrypt via encryption-service and scrub as usual.
+          payload = { ...source, passwordEncrypted: stored.passwordEncrypted };
+        }
+        // If no stored ciphertext exists either, we fall through to
+        // testSourceConnection which returns the "No password
+        // supplied" error — correct for a saved source with no
+        // password (draft) that the operator hasn't finished
+        // configuring.
+      }
+      return await testSourceConnection(payload);
     } catch (err) {
       // Defensive: testSourceConnection is designed to never throw
       // (returns {success:false} on every error path), but a require

@@ -369,6 +369,19 @@
               </div>
             </fieldset>
 
+            <!-- FTP Sources (M4 of docs/ftp-sources-brief.md). Generic
+                 "watch a folder over FTP, move files down" service.
+                 Independent of the OrderHub job pipeline — files moved
+                 here do NOT become jobs and are NOT routed. -->
+            <fieldset class="panel-section">
+              <legend>FTP Sources (generic file mover)</legend>
+              <p class="section-desc">Watch remote FTP folders and move files down to local folders. Independent of the OrderHub job pipeline — files moved by this service never become jobs and are never routed. Each source is enabled individually and polls at its own interval.</p>
+              <div id="ftpSourcesList" class="ftp-sources-list">
+                <div class="ftp-sources-empty" id="ftpSourcesEmpty">Loading…</div>
+              </div>
+              <button type="button" id="addFtpSourceBtn" class="btn-secondary" style="margin-top:8px">+ Add FTP Source</button>
+            </fieldset>
+
             <fieldset class="panel-section">
               <legend>AI Quality Gate</legend>
               <p class="section-desc">
@@ -1893,6 +1906,95 @@
       <div class="pm-modal-footer">
         <button type="button" id="backupRelaunchLaterBtn" class="btn-secondary">Restart later</button>
         <button type="button" id="backupRelaunchNowBtn" class="btn-primary">Restart now</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ FTP Source modal (M4b of docs/ftp-sources-brief.md) ═══
+       Add / Edit modal for one FTP source. Follows the controller-modal
+       pattern (pm-modal-overlay / pm-modal). Password field is masked
+       and never displays a stored password — for edit mode the hint
+       "(leave blank to keep existing)" reminds the operator to only
+       type here when rotating credentials. Per-source save via
+       ohd:ftp-sources:save-source (Option F). -->
+  <div id="ftpSourceModal" class="pm-modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="ftpSourceModalTitle">
+    <div class="pm-modal">
+      <button type="button" class="pm-modal-close" aria-label="Close">&times;</button>
+      <h3 id="ftpSourceModalTitle">Add FTP Source</h3>
+
+      <div class="form-group">
+        <label for="fsSourceName">Name</label>
+        <input type="text" id="fsSourceName" placeholder="e.g. Labworks XML">
+      </div>
+
+      <div class="form-group">
+        <label class="modal-checkbox">
+          <input type="checkbox" id="fsEnabled">
+          <span>Enabled — poll this source on its own schedule</span>
+        </label>
+      </div>
+
+      <div class="form-group">
+        <label for="fsHost">Host</label>
+        <input type="text" id="fsHost" placeholder="ftp.example.com">
+      </div>
+
+      <div class="form-group">
+        <label for="fsPort">Port <span style="font-weight:normal;color:#888">(default 21)</span></label>
+        <input type="number" id="fsPort" min="1" max="65535" placeholder="21" style="width:120px">
+      </div>
+
+      <div class="form-group">
+        <label for="fsUsername">Username</label>
+        <input type="text" id="fsUsername">
+      </div>
+
+      <div class="form-group">
+        <label for="fsPassword">Password</label>
+        <!-- type="password" so the value never renders as visible text
+             even briefly. The value is only ever populated by operator
+             typing — never pre-filled from the store on edit (the M4a
+             list-sources IPC strips the ciphertext before it reaches
+             the renderer, and we deliberately do not fetch it back
+             on modal open either). -->
+        <input type="password" id="fsPassword" autocomplete="new-password">
+        <small id="fsPasswordHint" style="color:var(--text-muted,#888);display:block;margin-top:4px"></small>
+      </div>
+
+      <div class="form-group">
+        <label for="fsRemotePath">Remote Path</label>
+        <input type="text" id="fsRemotePath" placeholder="/incoming/labworks">
+      </div>
+
+      <div class="form-group">
+        <label for="fsLocalPath">Local Path <span style="font-weight:normal;color:#888">(local or UNC)</span></label>
+        <div class="input-with-button">
+          <input type="text" id="fsLocalPath" placeholder="C:\Lab\Inbox or \\server\share\folder" readonly>
+          <button type="button" id="fsLocalPathBrowseBtn" class="btn-browse">Browse...</button>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label for="fsIntervalMinutes">Poll interval <span style="font-weight:normal;color:#888">(minutes, 1–1440)</span></label>
+        <input type="number" id="fsIntervalMinutes" min="1" max="1440" placeholder="5" style="width:120px">
+      </div>
+
+      <div class="form-group">
+        <label class="modal-checkbox">
+          <input type="checkbox" id="fsDeleteAfterDownload">
+          <span>Delete files from the FTP server after successful download <em style="color:#888">(move — the default; untick to copy)</em></span>
+        </label>
+      </div>
+
+      <div class="pm-modal-footer" style="justify-content:space-between;flex-wrap:wrap;gap:8px">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <button type="button" id="fsTestConnectionBtn" class="btn-secondary">Test connection</button>
+          <span id="fsTestConnectionResult" style="font-size:12px"></span>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button type="button" id="fsCancelBtn" class="btn-secondary">Cancel</button>
+          <button type="button" id="fsSaveBtn" class="btn-primary">Save</button>
+        </div>
       </div>
     </div>
   </div>

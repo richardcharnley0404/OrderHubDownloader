@@ -7836,3 +7836,333 @@ async function handleBackupRelaunchNow() {
     });
   }
 })();
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FTP Sources (M4b of docs/ftp-sources-brief.md)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Renderer UI for the generic "watch an FTP folder, move files down"
+// service (M1–M3). Per-source Add / Edit / Delete + Test-connection.
+// Scope boundary: nothing here touches the OrderHub job pipeline —
+// files moved by this service never become jobs.
+//
+// Per Option F (chosen 2026-08-15): all persistence is per-source via
+// window.electronAPI.ftpSourcesSave / ftpSourcesDelete. The general
+// Settings save NEVER round-trips ftpSources (M4a intentionally has
+// no wire from the settings-form collect into the ftpSources array),
+// so one bad row can never block an unrelated setting.
+//
+// Password field discipline: the modal's <input type="password"> is
+// only ever written to by operator typing — the stored ciphertext is
+// never fetched back into the DOM (M4a's list-sources IPC strips it
+// server-side), and we do not clone `hasPassword` into the value
+// field even for edit mode. Instead the hint below the field tells
+// the operator "leave blank to keep existing" when editing a saved
+// source. Never render a stored password back into the DOM per brief.
+(function initFtpSourcesUi() {
+  // ── State ────────────────────────────────────────────────────────────
+  let cachedFtpSources = [];   // shape from ohd:ftp-sources:list-sources
+  let editingSourceId  = null; // string | null; null = create mode
+
+  // ── DOM handles ──────────────────────────────────────────────────────
+  const listEl        = document.getElementById('ftpSourcesList');
+  const emptyEl       = document.getElementById('ftpSourcesEmpty');
+  const addBtn        = document.getElementById('addFtpSourceBtn');
+  const modal         = document.getElementById('ftpSourceModal');
+  const titleEl       = document.getElementById('ftpSourceModalTitle');
+  const nameEl        = document.getElementById('fsSourceName');
+  const enabledEl     = document.getElementById('fsEnabled');
+  const hostEl        = document.getElementById('fsHost');
+  const portEl        = document.getElementById('fsPort');
+  const usernameEl    = document.getElementById('fsUsername');
+  const passwordEl    = document.getElementById('fsPassword');
+  const passwordHint  = document.getElementById('fsPasswordHint');
+  const remotePathEl  = document.getElementById('fsRemotePath');
+  const localPathEl   = document.getElementById('fsLocalPath');
+  const intervalEl    = document.getElementById('fsIntervalMinutes');
+  const deleteAfterEl = document.getElementById('fsDeleteAfterDownload');
+  const testBtn       = document.getElementById('fsTestConnectionBtn');
+  const testResultEl  = document.getElementById('fsTestConnectionResult');
+  const localPathBrowseBtn = document.getElementById('fsLocalPathBrowseBtn');
+  const cancelBtn     = document.getElementById('fsCancelBtn');
+  const saveBtn       = document.getElementById('fsSaveBtn');
+
+  // Every element above should exist — the modal + list markup ships
+  // in index.html. Defensive early-return so a stray hot-reload doesn't
+  // break the whole renderer script.
+  if (!listEl || !addBtn || !modal || !saveBtn) return;
+
+  // ── List rendering ───────────────────────────────────────────────────
+
+  // Format the lastRunAt timestamp as a compact relative time. Keeps
+  // the row narrow — an absolute datetime tooltip is on the row (title
+  // attr on the wrapper) for operators who want the exact moment.
+  function _formatRelative(ts) {
+    if (!ts) return 'Never';
+    const diff = Date.now() - ts;
+    if (diff < 0)               return 'just now';
+    if (diff < 60_000)          return 'just now';
+    if (diff < 3_600_000)       return Math.floor(diff / 60_000) + ' min ago';
+    if (diff < 86_400_000)      return Math.floor(diff / 3_600_000) + ' h ago';
+    return Math.floor(diff / 86_400_000) + ' d ago';
+  }
+
+  function _summariseResult(lastResult) {
+    if (!lastResult) return 'No pass has run yet';
+    const parts = [
+      lastResult.moved   + ' moved',
+      lastResult.skipped + ' skipped',
+      lastResult.failed  + ' failed',
+    ];
+    const wholePassErr = (lastResult.errors || []).find((e) => e && e.filename === null);
+    if (wholePassErr) return parts.join(', ') + ' — pass failed: ' + wholePassErr.message;
+    return parts.join(', ');
+  }
+
+  async function refreshList() {
+    let result;
+    try {
+      result = await window.electronAPI.ftpSourcesList();
+    } catch (err) {
+      listEl.innerHTML = '';
+      emptyEl.style.display = '';
+      emptyEl.textContent   = 'Error loading FTP sources: ' + (err.message || err);
+      return;
+    }
+    if (!result || !result.success) {
+      listEl.innerHTML = '';
+      emptyEl.style.display = '';
+      emptyEl.textContent   = 'Error loading FTP sources: ' + ((result && result.error) || 'unknown');
+      return;
+    }
+    cachedFtpSources = result.sources || [];
+    if (cachedFtpSources.length === 0) {
+      listEl.innerHTML = '';
+      listEl.appendChild(emptyEl);
+      emptyEl.style.display = '';
+      emptyEl.textContent   = 'No FTP sources configured.';
+      return;
+    }
+    emptyEl.style.display = 'none';
+
+    // Rebuild the list. Simple full-render since the operator will
+    // rarely have more than a handful of sources.
+    const rows = cachedFtpSources.map((s) => {
+      const badge = s.enabled
+        ? '<span class="ftp-source-badge enabled">Enabled</span>'
+        : '<span class="ftp-source-badge disabled">Disabled</span>';
+      const lastRunAtRel = _formatRelative(s.lastRunAt);
+      const lastResult   = _summariseResult(s.lastResult);
+      const lastRunTitle = s.lastRunAt ? new Date(s.lastRunAt).toLocaleString() : '';
+      const runningTag   = s.running ? ' <em style="color:#888">(running…)</em>' : '';
+      return (
+        '<div class="ftp-source-row" data-source-id="' + escapeHtml(s.id) + '">' +
+          '<div class="ftp-source-row__main">' +
+            '<div class="ftp-source-row__title">' +
+              '<strong>' + escapeHtml(s.name) + '</strong> ' + badge + runningTag +
+            '</div>' +
+            '<div class="ftp-source-row__meta" style="font-size:12px;color:var(--text-muted,#666);margin-top:4px">' +
+              escapeHtml((s.username || '') + '@' + (s.host || '')) + ' → ' +
+              escapeHtml(s.localPath || '') +
+              ' · every ' + escapeHtml(String(s.intervalMinutes)) + ' min' +
+              ' · ' + (s.deleteAfterDownload ? 'move' : 'copy') +
+            '</div>' +
+            '<div class="ftp-source-row__lastrun" style="font-size:12px;color:var(--text-muted,#666);margin-top:2px"' +
+                 (lastRunTitle ? ' title="' + escapeHtml(lastRunTitle) + '"' : '') + '>' +
+              'Last run: ' + escapeHtml(lastRunAtRel) + ' — ' + escapeHtml(lastResult) +
+            '</div>' +
+          '</div>' +
+          '<div class="ftp-source-row__actions" style="display:flex;gap:6px;align-items:center">' +
+            '<button type="button" class="btn-secondary btn-sm" data-fs-edit="' + escapeHtml(s.id) + '">Edit</button>' +
+            '<button type="button" class="btn-secondary btn-sm" data-fs-delete="' + escapeHtml(s.id) + '">Delete</button>' +
+          '</div>' +
+        '</div>'
+      );
+    });
+    listEl.innerHTML = rows.join('');
+  }
+
+  // ── Modal — open / close / populate ──────────────────────────────────
+
+  function _clearTestResult() {
+    testResultEl.textContent = '';
+    testResultEl.style.color = '';
+  }
+
+  function _setFormFromSource(source) {
+    // source === null → create mode; else edit.
+    editingSourceId = source ? source.id : null;
+    titleEl.textContent = source ? 'Edit FTP Source' : 'Add FTP Source';
+
+    nameEl.value        = source ? (source.name || '') : '';
+    enabledEl.checked   = source ? !!source.enabled     : false;
+    hostEl.value        = source ? (source.host || '') : '';
+    portEl.value        = source ? (source.port || 21) : 21;
+    usernameEl.value    = source ? (source.username || '') : '';
+    // Password field is NEVER pre-populated. Operator types here only
+    // when setting or rotating credentials. The hint below explains
+    // "leave blank to keep existing" for edit mode with a saved
+    // password already on file.
+    passwordEl.value    = '';
+    if (source && source.hasPassword) {
+      passwordHint.textContent = 'A password is saved. Leave blank to keep it, or type a new one to replace it.';
+    } else {
+      passwordHint.textContent = source
+        ? 'No password saved yet — enter one to enable this source.'
+        : '';
+    }
+    remotePathEl.value  = source ? (source.remotePath || '') : '';
+    localPathEl.value   = source ? (source.localPath  || '') : '';
+    intervalEl.value    = source ? (source.intervalMinutes || 5) : 5;
+    deleteAfterEl.checked = source ? source.deleteAfterDownload !== false : true;
+
+    _clearTestResult();
+  }
+
+  function openFtpSourceModal(source) {
+    _setFormFromSource(source);
+    modal.classList.remove('hidden');
+    nameEl.focus();
+  }
+
+  function closeFtpSourceModal() {
+    modal.classList.add('hidden');
+    editingSourceId = null;
+    _clearTestResult();
+  }
+
+  // ── Modal — collect + save ──────────────────────────────────────────
+
+  function _collectFormAsSource() {
+    // Only fields the M1 sanitiser knows about. `id` present only for
+    // edits. `password` field carries a NEW plaintext to encrypt on
+    // the main side (M1 sanitiser handles the "leave blank preserves
+    // prior ciphertext" rule); empty means "keep existing".
+    const source = {
+      name:                nameEl.value,
+      enabled:             enabledEl.checked,
+      host:                hostEl.value,
+      port:                portEl.value === '' ? undefined : Number(portEl.value),
+      username:            usernameEl.value,
+      remotePath:          remotePathEl.value,
+      localPath:           localPathEl.value,
+      intervalMinutes:     intervalEl.value === '' ? undefined : Number(intervalEl.value),
+      deleteAfterDownload: deleteAfterEl.checked,
+    };
+    if (editingSourceId) source.id = editingSourceId;
+    if (passwordEl.value.length > 0) source.password = passwordEl.value;
+    return source;
+  }
+
+  async function saveFtpSource() {
+    const source = _collectFormAsSource();
+    saveBtn.disabled  = true;
+    const prevText    = saveBtn.textContent;
+    saveBtn.textContent = 'Saving…';
+    try {
+      const result = await window.electronAPI.ftpSourcesSave(source);
+      if (!result || !result.success) {
+        showStatus('Save failed: ' + ((result && result.error) || 'unknown error'), 'error');
+        return;
+      }
+      // Clear the password buffer immediately so it doesn't sit in the
+      // DOM after save. Never necessary for correctness (the input is
+      // type="password") but keeps the value out of any later heap
+      // dump / devtools snapshot the operator may take.
+      passwordEl.value = '';
+      showStatus('FTP source saved.', 'success');
+      closeFtpSourceModal();
+      await refreshList();
+    } catch (err) {
+      showStatus('Save failed: ' + (err.message || err), 'error');
+    } finally {
+      saveBtn.disabled  = false;
+      saveBtn.textContent = prevText;
+    }
+  }
+
+  async function deleteFtpSourceById(id) {
+    const source = cachedFtpSources.find((s) => s.id === id);
+    const name   = source ? source.name : id;
+    if (!confirm('Delete FTP source "' + name + '"? Files already downloaded stay on your machine; only the polling schedule is removed.')) {
+      return;
+    }
+    try {
+      const result = await window.electronAPI.ftpSourcesDelete(id);
+      if (!result || !result.success) {
+        showStatus('Delete failed: ' + ((result && result.error) || 'unknown error'), 'error');
+        return;
+      }
+      showStatus('FTP source deleted.', 'success');
+      await refreshList();
+    } catch (err) {
+      showStatus('Delete failed: ' + (err.message || err), 'error');
+    }
+  }
+
+  // ── Modal — Test connection ─────────────────────────────────────────
+
+  async function testConnection() {
+    // Collect the current form. Two scenarios:
+    //   (a) Operator typed a new password → payload carries `password`
+    //       plaintext, which takes precedence at the main side.
+    //   (b) Editing a saved source without re-typing → payload carries
+    //       `id` and no password material. The M4b IPC handler
+    //       (ohd:ftp-sources:test-connection) looks up the stored
+    //       ciphertext by id and merges it in before calling
+    //       testSourceConnection, so this flow just works.
+    // The renderer NEVER receives the ciphertext (list-sources strips
+    // it) and never sends it — the id-lookup keeps it main-side only.
+    const source = _collectFormAsSource();
+    _clearTestResult();
+    testBtn.disabled  = true;
+    const prevText    = testBtn.textContent;
+    testBtn.textContent = 'Testing…';
+    try {
+      const result = await window.electronAPI.ftpSourcesTestConnection(source);
+      if (result && result.success) {
+        testResultEl.textContent = '✓ Connected — ' + result.fileCount + ' file(s) visible at ' + (result.remotePath || '');
+        testResultEl.style.color = 'var(--app-green, #2b8a3e)';
+      } else {
+        testResultEl.textContent = '✗ ' + ((result && result.error) || 'unknown error');
+        testResultEl.style.color = 'var(--app-red, #c92a2a)';
+      }
+    } catch (err) {
+      testResultEl.textContent = '✗ ' + (err.message || err);
+      testResultEl.style.color = 'var(--app-red, #c92a2a)';
+    } finally {
+      testBtn.disabled  = false;
+      testBtn.textContent = prevText;
+    }
+  }
+
+  // ── Event wiring ────────────────────────────────────────────────────
+
+  addBtn.addEventListener('click', () => openFtpSourceModal(null));
+  cancelBtn.addEventListener('click', closeFtpSourceModal);
+  saveBtn.addEventListener('click', () => { saveFtpSource(); });
+  testBtn.addEventListener('click', () => { testConnection(); });
+
+  localPathBrowseBtn.addEventListener('click', async () => {
+    const dir = await window.electronAPI.selectDirectory();
+    if (dir) localPathEl.value = dir;
+  });
+
+  // Delegated click handler on the list — one listener regardless of
+  // how many rows get rendered.
+  listEl.addEventListener('click', (event) => {
+    const editId   = event.target.getAttribute && event.target.getAttribute('data-fs-edit');
+    const deleteId = event.target.getAttribute && event.target.getAttribute('data-fs-delete');
+    if (editId) {
+      const source = cachedFtpSources.find((s) => s.id === editId);
+      if (source) openFtpSourceModal(source);
+    } else if (deleteId) {
+      deleteFtpSourceById(deleteId);
+    }
+  });
+
+  // Initial load. Runs at DOMContentLoaded time via the IIFE this
+  // file wraps around — cachedFtpSources populates and the list
+  // renders before the operator gets to the Downloads sub-tab.
+  refreshList();
+})();

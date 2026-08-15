@@ -3265,3 +3265,59 @@ button {
   color: var(--app-red);
   border-color: var(--app-red);
 }
+
+/* ── FTP Sources list (M4b of docs/ftp-sources-brief.md) ─────────────
+   One row per configured FTP source in Settings → Downloads. Row is a
+   flex row with the meta on the left and the Edit/Delete buttons on
+   the right. Enabled/disabled badges use the existing green/muted
+   tokens so the mode is scannable at a glance. */
+.ftp-sources-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.ftp-source-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--app-border, #ddd);
+  border-radius: 4px;
+  background: var(--app-surface, #fff);
+}
+.ftp-source-row__main {
+  flex: 1;
+  min-width: 0;   /* let the meta line truncate cleanly */
+}
+.ftp-source-row__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ftp-source-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.ftp-source-badge.enabled {
+  background: var(--app-green-weak, #d3f9d8);
+  color:      var(--app-green,      #2b8a3e);
+  border:     1px solid var(--app-green, #2b8a3e);
+}
+.ftp-source-badge.disabled {
+  background: var(--app-surface-muted, #f5f5f5);
+  color:      var(--text-muted,        #666);
+  border:     1px solid var(--app-border, #ddd);
+}
+.ftp-sources-empty {
+  padding: 12px;
+  color: var(--text-muted, #666);
+  font-style: italic;
+}
