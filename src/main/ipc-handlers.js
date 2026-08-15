@@ -3066,6 +3066,33 @@ let _pollWindowManager  = null;
 // Cleared per job when the operator resends it so the new o→e/q cycle is tracked.
 const _terminalJobs = new Set();
 
+// M1 of docs/epson-batch-splitting-brief.md — this poller is
+// deliberately NOT yet batch-aware. Rationale:
+//
+//   - M1 extends buildFolderName + folder-monitor + printUtils.parseFolderName
+//     to CARRY batch identity through the naming and event surface, but
+//     does NOT yet PRODUCE split folders (M3 does that in
+//     _sendViaDPOFRouted).
+//   - M2 adds the per-job batch ledger that this poller will consult to
+//     iterate every batch's folder for a split job.
+//   - Until M2/M3 land, every DPOF job produces exactly one folder,
+//     which this poller finds correctly via getJobOutputStatus (single
+//     baseName lookup). No batch-splits exist yet on disk to
+//     mis-attribute.
+//
+// Post-M2 the pattern will be: read job._batchLedger (if present),
+// call getJobOutputStatus per batch, aggregate to a single status.
+// Single-folder jobs continue on the current code path unchanged.
+//
+// The reprint-attribution risk the brief flags (a reprint's folder
+// might be confused with the parent's) is closed at THIS layer today
+// by getJobOutputStatus's per-baseName lookup: it builds
+// buildFolderName('', job, reprintSuffix=null) and matches exactly,
+// so a reprint's folder (which has `_r1_` in the middle) never matches
+// the parent's baseName. Documented here rather than left as an
+// implicit "it happens to work" — the invariant is enforced by
+// per-baseName lookup, and any future refactor that switches to
+// jobId-prefix matching must preserve it.
 async function _pollAwaitingJobs() {
   if (!_pollWindowManager) return;
 

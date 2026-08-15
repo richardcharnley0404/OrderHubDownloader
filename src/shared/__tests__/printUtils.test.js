@@ -11,7 +11,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildFolderName, extractSurname, stripOrderNumberPrefix } = require('../printUtils.js');
+const { buildFolderName, parseFolderName, extractSurname, stripOrderNumberPrefix } = require('../printUtils.js');
 
 const baseJob = {
   id: 38461218,
@@ -194,6 +194,195 @@ test('stripOrderNumberPrefix: case-insensitive match; result preserves the ORIGI
 test('stripOrderNumberPrefix: prefix longer than the order number → unchanged (defensive)', () => {
   assert.equal(stripOrderNumberPrefix('ABC', 'PXDEMO-'), 'ABC');
   assert.equal(stripOrderNumberPrefix('', 'PXDEMO-'),    '');
+});
+
+// ── Batch discriminator (M1 of docs/epson-batch-splitting-brief.md) ─────
+//
+// The single non-negotiable: an unsplit non-reprint job's folder name
+// must be BYTE-IDENTICAL to the pre-M1 output. The lab reads these
+// names by eye — any drift on the common case is a regression they'll
+// notice immediately.
+
+test('buildFolderName: no batch, no reprint → byte-identical to pre-M1 output (regression lock)', () => {
+  // Pins the golden string for the common case. If this assertion
+  // changes in a future edit, it must be a deliberate call — read the
+  // brief's "unsplit folder name must not change" constraint first.
+  const golden = 'o38461218_PXDEMO-DR2PE0-1_4x6 Photo Print_lustre_full-bleed';
+  assert.equal(buildFolderName('o', baseJob), golden);
+});
+
+test('buildFolderName: no batch, no reprint, with surname → byte-identical pre-M1 output', () => {
+  const golden = 'o38461218_PXDEMO-DR2PE0-1_Charnley_4x6 Photo Print_lustre_full-bleed';
+  assert.equal(
+    buildFolderName('o', baseJob, null, {
+      includeCustomerName: true,
+      customerName:        'Richard Charnley',
+    }),
+    golden,
+  );
+});
+
+test('buildFolderName: reprint → byte-identical pre-M1 output', () => {
+  assert.equal(
+    buildFolderName('o', baseJob, 'r1'),
+    'o38461218_PXDEMO-DR2PE0-1_r1_4x6 Photo Print_lustre_full-bleed',
+  );
+});
+
+test('buildFolderName: batch marker sits in the same slot reprintSuffix sits in', () => {
+  // The brief's "same slot" rule. Marker format is `_{index}of{total}`
+  // — human-readable (a lab operator scanning the folder listing
+  // reads "2 of 5" without knowing OHD internals) and NTFS-safe
+  // (no reserved chars).
+  assert.equal(
+    buildFolderName('o', baseJob, null, { batch: { index: 2, total: 5 } }),
+    'o38461218_PXDEMO-DR2PE0-1_2of5_4x6 Photo Print_lustre_full-bleed',
+  );
+});
+
+test('buildFolderName: batch renders for every prefix + surname combination', () => {
+  // Belt-and-braces: batch works with p/o/e/q and with the surname
+  // option (`includeCustomerName`).
+  const opts = { batch: { index: 3, total: 4 } };
+  assert.equal(
+    buildFolderName('p', baseJob, null, opts),
+    'p38461218_PXDEMO-DR2PE0-1_3of4_4x6 Photo Print_lustre_full-bleed',
+  );
+  assert.equal(
+    buildFolderName('e', baseJob, null, { ...opts, includeCustomerName: true, customerName: 'Alice Bee' }),
+    'e38461218_PXDEMO-DR2PE0-1_Bee_3of4_4x6 Photo Print_lustre_full-bleed',
+  );
+});
+
+test('buildFolderName: single-batch job (1of1) DOES render the marker — this path is only taken when split is requested', () => {
+  // `1of1` at first glance looks like the "unsplit" case, but it's
+  // NOT — the caller only supplies opts.batch when the splitter has
+  // decided to split. A single-batch split is legitimate (e.g. the
+  // splitter's fallthrough for a job that fits under-cap because a
+  // discarded image dropped the count between resolve and dispatch)
+  // and the marker is correct to render there so the ledger's
+  // per-batch folder attribution still works. The "unsplit path
+  // never calls with a batch" invariant is enforced at the M3
+  // dispatcher, not here.
+  assert.equal(
+    buildFolderName('o', baseJob, null, { batch: { index: 1, total: 1 } }),
+    'o38461218_PXDEMO-DR2PE0-1_1of1_4x6 Photo Print_lustre_full-bleed',
+  );
+});
+
+test('buildFolderName: reprint + batch together → throws (mutually exclusive by design)', () => {
+  assert.throws(
+    () => buildFolderName('o', baseJob, 'r1', { batch: { index: 2, total: 5 } }),
+    /mutually exclusive/,
+    'the "same slot" rule is enforced; reprint-of-split-job needs an explicit design decision, not silent behaviour',
+  );
+});
+
+test('buildFolderName: invalid batch shapes → throws with useful message', () => {
+  for (const bad of [
+    { index: 0, total: 3 },        // index < 1
+    { index: 4, total: 3 },        // index > total
+    { index: 2, total: 0 },        // total < 1
+    { index: 2 },                  // total missing
+    { total: 3 },                  // index missing
+    { index: 1.5, total: 3 },      // non-integer
+    { index: '1', total: '3' },    // strings, not numbers
+    {},                            // empty
+  ]) {
+    assert.throws(
+      () => buildFolderName('o', baseJob, null, { batch: bad }),
+      /opts\.batch must be/,
+      `bad batch ${JSON.stringify(bad)} must be rejected`,
+    );
+  }
+});
+
+// ── parseFolderName — inverse for the folder monitor ─────────────────────
+
+test('parseFolderName: round-trips buildFolderName for unsplit / batch / reprint / surname', () => {
+  // The M1 monitor invariant: parseFolderName is the inverse of
+  // buildFolderName for every combination the writer can produce.
+  // If this test fails, the monitor cannot correctly attribute
+  // status events — the entire batch-splitting design breaks at
+  // the attribution layer.
+  const cases = [
+    { desc: 'unsplit',            args: [null, {}],                                                                       expect: { batch: null, reprintSuffix: null } },
+    { desc: 'reprint',            args: ['r1', {}],                                                                       expect: { batch: null, reprintSuffix: 'r1' } },
+    { desc: 'reprint r10',        args: ['r10', {}],                                                                      expect: { batch: null, reprintSuffix: 'r10' } },
+    { desc: 'batch 2/5',          args: [null, { batch: { index: 2, total: 5 } }],                                        expect: { batch: { index: 2, total: 5 }, reprintSuffix: null } },
+    { desc: 'batch 1/1',          args: [null, { batch: { index: 1, total: 1 } }],                                        expect: { batch: { index: 1, total: 1 }, reprintSuffix: null } },
+    { desc: 'batch 10/20',        args: [null, { batch: { index: 10, total: 20 } }],                                      expect: { batch: { index: 10, total: 20 }, reprintSuffix: null } },
+    { desc: 'unsplit + surname',  args: [null, { includeCustomerName: true, customerName: 'Charnley' }],                  expect: { batch: null, reprintSuffix: null } },
+    { desc: 'batch + surname',    args: [null, { batch: { index: 2, total: 5 }, includeCustomerName: true, customerName: 'Charnley' }], expect: { batch: { index: 2, total: 5 }, reprintSuffix: null } },
+    { desc: 'reprint + surname',  args: ['r2', { includeCustomerName: true, customerName: 'Charnley' }],                  expect: { batch: null, reprintSuffix: 'r2' } },
+  ];
+  for (const c of cases) {
+    for (const prefix of ['p', 'o', 'q', 'e']) {
+      const built  = buildFolderName(prefix, baseJob, c.args[0], c.args[1]);
+      const parsed = parseFolderName(built);
+      assert.ok(parsed, `${c.desc} (prefix ${prefix}): parseFolderName returned null for "${built}"`);
+      assert.equal(parsed.prefix, prefix, `${c.desc} (prefix ${prefix}): prefix`);
+      assert.equal(parsed.jobId,  '38461218', `${c.desc} (prefix ${prefix}): jobId`);
+      assert.deepEqual(parsed.batch,         c.expect.batch,         `${c.desc} (prefix ${prefix}): batch`);
+      assert.equal(parsed.reprintSuffix, c.expect.reprintSuffix, `${c.desc} (prefix ${prefix}): reprintSuffix`);
+    }
+  }
+});
+
+test('parseFolderName: returns null for foreign folder names', () => {
+  // Folders that don't match the DPOF shape at all. The monitor
+  // should ignore these silently — a null return is the "not one of
+  // ours" signal.
+  const foreign = [
+    '',
+    'random-folder',
+    'processed',        // Darkroom Pro's processed subfolder
+    'p38461218',        // no `_` separator, malformed
+    'x38461218_PXDEMO-1_thing',   // unknown prefix
+    'o_PXDEMO-1_thing', // no jobId digits
+  ];
+  for (const name of foreign) {
+    assert.equal(parseFolderName(name), null, `foreign name "${name}" must return null`);
+  }
+});
+
+test('parseFolderName: nullish input tolerated (defensive)', () => {
+  assert.equal(parseFolderName(null),      null);
+  assert.equal(parseFolderName(undefined), null);
+  assert.equal(parseFolderName(42),        null);
+});
+
+test('parseFolderName: batch-shaped substring in product does NOT false-match (space boundary)', () => {
+  // Safety net for the "product name contains a substring that looks
+  // like a batch marker" edge. The batch regex requires
+  // `_(\d+)of(\d+)(?=_|$)` — the marker must be preceded by `_` AND
+  // followed by either `_` or end-of-string. Product names contain
+  // spaces (e.g. `4x6" Photo Print`, `2of4 sampler pack`), so a
+  // batch-shaped substring inside a product name is followed by a
+  // SPACE, not a `_`. The (?=_|$) boundary catches this. Test:
+  const trapJob = {
+    id:           99999999,
+    order_number: 'PX-1',
+    job_name:     'PX-1-1',
+    product:      '2of4 sampler pack',   // starts batch-shaped, followed by space
+    options:      [],
+  };
+  const built  = buildFolderName('o', trapJob);
+  const parsed = parseFolderName(built);
+  assert.equal(parsed.batch, null,
+    'space after `2of4` prevents the batch regex from matching — the marker requires _ on the trailing side too');
+});
+
+test('parseFolderName: batch marker at the end of the folder name still matches (options empty)', () => {
+  // The other boundary case: batch marker with NO product following
+  // (empty options AND empty product). The `(?=_|$)` allows
+  // end-of-string on the trailing side so this still parses. Not a
+  // real-world case for DPOF jobs (product is always populated), but
+  // the regex should handle it consistently.
+  const minimalJob = { id: 1, job_name: 'J', product: '', options: [] };
+  const built  = buildFolderName('o', minimalJob, null, { batch: { index: 1, total: 2 } });
+  assert.equal(built, 'o1_J_1of2');
+  assert.deepEqual(parseFolderName(built).batch, { index: 1, total: 2 });
 });
 
 test('stripOrderNumberPrefix: non-string order number returned verbatim (defensive)', () => {

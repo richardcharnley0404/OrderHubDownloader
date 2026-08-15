@@ -3,6 +3,7 @@
 const path = require('path');
 const fs = require('fs');
 const chokidar = require('chokidar');
+const { parseFolderName } = require('../../shared/printUtils');
 
 class FolderMonitor {
   constructor() {
@@ -101,12 +102,18 @@ class FolderMonitor {
   }
 
   handlePrefixChange(folderName, prefix, callback) {
-    // Captures the numeric job id (job.id) that buildFolderName now writes
-    // immediately after the prefix, e.g. o38461218_PXDEMO-PFTAP4-1_…
-    const match = folderName.match(/^[oeq](\d+)_(.+)$/);
-    if (!match) return;
-
-    const [, jobId, productCode] = match;
+    // Delegate to the shared parser (M1 of docs/epson-batch-splitting-brief.md).
+    // It handles the discriminator slot properly — batch (`_2of5`) vs
+    // reprint (`_r1`) vs unsplit — so the callback payload can name
+    // WHICH folder-for-a-job changed state, not just the job id.
+    //
+    // The pre-M1 shape captured `(jobId, productCode)` where
+    // "productCode" was really "everything after jobId_" (misleading —
+    // it was jobNo + surname + product + options concatenated). Renamed
+    // to `rest` in the payload for accuracy; consumers that need
+    // structured fields read `batch` / `reprintSuffix` instead.
+    const parsed = parseFolderName(folderName);
+    if (!parsed) return;
 
     let status;
     switch (prefix) {
@@ -116,7 +123,14 @@ class FolderMonitor {
       default:  return;
     }
 
-    callback({ jobId, productCode, status, timestamp: new Date() });
+    callback({
+      jobId:         parsed.jobId,
+      batch:         parsed.batch,          // {index, total} for split dispatches, null for unsplit
+      reprintSuffix: parsed.reprintSuffix,  // 'r1' etc for reprints, null otherwise
+      rest:          parsed.rest,           // legacy productCode-shaped field, kept as-is for existing logging
+      status,
+      timestamp:     new Date(),
+    });
   }
 
   stopMonitoring() {

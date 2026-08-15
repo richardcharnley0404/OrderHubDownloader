@@ -109,10 +109,19 @@ class PrintControllerService {
     };
 
     const onDpofStatusChange = (status) => {
+      // M1 of docs/epson-batch-splitting-brief.md: the folder-monitor
+      // callback now carries `batch` ({index,total}|null) and
+      // `reprintSuffix` (string|null) so a status event can be
+      // attributed to the RIGHT folder-for-a-job — not just the
+      // parent job. Log both so a future consumer that acts on the
+      // callback (real state mutation, not just this info log) has
+      // the full context in the Activity Log to reason from.
       logger.info(`Print job status changed`, {
-        jobId: status.jobId,
-        status: status.status,
-        controller: controller.name
+        jobId:         status.jobId,
+        batch:         status.batch,          // null for unsplit; {index,total} for split
+        reprintSuffix: status.reprintSuffix,  // null for parent; 'r1' etc for reprints
+        status:        status.status,
+        controller:    controller.name,
       });
     };
 
