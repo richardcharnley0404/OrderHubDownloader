@@ -1,5 +1,47 @@
 ## Unreleased
 
+**Critical fix: auto-print's batch-splitting hold has not worked since
+v1.10.0 (2026-08-10).** If you set a "Maximum prints per job" cap on a
+Darkroom Pro controller in v1.10.0 or later, **auto-print has been
+dispatching over-cap jobs unheld the entire time**. The Jobs-grid chip
+correctly showed "Large job — review required" and the operator
+Send-to-Print path correctly split the job into `_1.txt`, `_2.txt`
+files, but the auto-print gate silently skipped the hold check and
+dispatched the whole job in one file — regardless of "Send batches
+automatically" being on or off, because the flag was never consulted
+either.
+
+Root cause was a one-character path typo in the auto-print resolver
+(`require('../services/manifest-print-count')` instead of
+`./services/…`), which threw MODULE_NOT_FOUND on every cycle. The catch
+block above it was silent, so nothing in the Activity Log flagged the
+failure — the hold never fired, no error appeared, and the batch chip
+kept advertising an "auto-print hold" that no longer existed.
+
+What to check on your controllers:
+
+  - If your Darkroom Pro controller has a "Maximum prints per job" set,
+    review recent auto-dispatched jobs against that cap. Anything past
+    the cap dispatched in one file, not multiple.
+  - "Send batches automatically" (introduced earlier in this Unreleased
+    release) was equally never consulted for auto-print — the flag
+    persists correctly and works via operator Send-to-Print, but the
+    auto-print path bypassed it as a side-effect of the same bug.
+
+After this release the gate holds correctly: over-cap jobs wait for
+Send-to-Print (or auto-dispatch as batches when the tick is on), and
+size-unknown jobs (a rare "manifest present but unreadable" case
+introduced by the follow-up fail-safe) are held with an
+`[auto-print] batch cap set but manifest print-count unreadable —
+holding job` warn in the Activity Log so operators can trace them.
+
+Two engineering follow-ups landed alongside the path fix: both
+resolver catch blocks now log at ERROR before returning null (previous
+silent catches were exactly what let the typo hide for six days), and
+a new integration test exercises the wired resolver end-to-end so the
+next require-path typo fails `npm test` on the first run instead of
+shipping.
+
 **New: "Send batches automatically" for Darkroom Pro.** A new tick to
 the right of the "Maximum prints per job" input on the Darkroom Pro
 controller settings. With it on, a job that would normally be held for
