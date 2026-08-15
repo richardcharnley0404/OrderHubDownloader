@@ -212,13 +212,16 @@ async function resolveRoutesForReceivedJobs(jobs) {
 // Tab visibility (mode-driven)
 // ══════════════════════════════════════
 //
-// Jobs and Film Review are only relevant when their underlying mode is
-// enabled in Settings. A site-PC running purely as a film-scan uploader
-// (pollingEnabled: false, filmScansEnabled: true) shouldn't see a Jobs
-// tab at all — and conversely an order-handling PC with filmScansEnabled
-// off shouldn't see Film Review. Settings and Activity Log are always
-// visible (Settings because the operator needs it to enable the modes
-// in the first place, Activity Log because it's a passive read-only view).
+// Jobs, Film Review and Order XML are only relevant when their underlying
+// mode is enabled in Settings. A site-PC running purely as a film-scan
+// uploader (pollingEnabled: false, filmScansEnabled: true) shouldn't see
+// a Jobs tab at all — and conversely an order-handling PC with
+// filmScansEnabled off shouldn't see Film Review. Settings and Activity
+// Log are always visible (Settings because the operator needs it to
+// enable the modes in the first place — the Order XML Settings sub-tab
+// stays visible even when orderXmlEnabled is false so the operator can
+// switch it back on; only the main-window tab is hidden — and Activity
+// Log because it's a passive read-only view).
 //
 // Triggered on:
 //   - App startup, immediately after getConfig() resolves
@@ -227,13 +230,16 @@ async function resolveRoutesForReceivedJobs(jobs) {
 // If the active tab gets hidden by a config change, focus is moved to
 // the first visible tab so the user isn't left staring at nothing.
 function updateTabVisibility(config) {
-  const showJobs = !!(config && config.pollingEnabled);
-  const showFilm = !!(config && config.filmScansEnabled);
+  const showJobs     = !!(config && config.pollingEnabled);
+  const showFilm     = !!(config && config.filmScansEnabled);
+  const showOrderXml = !!(config && config.orderXmlEnabled);
 
-  const jobsTab = document.querySelector('.tab-bar .tab[data-tab="jobs"]');
-  const filmTab = document.querySelector('.tab-bar .tab[data-tab="film"]');
-  if (jobsTab) jobsTab.style.display = showJobs ? '' : 'none';
-  if (filmTab) filmTab.style.display = showFilm ? '' : 'none';
+  const jobsTab     = document.querySelector('.tab-bar .tab[data-tab="jobs"]');
+  const filmTab     = document.querySelector('.tab-bar .tab[data-tab="film"]');
+  const orderXmlTab = document.querySelector('.tab-bar .tab[data-tab="orderxml"]');
+  if (jobsTab)     jobsTab.style.display     = showJobs     ? '' : 'none';
+  if (filmTab)     filmTab.style.display     = showFilm     ? '' : 'none';
+  if (orderXmlTab) orderXmlTab.style.display = showOrderXml ? '' : 'none';
 
   // If the currently-active tab is now hidden, switch to the first
   // visible tab. Programmatic .click() reuses the existing tab handler,
