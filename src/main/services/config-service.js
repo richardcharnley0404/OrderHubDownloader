@@ -524,6 +524,35 @@ const schema = {
     type: 'array',
     default: []
   },
+  // FTP Sources — a plain "watch a folder over FTP, move files down to a local
+  // folder" service. Independent of the OrderHub job pipeline: nothing here
+  // creates jobs, nothing here goes through routing or dispatch, and files
+  // moved by this service must NEVER reach the Jobs grid, auto-print or
+  // markReceived. See docs/ftp-sources-brief.md for scope. Shape enforced by
+  // _sanitiseFtpSources; per-entry:
+  //   {
+  //     id:                  string (uuid),
+  //     name:                string (operator-facing label, unique),
+  //     enabled:             boolean,
+  //     host:                string,
+  //     port:                integer 1..65535 (default 21),
+  //     username:            string,
+  //     passwordEncrypted:   string (safeStorage-encrypted base64; NEVER
+  //                          plaintext — the sanitiser refuses to write a
+  //                          plaintext password to the store),
+  //     secure:              boolean (default false; ftp-service.js only
+  //                          supports plain FTP today, so `true` is stored
+  //                          for forward-compat but currently has no effect),
+  //     remotePath:          string,
+  //     localPath:           string (local absolute or UNC),
+  //     intervalMinutes:     integer 1..1440 (default 5),
+  //     deleteAfterDownload: boolean (default true — this is the "move" in
+  //                          the request; false = copy).
+  //   }
+  ftpSources: {
+    type: 'array',
+    default: []
+  },
   // Shared settings
   fileStabilityMinutes: {
     type: 'number',
@@ -879,6 +908,16 @@ class ConfigService {
       orderXmlHotFolders: this.store.get('orderXmlHotFolders') || [],
       orderXmlProductMappings: this.store.get('orderXmlProductMappings') || {},
       orderXmlCustomers: this.store.get('orderXmlCustomers') || [],
+      // FTP Sources — strip the ciphertext blob before it reaches the
+      // renderer. The renderer never sees passwordEncrypted, only a
+      // `hasPassword` boolean so it can render a "(saved)" placeholder in
+      // the masked field. Sending the ciphertext round-trip would leak it
+      // into DevTools + the renderer heap for no gain — the mover (M2)
+      // reads it via getFtpSources() and decrypts on demand.
+      ftpSources: this.getFtpSources().map((s) => {
+        const { passwordEncrypted, ...rest } = s;
+        return { ...rest, hasPassword: Boolean(passwordEncrypted) };
+      }),
       // Shared
       fileStabilityMinutes: this.store.get('fileStabilityMinutes'),
       pollingInterval: this.store.get('pollingInterval'),
@@ -1165,6 +1204,19 @@ class ConfigService {
     if (Array.isArray(config.orderXmlCustomers)) {
       const sanitised = this._sanitiseOrderXmlCustomers(config.orderXmlCustomers);
       this.store.set('orderXmlCustomers', sanitised);
+    }
+
+    // Save FTP Sources. Sanitiser rejects invalid input with a useful error
+    // (the caller — ipc-handlers config:save — returns { success:false,
+    // error } up to the renderer), encrypts freshly-supplied passwords via
+    // encryption-service, and preserves existing ciphertext for rows the
+    // renderer round-trips with no `password` field (the "leave blank to
+    // keep existing" pattern the masked UI relies on). See
+    // docs/ftp-sources-brief.md for scope. Absent config.ftpSources leaves
+    // the stored list untouched — matches the Order XML shape.
+    if (Array.isArray(config.ftpSources)) {
+      const sanitised = this._sanitiseFtpSources(config.ftpSources);
+      this.store.set('ftpSources', sanitised);
     }
 
     // Save AI Enhancement settings
@@ -1536,6 +1588,168 @@ class ConfigService {
         id, label, enabled, sourceFormat, watchFolder, processedFolder,
         websiteCode, maxRetries,
       });
+    }
+
+    return result;
+  }
+
+  /**
+   * Return the raw FTP sources array from the store, including the
+   * `passwordEncrypted` blob for each row. Used by the mover (M2 of
+   * docs/ftp-sources-brief.md) — the mover decrypts on demand per
+   * connection so plaintext only exists in memory for the duration of an
+   * FTP session. Renderer-facing callers go through `getAll()`, which
+   * strips the ciphertext.
+   *
+   * @returns {Array<object>} rows in the on-disk shape (may be empty)
+   */
+  getFtpSources() {
+    return this.store.get('ftpSources') || [];
+  }
+
+  /**
+   * Sanitise + validate the ftpSources array before write.
+   *
+   * Rules:
+   *   - `name`: required non-empty, unique (case-insensitive) across the
+   *     whole list. Two sources with the same name is a footgun for the
+   *     operator (which one is failing?) and offers zero UX value.
+   *   - `id`: preserved if supplied; generated via _genHotFolderId (reused
+   *     as a general UUID helper) when absent.
+   *   - `port`: default 21; must be an integer in [1, 65535] when supplied.
+   *   - `intervalMinutes`: default 5; must be an integer in [1, 1440].
+   *   - `localPath`: non-empty on every row (draft or enabled) — a source
+   *     with no destination isn't ever valid; catch it at save time so a
+   *     future "enable" toggle doesn't need to re-validate everything.
+   *   - `deleteAfterDownload`: default true (the "move" in the request);
+   *     explicit false = copy.
+   *   - `secure`: coerced to boolean; ftp-service.js today only supports
+   *     plain FTP so `true` is stored for forward-compat but currently
+   *     has no effect at the transport layer. Do NOT reject `true` — a
+   *     future ftp-service upgrade should pick it up without a migration.
+   *   - When enabled: `host`, `username`, `remotePath` all required; a
+   *     `passwordEncrypted` MUST end up on the row (either freshly
+   *     encrypted from a supplied `password` or preserved from the prior
+   *     store state). A disabled source is a draft and may omit these —
+   *     matches the brief's "a disabled source round-trips unchanged"
+   *     test.
+   *
+   * Password handling. The renderer never sends the encrypted blob back
+   * on save — it uses the "leave blank to keep existing" pattern, so a
+   * row with no `password` field means "preserve the stored ciphertext".
+   * A row with a non-empty `password` string means "encrypt this new
+   * value and replace the ciphertext". A row with password === '' on a
+   * new (never-stored) source means "no password yet" — legal for a
+   * disabled draft, rejected for an enabled source by the enabled-fields
+   * check above. This module NEVER writes a plaintext password to the
+   * store: if `encryption-service.isAvailable()` returns false (i.e.
+   * safeStorage is unusable — the plaintext-fallback branch that the
+   * v1.10.0 batch-gate incident-adjacent CLAUDE.md landmine warns
+   * about), the sanitiser throws rather than silently persisting a
+   * plaintext password.
+   */
+  _sanitiseFtpSources(rows) {
+    // Lazy require: encryption-service depends on Electron's `safeStorage`,
+    // and hoisting the require to file top would tie config-service's own
+    // load path to an Electron symbol the existing test harnesses don't
+    // stub. Keeps the module load-time footprint identical for anyone not
+    // exercising FTP sources.
+    const encryptionService = require('./encryption-service');
+
+    const existing = this.store.get('ftpSources') || [];
+    const existingById = new Map(existing.map((s) => [s.id, s]));
+
+    const seenNames = new Set();
+    const result = [];
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      if (!row || typeof row !== 'object') continue;
+
+      const id       = String(row.id || '').trim() || _genHotFolderId();
+      const name     = String(row.name || '').trim();
+      const enabled  = Boolean(row.enabled);
+      const host     = String(row.host || '').trim();
+      const username = String(row.username || '').trim();
+      const remotePath = String(row.remotePath || '').trim();
+      const localPath  = String(row.localPath || '').trim();
+      const secure    = Boolean(row.secure);
+      const deleteAfterDownload = row.deleteAfterDownload === false ? false : true;
+      const where = name ? `"${name}"` : `#${i + 1}`;
+
+      // Name required + unique.
+      if (!name) {
+        throw new Error(`FTP source #${i + 1}: name is required`);
+      }
+      const nameKey = name.toLowerCase();
+      if (seenNames.has(nameKey)) {
+        throw new Error(`FTP source name "${name}" is used more than once — names must be unique`);
+      }
+      seenNames.add(nameKey);
+
+      // localPath non-empty on every row (brief §M1 validation).
+      if (!localPath) {
+        throw new Error(`FTP source ${where}: local path is required`);
+      }
+
+      // Port. `Number(x)` rather than `parseInt(x, 10)` on purpose: the
+      // brief says "integer 1..65535", and `parseInt('3.14', 10)` returns
+      // `3` — silently truncating a float slips a "0.5-second interval"
+      // typo past the gate. Number('3.14') stays 3.14 and fails
+      // Number.isInteger; Number('abc') is NaN and fails likewise.
+      let port = 21;
+      if (row.port !== null && row.port !== undefined && row.port !== '') {
+        const p = Number(row.port);
+        if (!Number.isInteger(p) || p < 1 || p > 65535) {
+          throw new Error(`FTP source ${where}: port must be an integer between 1 and 65535`);
+        }
+        port = p;
+      }
+
+      // Interval. Same strict-integer treatment as port above.
+      let intervalMinutes = 5;
+      if (row.intervalMinutes !== null && row.intervalMinutes !== undefined && row.intervalMinutes !== '') {
+        const n = Number(row.intervalMinutes);
+        if (!Number.isInteger(n) || n < 1 || n > 1440) {
+          throw new Error(`FTP source ${where}: interval must be an integer between 1 and 1440 minutes`);
+        }
+        intervalMinutes = n;
+      }
+
+      // Password: encrypt fresh or preserve prior ciphertext.
+      const priorSource      = existingById.get(id);
+      const passwordProvided = typeof row.password === 'string' && row.password.length > 0;
+      let   passwordEncrypted = null;
+
+      if (passwordProvided) {
+        if (!encryptionService.isAvailable()) {
+          throw new Error(
+            `FTP source ${where}: cannot save password — safeStorage encryption is not available on this system`
+          );
+        }
+        passwordEncrypted = encryptionService.encrypt(row.password);
+      } else if (priorSource && priorSource.passwordEncrypted) {
+        passwordEncrypted = priorSource.passwordEncrypted;
+      }
+
+      // Enabled sources need the full connection quadruple. Draft
+      // (disabled) sources may omit any of these — the brief locks the
+      // "a disabled source round-trips unchanged" contract.
+      if (enabled) {
+        if (!host)              throw new Error(`FTP source ${where}: host is required when enabled`);
+        if (!username)          throw new Error(`FTP source ${where}: username is required when enabled`);
+        if (!passwordEncrypted) throw new Error(`FTP source ${where}: password is required when enabled`);
+        if (!remotePath)        throw new Error(`FTP source ${where}: remote path is required when enabled`);
+      }
+
+      const out = {
+        id, name, enabled, host, port, username,
+        secure, remotePath, localPath,
+        intervalMinutes, deleteAfterDownload,
+      };
+      if (passwordEncrypted) out.passwordEncrypted = passwordEncrypted;
+
+      result.push(out);
     }
 
     return result;
