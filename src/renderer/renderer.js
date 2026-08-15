@@ -5346,7 +5346,10 @@ function updateOcTypeFields() {
   document.getElementById('ocPipelineGroup').style.display           = type === 'pdf_copy'     ? '' : 'none';
   document.getElementById('ocCheckOrderStatusGroup').style.display   = (type === 'noritsu' || type === 'epson' || type === 'dpof' || type === 'darkroompro') ? '' : 'none';
   document.getElementById('ocIncludeCustomerNameGroup').style.display = (type === 'noritsu' || type === 'epson' || type === 'dpof') ? '' : 'none';
-  document.getElementById('ocMaxPrintsPerJobGroup').style.display     = type === 'darkroompro' ? '' : 'none';
+  // Batch-splitting cap + auto-send tick — shown for darkroompro
+  // (v1.10) and epson (M5 of docs/epson-batch-splitting-brief.md).
+  // Kept off noritsu and untyped-dpof deliberately.
+  document.getElementById('ocMaxPrintsPerJobGroup').style.display     = (type === 'darkroompro' || type === 'epson') ? '' : 'none';
   // Fuji PIC Pro-only: order-level submission (mergeOrderJobs + wait cap)
   // and per-controller Strip Order Number Prefix (v1.13.0).
   document.getElementById('ocMergeOrderJobsGroup').style.display          = type === 'fujipicpro' ? '' : 'none';
@@ -5458,19 +5461,24 @@ function openOrderControllerModal(ctrl = null) {
   document.getElementById('ocCheckOrderStatus').checked = ctrl ? (ctrl.checkOrderStatus === true)      : false;
   // Default ON for new controllers and for legacy controllers missing the field.
   document.getElementById('ocIncludeCustomerName').checked = ctrl ? (ctrl.includeCustomerInFolder !== false) : true;
-  // Batch-splitting cap — Darkroom Pro only. Blank field = feature off. A
-  // non-numeric or non-positive stored value is also displayed as blank.
-  const isDarkroomProCtrl = ctrl && ctrl.type === 'darkroompro';
+  // Batch-splitting cap — Darkroom Pro + Epson (M5 of
+  // docs/epson-batch-splitting-brief.md). Blank field = feature off.
+  // A non-numeric or non-positive stored value is also displayed as
+  // blank. Stored fields on other controller types are IGNORED here so
+  // a stale value from a type-flip can't render on the wrong control
+  // surface — this mirrors the routing-service literal that only
+  // advertises the field for these two types.
+  const isBatchCapableCtrl = ctrl && (ctrl.type === 'darkroompro' || ctrl.type === 'epson');
   document.getElementById('ocMaxPrintsPerJob').value =
-    isDarkroomProCtrl && Number.isFinite(ctrl.maxPrintsPerJob) && ctrl.maxPrintsPerJob > 0
+    isBatchCapableCtrl && Number.isFinite(ctrl.maxPrintsPerJob) && ctrl.maxPrintsPerJob > 0
       ? String(ctrl.maxPrintsPerJob)
       : '';
-  // M2 (2026-08-15) auto-send-batches. Strict === true so a truthy
-  // non-boolean from a hand-edited config still renders as unchecked.
-  // The disabled state is a function of whether the cap input has a
-  // value (see _refreshAutoSendBatchesEnabledState below).
+  // M2 (2026-08-15) DP + M5 epson auto-send-batches. Strict === true so
+  // a truthy non-boolean from a hand-edited config still renders as
+  // unchecked. The disabled state is a function of whether the cap
+  // input has a value (see _refreshAutoSendBatchesEnabledState below).
   document.getElementById('ocAutoSendBatches').checked =
-    isDarkroomProCtrl && ctrl.autoSendBatches === true;
+    isBatchCapableCtrl && ctrl.autoSendBatches === true;
   _refreshAutoSendBatchesEnabledState();
   // Order-level submission — Fuji PIC Pro only. Checkbox is boolean;
   // blank number field = "use the default" (do not treat null as
@@ -5973,28 +5981,6 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
     controller.mediaTranslations    = readMediaTranslations();
     controller.photoLines           = readPhotoLines();
 
-    // Batch-splitting cap. Blank = null (feature off). A stray non-numeric
-    // or out-of-range value is rejected rather than clamped so a typo can't
-    // silently split every job (e.g. `10` when the operator meant `100`).
-    const maxPrintsRaw = document.getElementById('ocMaxPrintsPerJob').value.trim();
-    if (maxPrintsRaw === '') {
-      controller.maxPrintsPerJob = null;
-    } else {
-      const n = parseInt(maxPrintsRaw, 10);
-      if (!Number.isFinite(n) || n < 1 || n > 10000 || String(n) !== maxPrintsRaw) {
-        alert('Maximum prints per job must be a whole number between 1 and 10000, or blank for no limit.');
-        return;
-      }
-      controller.maxPrintsPerJob = n;
-    }
-
-    // M2 (2026-08-15) auto-send-batches. MUST live inside the
-    // `if (type === 'darkroompro')` block — assigning outside would
-    // silently no-op the field on save. That exact bug shipped in
-    // 1.12.0 with the PIC Pro merge flag and cost a release; the
-    // discipline is per-type field, per-type block.
-    controller.autoSendBatches = document.getElementById('ocAutoSendBatches').checked;
-
     // Misconfiguration guard: defining translations without a Paper Type
     // Option Key is meaningless — resolveMedia short-circuits at line 129
     // (`if (!mediaOptionKey ...) return ''`) before it ever consults the
@@ -6013,6 +5999,32 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
       return;
     }
     document.getElementById('ocMediaOptionKey').setCustomValidity('');
+  }
+
+  // Batch-splitting cap + auto-send tick. Shared shape between
+  // darkroompro (v1.10) and epson (M5 of docs/epson-batch-splitting-
+  // brief.md); kept OUT of both type-specific blocks above and put in
+  // its own per-type gate so each field is assigned in the block that
+  // matches its owning type — the 1.12.0 PIC Pro bug ("assigned in the
+  // wrong type block, silently never persisted") is prevented by this
+  // discipline. A stray non-numeric or out-of-range cap is rejected
+  // rather than clamped so a typo can't silently split every job (e.g.
+  // `10` when the operator meant `100`).
+  if (type === 'darkroompro' || type === 'epson') {
+    const maxPrintsRaw = document.getElementById('ocMaxPrintsPerJob').value.trim();
+    if (maxPrintsRaw === '') {
+      controller.maxPrintsPerJob = null;
+    } else {
+      const n = parseInt(maxPrintsRaw, 10);
+      if (!Number.isFinite(n) || n < 1 || n > 10000 || String(n) !== maxPrintsRaw) {
+        alert('Maximum prints per job must be a whole number between 1 and 10000, or blank for no limit.');
+        return;
+      }
+      controller.maxPrintsPerJob = n;
+    }
+    // Renderer always sends checkbox.checked (strict boolean). The IPC
+    // boundary re-validates as belt-and-braces (ipc-handlers.js).
+    controller.autoSendBatches = document.getElementById('ocAutoSendBatches').checked;
   }
   if (type === 'frontline') {
     controller.device     = document.getElementById('ocDevice').value.trim()     || 'Pixfizz';

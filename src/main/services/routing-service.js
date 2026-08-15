@@ -305,7 +305,7 @@ function resolveRoute(job) {
         // DPOF and other controller types
         const printSizeCode = resolvePrintSizeCode(overrideMapping);
 
-        return {
+        const overrideRoute = {
           type:             'controller',
           controllerType:   overrideCtrl.type || 'dpof',
           controllerId:     overrideCtrl.id,
@@ -320,6 +320,21 @@ function resolveRoute(job) {
           // that pre-date this field.
           includeCustomerInFolder: overrideCtrl.includeCustomerInFolder !== false,
         };
+        // M5 of docs/epson-batch-splitting-brief.md — epson (and ONLY
+        // epson) controllers carry the batch-splitting cap and the
+        // auto-send tick, mirroring the darkroompro literal above.
+        // Kept OFF noritsu and untyped-dpof deliberately: the release
+        // is scoped to Epson OrderController, per the brief. Read-time
+        // defaults match the DP literal (absent / non-numeric / ≤0 → null;
+        // non-boolean → false).
+        if (overrideCtrl.type === 'epson') {
+          overrideRoute.maxPrintsPerJob =
+            Number.isFinite(overrideCtrl.maxPrintsPerJob) && overrideCtrl.maxPrintsPerJob > 0
+              ? overrideCtrl.maxPrintsPerJob
+              : null;
+          overrideRoute.autoSendBatches = overrideCtrl.autoSendBatches === true;
+        }
+        return overrideRoute;
       }
     }
     // Override references a deleted mapping — log and fall through to normal routing.
@@ -663,7 +678,7 @@ function resolveRoute(job) {
   // lives in resolvePrintSizeCode — see its docstring for the rules.
   const printSizeCode = resolvePrintSizeCode(channelMapping);
 
-  return {
+  const dpofRoute = {
     type:             'controller',
     controllerType:   controller.type || 'dpof',
     controllerId:     controller.id,
@@ -685,6 +700,20 @@ function resolveRoute(job) {
     // that pre-date this field.
     includeCustomerInFolder: controller.includeCustomerInFolder !== false,
   };
+  // M5 of docs/epson-batch-splitting-brief.md — epson controllers
+  // now surface the batch-splitting cap and the auto-send tick, the
+  // route fields M3's split dispatcher consults. Kept OFF the noritsu
+  // and untyped-dpof paths deliberately — the brief scopes this
+  // release to Epson OrderController. Symmetrical with the darkroompro
+  // literal at Layer-3 above; same read-time defaults.
+  if (controller.type === 'epson') {
+    dpofRoute.maxPrintsPerJob =
+      Number.isFinite(controller.maxPrintsPerJob) && controller.maxPrintsPerJob > 0
+        ? controller.maxPrintsPerJob
+        : null;
+    dpofRoute.autoSendBatches = controller.autoSendBatches === true;
+  }
+  return dpofRoute;
 }
 
 // ── Routing-hold helpers (v1.7.8) ─────────────────────────────────────────────
@@ -800,16 +829,21 @@ function resolveRouteForController(job, controllerId) {
     checkOrderStatus: controller.checkOrderStatus !== false,
     includeCustomerInFolder: controller.includeCustomerInFolder !== false,
   };
-  // v1.10 batch-splitting cap — Darkroom Pro only. Kept off the DPOF branch
-  // deliberately: the Epson release will add it there, not this one.
-  if (controller.type === 'darkroompro') {
+  // Batch-splitting cap — Darkroom Pro (v1.10) and Epson (M5 of
+  // docs/epson-batch-splitting-brief.md). Kept off noritsu and
+  // untyped-dpof deliberately — no splitter behaviour for those types
+  // yet, and advertising the field would let holdForReview raise a
+  // reason a downstream dispatcher can't act on.
+  if (controller.type === 'darkroompro' || controller.type === 'epson') {
     shape.maxPrintsPerJob =
       Number.isFinite(controller.maxPrintsPerJob) && controller.maxPrintsPerJob > 0
         ? controller.maxPrintsPerJob
         : null;
-    // M2 (2026-08-15): mirror the two resolveRoute darkroompro literals
-    // so a reassignment-time route carries the same shape as one
-    // resolved through the normal path.
+    // M2 (2026-08-15) DP + M5 epson: mirror the two resolveRoute
+    // literals so a reassignment-time route carries the same shape
+    // as one resolved through the normal path. Drift on any branch
+    // would silently split-and-hold jobs the operator opted OUT of
+    // reviewing.
     shape.autoSendBatches = controller.autoSendBatches === true;
   }
   return shape;

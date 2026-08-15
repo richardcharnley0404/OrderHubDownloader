@@ -1,16 +1,19 @@
 /**
  * Tests for the per-controller `maxPrintsPerJob` batch-splitting cap.
  *
- * A Darkroom Pro controller may carry `maxPrintsPerJob: <positive integer>`.
- * The value is read from the store on every resolveRoute and surfaced on the
- * returned route so the dispatch method (`_sendViaDarkroomProRouted`) can
- * decide whether to split. No migration — an absent, null, non-numeric or
- * non-positive field must be treated as "feature off" and surface as `null`
- * on the route.
+ * Darkroom Pro (v1.10) and Epson (M5 of docs/epson-batch-splitting-
+ * brief.md) carry `maxPrintsPerJob: <positive integer>`. The value is
+ * read from the store on every resolveRoute and surfaced on the returned
+ * route so the dispatch method (`_sendViaDarkroomProRouted` for DP,
+ * `sendViaDPOFRouted` for Epson) can decide whether to split. No
+ * migration — an absent, null, non-numeric or non-positive field must
+ * be treated as "feature off" and surface as `null` on the route.
  *
- * The DPOF and other controller types deliberately do NOT surface the field
- * on their routes in this milestone — the Epson batching release adds it
- * there.
+ * `noritsu` and untyped-dpof controllers deliberately do NOT surface
+ * the field on their routes — the brief scopes this release to Epson
+ * OrderController. A stale value on those types must NOT reach the
+ * route (advertising it would let holdForReview raise a reason a
+ * downstream dispatcher can't act on).
  *
  * Store/electron are shimmed exactly like routing-ignored-options.test.js.
  *
@@ -159,31 +162,112 @@ test('resolveRoute via _channelMappingOverride (darkroompro) surfaces null when 
   assert.equal(route.maxPrintsPerJob, null);
 });
 
-test('resolveRouteForController: DPOF controller does NOT surface maxPrintsPerJob (Epson release adds it)', () => {
+// ── M5 of docs/epson-batch-splitting-brief.md — epson controllers ───────────
+//
+// Epson now surfaces both fields on its route literals (main, override,
+// resolveRouteForController). Same read-time defaults as darkroompro.
+// noritsu and untyped-dpof stay excluded.
+
+function seedEpson({ maxPrintsPerJob, autoSendBatches } = {}) {
+  const controller = {
+    id:              'ctrl-eps',
+    name:            'Epson SureLab',
+    type:            'epson',
+    outputPath:      '/eps',
+  };
+  if (maxPrintsPerJob !== undefined) controller.maxPrintsPerJob = maxPrintsPerJob;
+  if (autoSendBatches !== undefined) controller.autoSendBatches = autoSendBatches;
   __seed({
-    processControllerMappings: [{ process: 'Lab', controllerId: 'ctrl-dpof' }],
-    orderControllers: [{
-      id:              'ctrl-dpof',
-      name:            'Epson SureLab',
-      type:            'epson',
-      outputPath:      '/dpof',
-      // Even if a stale/legacy setting is present on a non-darkroompro
-      // controller, it must not be advertised on the route in M1.
-      maxPrintsPerJob: 100,
-    }],
-    channelMappings: [{
-      id:           'cmd',
-      controllerId: 'ctrl-dpof',
-      productCode:  PRODUCT,
-      options:      [],
+    processControllerMappings: [{ process: 'Lab', controllerId: 'ctrl-eps' }],
+    orderControllers:          [controller],
+    channelMappings:           [{
+      id:            'cme',
+      controllerId:  'ctrl-eps',
+      productCode:   PRODUCT,
+      options:       [],
       channelNumber: 1,
       printSizeCode: 'KG',
     }],
   });
-  const route = resolveRouteForController(job, 'ctrl-dpof');
-  assert.equal(route.type, 'controller');
+}
+
+test('resolveRoute: epson carries maxPrintsPerJob when valid (M5 parity with darkroompro)', () => {
+  seedEpson({ maxPrintsPerJob: 100 });
+  const route = resolveRoute(job);
+  assert.equal(route.type,           'controller');
   assert.equal(route.controllerType, 'epson');
+  assert.equal(route.maxPrintsPerJob, 100);
+});
+
+test('resolveRoute: epson surfaces null when absent (M5 read-time default)', () => {
+  seedEpson({});
+  const route = resolveRoute(job);
+  assert.equal(route.maxPrintsPerJob, null);
+});
+
+for (const bad of [0, -1, Number.NaN, 'abc', {}, [], false, true]) {
+  test(`resolveRoute epson: invalid maxPrintsPerJob (${JSON.stringify(bad)}) → null on the route`, () => {
+    seedEpson({ maxPrintsPerJob: bad });
+    assert.equal(resolveRoute(job).maxPrintsPerJob, null);
+  });
+}
+
+test('resolveRouteForController: epson carries maxPrintsPerJob when valid (M5)', () => {
+  seedEpson({ maxPrintsPerJob: 50 });
+  const route = resolveRouteForController(job, 'ctrl-eps');
+  assert.equal(route.type,            'controller');
+  assert.equal(route.controllerType,  'epson');
+  assert.equal(route.maxPrintsPerJob, 50);
+});
+
+test('resolveRouteForController: epson surfaces null when absent (M5)', () => {
+  seedEpson({});
+  const route = resolveRouteForController(job, 'ctrl-eps');
+  assert.equal(route.maxPrintsPerJob, null);
+});
+
+test('resolveRoute via _channelMappingOverride (epson) carries maxPrintsPerJob (M5)', () => {
+  seedEpson({ maxPrintsPerJob: 75 });
+  const route = resolveRoute({ ...job, _channelMappingOverride: 'cme' });
+  assert.equal(route.controllerType,  'epson');
+  assert.equal(route.maxPrintsPerJob, 75);
+});
+
+test('resolveRoute via _channelMappingOverride (epson) surfaces null when absent (M5)', () => {
+  seedEpson({});
+  const route = resolveRoute({ ...job, _channelMappingOverride: 'cme' });
+  assert.equal(route.maxPrintsPerJob, null);
+});
+
+test('resolveRouteForController: noritsu still does NOT surface maxPrintsPerJob (scope guard)', () => {
+  // The M5 scope is Epson OrderController. A noritsu controller with a
+  // stale maxPrintsPerJob must NOT advertise the field — advertising it
+  // would let holdForReview raise the over-batch-threshold reason on a
+  // controller whose dispatcher has no splitter to consume it.
+  __seed({
+    processControllerMappings: [{ process: 'Lab', controllerId: 'ctrl-nor' }],
+    orderControllers:          [{
+      id:              'ctrl-nor',
+      name:            'Noritsu QSS',
+      type:            'noritsu',
+      outputPath:      '/nor',
+      maxPrintsPerJob: 100,   // stale — must not surface
+    }],
+    channelMappings:           [{
+      id:            'cmn',
+      controllerId:  'ctrl-nor',
+      productCode:   PRODUCT,
+      options:       [],
+      channelNumber: 1,
+      printSizeCode: 'KG',
+    }],
+  });
+  const route = resolveRoute(job);
+  assert.equal(route.controllerType, 'noritsu');
   assert.equal(Object.prototype.hasOwnProperty.call(route, 'maxPrintsPerJob'), false);
+
+  const rrfc = resolveRouteForController(job, 'ctrl-nor');
+  assert.equal(Object.prototype.hasOwnProperty.call(rrfc, 'maxPrintsPerJob'), false);
 });
 
 // ── autoSendBatches (M2, 2026-08-15) ─────────────────────────────────────────
@@ -275,22 +359,56 @@ test('autoSendBatches: resolveRouteForController darkroompro branch defaults to 
   assert.equal(route.autoSendBatches, false);
 });
 
-test('autoSendBatches: non-darkroompro routes do NOT surface the field', () => {
-  // Same scoping discipline as maxPrintsPerJob — the field is meaningless
-  // on other controller types (no splitter to skip a hold for). A stale
-  // value must not be advertised on the route.
+test('autoSendBatches: epson routes surface the field (M5 parity with darkroompro)', () => {
+  seedEpson({ autoSendBatches: true, maxPrintsPerJob: 100 });
+  const route = resolveRoute(job);
+  assert.equal(route.controllerType,  'epson');
+  assert.equal(route.autoSendBatches, true);
+});
+
+test('autoSendBatches: epson defaults to false when absent (M5 read-time default)', () => {
+  seedEpson({ maxPrintsPerJob: 100 });
+  const route = resolveRoute(job);
+  assert.equal(route.autoSendBatches, false);
+});
+
+for (const bad of [1, 'true', 'yes', {}, [], null]) {
+  test(`autoSendBatches epson: non-boolean ${JSON.stringify(bad)} coerces to false on the route`, () => {
+    seedEpson({ autoSendBatches: bad, maxPrintsPerJob: 100 });
+    assert.equal(resolveRoute(job).autoSendBatches, false,
+      'strict === true coercion — anything else is feature-off');
+  });
+}
+
+test('autoSendBatches: _channelMappingOverride branch (epson) carries the field (M5)', () => {
+  seedEpson({ autoSendBatches: true, maxPrintsPerJob: 50 });
+  const route = resolveRoute({ ...job, _channelMappingOverride: 'cme' });
+  assert.equal(route.controllerType,  'epson');
+  assert.equal(route.autoSendBatches, true);
+});
+
+test('autoSendBatches: resolveRouteForController (epson) carries the field (M5)', () => {
+  seedEpson({ autoSendBatches: true, maxPrintsPerJob: 30 });
+  const route = resolveRouteForController(job, 'ctrl-eps');
+  assert.equal(route.autoSendBatches, true);
+});
+
+test('autoSendBatches: noritsu still does NOT surface the field (M5 scope guard)', () => {
+  // The field is meaningless on noritsu — no splitter for that type.
+  // A stale value must not be advertised on the route (advertising would
+  // let holdForReview raise a reason a downstream dispatcher can't act on).
   __seed({
-    processControllerMappings: [{ process: 'Lab', controllerId: 'ctrl-dpof' }],
-    orderControllers: [{
-      id:               'ctrl-dpof',
-      name:             'Epson SureLab',
-      type:             'epson',
-      outputPath:       '/dpof',
-      autoSendBatches:  true,
+    processControllerMappings: [{ process: 'Lab', controllerId: 'ctrl-nor' }],
+    orderControllers:          [{
+      id:               'ctrl-nor',
+      name:             'Noritsu QSS',
+      type:             'noritsu',
+      outputPath:       '/nor',
+      autoSendBatches:  true,   // stale — must not surface
     }],
-    channelMappings: [{
-      id:            'cmd',
-      controllerId:  'ctrl-dpof',
+    channelMappings:           [{
+      id:            'cmn',
+      controllerId:  'ctrl-nor',
       productCode:   PRODUCT,
       options:       [],
       channelNumber: 1,
@@ -298,11 +416,10 @@ test('autoSendBatches: non-darkroompro routes do NOT surface the field', () => {
     }],
   });
   const route = resolveRoute(job);
-  assert.equal(route.type, 'controller');
-  assert.equal(route.controllerType, 'epson');
+  assert.equal(route.controllerType, 'noritsu');
   assert.equal(Object.prototype.hasOwnProperty.call(route, 'autoSendBatches'), false);
 
-  const rrfc = resolveRouteForController(job, 'ctrl-dpof');
+  const rrfc = resolveRouteForController(job, 'ctrl-nor');
   assert.equal(Object.prototype.hasOwnProperty.call(rrfc, 'autoSendBatches'), false);
 });
 

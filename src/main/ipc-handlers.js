@@ -1263,9 +1263,17 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
       // check at the IPC boundary stops a malformed payload (future
       // renderer bug, external caller) from persisting a value that
       // would silently split every job.
+      //
+      // Scope: darkroompro + epson (M5 of docs/epson-batch-splitting-
+      // brief.md added epson). noritsu and untyped-dpof aren't in the
+      // set — a stale value on those types is harmless (route literals
+      // deliberately don't advertise the field for them) but there's
+      // no reason to persist one either, so the guard also runs there
+      // by NOT running (we only reject when the type is in the batch-
+      // capable set; other types pass the field through untouched).
+      const isBatchCapableType = controller && (controller.type === 'darkroompro' || controller.type === 'epson');
       if (
-        controller &&
-        controller.type === 'darkroompro' &&
+        isBatchCapableType &&
         controller.maxPrintsPerJob !== undefined &&
         controller.maxPrintsPerJob !== null
       ) {
@@ -1275,22 +1283,23 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
           logger.logWarning('[routing] save-controller rejected — invalid maxPrintsPerJob', {
             controllerId:    controller.id,
             name:            controller.name,
+            controllerType:  controller.type,
             maxPrintsPerJob: n,
           });
           return { success: false, error: msg };
         }
       }
 
-      // M2 (2026-08-15): autoSendBatches must be a strict boolean when
-      // present. Renderer sends checkbox.checked (always boolean); the
-      // IPC mirror stops a malformed payload (external caller, hand-
-      // edited JSON round-tripped through the config) from persisting
-      // a truthy non-boolean that would then silently suppress the
-      // operator-review gate on every over-cap job. Undefined is fine —
-      // existing controllers behave as before (feature off).
+      // M2 (2026-08-15) DP + M5 epson: autoSendBatches must be a strict
+      // boolean when present. Renderer sends checkbox.checked (always
+      // boolean); the IPC mirror stops a malformed payload (external
+      // caller, hand-edited JSON round-tripped through the config) from
+      // persisting a truthy non-boolean that would then silently
+      // suppress the operator-review gate on every over-cap job.
+      // Undefined is fine — existing controllers behave as before
+      // (feature off).
       if (
-        controller &&
-        controller.type === 'darkroompro' &&
+        isBatchCapableType &&
         controller.autoSendBatches !== undefined &&
         typeof controller.autoSendBatches !== 'boolean'
       ) {
@@ -1298,6 +1307,7 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
         logger.logWarning('[routing] save-controller rejected — invalid autoSendBatches', {
           controllerId:    controller.id,
           name:            controller.name,
+          controllerType:  controller.type,
           autoSendBatches: controller.autoSendBatches,
         });
         return { success: false, error: msg };

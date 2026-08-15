@@ -281,3 +281,85 @@ test('autoSendBatches: darkroompro guard does not tangle with the maxPrintsPerJo
   assert.match(result.error, /autoSendBatches/);
   assert.doesNotMatch(result.error, /Maximum prints per job/);
 });
+
+// ── M5: guard also fires on epson controllers ─────────────────────────────
+
+function makeEpson(overrides = {}) {
+  return {
+    id:         'ctrl-eps-1',
+    name:       'Epson SureLab',
+    type:       'epson',
+    outputPath: 'C:\\eps\\hot',
+    ...overrides,
+  };
+}
+
+test('M5 epson: autoSendBatches true + valid cap persists', async () => {
+  resetState();
+  const result = await saveController(null, makeEpson({
+    maxPrintsPerJob: 20,
+    autoSendBatches: true,
+  }));
+  assert.equal(result.success, true);
+  assert.equal(__controllers[0].maxPrintsPerJob, 20);
+  assert.equal(__controllers[0].autoSendBatches, true);
+});
+
+test('M5 epson: invalid maxPrintsPerJob is rejected with a clear message', async () => {
+  for (const bad of [0, -1, 10001, 1.5, 'abc', {}, []]) {
+    resetState();
+    const result = await saveController(null, makeEpson({ maxPrintsPerJob: bad }));
+    assert.equal(result.success, false, `${JSON.stringify(bad)} must be rejected`);
+    assert.match(result.error, /Maximum prints per job/);
+    assert.equal(__controllers.length, 0, 'controller must not persist on rejection');
+
+    const warn = __warns.find(w => /invalid maxPrintsPerJob/.test(w.msg));
+    assert.ok(warn, `rejection at ${JSON.stringify(bad)} must log at warn level`);
+    assert.equal(warn.meta.controllerType, 'epson');
+  }
+});
+
+test('M5 epson: non-boolean autoSendBatches is rejected', async () => {
+  for (const bad of ['true', 1, {}, [], null]) {
+    resetState();
+    const result = await saveController(null, makeEpson({
+      maxPrintsPerJob: 20,
+      autoSendBatches: bad,
+    }));
+    assert.equal(result.success, false, `${JSON.stringify(bad)} must be rejected`);
+    assert.match(result.error, /autoSendBatches/);
+    assert.equal(__controllers.length, 0);
+
+    const warn = __warns.find(w => /invalid autoSendBatches/.test(w.msg));
+    assert.ok(warn);
+    assert.equal(warn.meta.controllerType, 'epson');
+  }
+});
+
+test('M5 epson: null cap is accepted (feature off)', async () => {
+  resetState();
+  const result = await saveController(null, makeEpson({ maxPrintsPerJob: null }));
+  assert.equal(result.success, true);
+  assert.equal(__controllers[0].maxPrintsPerJob, null);
+});
+
+test('M5 scope: guard still does NOT fire on noritsu (a stale field passes through)', async () => {
+  // The M5 scope-widening added epson to the guard. noritsu is still
+  // outside — a stale batch field on a noritsu controller must pass
+  // through untouched (route literals don't advertise it there anyway,
+  // so it can't affect dispatch). Locks that the widening was surgical
+  // and didn't accidentally catch the whole DPOF family.
+  resetState();
+  const noritsuCtrl = {
+    id:              'ctrl-nor-1',
+    name:            'Noritsu QSS',
+    type:            'noritsu',
+    outputPath:      'C:\\nor\\hot',
+    maxPrintsPerJob: 'garbage',
+    autoSendBatches: 'nope',
+  };
+  const result = await saveController(null, noritsuCtrl);
+  assert.equal(result.success, true, 'guard must not fire on a noritsu controller');
+  assert.equal(__controllers[0].maxPrintsPerJob, 'garbage');
+  assert.equal(__controllers[0].autoSendBatches, 'nope');
+});
