@@ -12,6 +12,13 @@ const { darkroomProGenerator } = require('./darkroom-pro-generator');
 const { darkroomProFileWriter } = require('./darkroom-pro-file-writer');
 const { generateDarkroomProFile } = require('./darkroom-pro-output');
 const { splitIntoBatches, batchPrintCount } = require('../../shared/batchSplit');
+const {
+  CANONICAL_FIELD:     BATCH_LEDGER_FIELD,
+  newLedger:           newBatchLedger,
+  recordBatchDispatched,
+  recordBatchError,
+  completeLedger,
+} = require('../../shared/batchLedger');
 const { frontlineGenerator } = require('./frontline-generator');
 const { frontlineFileWriter } = require('./frontline-file-writer');
 const { generateFujiJobMakerFiles } = require('./fuji-jobmaker-generator');
@@ -2014,18 +2021,24 @@ class PrintService {
     // jobService.updateJobLocally (writes to jobs-cache; survives restart).
     // Only stamped on split jobs — single-batch dispatches keep the pre-M4
     // shape byte-for-byte (regression guarantee).
+    //
+    // M2 of docs/epson-batch-splitting-brief.md: the ledger shape is now
+    // shared across controller families via src/shared/batchLedger.js,
+    // and writes go to the canonical field (`_batchLedger`) rather than
+    // the pre-M2 `_darkroomProBatchLedger`. Old-name persisted ledgers
+    // continue to read correctly via readLedger's fallback — see the
+    // module docblock. DP entries carry the DPOF `acceptedAt` /
+    // `acceptedPrefix` fields as null-forever; keeping the shape uniform
+    // means downstream readers don't need per-controller branches.
     const ledger = isSplit
-      ? {
+      ? newBatchLedger({
           cap,
           totalBatches: batches.length,
           totalPrints:  batchPrintCount(dispatchRecords),
-          startedAt:    new Date().toISOString(),
-          completedAt:  null,
-          batches:      [],
-        }
+        })
       : null;
     if (ledger) {
-      jobService.updateJobLocally(job.id, { _darkroomProBatchLedger: ledger });
+      jobService.updateJobLocally(job.id, { [BATCH_LEDGER_FIELD]: ledger });
     }
 
     // ── Dispatch loop ───────────────────────────────────────────────────────
@@ -2091,16 +2104,13 @@ class PrintService {
           outputFilenameStem,
         });
         if (ledger) {
-          ledger.batches.push({
-            index:         batchIndex1,
-            total:         totalBatches,
-            filename:      `${outputFilenameStem}.txt`,
-            destPath:      null,
-            dispatchedAt:  new Date().toISOString(),
-            outcome:       'error',
-            error:         err.message,
+          recordBatchError(ledger, {
+            index:    batchIndex1,
+            total:    totalBatches,
+            filename: `${outputFilenameStem}.txt`,
+            error:    err.message,
           });
-          jobService.updateJobLocally(job.id, { _darkroomProBatchLedger: ledger });
+          jobService.updateJobLocally(job.id, { [BATCH_LEDGER_FIELD]: ledger });
         }
         const succeeded = destPaths.length; // number that landed OK
         const errorMessage = isSplit
@@ -2125,18 +2135,16 @@ class PrintService {
 
       destPaths.push(destPath);
       if (ledger) {
-        ledger.batches.push({
-          index:         batchIndex1,
-          total:         totalBatches,
-          filename:      `${outputFilenameStem}.txt`,
+        recordBatchDispatched(ledger, {
+          index:    batchIndex1,
+          total:    totalBatches,
+          filename: `${outputFilenameStem}.txt`,
           destPath,
-          dispatchedAt:  new Date().toISOString(),
-          outcome:       'success',
         });
         // Persist after every batch so a mid-loop process crash still
         // leaves a record of what went out. Fuji PIC Pro monitor uses
         // the same persist-on-every-mutation posture for the same reason.
-        jobService.updateJobLocally(job.id, { _darkroomProBatchLedger: ledger });
+        jobService.updateJobLocally(job.id, { [BATCH_LEDGER_FIELD]: ledger });
         logger.info(`[dp-batch] batch ${batchIndex1}/${totalBatches} sent`, {
           jobId:      job.id,
           controller: route.controllerName,
@@ -2149,8 +2157,8 @@ class PrintService {
 
     // ── All batches landed ──────────────────────────────────────────────────
     if (ledger) {
-      ledger.completedAt = new Date().toISOString();
-      jobService.updateJobLocally(job.id, { _darkroomProBatchLedger: ledger });
+      completeLedger(ledger);
+      jobService.updateJobLocally(job.id, { [BATCH_LEDGER_FIELD]: ledger });
     }
 
     logger.info('Job sent via Darkroom Pro (routed)', {

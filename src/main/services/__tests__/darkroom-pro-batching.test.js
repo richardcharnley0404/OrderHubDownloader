@@ -187,7 +187,7 @@ test('cap null → exactly one emit, stem = job_name, no _1 suffix, no ledger', 
   assert.equal('destPaths' in result, false);
   assert.equal('ledger' in result,    false);
   // No ledger persisted.
-  const ledgerWrites = calls.updateJobLocally.filter(c => c.updates._darkroomProBatchLedger);
+  const ledgerWrites = calls.updateJobLocally.filter(c => c.updates._batchLedger);
   assert.equal(ledgerWrites.length, 0, 'no ledger writes on unsplit dispatch');
   // Job not stored beyond markInProduction (which is stubbed here, so store stays empty).
   assert.equal(store.size, 0);
@@ -302,7 +302,7 @@ test('batch 4 of 6 throws → ledger records 1-3 succeeded + batch 4 error, job 
   // Ledger reflects the truth: 3 successes + 1 error entry. Read from the
   // in-memory store (last write wins per key).
   const stored = store.get(42);
-  const ledger = stored._darkroomProBatchLedger;
+  const ledger = stored._batchLedger;
   assert.ok(ledger);
   assert.equal(ledger.totalBatches, 6);
   assert.equal(ledger.batches.length, 4);
@@ -348,8 +348,8 @@ test('ledger is persisted after EVERY batch — at the moment batch 4 starts, ba
       // would leave on disk. `store.get(42)` here is the in-memory
       // jobs-cache surrogate the harness maintains.
       const stored = store.get(42);
-      snapshotAtBatch4Start = stored && stored._darkroomProBatchLedger
-        ? JSON.parse(JSON.stringify(stored._darkroomProBatchLedger))
+      snapshotAtBatch4Start = stored && stored._batchLedger
+        ? JSON.parse(JSON.stringify(stored._batchLedger))
         : null;
       throw new Error('simulated crash before batch 4 completes');
     }
@@ -383,7 +383,7 @@ test('ledger survives a simulated restart — the stored jobs-cache entry carrie
   // whatever the last updateJobLocally write persisted.
   const stored = store.get(42);
   assert.ok(stored, 'jobs-cache entry survives');
-  const ledger = stored._darkroomProBatchLedger;
+  const ledger = stored._batchLedger;
   assert.ok(ledger, 'ledger is on the persisted entry');
   assert.equal(ledger.totalBatches, 3);
   assert.equal(ledger.batches.length, 3);

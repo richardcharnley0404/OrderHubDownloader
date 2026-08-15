@@ -3232,14 +3232,16 @@ button {
   cursor: help;
 }
 
-/* ── Darkroom Pro batched dispatch (M6, 2026-08-10) ──────────────────────
-   "Sent as N batches" chip on the job-list row. Rendered only when
-   job._darkroomProBatchLedger exists, i.e. when M4 split the dispatch —
-   single-batch dispatches leave no ledger, so unaffected labs see no
-   change. Green on full success, red on partial failure (ledger.completedAt
-   is null when the loop threw). Matches the M2 hold-chip geometry so the
-   two chips align in the flags-cell. Tooltip carries per-batch filenames
-   and outcomes. */
+/* ── Batched dispatch chip (M6 of v1.10.0 Darkroom Pro work) ─────────────
+   "Sent as N batches" chip on the job-list row. Rendered only when a
+   batch ledger exists on the job — the pre-M2 field name was
+   `_darkroomProBatchLedger`; M2 of docs/epson-batch-splitting-brief.md
+   generalised it to `_batchLedger` so DPOF controllers can use the
+   same chip. Single-batch dispatches leave no ledger, so unaffected
+   labs see no change. Green on full success, red on partial failure
+   (ledger.completedAt is null when the loop threw). Matches the M2
+   hold-chip geometry so the two chips align in the flags-cell.
+   Tooltip carries per-batch filenames and outcomes. */
 /* Same block-stack posture as .hold-review-chip — see the note there.
    Kept as its own rule (rather than a shared selector) because the two
    chips have distinct colour tokens and it's easier to spot the pair

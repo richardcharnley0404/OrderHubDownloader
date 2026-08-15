@@ -1187,17 +1187,27 @@ function renderJobTable(jobs) {
       flagsHtml += `<span class="hold-review-chip" title="${escapeHtml(tipText)}">${escapeHtml(chipLabel)}</span>`;
     }
 
-    // Batched Darkroom Pro dispatch chip (M6). M4 populates
-    // job._darkroomProBatchLedger on split dispatches only — the byte-for-byte
-    // single-batch path leaves no ledger, so this chip is absent there and the
-    // grid stays visually identical for every lab that hasn't set a cap.
-    // completedAt is the pass/fail signal: only stamped once every batch has
-    // been written successfully; partial failure leaves it null and the
-    // batches array short (the loop stops at the throw). Tooltip carries the
+    // Batched dispatch chip (M6 of v1.10.0 Darkroom Pro work; generalised in
+    // M2 of docs/epson-batch-splitting-brief.md). Print-service populates a
+    // ledger on split dispatches only — the byte-for-byte single-batch path
+    // leaves no ledger, so this chip is absent there and the grid stays
+    // visually identical for every lab that hasn't set a cap. completedAt
+    // is the pass/fail signal: only stamped once every batch has reached
+    // its terminal state; partial failure leaves it null and the batches
+    // array short (the loop stops at the throw). Tooltip carries the
     // per-batch filenames + outcomes so the operator can reconcile against
-    // Darkroom Pro's queue without opening the Activity Log.
-    if (job._darkroomProBatchLedger) {
-      const ledger    = job._darkroomProBatchLedger;
+    // the controller's queue without opening the Activity Log.
+    //
+    // Field fallback (M2, 2026-08-15). M2 renamed the ledger's storage
+    // slot from `_darkroomProBatchLedger` to the canonical `_batchLedger`
+    // shared by both controller families. Jobs already dispatched under a
+    // pre-M2 build still carry the old field, so we read from the new one
+    // first and fall back to the old one — matches
+    // src/shared/batchLedger.js `readLedger()` (inlined here because
+    // renderer.js is vanilla, no shared-module requires).
+    const _batchLedger = job._batchLedger || job._darkroomProBatchLedger;
+    if (_batchLedger) {
+      const ledger    = _batchLedger;
       const total     = ledger.totalBatches;
       const batches   = Array.isArray(ledger.batches) ? ledger.batches : [];
       const succeeded = batches.filter(b => b && b.outcome === 'success').length;
@@ -1208,8 +1218,8 @@ function renderJobTable(jobs) {
         .map(b => `${b.filename || '(unnamed)'} — ${b.outcome}${b.error ? `: ${b.error}` : ''}`)
         .join('\n');
       const header    = partial
-        ? `Darkroom Pro batches: ${succeeded} of ${total} written, ${total - succeeded} not written. Cap ${ledger.cap}, ${ledger.totalPrints} prints total.`
-        : `Darkroom Pro batches: ${total} of ${total} written. Cap ${ledger.cap}, ${ledger.totalPrints} prints total.`;
+        ? `Batches: ${succeeded} of ${total} written, ${total - succeeded} not written. Cap ${ledger.cap}, ${ledger.totalPrints} prints total.`
+        : `Batches: ${total} of ${total} written. Cap ${ledger.cap}, ${ledger.totalPrints} prints total.`;
       const tipText   = perBatch ? `${header}\n\n${perBatch}` : header;
       flagsHtml += `<span class="${chipClass}" title="${escapeHtml(tipText)}">${escapeHtml(chipText)}</span>`;
     }
