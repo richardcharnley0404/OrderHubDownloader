@@ -77,7 +77,7 @@ const REASON_TEXT = Object.freeze({
  *   Routing. Supplied by the caller (job-service / runAutoPrint) which
  *   reads it from routing-service.getRoutingHeldProcesses() — passed in
  *   so this module stays pure and electron-store-free for node:test.
- * @param {(job: object) => {cap:number, prints:number}|null} [ctx.batchThresholdCheck] -
+ * @param {(job: object) => {cap:number, prints:number, autoSendBatches?:boolean}|null} [ctx.batchThresholdCheck] -
  *   Per-job resolver returning both sides of the comparison already
  *   evaluated: the controller's maxPrintsPerJob cap (positive integer)
  *   AND the job's total print count. Returns null when the check
@@ -93,6 +93,15 @@ const REASON_TEXT = Object.freeze({
  *   `job.quantity`: the latter carries different meanings across job
  *   sources (Pixfizz vs manual vs film) — see the M3 investigation
  *   notes and `s3-artwork-downloader.js:434-479`.
+ *
+ *   Optional `autoSendBatches` (added 2026-08-15): when the resolving
+ *   controller has this set to `true`, the OVER_BATCH_THRESHOLD reason
+ *   is suppressed even when prints > cap. Auto-print then dispatches
+ *   the job and the existing splitter writes the multiple `_1.txt`,
+ *   `_2.txt` files unchanged — this only decides whether the job
+ *   waits, not how it dispatches. All other hold reasons still fire.
+ *   Any non-`true` value (undefined, false, null, non-boolean) leaves
+ *   the reason emission intact.
  *
  *   Backward-compatible: when the resolver is absent OR returns null,
  *   the batch-threshold reason is never emitted (M1 behaviour).
@@ -163,6 +172,12 @@ function computeHoldForReview(job, ctx = {}) {
       r
       && Number.isFinite(r.cap) && r.cap > 0
       && Number.isFinite(r.prints) && r.prints > r.cap
+      // autoSendBatches (M2, 2026-08-15): controller opted into
+      // unattended dispatch of over-cap jobs. Strict `=== true` so a
+      // stray truthy non-boolean (e.g. a string from a hand-edited
+      // config) can't silently suppress the operator-review gate; the
+      // IPC boundary validates on save, this is defence-in-depth.
+      && r.autoSendBatches !== true
     ) {
       reasons.push(REASON.OVER_BATCH_THRESHOLD);
     }

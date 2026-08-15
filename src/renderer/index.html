@@ -1412,11 +1412,22 @@
         </label>
       </div>
 
-      <!-- Darkroom Pro-only: batch-splitting cap. Blank = no limit. -->
+      <!-- Darkroom Pro-only: batch-splitting cap. Blank = no limit.
+           M2 (2026-08-15) autoSendBatches: the tick to the right of the
+           cap input lets operators opt into unattended dispatch of
+           over-cap jobs. Off by default; only meaningful when a cap is
+           also set (the tick disables itself when the input is blank). -->
       <div class="form-group" id="ocMaxPrintsPerJobGroup" style="display:none">
         <label for="ocMaxPrintsPerJob">Maximum prints per job <span style="font-weight:normal;color:#888">(optional)</span></label>
-        <input type="number" id="ocMaxPrintsPerJob" placeholder="e.g. 100" min="1" max="10000" style="width:120px;">
-        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Jobs whose total print count exceeds this are held for operator review and, when released, are written as multiple <code>{job_name}_1.txt</code>, <code>{job_name}_2.txt</code>… files so Darkroom Pro treats them as separate orders. Leave blank for no limit. Counts prints (image × copies), not images.</small>
+        <div class="oc-max-prints-row" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+          <input type="number" id="ocMaxPrintsPerJob" placeholder="e.g. 100" min="1" max="10000" style="width:120px;">
+          <label class="modal-checkbox" id="ocAutoSendBatchesLabel" style="margin:0;font-size:12px">
+            <input type="checkbox" id="ocAutoSendBatches">
+            <span>Send batches automatically</span>
+          </label>
+        </div>
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Jobs whose total print count exceeds this are written as multiple <code>{job_name}_1.txt</code>, <code>{job_name}_2.txt</code>… files so Darkroom Pro treats them as separate orders. By default the job is held for operator review first — Send to Print splits and dispatches it. Tick "Send batches automatically" to skip the review and dispatch unattended. Leave blank for no limit. Counts prints (image × copies), not images.</small>
+        <small id="ocAutoSendBatchesHelp" style="color:var(--text-muted,#888);display:block;margin-top:4px">When ticked, over-the-cap jobs are split and dispatched without operator action. Off by default. Requires a maximum above.</small>
       </div>
 
       <!-- Fuji PIC Pro-only: order-level submission. Off by default. -->

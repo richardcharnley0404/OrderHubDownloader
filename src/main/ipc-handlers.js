@@ -1071,6 +1071,28 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
         }
       }
 
+      // M2 (2026-08-15): autoSendBatches must be a strict boolean when
+      // present. Renderer sends checkbox.checked (always boolean); the
+      // IPC mirror stops a malformed payload (external caller, hand-
+      // edited JSON round-tripped through the config) from persisting
+      // a truthy non-boolean that would then silently suppress the
+      // operator-review gate on every over-cap job. Undefined is fine —
+      // existing controllers behave as before (feature off).
+      if (
+        controller &&
+        controller.type === 'darkroompro' &&
+        controller.autoSendBatches !== undefined &&
+        typeof controller.autoSendBatches !== 'boolean'
+      ) {
+        const msg = 'autoSendBatches must be a boolean.';
+        logger.logWarning('[routing] save-controller rejected — invalid autoSendBatches', {
+          controllerId:    controller.id,
+          name:            controller.name,
+          autoSendBatches: controller.autoSendBatches,
+        });
+        return { success: false, error: msg };
+      }
+
       // Fuji PIC Pro — order-level submission wait cap. Same posture as
       // the darkroompro cap above: renderer already validates, the IPC
       // mirror stops a malformed payload (future renderer bug, external
@@ -3202,7 +3224,11 @@ async function _runFujiPicProOrderMergePass(jobs, controllers, cutoff) {
       const { readManifestPrintCountSync } = require('./services/manifest-print-count');
       const prints = readManifestPrintCountSync(j);
       if (prints == null) return null;
-      return { cap: r.maxPrintsPerJob, prints };
+      // M2 (2026-08-15): forward autoSendBatches so the per-job
+      // eligibility gate matches the dispatch gate (both must agree —
+      // an autosendable job is dispatched immediately, not treated as
+      // ineligible for the merge-order pre-pass).
+      return { cap: r.maxPrintsPerJob, prints, autoSendBatches: r.autoSendBatches === true };
     } catch (_e) {
       return null;
     }
@@ -3600,7 +3626,11 @@ async function runAutoPrint() {
             const { readManifestPrintCountSync } = require('../services/manifest-print-count');
             const prints = readManifestPrintCountSync(j);
             if (prints == null) return null;
-            return { cap: r.maxPrintsPerJob, prints };
+            // M2 (2026-08-15): autoSendBatches suppresses the hold so
+            // this dispatch gate lets the job through and the existing
+            // splitter writes _1.txt, _2.txt… unchanged. Strict === true
+            // so a malformed stored value defaults to feature-off.
+            return { cap: r.maxPrintsPerJob, prints, autoSendBatches: r.autoSendBatches === true };
           } catch (_e) {
             return null;
           }

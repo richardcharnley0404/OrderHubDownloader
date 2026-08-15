@@ -353,6 +353,119 @@ test('Batch threshold: OVER_BATCH_THRESHOLD has operator-readable text in REASON
   assert.ok(/send to print/i.test(t), 'tooltip should tell the operator what to do next');
 });
 
+// ── autoSendBatches (M2, 2026-08-15) ────────────────────────────────────────
+//
+// Opt-in on the resolving Darkroom Pro controller: when the resolver returns
+// { …, autoSendBatches: true }, the OVER_BATCH_THRESHOLD reason is suppressed
+// so auto-print dispatches the job and the existing splitter writes the
+// multiple _1.txt, _2.txt files unchanged. Only that one reason is suppressed
+// — every other hold reason (manual-source, routing-hold, …) still fires,
+// stacked as before.
+//
+// Strict `=== true` check: a truthy non-boolean (e.g. a string "true" from
+// hand-edited config) must NOT silently suppress the operator-review gate.
+
+const checkOfAuto = (cap, prints, autoSendBatches) =>
+  (() => ({ cap, prints, autoSendBatches }));
+
+test('autoSendBatches: cap exceeded + off → OVER_BATCH_THRESHOLD raised (regression baseline)', () => {
+  // Explicit false — proves the flag being present-and-false behaves
+  // identically to it being absent (M1/M3 behaviour).
+  const r = computeHoldForReview(baseJob, { batchThresholdCheck: checkOfAuto(100, 1200, false) });
+  assert.equal(r._holdForReview, true);
+  assert.deepEqual(r._holdReasons, [REASON.OVER_BATCH_THRESHOLD]);
+});
+
+test('autoSendBatches: cap exceeded + on → OVER_BATCH_THRESHOLD suppressed, job dispatches unattended', () => {
+  const r = computeHoldForReview(baseJob, { batchThresholdCheck: checkOfAuto(100, 1200, true) });
+  assert.equal(r._holdForReview, false, 'auto-print gate reads _holdForReview; false = dispatch');
+  assert.deepEqual(r._holdReasons, [], 'no reason emitted → chip does not render');
+});
+
+test('autoSendBatches: cap exceeded + on + manual-source → still held (only batch reason is suppressed)', () => {
+  // The whole point of the "only one reason" contract — auto-send never
+  // unhides a job that is held for another reason. Manual-review is the
+  // canonical example; routing-hold behaves the same way (below).
+  const r = computeHoldForReview(
+    { artwork_source: 'manual', artwork_files: [] },
+    { batchThresholdCheck: checkOfAuto(100, 1200, true) },
+  );
+  assert.equal(r._holdForReview, true);
+  assert.deepEqual(r._holdReasons, [REASON.MANUAL_SOURCE],
+    'manual-source still fires; only OVER_BATCH_THRESHOLD is suppressed');
+});
+
+test('autoSendBatches: cap exceeded + on + routing-hold → still held, only batch reason suppressed', () => {
+  const r = computeHoldForReview(
+    { artwork_source: 'pixfizz', artwork_files: [], process: 'Lab' },
+    {
+      routingHeldProcesses: new Set(['Lab']),
+      batchThresholdCheck:  checkOfAuto(100, 1200, true),
+    },
+  );
+  assert.equal(r._holdForReview, true);
+  assert.deepEqual(r._holdReasons, [REASON.ROUTING_HOLD]);
+});
+
+test('autoSendBatches: no cap set + on → no reason either way (resolver returned null contract holds)', () => {
+  // When there is no cap the resolver returns null altogether — the module
+  // never sees autoSendBatches, and the reason cannot fire. This test locks
+  // that "on without a cap is a no-op" invariant so an operator ticking
+  // the box without a maximum can't produce surprising behaviour.
+  const r = computeHoldForReview(baseJob, { batchThresholdCheck: () => null });
+  assert.equal(r._holdForReview, false);
+  assert.deepEqual(r._holdReasons, []);
+});
+
+test('autoSendBatches: cap NOT exceeded + on → no reason (auto-send only bites over-cap)', () => {
+  // Under-cap jobs never trip the reason regardless of the flag; check the
+  // ordering is right (auto-send is a post-comparison suppression, not a
+  // pre-comparison short-circuit that could hide arithmetic bugs).
+  const r = computeHoldForReview(baseJob, { batchThresholdCheck: checkOfAuto(100, 50, true) });
+  assert.equal(r._holdForReview, false);
+  assert.deepEqual(r._holdReasons, []);
+});
+
+test('autoSendBatches: prints equal to cap + on → not held (cap-inclusive contract unchanged)', () => {
+  const r = computeHoldForReview(baseJob, { batchThresholdCheck: checkOfAuto(100, 100, true) });
+  assert.equal(r._holdForReview, false);
+});
+
+test('autoSendBatches: absent from the resolver return → treated as false (backward compat)', () => {
+  // Pre-M2 callers return { cap, prints } with no autoSendBatches field.
+  // Must behave exactly like the old code: reason fires when over-cap.
+  const r = computeHoldForReview(baseJob, { batchThresholdCheck: () => ({ cap: 100, prints: 1200 }) });
+  assert.equal(r._holdForReview, true);
+  assert.deepEqual(r._holdReasons, [REASON.OVER_BATCH_THRESHOLD]);
+});
+
+test('autoSendBatches: truthy non-boolean does NOT suppress — strict === true only', () => {
+  // Defence-in-depth: the IPC boundary rejects non-booleans on save, but
+  // the shared derivation must not depend on that guard. A stray string
+  // (from a hand-edited config that round-tripped through legacy code)
+  // must NOT silently disable the operator-review gate.
+  for (const bad of ['true', 1, {}, [], 'yes']) {
+    const r = computeHoldForReview(baseJob, {
+      batchThresholdCheck: () => ({ cap: 100, prints: 1200, autoSendBatches: bad }),
+    });
+    assert.equal(r._holdForReview, true,
+      `autoSendBatches: ${JSON.stringify(bad)} must NOT suppress the reason`);
+    assert.deepEqual(r._holdReasons, [REASON.OVER_BATCH_THRESHOLD]);
+  }
+});
+
+test('autoSendBatches: falsy non-boolean leaves the reason intact (defensive)', () => {
+  // Same principle from the other side — the shared derivation should
+  // only recognise strict `true` as opt-in. Anything else preserves M1
+  // behaviour.
+  for (const falsy of [null, undefined, 0, '', false]) {
+    const r = computeHoldForReview(baseJob, {
+      batchThresholdCheck: () => ({ cap: 100, prints: 1200, autoSendBatches: falsy }),
+    });
+    assert.equal(r._holdForReview, true, `falsy ${JSON.stringify(falsy)} → reason still fires`);
+  }
+});
+
 // ── Order-merge-waiting (M5, 2026-08-14) ────────────────────────────────────
 //
 // Fires for a Fuji PIC Pro job that routes to a merge-enabled controller and

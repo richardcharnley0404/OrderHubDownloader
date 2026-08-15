@@ -186,5 +186,125 @@ test('resolveRouteForController: DPOF controller does NOT surface maxPrintsPerJo
   assert.equal(Object.prototype.hasOwnProperty.call(route, 'maxPrintsPerJob'), false);
 });
 
+// ── autoSendBatches (M2, 2026-08-15) ─────────────────────────────────────────
+//
+// Companion to maxPrintsPerJob: darkroompro-only opt-in that suppresses the
+// over-batch-threshold operator-review gate so auto-print dispatches the
+// job and the existing splitter writes _1.txt / _2.txt files unchanged. All
+// three darkroompro literals (main resolveRoute, _channelMappingOverride,
+// resolveRouteForController) carry the field so a reassigned or overridden
+// route sees the same behaviour as the primary path — drift on any of them
+// would silently split-and-hold jobs the operator explicitly opted OUT of
+// reviewing.
+//
+// Strict === true coercion: a stray non-boolean (hand-edited config,
+// external caller, legacy fixture) surfaces as `false`, matching the
+// M2 "feature must fail closed" posture in holdForReview.js.
+
+function seedDarkroomProAuto(autoSendBatches, maxPrintsPerJob = 100) {
+  const controller = {
+    id:              CTRL_ID,
+    name:            'Darkroom Pro Station 1',
+    type:            'darkroompro',
+    outputPath:      '/out',
+    maxPrintsPerJob,
+  };
+  if (autoSendBatches !== undefined) controller.autoSendBatches = autoSendBatches;
+  __seed({
+    processControllerMappings: [{ process: 'Lab', controllerId: CTRL_ID }],
+    orderControllers: [controller],
+    channelMappings: [{
+      id:            'cm1',
+      controllerId:  CTRL_ID,
+      productCode:   PRODUCT,
+      options:       [],
+    }],
+  });
+}
+
+test('autoSendBatches: absent on the controller → route carries `false`', () => {
+  seedDarkroomProAuto(undefined);
+  const route = resolveRoute(job);
+  assert.equal(route.controllerType, 'darkroompro');
+  assert.equal(route.autoSendBatches, false, 'default state must be feature-off');
+});
+
+test('autoSendBatches: `true` on the controller → route carries `true`', () => {
+  seedDarkroomProAuto(true);
+  assert.equal(resolveRoute(job).autoSendBatches, true);
+});
+
+test('autoSendBatches: `false` on the controller → route carries `false`', () => {
+  seedDarkroomProAuto(false);
+  assert.equal(resolveRoute(job).autoSendBatches, false);
+});
+
+for (const bad of [1, 'true', 'yes', {}, [], null]) {
+  test(`autoSendBatches: non-boolean ${JSON.stringify(bad)} coerces to false on the route`, () => {
+    seedDarkroomProAuto(bad);
+    assert.equal(resolveRoute(job).autoSendBatches, false,
+      'strict === true coercion — anything else is feature-off');
+  });
+}
+
+test('autoSendBatches: _channelMappingOverride branch carries the field too', () => {
+  // The override branch is a separate literal that must stay in parity
+  // with the main branch — see the "drift on that branch has caused a
+  // live bug before" comment in the brief.
+  seedDarkroomProAuto(true);
+  const route = resolveRoute({ ...job, _channelMappingOverride: 'cm1' });
+  assert.equal(route.controllerType, 'darkroompro');
+  assert.equal(route.autoSendBatches, true);
+});
+
+test('autoSendBatches: _channelMappingOverride branch defaults to false when absent', () => {
+  seedDarkroomProAuto(undefined);
+  const route = resolveRoute({ ...job, _channelMappingOverride: 'cm1' });
+  assert.equal(route.autoSendBatches, false);
+});
+
+test('autoSendBatches: resolveRouteForController darkroompro branch carries the field', () => {
+  seedDarkroomProAuto(true);
+  const route = resolveRouteForController(job, CTRL_ID);
+  assert.equal(route.autoSendBatches, true);
+});
+
+test('autoSendBatches: resolveRouteForController darkroompro branch defaults to false when absent', () => {
+  seedDarkroomProAuto(undefined);
+  const route = resolveRouteForController(job, CTRL_ID);
+  assert.equal(route.autoSendBatches, false);
+});
+
+test('autoSendBatches: non-darkroompro routes do NOT surface the field', () => {
+  // Same scoping discipline as maxPrintsPerJob — the field is meaningless
+  // on other controller types (no splitter to skip a hold for). A stale
+  // value must not be advertised on the route.
+  __seed({
+    processControllerMappings: [{ process: 'Lab', controllerId: 'ctrl-dpof' }],
+    orderControllers: [{
+      id:               'ctrl-dpof',
+      name:             'Epson SureLab',
+      type:             'epson',
+      outputPath:       '/dpof',
+      autoSendBatches:  true,
+    }],
+    channelMappings: [{
+      id:            'cmd',
+      controllerId:  'ctrl-dpof',
+      productCode:   PRODUCT,
+      options:       [],
+      channelNumber: 1,
+      printSizeCode: 'KG',
+    }],
+  });
+  const route = resolveRoute(job);
+  assert.equal(route.type, 'controller');
+  assert.equal(route.controllerType, 'epson');
+  assert.equal(Object.prototype.hasOwnProperty.call(route, 'autoSendBatches'), false);
+
+  const rrfc = resolveRouteForController(job, 'ctrl-dpof');
+  assert.equal(Object.prototype.hasOwnProperty.call(rrfc, 'autoSendBatches'), false);
+});
+
 // Restore require shim hygiene for any later-loaded modules in the same worker.
 test.after(() => { Module.prototype.require = __originalRequire; });

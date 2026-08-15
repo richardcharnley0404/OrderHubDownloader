@@ -295,6 +295,10 @@ function resolveRoute(job) {
               Number.isFinite(overrideCtrl.maxPrintsPerJob) && overrideCtrl.maxPrintsPerJob > 0
                 ? overrideCtrl.maxPrintsPerJob
                 : null,
+            // M2 (2026-08-15): parity with the main darkroompro literal
+            // below. Strict boolean coercion — anything not === true is
+            // false. Feature only bites when a cap is also set.
+            autoSendBatches: overrideCtrl.autoSendBatches === true,
           };
         }
 
@@ -472,6 +476,12 @@ function resolveRoute(job) {
         Number.isFinite(controller.maxPrintsPerJob) && controller.maxPrintsPerJob > 0
           ? controller.maxPrintsPerJob
           : null,
+      // M2 (2026-08-15) auto-send-batches: when true AND a cap is set,
+      // holdForReview suppresses the over-batch-threshold reason so
+      // auto-print dispatches unattended and the existing splitter
+      // writes {job_name}_1.txt, _2.txt… Strict === true coercion so
+      // anything malformed defaults to false (feature off).
+      autoSendBatches: controller.autoSendBatches === true,
     };
   }
 
@@ -797,6 +807,10 @@ function resolveRouteForController(job, controllerId) {
       Number.isFinite(controller.maxPrintsPerJob) && controller.maxPrintsPerJob > 0
         ? controller.maxPrintsPerJob
         : null;
+    // M2 (2026-08-15): mirror the two resolveRoute darkroompro literals
+    // so a reassignment-time route carries the same shape as one
+    // resolved through the normal path.
+    shape.autoSendBatches = controller.autoSendBatches === true;
   }
   return shape;
 }

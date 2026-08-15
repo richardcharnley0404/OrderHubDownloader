@@ -54,7 +54,11 @@ function _getBatchThresholdCheck(job) {
       ? job._totalPrintCount
       : null;
     if (prints == null) return null;
-    return { cap: route.maxPrintsPerJob, prints };
+    // M2 (2026-08-15): forward the controller's autoSendBatches flag so
+    // computeHoldForReview can suppress OVER_BATCH_THRESHOLD when the
+    // operator has opted into unattended dispatch. Route already
+    // strict-coerces to boolean.
+    return { cap: route.maxPrintsPerJob, prints, autoSendBatches: route.autoSendBatches === true };
   } catch (_e) {
     return null;
   }

@@ -5190,6 +5190,28 @@ function readMediaTranslations() {
   return result;
 }
 
+// M2 (2026-08-15): the Send-batches-automatically tick is only meaningful
+// when a cap is set. Cap blank → disable the tick and swap the help text
+// so the operator can see why. Called on modal open AND from an `input`
+// listener on the cap field, so the state stays live while the operator
+// edits. Checked state is preserved across disable/enable — hiding the
+// user's intent behind a silent uncheck would be worse UX than showing
+// a disabled tick with a stored `true`.
+function _refreshAutoSendBatchesEnabledState() {
+  const capInput = document.getElementById('ocMaxPrintsPerJob');
+  const cbLabel  = document.getElementById('ocAutoSendBatchesLabel');
+  const cb       = document.getElementById('ocAutoSendBatches');
+  const help     = document.getElementById('ocAutoSendBatchesHelp');
+  if (!capInput || !cbLabel || !cb || !help) return;
+  const enabled = capInput.value.trim() !== '';
+  cb.disabled = !enabled;
+  cbLabel.style.opacity = enabled ? '' : '0.55';
+  cbLabel.style.cursor  = enabled ? '' : 'not-allowed';
+  help.textContent = enabled
+    ? 'When ticked, over-the-cap jobs are split and dispatched without operator action. Off by default.'
+    : 'Set a maximum above to enable this option. When ticked, over-the-cap jobs are split and dispatched without operator action.';
+}
+
 function updateOcTypeFields() {
   const type = document.getElementById('ocType').value;
   const isFujiJobMaker = type === 'fujijobmaker';
@@ -5327,6 +5349,13 @@ function openOrderControllerModal(ctrl = null) {
     isDarkroomProCtrl && Number.isFinite(ctrl.maxPrintsPerJob) && ctrl.maxPrintsPerJob > 0
       ? String(ctrl.maxPrintsPerJob)
       : '';
+  // M2 (2026-08-15) auto-send-batches. Strict === true so a truthy
+  // non-boolean from a hand-edited config still renders as unchecked.
+  // The disabled state is a function of whether the cap input has a
+  // value (see _refreshAutoSendBatchesEnabledState below).
+  document.getElementById('ocAutoSendBatches').checked =
+    isDarkroomProCtrl && ctrl.autoSendBatches === true;
+  _refreshAutoSendBatchesEnabledState();
   // Order-level submission — Fuji PIC Pro only. Checkbox is boolean;
   // blank number field = "use the default" (do not treat null as
   // "wait forever" per the brief). A stray non-numeric or out-of-range
@@ -5703,6 +5732,10 @@ document.getElementById('addOrderControllerBtn').addEventListener('click', () =>
 
 document.getElementById('ocType').addEventListener('change', updateOcTypeFields);
 
+// M2 (2026-08-15): live enable/disable for the auto-send-batches tick as
+// the operator types the cap. See _refreshAutoSendBatchesEnabledState.
+document.getElementById('ocMaxPrintsPerJob').addEventListener('input', _refreshAutoSendBatchesEnabledState);
+
 document.getElementById('ocCancelBtn').addEventListener('click', () => {
   document.getElementById('orderControllerModal').classList.add('hidden');
 });
@@ -5838,6 +5871,13 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
       }
       controller.maxPrintsPerJob = n;
     }
+
+    // M2 (2026-08-15) auto-send-batches. MUST live inside the
+    // `if (type === 'darkroompro')` block — assigning outside would
+    // silently no-op the field on save. That exact bug shipped in
+    // 1.12.0 with the PIC Pro merge flag and cost a release; the
+    // discipline is per-type field, per-type block.
+    controller.autoSendBatches = document.getElementById('ocAutoSendBatches').checked;
 
     // Misconfiguration guard: defining translations without a Paper Type
     // Option Key is meaningless — resolveMedia short-circuits at line 129
