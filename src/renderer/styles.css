@@ -3209,9 +3209,16 @@ button {
    _holdForReview gate is server-side computed; this chip is the
    operator-facing surface. Colours via --app-amber* tokens so the warn
    semantic matches the rest of the app and tracks light/dark themes. */
+/* Block-level + shrink-to-fit width + auto side-margins so a hold chip
+   sits centred under the flag icons on its own row inside .flags-cell.
+   Before 2026-08-15 the chip was inline-block; when it and the batch
+   chip were both present they lined up side-by-side and forced a
+   horizontal scroll on the Jobs table. Chip text keeps its own
+   `white-space: nowrap` so the label never wraps inside the box. */
 .hold-review-chip {
-  display: inline-block;
-  margin: 0 4px;
+  display: block;
+  width: fit-content;
+  margin: 2px auto;
   padding: 2px 8px;
   border-radius: 3px;
   font-size: 10px;
@@ -3223,7 +3230,6 @@ button {
   border: 1px solid var(--app-amber);
   white-space: nowrap;
   cursor: help;
-  vertical-align: middle;
 }
 
 /* ── Darkroom Pro batched dispatch (M6, 2026-08-10) ──────────────────────
@@ -3234,9 +3240,14 @@ button {
    is null when the loop threw). Matches the M2 hold-chip geometry so the
    two chips align in the flags-cell. Tooltip carries per-batch filenames
    and outcomes. */
+/* Same block-stack posture as .hold-review-chip — see the note there.
+   Kept as its own rule (rather than a shared selector) because the two
+   chips have distinct colour tokens and it's easier to spot the pair
+   when they're each explicit about their block layout. */
 .batch-dispatch-chip {
-  display: inline-block;
-  margin: 0 4px;
+  display: block;
+  width: fit-content;
+  margin: 2px auto;
   padding: 2px 8px;
   border-radius: 3px;
   font-size: 10px;
@@ -3248,7 +3259,6 @@ button {
   border: 1px solid var(--app-green);
   white-space: nowrap;
   cursor: help;
-  vertical-align: middle;
 }
 .batch-dispatch-chip--error {
   background: var(--app-red-weak);
