@@ -11,6 +11,13 @@ const logger = require('./services/logger');
 const updater = require('./updater');
 const { runIntegrityQuarantineMigration } = require('./services/integrity-quarantine-migration');
 const backupServiceModule = require('./services/backup-service');
+// M4a of docs/ftp-sources-brief.md: the FTP-source scheduler owns
+// one setInterval per enabled source. Reconciled at boot (immediately
+// after IPC handlers register — see whenReady block below) and stopped
+// in before-quit. The "works until first restart" failure mode is the
+// worst thing this feature can do, so the boot wire is tested in
+// src/main/services/__tests__/ftp-source-scheduler-boot-wiring.test.js.
+const ftpSourceScheduler  = require('./services/ftp-source-scheduler');
 
 // Disable libvips' operation cache. The cache retains file descriptors on
 // recently-read images so subsequent passes are faster — but on a slow SMB
@@ -59,6 +66,24 @@ if (!gotTheLock) {
 
     // Setup IPC handlers (pass windowManager so jobs:updated events can reach renderer)
     setupIpcHandlers(pollingService, ftpService, windowManager);
+
+    // M4a: wire the FTP-source scheduler at boot. MUST happen here (after
+    // config-service is loaded, before we call anything user-facing) so
+    // enabled sources start polling on their own cadence without waiting
+    // for the operator to open Settings and hit Save. The
+    // "reconciled-only-on-save" failure mode would silently mean sources
+    // stop polling after every restart — the worst thing this feature
+    // can do. Boot wiring pinned by the test file cited at file-top.
+    try {
+      ftpSourceScheduler.reconcile(configService.getFtpSources());
+    } catch (err) {
+      // Reconcile shouldn't throw — the scheduler swallows per-source
+      // invalid-interval issues with a warn. But if it does (a
+      // corrupted store, an unexpected shape change), don't take out
+      // the whole boot; the operator can still fix the config via
+      // Settings once the app comes up.
+      logger.logError('[ftp-sources] scheduler reconcile at boot threw', err);
+    }
 
     // Create main window
     windowManager.createWindow();
@@ -200,6 +225,13 @@ if (!gotTheLock) {
     if (pollingService.isRunning()) {
       pollingService.stop();
     }
+
+    // M4a: stop FTP-source timers. `.unref()` means they don't hold the
+    // process open, so this is belt-and-braces — but a still-scheduled
+    // tick between quit-signal and process-exit could fire runFtpSourcePass
+    // one more time and try to write to an SMB share that Windows has
+    // already started tearing down. Stop is cheap and idempotent.
+    try { ftpSourceScheduler.stop(); } catch (_) { /* best-effort */ }
 
     // Release the orientation-service handle and tear down the AI inference
     // host (utilityProcess). Fire-and-forget — we don't want a slow shutdown

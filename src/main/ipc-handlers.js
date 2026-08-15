@@ -443,6 +443,129 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
     }
   });
 
+  // ── FTP Sources (M4a of docs/ftp-sources-brief.md) ─────────────────────
+  //
+  // Per-source IPC per Option F: general Settings save NEVER round-trips
+  // ftpSources — each source is saved individually through save-source /
+  // delete-source below. One bad row can only reject its own save, not
+  // every other setting in the Downloads / Connection / Order XML blocks.
+  //
+  // After any successful save or delete, we reconcile the scheduler so
+  // timers reflect current state without an app restart.
+  //
+  // Scope boundary: none of these handlers touch job-service,
+  // routing-service, print-service, or runAutoPrint. Files moved by
+  // this feature never become jobs.
+
+  const ftpSourceScheduler   = require('./services/ftp-source-scheduler');
+  const { testSourceConnection } = require('./services/ftp-source-service');
+
+  // Return the full list of sources, ciphertext stripped, merged with
+  // per-source scheduler status (running / lastRunAt / lastResult). The
+  // renderer polls this on Downloads tab load + after each save/delete.
+  ipcMain.handle('ohd:ftp-sources:list-sources', async () => {
+    try {
+      const rawSources = configService.getFtpSources();
+      const statusById = new Map(
+        ftpSourceScheduler.getStatuses().map((s) => [s.sourceId, s]),
+      );
+      const sources = rawSources.map((s) => {
+        const { passwordEncrypted, ...rest } = s;
+        const status = statusById.get(s.id) || null;
+        return {
+          ...rest,
+          hasPassword: Boolean(passwordEncrypted),
+          running:    status ? status.running    : false,
+          lastRunAt:  status ? status.lastRunAt  : null,
+          lastResult: status ? status.lastResult : null,
+        };
+      });
+      return { success: true, sources };
+    } catch (err) {
+      logger.logError('[ftp-sources] list failed', err);
+      return { success: false, error: err.message };
+    }
+  });
+
+  // Save (create or update) one source. Validation lives inside
+  // _sanitiseFtpSources via configService.saveFtpSource — reject-on-
+  // invalid with a useful message. Reconciles the scheduler on success
+  // so the operator's edit takes effect without a restart.
+  ipcMain.handle('ohd:ftp-sources:save-source', async (event, source) => {
+    try {
+      const saved = configService.saveFtpSource(source);
+      // Never send ciphertext back to the renderer — same boundary as
+      // ohd:ftp-sources:list-sources above.
+      const { passwordEncrypted, ...rest } = saved;
+      const clean = { ...rest, hasPassword: Boolean(passwordEncrypted) };
+
+      ftpSourceScheduler.reconcile(configService.getFtpSources());
+      return { success: true, source: clean };
+    } catch (err) {
+      // The sanitiser's throws are already operator-actionable (M1 audit:
+      // every throw names the source + wrong field). Log at warn so
+      // repeated invalid saves are traceable without spamming error.
+      logger.logWarning('[ftp-sources] save rejected', {
+        sourceName: source && source.name,
+        error:      err.message,
+      });
+      return { success: false, error: err.message };
+    }
+  });
+
+  // Delete one source by id. Idempotent — deleting a non-existent id
+  // returns success with `existed:false` so the renderer can distinguish
+  // "operator raced two delete clicks" from "actually removed" for its
+  // toast text if it cares.
+  ipcMain.handle('ohd:ftp-sources:delete-source', async (event, id) => {
+    try {
+      if (typeof id !== 'string' || !id) {
+        return { success: false, error: 'id is required' };
+      }
+      const result = configService.deleteFtpSource(id);
+      ftpSourceScheduler.reconcile(configService.getFtpSources());
+      return { success: true, existed: result.existed };
+    } catch (err) {
+      logger.logError('[ftp-sources] delete failed', err, { id });
+      return { success: false, error: err.message };
+    }
+  });
+
+  // Test-connection button (brief §M4: "the single highest-value control
+  // in the feature"). Accepts a source shape with either freshly-typed
+  // `password` plaintext OR stored `passwordEncrypted` — see
+  // testSourceConnection docblock for the precedence rule.
+  //
+  // PLAINTEXT-IN-FLIGHT: this is the one place in the feature where the
+  // password crosses the IPC boundary in the clear. The service function
+  // handles scrubbing on every error path; this handler adds a defensive
+  // wrapper that scrubs any accidental throw from OUTSIDE
+  // testSourceConnection (unusual, but the invariant matters more than
+  // the belt-and-braces cost). NEVER log the password field.
+  ipcMain.handle('ohd:ftp-sources:test-connection', async (event, source) => {
+    try {
+      if (!source || typeof source !== 'object') {
+        return { success: false, error: 'source is required' };
+      }
+      return await testSourceConnection(source);
+    } catch (err) {
+      // Defensive: testSourceConnection is designed to never throw
+      // (returns {success:false} on every error path), but a require
+      // failure or programmer error could bubble up here. Scrub the
+      // password from whatever the message says before returning.
+      const { _scrubPasswordFromString } = require('./services/ftp-source-service');
+      const plaintext = (typeof source.password === 'string' && source.password.length > 0)
+        ? source.password
+        : null;   // encryptedcase — no plaintext available here to scrub
+      const raw   = err && err.message ? String(err.message) : 'Unknown error';
+      const safe  = plaintext ? _scrubPasswordFromString(raw, plaintext) : raw;
+      logger.logError('[ftp-sources] test-connection threw (unexpected)', err, {
+        sourceName: source.name,
+      });
+      return { success: false, error: safe };
+    }
+  });
+
   // Test S3 connection
   ipcMain.handle('s3:testConnection', async (event, s3Config) => {
     try {

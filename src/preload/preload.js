@@ -41,6 +41,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   orderXmlListParserFormats: () => ipcRenderer.invoke('orderXml:listParserFormats'),
   orderXmlOpenFolder:  (id, which) => ipcRenderer.invoke('orderXml:openFolder', { id, which }),
 
+  // FTP Sources (M4a) — per-source IPC per Option F. General Settings
+  // save does NOT round-trip ftpSources; each source is saved
+  // individually via ftpSourcesSave / ftpSourcesDelete below.
+  ftpSourcesList:           ()       => ipcRenderer.invoke('ohd:ftp-sources:list-sources'),
+  ftpSourcesSave:           (source) => ipcRenderer.invoke('ohd:ftp-sources:save-source', source),
+  ftpSourcesDelete:         (id)     => ipcRenderer.invoke('ohd:ftp-sources:delete-source', id),
+  ftpSourcesTestConnection: (source) => ipcRenderer.invoke('ohd:ftp-sources:test-connection', source),
+
   // Status updates from main process
   onStatusUpdate: (callback) => ipcRenderer.on('status:update', (event, data) => callback(data)),
 

@@ -1608,6 +1608,74 @@ class ConfigService {
   }
 
   /**
+   * Save one FTP source (M4 Option F). Reads the full list, splices in
+   * the incoming row by id (updates existing / appends new), runs the
+   * whole list through `_sanitiseFtpSources` so per-row validation +
+   * password-encryption + list-uniqueness all fire, then persists.
+   *
+   * Per Option F chosen 2026-08-15: the general Settings save NEVER
+   * round-trips ftpSources — each source is saved individually through
+   * this method so one bad row can only ever reject its own save, not
+   * every other setting in the Downloads / Connection / Order XML
+   * blocks. The `_sanitiseFtpSources` sanitiser still throws on invalid
+   * input; callers (the IPC handler) surface the throw as
+   * `{success:false, error:msg}` to the renderer.
+   *
+   * @param {object} source - one source shape from the M4 modal.
+   *   Required: name, localPath. Password handling: a non-empty
+   *   `password` string is encrypted fresh; an omitted or empty
+   *   `password` preserves the prior ciphertext for the matching id
+   *   (the "leave blank to keep existing" pattern the masked UI
+   *   depends on). See _sanitiseFtpSources docblock for full rules.
+   * @returns {object} the sanitised row as it lives on disk after the
+   *   write — includes the possibly-minted id, encrypted password (if
+   *   any), and every default the sanitiser applied. The IPC handler
+   *   strips the ciphertext before returning to the renderer.
+   */
+  saveFtpSource(source) {
+    if (!source || typeof source !== 'object') {
+      throw new Error('saveFtpSource: source is required');
+    }
+    const list = this.getFtpSources();
+    // Match by id. A source with no id at all is a create — sanitiser
+    // will mint one. Match against an intentional-missing id (undefined)
+    // yields -1, so we append.
+    const idx = source.id
+      ? list.findIndex((s) => s.id === source.id)
+      : -1;
+    const nextList = list.slice();
+    if (idx >= 0) {
+      nextList[idx] = source;
+    } else {
+      nextList.push(source);
+    }
+    const sanitised = this._sanitiseFtpSources(nextList);
+    this.store.set('ftpSources', sanitised);
+    // Return the row that corresponds to the incoming save — same
+    // index for updates, last-append for creates (sanitiser preserves
+    // ordering).
+    return sanitised[idx >= 0 ? idx : sanitised.length - 1];
+  }
+
+  /**
+   * Delete one FTP source by id (M4 Option F). Idempotent: deleting a
+   * non-existent id is a no-op that returns `{existed: false}` so the
+   * caller can distinguish "deleted" from "already gone" for logging.
+   * No validation runs on the OTHER rows — a bad row already in the
+   * store won't block a delete of some unrelated source.
+   *
+   * @param {string} id
+   * @returns {{existed: boolean}}
+   */
+  deleteFtpSource(id) {
+    const list = this.getFtpSources();
+    const nextList = list.filter((s) => s.id !== id);
+    if (nextList.length === list.length) return { existed: false };
+    this.store.set('ftpSources', nextList);
+    return { existed: true };
+  }
+
+  /**
    * Sanitise + validate the ftpSources array before write.
    *
    * Rules:

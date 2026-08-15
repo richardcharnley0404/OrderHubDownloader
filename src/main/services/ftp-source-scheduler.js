@@ -68,6 +68,9 @@ const DEFAULT_DEPS = Object.freeze({
   clearInterval: (handle) => clearInterval(handle),
   runPass:       runFtpSourcePass,
   logger:        logger,
+  // Injected so tests get deterministic timestamps on lastRun. Production
+  // uses the real Date.now.
+  now:           () => Date.now(),
 });
 
 class FtpSourceScheduler {
@@ -140,6 +143,11 @@ class FtpSourceScheduler {
         timer,
         intervalMs,
         running: false,
+        // lastRun: {at, summary} — populated by _tick after each pass
+        // (M4a addition). Null until the source's first pass finishes.
+        // The M4 Settings UI reads this via `getStatuses()` and renders
+        // "last-run time + last result" per row per brief §M4.
+        lastRun: null,
       });
     }
 
@@ -193,22 +201,24 @@ class FtpSourceScheduler {
     }
 
     entry.running = true;
+    let runSummary = null;   // captured for the finally block's lastRun stamp
+    let runError   = null;
     try {
       // Read the source out of the entry at fire time — NOT captured
       // when the timer was created. This is what makes invariant 4
       // (source-swap on keep) actually take effect.
       const source  = entry.source;
-      const summary = await this._deps.runPass(source);
+      runSummary    = await this._deps.runPass(source);
 
       // M3-scope INFO summary. M5 refines the warn/error surface for
       // per-file and whole-pass failures; this line stays the
       // "did anything happen this pass" signal.
       this._deps.logger.info('[ftp-sources] pass complete', {
         sourceName: source.name,
-        moved:      summary.moved,
-        skipped:    summary.skipped,
-        failed:     summary.failed,
-        errors:     summary.errors.length,
+        moved:      runSummary.moved,
+        skipped:    runSummary.skipped,
+        failed:     runSummary.failed,
+        errors:     runSummary.errors.length,
       });
     } catch (err) {
       // Should not happen — runFtpSourcePass catches every error
@@ -217,15 +227,61 @@ class FtpSourceScheduler {
       // `running` stuck true (which would silently mute this source's
       // ticks forever). Log at error, then let the finally clear the
       // flag.
+      runError = err;
       this._deps.logger.logError('[ftp-sources] runPass threw (unexpected — runFtpSourcePass should catch its own)', err, {
         sourceName: entry.source.name,
       });
     } finally {
       // Re-read from the map: reconcile may have removed the entry
-      // while we were awaiting. If so, there's nothing to clear.
+      // while we were awaiting. If so, there's nothing to clear or
+      // stamp — the source is gone.
       const currentEntry = this._entries.get(sourceId);
-      if (currentEntry) currentEntry.running = false;
+      if (currentEntry) {
+        currentEntry.running = false;
+        // Stamp lastRun for the M4 Settings UI. Successful pass gets
+        // the summary; an unexpected throw (invariant 3 safety net)
+        // gets a synthetic summary that surfaces the error to the UI
+        // so the operator sees SOMETHING went wrong even in that
+        // shouldn't-happen path.
+        currentEntry.lastRun = {
+          at:      this._deps.now(),
+          summary: runSummary || {
+            moved:   0,
+            skipped: 0,
+            failed:  0,
+            errors:  [{
+              filename: null,
+              message:  runError && runError.message ? runError.message : 'runPass threw (see logs)',
+            }],
+          },
+        };
+      }
     }
+  }
+
+  /**
+   * Snapshot of the status of every currently-scheduled source, for
+   * the M4 Settings UI's "last-run time + last result" columns. The
+   * IPC handler merges this with the full source list from
+   * configService.getFtpSources() so disabled sources (which have no
+   * entry here) still appear in the list without status. Returns an
+   * array so ordering is stable for renderer diff-and-render loops.
+   *
+   * @returns {Array<{sourceId:string, name:string, running:boolean, intervalMs:number, lastRunAt:number|null, lastResult:object|null}>}
+   */
+  getStatuses() {
+    const out = [];
+    for (const [id, entry] of this._entries.entries()) {
+      out.push({
+        sourceId:   id,
+        name:       entry.source.name,
+        running:    entry.running,
+        intervalMs: entry.intervalMs,
+        lastRunAt:  entry.lastRun ? entry.lastRun.at : null,
+        lastResult: entry.lastRun ? entry.lastRun.summary : null,
+      });
+    }
+    return out;
   }
 
   // ── Test-only introspection ─────────────────────────────────────────────

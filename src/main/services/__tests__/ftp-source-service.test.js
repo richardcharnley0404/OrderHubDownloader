@@ -47,8 +47,10 @@ Module.prototype.require = function (req) {
 
 const {
   runFtpSourcePass,
+  testSourceConnection,
   _joinRemotePath,
   _clearFallbackLoggedForTests,
+  _scrubPasswordFromString,
 } = require('../ftp-source-service');
 
 // Restore for any sibling test files loaded after this one.
@@ -757,4 +759,313 @@ test('rename fallback: subsequent files in the SAME pass do not re-log (log-once
   assert.equal(result.moved, 3, 'all three fell back to rename successfully');
   assert.equal(log.infoCalls.length, 1,
     'three files fall back — only one INFO log; brief §"once per source" is per source, not per file');
+});
+
+// ── testSourceConnection (M4a) — plaintext-in-flight scrubbing ─────────────
+//
+// The single place in the feature where a secret is in the clear. Every
+// return path — success, listing-fail, connect-fail, auth-fail, thrown
+// before-access — MUST scrub the plaintext password from:
+//   - the returned `error` string
+//   - every log-line meta (info / warn / error)
+// AND the password must never appear as its own field in the return
+// value. Tests deliberately use a highly-distinctive plaintext so a
+// leak fails loudly.
+
+const DISTINCTIVE_PASSWORD = 'ohd-test-password-a1b2c3-DO-NOT-LEAK';
+
+/**
+ * Assert that neither the return value nor ANY spy-logger call
+ * contains the given plaintext. Deep-scans every string in the return
+ * object + every log meta value. Called at the end of every test-
+ * connection test so we don't repeat the same assertions six times.
+ */
+function assertNoLeak(returnValue, log, plaintext) {
+  const returnJson = JSON.stringify(returnValue);
+  assert.ok(!returnJson.includes(plaintext),
+    `plaintext password leaked into return value: ${returnJson}`);
+
+  const allLogs = [
+    ...(log.infoCalls || []),
+    ...(log.warnCalls || []),
+    ...(log.errorCalls || []),
+    ...(log.debugCalls || []),
+  ];
+  for (const entry of allLogs) {
+    const json = JSON.stringify(entry);
+    assert.ok(!json.includes(plaintext),
+      `plaintext password leaked into a log line: ${json}`);
+  }
+}
+
+test('testSourceConnection: happy path returns success + fileCount, no plaintext leak', async () => {
+  const source = makeSource({ password: DISTINCTIVE_PASSWORD, passwordEncrypted: undefined });
+  const { client, factory } = makeClient({
+    listing: [
+      { name: 'a.xml', isFile: true },
+      { name: 'b.xml', isFile: true },
+      { name: 'dir',   isFile: false, isDirectory: true },
+    ],
+  });
+  const log = spyLogger();
+  const result = await testSourceConnection(source, {
+    createClient:      factory,
+    fs,
+    encryptionService: stubEncryption(),
+    logger:            log,
+  });
+
+  assert.equal(result.success,   true);
+  assert.equal(result.fileCount, 2, 'directory entry excluded from file count');
+  assert.equal(result.remotePath, source.remotePath);
+  // Password IS what basic-ftp sees (contract: we forward the plaintext to access()).
+  assert.equal(client.accessCalls[0].password, DISTINCTIVE_PASSWORD);
+  // …but MUST NOT be in the return value or any log line.
+  assertNoLeak(result, log, DISTINCTIVE_PASSWORD);
+});
+
+test('testSourceConnection: auth failure — scrubbed error returned + logged, no plaintext leak', async () => {
+  // Simulate a pathological FTP server that echoes the credentials in
+  // its error text — the exact scenario the scrubber exists for.
+  const source = makeSource({ password: DISTINCTIVE_PASSWORD, passwordEncrypted: undefined });
+  const { factory } = makeClient({
+    onAccess: () => {
+      throw new Error(`530 Login incorrect (tried password "${DISTINCTIVE_PASSWORD}")`);
+    },
+  });
+  const log = spyLogger();
+  const result = await testSourceConnection(source, {
+    createClient:      factory,
+    fs,
+    encryptionService: stubEncryption(),
+    logger:            log,
+  });
+
+  assert.equal(result.success, false);
+  assert.match(result.error, /530 Login incorrect/);
+  assert.match(result.error, /\[password redacted\]/,
+    'the redaction marker must be present where the plaintext used to be');
+  assertNoLeak(result, log, DISTINCTIVE_PASSWORD);
+});
+
+test('testSourceConnection: list failure post-auth — scrubbed error, no plaintext leak', async () => {
+  const source = makeSource({ password: DISTINCTIVE_PASSWORD, passwordEncrypted: undefined });
+  const { factory } = makeClient({
+    onList: () => {
+      // Some servers echo request context in list errors; simulate that
+      // to prove the scrub works past the connect phase too.
+      throw new Error(`550 no such directory (auth as "user" password "${DISTINCTIVE_PASSWORD}")`);
+    },
+  });
+  const log = spyLogger();
+  const result = await testSourceConnection(source, {
+    createClient:      factory,
+    fs,
+    encryptionService: stubEncryption(),
+    logger:            log,
+  });
+
+  assert.equal(result.success, false);
+  assertNoLeak(result, log, DISTINCTIVE_PASSWORD);
+});
+
+test('testSourceConnection: bland error (no plaintext in message) → returned verbatim, still logged, still no leak', async () => {
+  // The common case — a well-behaved server just says "530 Login
+  // incorrect". Scrub is a no-op here (nothing to redact); the test
+  // pins that the scrub doesn't corrupt a bland message.
+  const source = makeSource({ password: DISTINCTIVE_PASSWORD, passwordEncrypted: undefined });
+  const { factory } = makeClient({
+    onAccess: () => { throw new Error('530 Login incorrect'); },
+  });
+  const log = spyLogger();
+  const result = await testSourceConnection(source, {
+    createClient:      factory,
+    fs,
+    encryptionService: stubEncryption(),
+    logger:            log,
+  });
+  assert.equal(result.error, '530 Login incorrect', 'bland message passed through verbatim');
+  assertNoLeak(result, log, DISTINCTIVE_PASSWORD);
+});
+
+test('testSourceConnection: encrypted-source path decrypts via encryption-service, no plaintext leak', async () => {
+  // Path (b) — saved source with only passwordEncrypted. Test that the
+  // decrypted plaintext still doesn't leak via the same scrub path.
+  const source = makeSource({
+    password:          undefined,   // renderer sent no plaintext (no edit)
+    passwordEncrypted: 'ENC[whatever]',
+  });
+  const { client, factory } = makeClient({ listing: [] });
+  const log = spyLogger();
+  const result = await testSourceConnection(source, {
+    createClient:      factory,
+    fs,
+    encryptionService: { decrypt: () => DISTINCTIVE_PASSWORD, encrypt: () => '', isAvailable: () => true },
+    logger:            log,
+  });
+  assert.equal(result.success, true);
+  assert.equal(client.accessCalls[0].password, DISTINCTIVE_PASSWORD, 'decrypted plaintext reaches access()');
+  assertNoLeak(result, log, DISTINCTIVE_PASSWORD);
+});
+
+test('testSourceConnection: encrypted-source path + auth failure — scrubs decrypted plaintext', async () => {
+  const source = makeSource({
+    password:          undefined,
+    passwordEncrypted: 'ENC[whatever]',
+  });
+  const { factory } = makeClient({
+    onAccess: () => { throw new Error(`530 Login incorrect (password: ${DISTINCTIVE_PASSWORD})`); },
+  });
+  const log = spyLogger();
+  const result = await testSourceConnection(source, {
+    createClient:      factory,
+    fs,
+    encryptionService: { decrypt: () => DISTINCTIVE_PASSWORD, encrypt: () => '', isAvailable: () => true },
+    logger:            log,
+  });
+  assert.equal(result.success, false);
+  assert.match(result.error, /\[password redacted\]/);
+  assertNoLeak(result, log, DISTINCTIVE_PASSWORD);
+});
+
+test('testSourceConnection: neither password nor passwordEncrypted → clear error, no crash', async () => {
+  const source = makeSource({ password: undefined, passwordEncrypted: undefined });
+  const { factory } = makeClient();
+  const log = spyLogger();
+  const result = await testSourceConnection(source, {
+    createClient:      factory,
+    fs,
+    encryptionService: stubEncryption(),
+    logger:            log,
+  });
+  assert.equal(result.success, false);
+  assert.match(result.error, /No password supplied/);
+});
+
+test('testSourceConnection: plaintext takes precedence over ciphertext (renderer typed a new password)', async () => {
+  const NEW_TYPED = 'freshly-typed-in-modal';
+  const source = makeSource({
+    password:          NEW_TYPED,
+    passwordEncrypted: 'ENC[STALE-should-not-be-used]',
+  });
+  const { client, factory } = makeClient({ listing: [] });
+  await testSourceConnection(source, {
+    createClient:      factory,
+    fs,
+    encryptionService: { decrypt: () => 'STALE-should-not-be-used', encrypt: () => '', isAvailable: () => true },
+    logger:            spyLogger(),
+  });
+  assert.equal(client.accessCalls[0].password, NEW_TYPED,
+    'plaintext from the modal wins over stored ciphertext — matches "Test before Save" UX');
+});
+
+test('testSourceConnection: client.close() always called even on early return via no-password branch', async () => {
+  // The no-password branch returns BEFORE the client is created (short
+  // circuit above the createClient call). Verifies we didn't
+  // accidentally construct then leak a client.
+  const source = makeSource({ password: undefined, passwordEncrypted: undefined });
+  const { client, factory } = makeClient();
+  await testSourceConnection(source, {
+    createClient:      factory,
+    fs,
+    encryptionService: stubEncryption(),
+    logger:            spyLogger(),
+  });
+  assert.equal(client.closeCalls, 0, 'no client created — no close to call');
+  assert.equal(client.accessCalls.length, 0);
+});
+
+test('testSourceConnection: client.close() called on happy path AND on failure', async () => {
+  const source = makeSource({ password: DISTINCTIVE_PASSWORD, passwordEncrypted: undefined });
+
+  // happy
+  {
+    const { client, factory } = makeClient({ listing: [] });
+    await testSourceConnection(source, {
+      createClient:      factory,
+      fs,
+      encryptionService: stubEncryption(),
+      logger:            spyLogger(),
+    });
+    assert.equal(client.closeCalls, 1);
+  }
+
+  // failure — close still runs (finally)
+  {
+    const { client, factory } = makeClient({ onAccess: () => { throw new Error('nope'); } });
+    await testSourceConnection(source, {
+      createClient:      factory,
+      fs,
+      encryptionService: stubEncryption(),
+      logger:            spyLogger(),
+    });
+    assert.equal(client.closeCalls, 1);
+  }
+});
+
+// ── _scrubPasswordFromString unit tests ─────────────────────────────────────
+
+test('_scrubPasswordFromString: replaces every occurrence, non-regex (metachars safe)', () => {
+  const text  = 'auth failed for pw=$^.*|(?)[+] and again $^.*|(?)[+]';
+  const pw    = '$^.*|(?)[+]';
+  const clean = _scrubPasswordFromString(text, pw);
+  assert.equal(clean, 'auth failed for pw=[password redacted] and again [password redacted]',
+    'split+join must handle regex metachars in the password without corruption');
+});
+
+test('_scrubPasswordFromString: no-op on empty inputs', () => {
+  assert.equal(_scrubPasswordFromString('some error', ''),      'some error');
+  assert.equal(_scrubPasswordFromString('some error', null),    'some error');
+  assert.equal(_scrubPasswordFromString('',           'x'),     '');
+  assert.equal(_scrubPasswordFromString(null,         'x'),     null);
+});
+
+test('_scrubPasswordFromString: undefined password is a no-op (anonymous-FTP / no-password path)', () => {
+  // Explicit test for `undefined` since the decrypt-then-scrub flow can
+  // reach here with an unset value if `encryptionService.decrypt`
+  // returns undefined on empty input. Must NOT touch the text.
+  const text = 'connection reset by peer';
+  assert.equal(_scrubPasswordFromString(text, undefined), text);
+});
+
+test('_scrubPasswordFromString: empty-string password is a no-op (anonymous-FTP / no-password path)', () => {
+  // Explicit test — same code path as above but with an empty string
+  // rather than absent. This is the "anonymous FTP" case the user
+  // flagged: basic-ftp accepts empty passwords, and if a source ever
+  // reaches this function with `password: ''` the guard must NOT
+  // fall through to split — `text.split('').join(marker)` inserts
+  // the marker between EVERY character and turns a log line into
+  // garbage.
+  const text = 'connection reset by peer';
+  assert.equal(_scrubPasswordFromString(text, ''), text,
+    'empty password must never trigger the between-every-character corruption');
+});
+
+test('_scrubPasswordFromString: whitespace-only passwords do not corrupt the text (single space, tab, mixed)', () => {
+  // The bug this guards against: `text.split(' ').join(marker)`
+  // replaces every space with the redaction marker, corrupting an
+  // innocent error message. Guard applies to any password that trims
+  // to empty — space, tab, newline, or mixed whitespace all count.
+  const text = 'hello world tab\tseparated newline\nseparated';
+
+  assert.equal(_scrubPasswordFromString(text, ' '),      text, 'single space must not split-on-space');
+  assert.equal(_scrubPasswordFromString(text, '\t'),     text, 'single tab must not split-on-tab');
+  assert.equal(_scrubPasswordFromString(text, '   '),    text, 'multi-space still trims to empty');
+  assert.equal(_scrubPasswordFromString(text, ' \t\n '), text, 'mixed whitespace still trims to empty');
+});
+
+test('_scrubPasswordFromString: password containing leading/trailing whitespace but with real content IS scrubbed', () => {
+  // Defence-in-depth for the whitespace guard. A password of "  actualpw  "
+  // (someone pasted with padding) has real content — must scrub the whole
+  // thing, not skip. The guard is only on trims-to-empty, not on any
+  // whitespace at all.
+  const password = '  actualpw  ';
+  const text     = 'error mentioning "  actualpw  " here';
+  const scrubbed = _scrubPasswordFromString(text, password);
+  assert.equal(scrubbed, 'error mentioning "[password redacted]" here',
+    'a password with real content plus padding still scrubs — only trims-to-empty is a no-op');
+});
+
+test('_scrubPasswordFromString: no-op when password does not appear in text', () => {
+  assert.equal(_scrubPasswordFromString('530 Login incorrect', 'my-pw'), '530 Login incorrect');
 });

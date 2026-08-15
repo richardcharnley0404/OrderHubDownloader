@@ -357,14 +357,140 @@ function _joinRemotePath(dir, filename) {
   return dir + '/' + filename;
 }
 
+/**
+ * Test a source's FTP credentials + remote path by opening one session,
+ * listing the remote folder, and counting the visible files. Used by
+ * the M4 "Test connection" button — the single highest-value control
+ * in the feature (most failures are wrong credentials or wrong path,
+ * and the operator needs to find that out at setup time, not at 3am).
+ *
+ * Password handling. The M4 modal calls this in two situations:
+ *   (a) Testing a NEW source not yet saved — the payload carries
+ *       `password` as freshly-typed plaintext (there is no ciphertext
+ *       to decrypt).
+ *   (b) Testing an EXISTING saved source — the payload carries
+ *       `passwordEncrypted` (from configService.getFtpSources()) and
+ *       we decrypt on demand.
+ * Precedence is (a) over (b): if `password` is present and non-empty
+ * on the payload, use it — matches "operator typed a new password in
+ * the modal, click Test" without saving first.
+ *
+ * PLAINTEXT MUST NEVER LEAK OFF THIS FUNCTION. The `password` variable
+ * flows only into `basic-ftp`'s `access({password})`, never into any
+ * log line, and any error message that basic-ftp constructs from a
+ * bad login is scrubbed via `_scrubPasswordFromString` before it
+ * appears in the returned error or in a caller's log meta. This is
+ * the only place in the FTP-sources feature where a secret is in
+ * flight in the clear; failures on the wire (auth rejected, socket
+ * dropped mid-list, etc.) can echo details of the payload in
+ * server-side errors, so we scrub unconditionally on every return
+ * path.
+ *
+ * @param {object} source - shape from the M4 modal. Required: host,
+ *   username, remotePath. Password: `password` plaintext OR
+ *   `passwordEncrypted` (must have one).
+ * @param {object} [deps] - injectable for tests.
+ * @returns {Promise<{success:true, fileCount:number, remotePath:string} | {success:false, error:string}>}
+ */
+async function testSourceConnection(source, deps = {}) {
+  const d = { ...DEFAULT_DEPS, ...deps };
+
+  // Resolve the plaintext password once. Held in a single variable so
+  // there's exactly one thing to scrub from error messages before
+  // returning. NEVER logged, NEVER interpolated into strings other
+  // than basic-ftp's `access({password})` arg.
+  let password;
+  if (typeof source.password === 'string' && source.password.length > 0) {
+    password = source.password;
+  } else if (source.passwordEncrypted) {
+    password = d.encryptionService.decrypt(source.passwordEncrypted);
+  } else {
+    return { success: false, error: 'No password supplied' };
+  }
+
+  const client = d.createClient();
+  client.ftp.verbose = false;
+
+  try {
+    await client.access({
+      host:     source.host,
+      port:     source.port || 21,
+      user:     source.username,
+      password: password,
+      // MIRROR ftp-service.js: secure hardcoded to false. See file-top.
+      secure:   false,
+    });
+    const listing   = await client.list(source.remotePath);
+    const fileCount = (Array.isArray(listing) ? listing : [])
+      .filter((e) => e && e.isFile === true)
+      .length;
+    return { success: true, fileCount, remotePath: source.remotePath };
+  } catch (err) {
+    // Scrub the plaintext password from any error text before it
+    // leaves this function. basic-ftp's error messages are usually
+    // just the FTP server's response ("530 Login incorrect", "550 no
+    // such directory") which don't echo the password — but a
+    // pathological server or a future basic-ftp release could
+    // include it, and even a stack trace from a network layer could
+    // contain the credentials object. Scrub unconditionally on every
+    // failure path so the leak surface is provably zero.
+    const rawMessage    = err && err.message ? String(err.message) : 'Unknown error';
+    const safeMessage   = _scrubPasswordFromString(rawMessage, password);
+
+    // Same scrub applied to the log meta. Log intentionally omits
+    // the password field entirely (not even scrubbed) — safer to be
+    // absent than potentially present-with-typo.
+    d.logger.logWarning('[ftp-sources] test connection failed', {
+      sourceName: source.name,
+      host:       source.host,
+      remotePath: source.remotePath,
+      error:      safeMessage,
+    });
+    return { success: false, error: safeMessage };
+  } finally {
+    try { client.close(); } catch (_closeErr) { /* best-effort */ }
+  }
+}
+
+/**
+ * Remove every occurrence of `password` from `text` and replace with
+ * `[password redacted]`. Uses split+join to avoid regex-metachar
+ * traps: passwords contain arbitrary bytes and building a regex from
+ * one is a bug waiting to happen. Returns the text verbatim when
+ * either arg is empty OR the password is whitespace-only.
+ *
+ * The whitespace-only guard matters. `!password` catches '' / null /
+ * undefined but NOT ' ' or '\t'. Without the trim check,
+ * `_scrubPasswordFromString('hello world', ' ')` would return
+ * `'hello[password redacted]world'` — splitting on the single space,
+ * corrupting the log message. Anonymous-FTP setups where the
+ * effective password is empty or whitespace-only are a real code path
+ * (basic-ftp accepts empty passwords for anonymous auth, and the
+ * decrypt-then-scrub flow reaches this function with whatever the
+ * ciphertext decoded to). No-op the scrub in those cases: theoretical
+ * leak of a whitespace-only "secret" is not worth log corruption
+ * risk on every real error message.
+ */
+function _scrubPasswordFromString(text, password) {
+  if (typeof text !== 'string' && text != null) text = String(text);
+  if (text == null || text === '') return text;
+  if (typeof password !== 'string')  return text;
+  if (password.length === 0)         return text;
+  if (password.trim().length === 0)  return text;
+  return text.split(password).join('[password redacted]');
+}
+
 module.exports = {
   runFtpSourcePass,
+  testSourceConnection,
   // Exposed for unit tests only — production callers only need
-  // runFtpSourcePass. Keeps _joinRemotePath's tiny surface directly
-  // testable without exercising a whole pass; _clearFallbackLoggedForTests
-  // lets tests reset the log-once-per-source set between cases so the
-  // "logs only once" assertion is deterministic (module-scoped state
-  // otherwise leaks across tests).
+  // runFtpSourcePass / testSourceConnection. Keeps the small
+  // internal helpers directly testable without exercising a whole
+  // pass; _clearFallbackLoggedForTests lets tests reset the log-
+  // once-per-source set between cases so the "logs only once"
+  // assertion is deterministic (module-scoped state otherwise
+  // leaks across tests).
   _joinRemotePath,
   _clearFallbackLoggedForTests,
+  _scrubPasswordFromString,
 };

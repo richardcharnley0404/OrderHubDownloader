@@ -153,13 +153,15 @@ function makeScheduler(overrides = {}) {
   const timers  = makeFakeTimers();
   const runPass = overrides.runPass || makeRunPassSpy();
   const log     = overrides.log     || makeLogger();
+  const now     = overrides.now     || (() => 1_700_000_000_000);   // deterministic
   const sched   = new FtpSourceScheduler({
     setInterval:   timers.setInterval,
     clearInterval: timers.clearInterval,
     runPass,
     logger:        log,
+    now,
   });
-  return { sched, timers, runPass, log };
+  return { sched, timers, runPass, log, now };
 }
 
 // ── Invariant 1: .unref() on every timer ───────────────────────────────────
@@ -493,6 +495,113 @@ test('stop() is idempotent — calling it twice does not throw', () => {
 });
 
 // ── Defensive: invalid intervalMinutes ─────────────────────────────────────
+
+// ── lastRun tracking + getStatuses (M4a additions) ────────────────────────
+
+test('getStatuses(): empty when no sources scheduled', () => {
+  const { sched } = makeScheduler();
+  assert.deepEqual(sched.getStatuses(), []);
+});
+
+test('getStatuses(): one entry per scheduled source, running=false + lastRunAt=null before first tick', () => {
+  const { sched, timers } = makeScheduler();
+  sched.reconcile([
+    makeSource({ id: 'a', name: 'A' }),
+    makeSource({ id: 'b', name: 'B', intervalMinutes: 10 }),
+  ]);
+  const statuses = sched.getStatuses().sort((x, y) => x.sourceId.localeCompare(y.sourceId));
+  assert.equal(statuses.length, 2);
+  assert.equal(statuses[0].sourceId,   'a');
+  assert.equal(statuses[0].name,       'A');
+  assert.equal(statuses[0].running,    false);
+  assert.equal(statuses[0].intervalMs, 5 * 60_000);
+  assert.equal(statuses[0].lastRunAt,  null, 'no pass has run yet');
+  assert.equal(statuses[0].lastResult, null);
+  assert.equal(statuses[1].intervalMs, 10 * 60_000);
+});
+
+test('lastRun stamped after a successful pass — at + summary populated', async () => {
+  const runPass = makeRunPassSpy({
+    summary: { moved: 2, skipped: 0, failed: 0, errors: [] },
+  });
+  const now = () => 1_700_000_000_000;
+  const { sched, timers } = makeScheduler({ runPass, now });
+  sched.reconcile([makeSource({ id: 's' })]);
+
+  await timers.fire(timers.tokens()[0]);
+
+  const [status] = sched.getStatuses();
+  assert.equal(status.lastRunAt, 1_700_000_000_000);
+  assert.deepEqual(status.lastResult, { moved: 2, skipped: 0, failed: 0, errors: [] });
+});
+
+test('lastRun updated on each subsequent pass — old summary is replaced', async () => {
+  // now() returns a different timestamp on each call — mirrors real time.
+  let clock = 1_700_000_000_000;
+  const now = () => clock;
+  const runPass = makeRunPassSpy();
+
+  const { sched, timers } = makeScheduler({
+    runPass,
+    now,
+  });
+  sched.reconcile([makeSource()]);
+  const token = timers.tokens()[0];
+
+  runPass.calls.length = 0;
+  await timers.fire(token);
+  clock += 60_000;
+  const after1 = sched.getStatuses()[0];
+  assert.equal(after1.lastRunAt, 1_700_000_000_000, 'stamped at fire-1 time');
+
+  await timers.fire(token);
+  const after2 = sched.getStatuses()[0];
+  assert.equal(after2.lastRunAt, 1_700_000_060_000, 'stamped at fire-2 time — old value replaced');
+});
+
+test('lastRun stamped even when runPass throws — surfaces the error to the UI so operators see the shouldn\'t-happen', async () => {
+  // Invariant-3 safety net: if runFtpSourcePass regresses and throws
+  // instead of catching, the scheduler still updates lastRun with a
+  // synthetic error summary so the M4 UI shows "something went wrong"
+  // instead of leaving the last-result cell frozen at the previous
+  // successful pass.
+  const runPass = makeRunPassSpy({ throw: new Error('regression: threw instead of caught') });
+  const now = () => 1_700_000_000_000;
+  const { sched, timers } = makeScheduler({ runPass, now });
+  sched.reconcile([makeSource()]);
+  await timers.fire(timers.tokens()[0]);
+
+  const [status] = sched.getStatuses();
+  assert.equal(status.lastRunAt, 1_700_000_000_000);
+  assert.equal(status.lastResult.moved,   0);
+  assert.equal(status.lastResult.failed,  0);
+  assert.equal(status.lastResult.errors.length, 1);
+  assert.equal(status.lastResult.errors[0].filename, null,
+    'synthetic error uses filename:null to mark it as a whole-pass failure');
+  assert.match(status.lastResult.errors[0].message, /regression/);
+});
+
+test('lastRun NOT stamped if the source was reconciled away mid-tick — no revived entry', async () => {
+  // Invariant-5 corollary: if the source is removed while its pass is
+  // running, the finally block's re-read finds nothing to stamp. Must
+  // NOT re-create the entry (that would leak a scheduled-away source
+  // back into getStatuses).
+  const runPass = makeRunPassSpy({ holdForever: true });
+  const { sched, timers } = makeScheduler({ runPass });
+  sched.reconcile([makeSource({ id: 'gone' })]);
+  const token = timers.tokens()[0];
+
+  const inflight = timers.fire(token);
+  await Promise.resolve();
+  sched.reconcile([]);   // remove mid-pass
+  runPass.resolveHold();
+  await inflight;
+
+  assert.deepEqual(sched.getStatuses(), [],
+    'removed source must not resurface in getStatuses via the finally block');
+});
+
+// ── invalid intervalMinutes (existing test, kept below for locality) ───────
 
 test('source with invalid intervalMinutes is skipped with a warn — not scheduled, not throwing', () => {
   // M1's sanitiser prevents this from ever reaching the scheduler in

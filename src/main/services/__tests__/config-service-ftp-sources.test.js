@@ -494,3 +494,129 @@ test('non-object rows are silently skipped (defensive against a malformed IPC pa
   });
   assert.equal(cs.getFtpSources().length, 1);
 });
+
+// ── saveFtpSource / deleteFtpSource (M4 Option F — per-source persistence) ─
+//
+// These methods are the primary entry point after M4a: the general Settings
+// save no longer round-trips ftpSources. One bad row can only reject its own
+// save now; other settings are unaffected. Each save runs through the same
+// `_sanitiseFtpSources` above so validation + encryption + list-uniqueness
+// all fire identically to the batch path.
+
+test('saveFtpSource: create new row appends and returns the row with a minted id', () => {
+  const { cs } = freshConfigService();
+  const saved = cs.saveFtpSource({
+    name: 'New Source', enabled: false, localPath: 'C:/new',
+  });
+  assert.ok(saved.id, 'sanitiser minted an id');
+  assert.equal(saved.name, 'New Source');
+  const all = cs.getFtpSources();
+  assert.equal(all.length, 1);
+  assert.equal(all[0].id, saved.id);
+});
+
+test('saveFtpSource: create with a supplied id preserves it', () => {
+  const { cs } = freshConfigService();
+  const saved = cs.saveFtpSource({
+    id: 'preassigned', name: 'One', enabled: false, localPath: 'C:/one',
+  });
+  assert.equal(saved.id, 'preassigned');
+});
+
+test('saveFtpSource: update by id replaces the matching row without touching siblings', () => {
+  const { cs } = freshConfigService();
+  cs.saveFtpSource({ id: 'a', name: 'A', enabled: false, localPath: 'C:/a' });
+  cs.saveFtpSource({ id: 'b', name: 'B', enabled: false, localPath: 'C:/b' });
+  cs.saveFtpSource({ id: 'a', name: 'A-renamed', enabled: false, localPath: 'C:/a-new' });
+
+  const all = cs.getFtpSources();
+  assert.equal(all.length, 2, 'no duplicate row created — matched by id');
+  const a = all.find((s) => s.id === 'a');
+  const b = all.find((s) => s.id === 'b');
+  assert.equal(a.name,      'A-renamed');
+  assert.equal(a.localPath, 'C:/a-new');
+  assert.equal(b.name,      'B',        'sibling untouched');
+  assert.equal(b.localPath, 'C:/b',     'sibling untouched');
+});
+
+test('saveFtpSource: update preserves the stored ciphertext when password field is omitted', () => {
+  const { cs, dataRef } = freshConfigService();
+  cs.saveFtpSource({
+    id: 'x', name: 'X', enabled: false, localPath: 'C:/x', password: 'original-secret',
+  });
+  const ciphertextBefore = cs.getFtpSources()[0].passwordEncrypted;
+
+  // Second save omits password entirely — the "leave blank to keep
+  // existing" pattern the masked-UI field relies on.
+  cs.saveFtpSource({
+    id: 'x', name: 'X (renamed)', enabled: false, localPath: 'C:/x',
+  });
+  assert.equal(cs.getFtpSources()[0].passwordEncrypted, ciphertextBefore);
+  assert.ok(!JSON.stringify(dataRef).includes('original-secret'),
+    'plaintext must not leak into the store on subsequent saves either');
+});
+
+test('saveFtpSource: throws on validation error — nothing persists', () => {
+  const { cs } = freshConfigService();
+  cs.saveFtpSource({ id: 'ok', name: 'OK', enabled: false, localPath: 'C:/ok' });
+  assert.throws(
+    () => cs.saveFtpSource({ id: 'bad', enabled: false, localPath: 'C:/bad' }),   // no name
+    /name is required/,
+  );
+  // The valid row remains — the bad save aborted mid-sanitise, no store write happened.
+  assert.equal(cs.getFtpSources().length, 1);
+  assert.equal(cs.getFtpSources()[0].id, 'ok');
+});
+
+test('saveFtpSource: name uniqueness enforced against OTHER rows already in the store', () => {
+  const { cs } = freshConfigService();
+  cs.saveFtpSource({ id: 'a', name: 'Lab', enabled: false, localPath: 'C:/a' });
+  assert.throws(
+    () => cs.saveFtpSource({ id: 'b', name: 'lab', enabled: false, localPath: 'C:/b' }),
+    /used more than once/,
+    'case-insensitive uniqueness — B collides with A',
+  );
+});
+
+test('saveFtpSource: null / non-object input throws with a clear message', () => {
+  const { cs } = freshConfigService();
+  assert.throws(() => cs.saveFtpSource(null),      /source is required/);
+  assert.throws(() => cs.saveFtpSource(undefined), /source is required/);
+  assert.throws(() => cs.saveFtpSource('nope'),    /source is required/);
+});
+
+// ── deleteFtpSource ────────────────────────────────────────────────────────
+
+test('deleteFtpSource: existing id → removed, returns {existed:true}', () => {
+  const { cs } = freshConfigService();
+  cs.saveFtpSource({ id: 'a', name: 'A', enabled: false, localPath: 'C:/a' });
+  cs.saveFtpSource({ id: 'b', name: 'B', enabled: false, localPath: 'C:/b' });
+  const result = cs.deleteFtpSource('a');
+  assert.deepEqual(result, { existed: true });
+  const remaining = cs.getFtpSources().map((s) => s.id);
+  assert.deepEqual(remaining, ['b']);
+});
+
+test('deleteFtpSource: unknown id → no-op, returns {existed:false} (idempotent)', () => {
+  const { cs } = freshConfigService();
+  cs.saveFtpSource({ id: 'a', name: 'A', enabled: false, localPath: 'C:/a' });
+  const result = cs.deleteFtpSource('never-existed');
+  assert.deepEqual(result, { existed: false });
+  assert.equal(cs.getFtpSources().length, 1, 'no accidental deletions of other rows');
+});
+
+test('deleteFtpSource: does NOT validate other rows — a stale invalid row cannot lock out delete', () => {
+  // Scenario the Option-F decision protects against: a bad row somehow
+  // ended up in the store (hand-edited config, sanitiser rule tightened
+  // after the row was saved). Delete must still work without running
+  // the sanitiser over the survivors.
+  const { cs, dataRef } = freshConfigService();
+  cs.saveFtpSource({ id: 'good', name: 'Good', enabled: false, localPath: 'C:/g' });
+  // Simulate a corrupt row appearing (bypass sanitiser).
+  dataRef.ftpSources.push({ id: 'corrupt' /* no name, no localPath */ });
+
+  const result = cs.deleteFtpSource('good');
+  assert.deepEqual(result, { existed: true });
+  const remaining = cs.getFtpSources().map((s) => s.id);
+  assert.deepEqual(remaining, ['corrupt'], 'delete succeeded even with a corrupt sibling');
+});
