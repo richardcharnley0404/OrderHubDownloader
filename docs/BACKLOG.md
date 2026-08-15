@@ -161,6 +161,20 @@ Possible side effect worth checking when the lab's logs arrive: if `/checkin` re
 was the stopgap before the typed controller existed. Delete it once the lab confirms the
 real one works.
 
+**`basic-ftp` client construction is duplicated between `ftp-service.js` and
+`ftp-source-service.js`.** M2 of `docs/ftp-sources-brief.md` chose to hold
+one `basic-ftp` session open per pass in `ftp-source-service.js` for
+performance (2N+1 connect/close cycles per pass on the strict-reuse path
+was unacceptable at WAN latency). The two files construct their sessions
+independently; any change to timeout / secure-TLS / passive-mode / encoding
+options in one must be mirrored in the other or one server will quietly
+work only with the caller that happens to match its expectations. A
+`withSession(credentials, fn)` helper on `ftp-service.js` would let the
+mover reuse a single connection without inheriting the DPOF-specific
+baggage (`_isExpected550OnOriginalFiles`, `markIntegritySuspect`,
+recursive `scanAndDownload`). Worth doing if a third caller ever appears
+— for two, cross-reference comments in both files are the cheaper guard.
+
 **`configService.save()` is not atomic.** It commits fields incrementally
 (`store.set(...)` interleaved with sanitiser throws), so a throw partway
 through leaves earlier fields persisted on disk and later ones silently
