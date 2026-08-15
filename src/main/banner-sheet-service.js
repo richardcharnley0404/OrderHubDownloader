@@ -17,14 +17,35 @@ const logger = require('./services/logger');
 /**
  * Generate a banner sheet image matching the job's print dimensions.
  *
+ * Text label. Pre-M3 (docs/epson-batch-splitting-brief.md) this was
+ * always the "orderCode" — jobCode with the trailing `-N` stripped
+ * (e.g. `PXDEMO-LZQ3V4-1` → `PXDEMO-LZQ3V4`). M3 extends the service
+ * with an optional batch descriptor: when a job is split into N
+ * batches (Epson batch-splitting feature), the operator asked for
+ * one banner PER batch with the batch number on it — batches at the
+ * printer are scheduled independently and prints for one job may not
+ * come off contiguously, so batch 2..N without a label leaves them
+ * unidentifiable in the output stack. When `opts.batch` is present,
+ * the text becomes `<jobCode>  (N of M)` — full job code (unstripped)
+ * plus a compact "(N of M)" suffix. When absent, the pre-M3 orderCode
+ * text is unchanged.
+ *
+ * The QR code content stays as orderCode either way — scanners get
+ * the same order identifier regardless of which batch they scan;
+ * disambiguation lives in the human-readable text.
+ *
  * @param {string} jobCode   - Full job code e.g. "PXDEMO-LZQ3V4-1"
  * @param {number} widthPx   - Output image width  in pixels (match job images)
  * @param {number} heightPx  - Output image height in pixels (match job images)
+ * @param {object} [opts]
+ * @param {{index:number, total:number}} [opts.batch] - When present,
+ *   the text label reads `<jobCode>  (N of M)` instead of the plain
+ *   orderCode. QR content is unchanged.
  * @returns {Promise<Buffer>} JPEG image buffer
  */
-async function generateBannerSheet(jobCode, widthPx, heightPx) {
-  console.error('[BANNER] generateBannerSheet called', jobCode, widthPx, heightPx);
-  logger.info('generateBannerSheet called', { jobCode, widthPx, heightPx });
+async function generateBannerSheet(jobCode, widthPx, heightPx, opts = {}) {
+  console.error('[BANNER] generateBannerSheet called', jobCode, widthPx, heightPx, opts.batch || null);
+  logger.info('generateBannerSheet called', { jobCode, widthPx, heightPx, batch: opts.batch || null });
 
   // Load dependencies with explicit error reporting so load failures are visible
   let QRCode, Jimp;
@@ -42,6 +63,14 @@ async function generateBannerSheet(jobCode, widthPx, heightPx) {
   // Derive order code by stripping trailing job number
   // e.g. "PXDEMO-LZQ3V4-1" → "PXDEMO-LZQ3V4"
   const orderCode = jobCode.replace(/-\d+$/, '');
+
+  // Text label choice (M3). Batched → jobCode + "  (N of M)" so an
+  // operator scanning the output stack can tell which batch is which;
+  // unbatched → orderCode (unchanged from pre-M3).
+  const batch = opts.batch;
+  const textLabel = (batch && Number.isInteger(batch.index) && Number.isInteger(batch.total))
+    ? `${jobCode}  (${batch.index} of ${batch.total})`
+    : orderCode;
 
   // ── QR code ────────────────────────────────────────────────────────────────
   // 354 × 354 px ≈ 30 mm at 300 dpi
@@ -65,8 +94,10 @@ async function generateBannerSheet(jobCode, widthPx, heightPx) {
   const qrY = Math.max(0, Math.floor(heightPx * 0.4 - QR_SIZE / 2));
   image.composite(qrImage, qrX, qrY);
 
-  // ── Order code label ────────────────────────────────────────────────────────
-  // Centred horizontally, ~20 px below the bottom edge of the QR code
+  // ── Text label ─────────────────────────────────────────────────────────────
+  // Centred horizontally, ~20 px below the bottom edge of the QR code.
+  // Content is orderCode for unbatched jobs (unchanged from pre-M3) and
+  // `<jobCode>  (N of M)` for batched — see docblock.
   const font  = await Jimp.loadFont(Jimp.FONT_SANS_32_BLACK);
   const textY = qrY + QR_SIZE + 20;
   image.print(
@@ -74,7 +105,7 @@ async function generateBannerSheet(jobCode, widthPx, heightPx) {
     0,
     textY,
     {
-      text:       orderCode,
+      text:       textLabel,
       alignmentX: Jimp.HORIZONTAL_ALIGN_CENTER,
       alignmentY: Jimp.VERTICAL_ALIGN_TOP,
     },
@@ -84,7 +115,7 @@ async function generateBannerSheet(jobCode, widthPx, heightPx) {
 
   const buffer = await image.getBufferAsync(Jimp.MIME_JPEG);
   console.error('[BANNER] buffer ready, size:', buffer.length);
-  logger.info('Banner sheet generated', { jobCode, orderCode, widthPx, heightPx });
+  logger.info('Banner sheet generated', { jobCode, orderCode, widthPx, heightPx, batch: batch || null });
   return buffer;
 }
 

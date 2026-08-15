@@ -297,76 +297,238 @@ class PrintService {
       }
     }
 
-    // ── Banner sheet ─────────────────────────────────────────────────────────
-    // If enabled on the controller, prepend a separator page as the first image.
-    // Failures are swallowed so a banner error never blocks the print job.
-    if (route.bannerSheet && imageFiles.length > 0) {
-      try {
-        const { generateBannerSheet } = require('../banner-sheet-service');
-        const Jimp = require('jimp');
-        const firstImg = await Jimp.read(imageFiles[0].sourcePath);
-        const widthPx  = firstImg.getWidth();
-        const heightPx = firstImg.getHeight();
-        const jobCode  = job.job_name || job.order_number || '';
-        const bannerBuffer = await generateBannerSheet(jobCode, widthPx, heightPx);
-        const bannerDir  = path.join(jobFolderPath, 'working');
-        const bannerPath = path.join(bannerDir, 'BANNER.JPG');
-        await fs.promises.mkdir(bannerDir, { recursive: true });
-        await fs.promises.writeFile(bannerPath, bannerBuffer);
-        imageFiles.unshift({ sourcePath: bannerPath, filename: 'BANNER.JPG' });
-        lineItems.unshift({ quantity: 1, filename: 'BANNER.JPG' });
-        console.error('[BANNER] unshift complete, imageFiles count:', imageFiles.length);
-        logger.info('Banner sheet prepended to DPOF job', { jobId: job.id, widthPx, heightPx });
-      } catch (bannerErr) {
-        console.error('[BANNER ERROR]', bannerErr);
-        logger.logError('Banner sheet generation failed — continuing without banner', bannerErr, { jobId: job.id });
-      }
-    }
-
-    const dpofContent = dpofGenerator.generate({
-      orderNumber:    job.order_number || manifest.orderNumber || '',
-      jobId:          job.id,
-      customerName:   job.customer_name || '',
-      channelNumber:  route.channelNumber,
-      printSizeCode:  route.printSizeCode,
-      images:         lineItems.map(li => ({ filename: li.filename, quantity: li.quantity })),
-      controllerType: route.controllerType || 'noritsu',
-    });
-
-    // Folder-name options sourced from the controller via routing-service.
-    // Default on for back-compat (route.includeCustomerInFolder !== false).
-    const nameOpts = {
+    // ── Folder-name options ─────────────────────────────────────────────────
+    // Sourced from the controller via routing-service. Default on for
+    // back-compat (route.includeCustomerInFolder !== false). The `batch`
+    // descriptor is added per-batch inside the loop for split jobs only —
+    // unsplit dispatches deliberately do NOT set nameOpts.batch, so
+    // buildFolderName never produces `_1of1` in the wild (see
+    // docs/epson-batch-splitting-brief.md M3 invariant).
+    const baseNameOpts = {
       includeCustomerName: route.includeCustomerInFolder !== false,
       customerName:        job.customer_name || '',
     };
 
-    let writeResult;
-    try {
-      writeResult = await orderFolderWriter.writeOrderFolder(
-        route.outputPath,
-        job,
-        dpofContent,
-        imageFiles,
-        null,
-        nameOpts
-      );
-    } catch (writeErr) {
-      const tempFolderName = buildFolderName('p', job, null, nameOpts);
-      logger.logError('DPOF write failed — p folder left in hot folder', writeErr, {
-        jobId: job.id,
-        tempFolder: tempFolderName
-      });
-      return { success: false, error: writeErr.message, folderName: tempFolderName };
+    // ── Build per-image dispatch records carrying quantity ──────────────────
+    // Mirrors the DP path (see _sendViaDarkroomProRouted). Zipping
+    // imageFiles + lineItems into one array of records lets the splitter
+    // work off quantity, and the batch loop can un-zip without re-indexing.
+    const dispatchRecords = jobManifest.images.map((manifestImg, i) => ({
+      filename:   imageFiles[i].filename,
+      sourcePath: imageFiles[i].sourcePath,
+      quantity:   manifestImg.quantity || 1,
+    }));
+
+    // ── Split ───────────────────────────────────────────────────────────────
+    // cap null / 0 / negative → single batch containing everything, and this
+    // whole method behaves byte-for-byte identically to pre-M3 for every
+    // existing DPOF lab that hasn't set the cap.
+    const cap     = route.maxPrintsPerJob;
+    const batches = splitIntoBatches(dispatchRecords, cap);
+    const isSplit = batches.length > 1;
+
+    // ── Persisted per-batch ledger ──────────────────────────────────────────
+    // Only stamped on split jobs — single-batch dispatches keep the pre-M3
+    // shape (no ledger field on the job). Shape shared with Darkroom Pro
+    // via src/shared/batchLedger.js (M2). DPOF entries pick up
+    // acceptedAt/acceptedPrefix later when the controller's terminal file
+    // (e_/q_ rename) is observed by the monitor.
+    const ledger = isSplit
+      ? newBatchLedger({
+          cap,
+          totalBatches: batches.length,
+          totalPrints:  batchPrintCount(dispatchRecords),
+        })
+      : null;
+    if (ledger) {
+      jobService.updateJobLocally(job.id, { [BATCH_LEDGER_FIELD]: ledger });
     }
 
-    logger.info('Job sent to print via DPOF (routed)', {
-      jobId:      job.id,
-      controller: route.controllerName,
-      channel:    route.channelNumber,
-      hotFolder:  writeResult.folderPath,
-      folderName: writeResult.folderName,
-      images:     imageFiles.length
-    });
+    // ── Dispatch loop ───────────────────────────────────────────────────────
+    const writeResults = [];
+    for (let i = 0; i < batches.length; i++) {
+      const batchRecords  = batches[i];
+      const batchIndex1   = i + 1;
+      const totalBatches  = batches.length;
+
+      // Un-zip per-batch imageFiles + lineItems. Preserves record order
+      // (splitIntoBatches keeps input order within each batch).
+      const batchImageFiles = batchRecords.map(r => ({
+        sourcePath: r.sourcePath,
+        filename:   r.filename,
+      }));
+      const batchLineItems = batchRecords.map((r, idx) => ({
+        lineItemNumber: idx + 1,
+        quantity:       r.quantity,
+        filename:       r.filename,
+      }));
+
+      // ── Banner sheet ─────────────────────────────────────────────────────
+      // If enabled on the controller, prepend a separator page. On split
+      // jobs the banner text carries the batch marker so operators can
+      // tell batches apart in the output stack — batches at the printer
+      // are scheduled independently and prints may not come off
+      // contiguously. Banner file is per-batch (BANNER.JPG unsplit,
+      // BANNER_NofM.JPG when split) so parallel writes don't collide on
+      // the temp path. Failures are swallowed so a banner error never
+      // blocks the print job.
+      if (route.bannerSheet && batchImageFiles.length > 0) {
+        try {
+          const { generateBannerSheet } = require('../banner-sheet-service');
+          const Jimp = require('jimp');
+          const firstImg = await Jimp.read(batchImageFiles[0].sourcePath);
+          const widthPx  = firstImg.getWidth();
+          const heightPx = firstImg.getHeight();
+          const jobCode  = job.job_name || job.order_number || '';
+          const bannerOpts = isSplit
+            ? { batch: { index: batchIndex1, total: totalBatches } }
+            : {};
+          const bannerBuffer = await generateBannerSheet(jobCode, widthPx, heightPx, bannerOpts);
+          const bannerDir      = path.join(jobFolderPath, 'working');
+          const bannerFilename = isSplit
+            ? `BANNER_${batchIndex1}of${totalBatches}.JPG`
+            : 'BANNER.JPG';
+          const bannerPath = path.join(bannerDir, bannerFilename);
+          await fs.promises.mkdir(bannerDir, { recursive: true });
+          await fs.promises.writeFile(bannerPath, bannerBuffer);
+          batchImageFiles.unshift({ sourcePath: bannerPath, filename: bannerFilename });
+          batchLineItems.unshift({ lineItemNumber: 0, quantity: 1, filename: bannerFilename });
+          logger.info('Banner sheet prepended to DPOF batch', {
+            jobId: job.id, widthPx, heightPx,
+            batch: isSplit ? { index: batchIndex1, total: totalBatches } : null,
+          });
+        } catch (bannerErr) {
+          logger.logError('Banner sheet generation failed — continuing without banner', bannerErr, {
+            jobId: job.id,
+            batch: isSplit ? { index: batchIndex1, total: totalBatches } : null,
+          });
+        }
+      }
+
+      // DPOF content generated per-batch — each batch is an independent
+      // job at the printer with its own IMAGE FORMAT block.
+      const dpofContent = dpofGenerator.generate({
+        orderNumber:    job.order_number || manifest.orderNumber || '',
+        jobId:          job.id,
+        customerName:   job.customer_name || '',
+        channelNumber:  route.channelNumber,
+        printSizeCode:  route.printSizeCode,
+        images:         batchLineItems.map(li => ({ filename: li.filename, quantity: li.quantity })),
+        controllerType: route.controllerType || 'noritsu',
+      });
+
+      // Per-batch nameOpts. Absent `batch` on the unsplit path — the M1
+      // invariant is that buildFolderName never sees a batch descriptor
+      // when the job wasn't actually split, so `_1of1` never appears in
+      // the wild. Pinned by print-service-dpof-batching.test.js.
+      const nameOpts = isSplit
+        ? { ...baseNameOpts, batch: { index: batchIndex1, total: totalBatches } }
+        : baseNameOpts;
+
+      let writeResult;
+      try {
+        writeResult = await orderFolderWriter.writeOrderFolder(
+          route.outputPath,
+          job,
+          dpofContent,
+          batchImageFiles,
+          null,
+          nameOpts
+        );
+      } catch (writeErr) {
+        // Partial failure. Batches [1..i] already landed — do NOT roll
+        // them back and do NOT pretend success. Stamp the ledger (split
+        // only), mark the job errored, return {success:false}. Neither
+        // _markCompleted nor _markInProduction fires — mirrors the DP
+        // lifecycle rule (completion only when every batch succeeds).
+        const tempFolderName = buildFolderName('p', job, null, nameOpts);
+        logger.logError(
+          isSplit
+            ? `[dpof-batch] batch ${batchIndex1}/${totalBatches} write failed — p folder left in hot folder`
+            : 'DPOF write failed — p folder left in hot folder',
+          writeErr,
+          {
+            jobId:      job.id,
+            controller: route.controllerName,
+            tempFolder: tempFolderName,
+          }
+        );
+        if (ledger) {
+          recordBatchError(ledger, {
+            index:    batchIndex1,
+            total:    totalBatches,
+            filename: tempFolderName,
+            error:    writeErr.message,
+          });
+          jobService.updateJobLocally(job.id, { [BATCH_LEDGER_FIELD]: ledger });
+        }
+        if (isSplit) {
+          const succeeded    = writeResults.length;
+          const errorMessage =
+            `DPOF batch ${batchIndex1}/${totalBatches} failed: ${writeErr.message}. ` +
+            `Batches 1..${succeeded} were written to the hot folder and are being printed; ` +
+            `batches ${batchIndex1}..${totalBatches} did NOT. ` +
+            `Cancel the printed ones at the printer if needed.`;
+          jobService.updateJobLocally(job.id, {
+            _status:       'error',
+            _errorMessage: errorMessage,
+          });
+          return {
+            success:          false,
+            method:           'dpof',
+            sourcePath:       jobFolderPath,
+            error:            errorMessage,
+            folderName:       tempFolderName,
+            batchesSucceeded: succeeded,
+            batchesTotal:     totalBatches,
+            ledger,
+          };
+        }
+        return { success: false, error: writeErr.message, folderName: tempFolderName };
+      }
+
+      writeResults.push(writeResult);
+      if (ledger) {
+        recordBatchDispatched(ledger, {
+          index:    batchIndex1,
+          total:    totalBatches,
+          filename: writeResult.folderName,
+          destPath: writeResult.folderPath,
+        });
+        // Persist after every batch so a mid-loop crash still leaves a
+        // record of what went out — same posture as the DP loop.
+        jobService.updateJobLocally(job.id, { [BATCH_LEDGER_FIELD]: ledger });
+        logger.info(`[dpof-batch] batch ${batchIndex1}/${totalBatches} sent`, {
+          jobId:      job.id,
+          controller: route.controllerName,
+          hotFolder:  writeResult.folderPath,
+          folderName: writeResult.folderName,
+          images:     batchImageFiles.length,
+          prints:     batchPrintCount(batchRecords),
+        });
+      }
+    }
+
+    // ── All batches landed ──────────────────────────────────────────────────
+    if (ledger) {
+      completeLedger(ledger);
+      jobService.updateJobLocally(job.id, { [BATCH_LEDGER_FIELD]: ledger });
+    }
+
+    const lastResult = writeResults[writeResults.length - 1];
+    logger.info(
+      isSplit ? 'Job sent to print via DPOF (routed, split)' : 'Job sent to print via DPOF (routed)',
+      {
+        jobId:      job.id,
+        controller: route.controllerName,
+        channel:    route.channelNumber,
+        hotFolder:  lastResult.folderPath,
+        folderName: lastResult.folderName,
+        ...(isSplit
+          ? { batches: batches.length, totalPrints: batchPrintCount(dispatchRecords) }
+          : { images: dispatchRecords.length }),
+      }
+    );
 
     if (route.checkOrderStatus === false) {
       logger.info('[auto-print] checkOrderStatus disabled — marking job as completed immediately', { jobId: job.id });
@@ -379,8 +541,9 @@ class PrintService {
       success:    true,
       method:     'dpof',
       sourcePath: jobFolderPath,
-      destPath:   writeResult.folderPath,
-      folderName: writeResult.folderName
+      destPath:   lastResult.folderPath,
+      folderName: lastResult.folderName,
+      ...(isSplit ? { batches: batches.length, ledger } : {}),
     };
   }
 
