@@ -31,16 +31,26 @@ const { resolveManifestPath }      = require('./manifest-path');
  *     awaiting-manifest gate above guarantees the file is on disk by
  *     the time we get here.
  *
- * Failure modes all return null (fail-open): missing downloadDirectory,
+ * Failure modes all return null AT THIS LEVEL: missing downloadDirectory,
  * missing order fields, manifest not present, non-empty read errors,
  * parse errors, jobId not found in the manifest, images array missing.
- * The caller (holdForReview via the batchThresholdCheck resolver) then
- * skips the over-batch-threshold reason — matching the existing
- * "missing ctx yields today's behaviour" contract on the derivation.
  *
- * A failed read here does NOT block dispatch — print-service._readManifest
- * has its own 4-attempt retry that will surface a genuine "manifest
- * never arrived" case as an error. This helper is deliberately quiet.
+ * Caller policy on null (2026-08-15):
+ *   - job-service._getBatchThresholdCheck (chip resolver, cache-backed):
+ *     returns null → chip stays silent. Cache is populated the first
+ *     time a stamp lands; a fresh job whose manifest hasn't been read
+ *     yet simply has no chip.
+ *   - runAutoPrint / merge pre-pass batchThresholdCheck (gate
+ *     resolvers, fresh reads): wrap null in `{ cap, prints: null,
+ *     unsizable: true, autoSendBatches }` and log a warn. holdForReview
+ *     then HOLDS the job — we won't dispatch a cap-configured Darkroom
+ *     Pro job whose print count we can't verify, even under
+ *     autoSendBatches. Fail-safe fix for the "gate falls open while
+ *     the chip shows Large job" disagreement.
+ *
+ * The two-source split (cache for display, fresh for decision) is
+ * deliberate — see job-service.js:19-37 for rationale (SMB stall risk
+ * vs dispatch correctness).
  */
 
 /**

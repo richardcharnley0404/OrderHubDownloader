@@ -3223,7 +3223,26 @@ async function _runFujiPicProOrderMergePass(jobs, controllers, cutoff) {
           && Number.isFinite(r.maxPrintsPerJob) && r.maxPrintsPerJob > 0)) return null;
       const { readManifestPrintCountSync } = require('./services/manifest-print-count');
       const prints = readManifestPrintCountSync(j);
-      if (prints == null) return null;
+      if (prints == null) {
+        // Fail-safe (2026-08-15): parity with the runAutoPrint gate
+        // below. If we can't size the job, it's ineligible for the
+        // merge pre-pass — treating it as "no batch reason" here would
+        // let it into a bucket the per-job loop would then hold via
+        // the same resolver, resulting in a stuck merge decision. Hold
+        // it uniformly.
+        logger.logWarning('[auto-print][merge] batch cap set but manifest print-count unreadable — holding job', {
+          jobId:       j.id,
+          jobName:     j.job_name || j.name || '(unnamed)',
+          orderNumber: j.order_number,
+          cap:         r.maxPrintsPerJob,
+        });
+        return {
+          cap:             r.maxPrintsPerJob,
+          prints:          null,
+          unsizable:       true,
+          autoSendBatches: r.autoSendBatches === true,
+        };
+      }
       // M2 (2026-08-15): forward autoSendBatches so the per-job
       // eligibility gate matches the dispatch gate (both must agree —
       // an autosendable job is dispatched immediately, not treated as
@@ -3614,10 +3633,15 @@ async function runAutoPrint() {
         // cycle — no _totalPrintCount cache. runAutoPrint is the last gate
         // before dispatch, so correctness matters more than the SMB read
         // cost (one small-file read per eligible job per 60s cycle). The
-        // awaiting-manifest gate at :2851 above guarantees the manifest
-        // is on disk by the time we get here; a transient read failure
-        // yields null → reason skipped → job continues into the dispatch
-        // path (which has its own 4-attempt manifest retry).
+        // awaiting-manifest gate above guarantees the manifest is on
+        // disk by the time we get here; if the read STILL fails past
+        // that gate (parse error, permission race, jobId not found in
+        // manifest, transient EBUSY on SMB), the resolver returns the
+        // `unsizable: true` sentinel so holdForReview HOLDS the job
+        // rather than dispatching a size-unknown Darkroom Pro job past
+        // the cap. Fail-safe fix (2026-08-15): the previous return of
+        // `null` here fell open and the job dispatched, disagreeing
+        // with the Jobs-grid chip (which reads the stamped cache).
         batchThresholdCheck: (j) => {
           try {
             const r = routingService.resolveRoute(j);
@@ -3625,7 +3649,20 @@ async function runAutoPrint() {
                 && Number.isFinite(r.maxPrintsPerJob) && r.maxPrintsPerJob > 0)) return null;
             const { readManifestPrintCountSync } = require('../services/manifest-print-count');
             const prints = readManifestPrintCountSync(j);
-            if (prints == null) return null;
+            if (prints == null) {
+              logger.logWarning('[auto-print] batch cap set but manifest print-count unreadable — holding job', {
+                jobId:       j.id,
+                jobName:     j.job_name || j.name || '(unnamed)',
+                orderNumber: j.order_number,
+                cap:         r.maxPrintsPerJob,
+              });
+              return {
+                cap:             r.maxPrintsPerJob,
+                prints:          null,
+                unsizable:       true,
+                autoSendBatches: r.autoSendBatches === true,
+              };
+            }
             // M2 (2026-08-15): autoSendBatches suppresses the hold so
             // this dispatch gate lets the job through and the existing
             // splitter writes _1.txt, _2.txt… unchanged. Strict === true
