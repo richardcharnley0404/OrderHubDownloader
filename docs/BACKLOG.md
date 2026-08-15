@@ -161,6 +161,38 @@ Possible side effect worth checking when the lab's logs arrive: if `/checkin` re
 was the stopgap before the typed controller existed. Delete it once the lab confirms the
 real one works.
 
+**`configService.save()` is not atomic.** It commits fields incrementally
+(`store.set(...)` interleaved with sanitiser throws), so a throw partway
+through leaves earlier fields persisted on disk and later ones silently
+dropped. The renderer only sees `"Error saving settings: <message>"` — no
+indication that a partial write happened, and no way for the operator to
+tell which half of their edits survived. Not caused by the FTP-sources
+work (which flagged it — see 2026-08-15 M1 of `docs/ftp-sources-brief.md`);
+it's been true for every validation path in `save()` since Order XML
+landed at least. Two ways to fix:
+
+  1. Front-load every validation before the first `store.set` — a
+     "validate everything, then commit everything" pass. Simplest but
+     requires collecting every rule currently inline with a `store.set`
+     into a top-of-function block.
+  2. Make the save transactional — snapshot the store on entry, roll
+     back on any throw. `electron-store` doesn't offer this natively;
+     would need a shallow-clone snapshot + explicit restore in the
+     catch, and care around fields that were legitimately deleted.
+
+Option 1 is the smaller change and matches the shape of Fuji-JobMaker /
+Fuji PIC Pro's `validateControllerConfig` at their IPC-boundary
+call sites (which validate then let the sanitiser rewrite the object
+in one atomic-ish call). Option 2 is more robust against future
+sanitisers that mutate the store as a side effect.
+
+For the FTP-sources feature specifically the risk is mitigated by
+routing per-source saves through their own IPC handler
+(`ohd:ftp-sources:save-source` — Option F chosen 2026-08-15), so the
+general Settings save never round-trips `ftpSources`. But the
+underlying `save()` non-atomicity remains a footgun for any future
+sanitiser added inside it.
+
 ---
 
 Older items from before 1.8.0 — the working-set divergence Phase 2, the FTP 550 noise on
