@@ -2431,22 +2431,36 @@ button {
   box-shadow: 0 0 0 2px var(--app-accent-weak);
 }
 
-/* Checkbox rows in the modal */
-.modal-checkbox {
+/* Checkbox rows in the modal.
+   Colliding rule: `.pm-modal .form-group label` above (0,2,1) sets
+   `display: block; font-weight: 600; margin-bottom: 3px`, which beats a
+   bare `.modal-checkbox` (0,1,0) and collapses the flex row into stacked
+   blocks — tick above label. Same trap documented on `.rh-option` below.
+   Selectors below are (0,3,1) / (0,4,2) so they win cleanly inside any
+   pm-modal form-group. The generic `.pm-modal .form-group input` rule
+   (0,2,1) also sets `width: 100%`, which stretches an unconstrained
+   checkbox — the boosted rule pins it to 16×16 like `.checkbox-group`. */
+.pm-modal .form-group label.modal-checkbox {
   display: flex;
   align-items: flex-start;
   gap: 10px;
   cursor: pointer;
   font-size: 12px;
+  font-weight: normal;
+  margin-bottom: 0;
   line-height: 1.4;
 }
 
-.modal-checkbox input[type="checkbox"] {
+.pm-modal .form-group label.modal-checkbox input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
   flex-shrink: 0;
   margin-top: 2px;
+  accent-color: var(--app-accent);
+  cursor: pointer;
 }
 
-.modal-checkbox span {
+.pm-modal .form-group label.modal-checkbox span {
   display: block;
 }
 
