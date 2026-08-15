@@ -238,7 +238,12 @@ test('Batch threshold: prints under cap → NOT held', () => {
   assert.equal(r._holdForReview, false);
 });
 
-test('Batch threshold: resolver returns null (no cap / non-darkroompro / manifest missing) → NOT held', () => {
+test('Batch threshold: resolver returns null (no cap / non-darkroompro / unrouted) → NOT held', () => {
+  // Null is now reserved for "feature off entirely" — no cap configured,
+  // non-darkroompro route, or unrouted job. Manifest-missing WITH a
+  // configured cap uses the `unsizable: true` sentinel instead (see the
+  // fail-safe tests below); the "prints == null → null" fall-open was
+  // the exact bug fixed on 2026-08-15.
   const r = computeHoldForReview(baseJob, { batchThresholdCheck: () => null });
   assert.equal(r._holdForReview, false);
 });
@@ -463,6 +468,110 @@ test('autoSendBatches: falsy non-boolean leaves the reason intact (defensive)', 
       batchThresholdCheck: () => ({ cap: 100, prints: 1200, autoSendBatches: falsy }),
     });
     assert.equal(r._holdForReview, true, `falsy ${JSON.stringify(falsy)} → reason still fires`);
+  }
+});
+
+// ── Fail-safe on unsizable (2026-08-15) ─────────────────────────────────────
+//
+// Bug fixed on this date: when a Darkroom Pro controller has a positive
+// maxPrintsPerJob AND the manifest print-count cannot be read at dispatch
+// time (parse error / permission race / EBUSY on SMB past the
+// _awaitingManifest gate), the runAutoPrint resolver USED to return null.
+// null in this module means "feature off entirely — do not raise the
+// reason", so the job dispatched unheld while the Jobs-grid chip
+// (which reads the stamped cache) still showed "Large job — review
+// required" — badge and gate disagreed, and an unsized job made it
+// past a cap the operator had explicitly configured.
+//
+// New contract: the resolver signals this scenario with
+// `{ cap, prints: null, unsizable: true, autoSendBatches }`. The
+// derivation HOLDS the job unconditionally on that flag —
+// `autoSendBatches` does NOT bypass because we won't split-dispatch a
+// job we can't size. The resolver logs a warn line at the same time so
+// the operator has a traceable diagnostic; this module stays fs-free.
+
+test('Fail-safe (user brief): cap set + count unavailable → held via OVER_BATCH_THRESHOLD', () => {
+  const r = computeHoldForReview(baseJob, {
+    batchThresholdCheck: () => ({ cap: 100, prints: null, unsizable: true }),
+  });
+  assert.equal(r._holdForReview, true, 'unsizable sentinel must HOLD the job');
+  assert.deepEqual(r._holdReasons, [REASON.OVER_BATCH_THRESHOLD]);
+});
+
+test('Fail-safe (user brief): cap set + count available + under cap → NOT held (regression baseline)', () => {
+  // Second of the three tests the user asked for explicitly. Not new
+  // behaviour — just locks that the happy path is unchanged after the
+  // fail-safe branch was added.
+  const r = computeHoldForReview(baseJob, { batchThresholdCheck: checkOf(100, 50) });
+  assert.equal(r._holdForReview, false);
+  assert.deepEqual(r._holdReasons, []);
+});
+
+test('Fail-safe (user brief): cap set + over cap + autoSendBatches on → NOT held (M2 regression baseline)', () => {
+  // Third of the three. Ensures the fail-safe branch didn't accidentally
+  // catch the M2 "autoSendBatches suppresses over-cap" path.
+  const r = computeHoldForReview(baseJob, {
+    batchThresholdCheck: () => ({ cap: 100, prints: 1200, autoSendBatches: true }),
+  });
+  assert.equal(r._holdForReview, false);
+});
+
+test('Fail-safe: unsizable + autoSendBatches ON → STILL held (auto-send must not bypass a size-unknown job)', () => {
+  // The critical invariant. autoSendBatches means "over-cap? split and
+  // dispatch". If we don't KNOW whether the job is over-cap, we cannot
+  // safely split-and-dispatch — the operator opted into unattended
+  // over-cap handling, not into unsized dispatch. Fail-safe hold.
+  const r = computeHoldForReview(baseJob, {
+    batchThresholdCheck: () => ({ cap: 100, prints: null, unsizable: true, autoSendBatches: true }),
+  });
+  assert.equal(r._holdForReview, true,
+    'autoSendBatches must NOT bypass the unsizable sentinel');
+  assert.deepEqual(r._holdReasons, [REASON.OVER_BATCH_THRESHOLD]);
+});
+
+test('Fail-safe: unsizable stacks with manual-source (both reasons listed)', () => {
+  const r = computeHoldForReview(
+    { artwork_source: 'manual', artwork_files: [] },
+    { batchThresholdCheck: () => ({ cap: 100, prints: null, unsizable: true }) },
+  );
+  assert.deepEqual(r._holdReasons, [REASON.MANUAL_SOURCE, REASON.OVER_BATCH_THRESHOLD]);
+});
+
+test('Fail-safe: unsizable=true takes precedence even when prints happens to be a number', () => {
+  // Defensive: a resolver that sets both `unsizable: true` AND a
+  // sensible-looking `prints` (e.g. from a partial read) must still
+  // hold — the flag is the caller's authoritative "don't trust the
+  // count" signal. Prevents a subtle bug where a caller-side
+  // half-measure (compute-then-flag) accidentally reverts to counting.
+  const r = computeHoldForReview(baseJob, {
+    batchThresholdCheck: () => ({ cap: 100, prints: 50, unsizable: true }),
+  });
+  assert.equal(r._holdForReview, true, 'unsizable must dominate an accompanying prints value');
+  assert.deepEqual(r._holdReasons, [REASON.OVER_BATCH_THRESHOLD]);
+});
+
+test('Fail-safe: unsizable=false is NOT the sentinel — falls through to the normal branch', () => {
+  // Strict `=== true`, same posture as autoSendBatches. Explicit false
+  // means "we sized the job, use the prints field", not "we tried and
+  // failed". Prevents a caller from accidentally opting jobs INTO the
+  // fail-safe by passing `unsizable: someExpression()`.
+  const r = computeHoldForReview(baseJob, {
+    batchThresholdCheck: () => ({ cap: 100, prints: 50, unsizable: false }),
+  });
+  assert.equal(r._holdForReview, false, 'unsizable=false is a no-op — normal branch applies');
+});
+
+test('Fail-safe: unsizable=true with an INVALID cap → still NOT held (feature-off wins)', () => {
+  // The cap gate is the outer condition — a route with no cap has the
+  // feature off entirely, and the unsizable branch must not fire there.
+  // Guards against a future refactor moving the flag check outside the
+  // cap gate.
+  for (const badCap of [0, -5, Number.NaN, null, undefined]) {
+    const r = computeHoldForReview(baseJob, {
+      batchThresholdCheck: () => ({ cap: badCap, prints: null, unsizable: true }),
+    });
+    assert.equal(r._holdForReview, false,
+      `unsizable with badCap ${JSON.stringify(badCap)} must NOT hold — feature-off invariant`);
   }
 });
 
