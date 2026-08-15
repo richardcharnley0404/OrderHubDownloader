@@ -1,5 +1,74 @@
 ## Unreleased
 
+**New: batch splitting for Epson OrderController jobs.** The Darkroom
+Pro "Maximum prints per job" feature is now available on Epson
+controllers too. Set a cap on the Epson controller in Settings →
+Routing → Order Controllers → Edit → Maximum prints per job, and any
+job whose total print count exceeds the cap will be split into
+multiple hot-folder submissions the Epson controller treats as
+separate orders. Same operator-review gate as Darkroom Pro (Send to
+Print splits and dispatches; tick "Send batches automatically" to
+skip the review and dispatch unattended). Counts prints, not images —
+a 25-image job at 4 copies each is 100 prints for the purposes of
+the cap. Leave the field blank to keep today's behaviour (one folder
+per job regardless of size). Off by default on all existing
+controllers.
+
+**Folder-name shape (a lab operator reads these — here's what to
+expect).** An unsplit job's folder name is unchanged from today —
+byte-identical — so anything a person or a script recognises
+continues to match. A split job produces one folder per batch with a
+compact `_NofM_` marker in the discriminator slot: an over-cap job
+that splits into 5 batches lands as
+
+```
+o38461218_PXDEMO-5LGAKK-1_1of5_4x6 Photo Print
+o38461218_PXDEMO-5LGAKK-1_2of5_4x6 Photo Print
+o38461218_PXDEMO-5LGAKK-1_3of5_4x6 Photo Print
+o38461218_PXDEMO-5LGAKK-1_4of5_4x6 Photo Print
+o38461218_PXDEMO-5LGAKK-1_5of5_4x6 Photo Print
+```
+
+reading as "2 of 5" at a glance. If Banner Sheet is enabled on the
+controller, a split job produces **one banner per batch** — batches
+at the printer are scheduled independently and the prints for one
+job may not come off the roll contiguously, so a plain banner on
+batch 1 only would leave batches 2..N unidentifiable in the output
+stack. The per-batch banner reads
+`<jobCode>  (N of M)` so operators can tell them apart. If your lab
+was previously used to a single banner per job, expect one per batch
+now on split jobs — not a duplicate-banner defect.
+
+**Completion is now a roll-up on split jobs.** A split job is only
+marked completed once **every** batch has been accepted by the
+controller. A single accept on batch 1 while batches 2..N are still
+importing no longer prematurely completes the parent. Any batch the
+controller rejects (folder renamed to `q…`) marks the job errored
+naming which batch failed, so the operator knows exactly which one
+needs attention.
+
+**Resend a single failed batch.** When one batch of a split job fails
+(the controller rejected it, or the write to the hot folder itself
+threw), a "Resend batch N/M" button appears next to the batch chip
+on the job row. Clicking it re-writes only that one batch's folder
+— reusing the batch's exact original image set from the ledger
+(never re-splits, so an operator-discarded image after the original
+dispatch doesn't change what goes into that batch). Batches
+still-pending or successfully-accepted don't get a resend button.
+Batches that are already accepted **do** get one, guarded by a
+confirmation dialog to prevent the obvious double-print — accept
+that prompt only if you know the printer needs the batch again.
+
+**Fix: a reprint's accepted folder no longer marks its parent job
+completed.** Previously, when auto-complete-on-printer-accept was
+turned on, a reprint's folder reaching `e` (accepted) would fire the
+completion for the parent job — regardless of whether the parent was
+actually done printing. The monitor now recognises the reprint
+suffix on the folder name and no longer attributes a reprint's
+terminal state to the parent.
+
+---
+
 **New: FTP Sources — a plain "watch a folder, move files down" service.**
 Independent of everything else OHD does. If your lab receives files
 over FTP that have nothing to do with an OrderHub job — Labworks XML,
