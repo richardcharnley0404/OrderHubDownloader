@@ -992,3 +992,77 @@ test('stripOrderNumberPrefix: case-insensitive match — casing of the tail is p
   assert.equal(result.success, true);
   stripAllThree(result, 'AbC9');
 });
+
+// ── Single-job dispatch: unique id fallback when job_name is blank ─────────
+//
+// Guards `_sendViaFujiPicProRouted` (the mergeOrderJobs-OFF path) against
+// two jobs of one order both falling back to bare `order_number` for their
+// orderId. That id names the staging folder; stageImages rm -rf's it before
+// staging. If two jobs collide on the id, the second dispatch wipes the
+// first's staged images before OrderGateway has delivered them — one blank
+// order at the printer and one good one. The fallback shape
+// `${order_number}_${id}` is what Darkroom Pro's dispatcher already uses at
+// print-service.js:2003 for exactly this reason.
+//
+// In production every OrderHub API response observed populates job_name
+// (cache surveyed 2026-08-14: 517/517 populated across 60 multi-job
+// orders), so this is a defensive fix. The test locks the guarantee in.
+
+test('single-job dispatch: two jobs of one order with blank job_name get DIFFERENT orderIds — no staging-folder collision', async (t) => {
+  resetCaptures();
+  __manifestReadCount = 0;
+  const orderNumber = 'ORD-BLANK-JN';
+  const root = await makeOrderFolder(orderNumber, 'ord-1', [101, 102]);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  // Two jobs, same order_number, DIFFERENT ids, BOTH with blank job_name.
+  // Old fallback (`job.job_name || job.order_number`) would give both the
+  // same orderId = 'ORD-BLANK-JN' and stageImages would rm -rf the first
+  // submission's folder. New fallback (`${order_number}_${id}`) is
+  // unique per job.
+  const jobA = makeJob(101, orderNumber, { job_name: '' });
+  const jobB = makeJob(102, orderNumber, { job_name: '' });
+  const route = picProRoute();
+
+  const resA = await printService._sendViaFujiPicProRouted(jobA, route);
+  const resB = await printService._sendViaFujiPicProRouted(jobB, route);
+
+  assert.equal(resA.success, true, `job A dispatch failed: ${resA.error}`);
+  assert.equal(resB.success, true, `job B dispatch failed: ${resB.error}`);
+
+  // Two staging calls, two DIFFERENT orderIds. The load-bearing
+  // assertion — without the fix, both would be 'ORD-BLANK-JN' and this
+  // would fail with "expected ORD-BLANK-JN_101 !== ORD-BLANK-JN_102".
+  assert.equal(__stageCalls.length, 2, 'both dispatches reached stageImages');
+  const stagedIds = __stageCalls.map(c => c.orderId);
+  assert.notEqual(stagedIds[0], stagedIds[1],
+    'staging folder names must be unique per job — otherwise rm -rf wipes the first submission');
+  assert.equal(stagedIds[0], `${orderNumber}_101`, 'job A id follows the Darkroom Pro-style fallback');
+  assert.equal(stagedIds[1], `${orderNumber}_102`, 'job B id follows the same shape with its own job.id');
+
+  // Consistency across the three plumbings — same check the strip tests
+  // above make. If the id ever diverges between staging / .txt / enqueue
+  // the OrderGateway handshake breaks.
+  assert.equal(__writeOrderFileCalls[0].filename, `${orderNumber}_101.txt`);
+  assert.equal(__writeOrderFileCalls[1].filename, `${orderNumber}_102.txt`);
+  assert.equal(__enqueueCalls[0].orderId,         `${orderNumber}_101`);
+  assert.equal(__enqueueCalls[1].orderId,         `${orderNumber}_102`);
+});
+
+test('single-job dispatch: populated job_name still wins over the fallback (regression guard)', async (t) => {
+  // The fallback fires only when job_name is blank. If OrderHub returns
+  // a real job_name (the 100% path in production), it must still drive
+  // the orderId — not the new `${order_number}_${id}` shape.
+  resetCaptures();
+  __manifestReadCount = 0;
+  const orderNumber = 'ORD-NAMED';
+  const root = await makeOrderFolder(orderNumber, 'ord-1', [101]);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const job = makeJob(101, orderNumber);   // job_name defaults to 'ORD-NAMED-101' via makeJob
+  const res = await printService._sendViaFujiPicProRouted(job, picProRoute());
+
+  assert.equal(res.success, true);
+  assert.equal(__stageCalls[0].orderId, 'ORD-NAMED-101',
+    'populated job_name is the orderId — fallback is only used when job_name is blank');
+});

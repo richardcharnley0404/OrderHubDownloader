@@ -2533,13 +2533,28 @@ class PrintService {
     // JobMaker's convention so two jobs from one order can't collide
     // in PIC Pro's staging or Order Data folders.
     //
+    // Fallback when job_name is blank: `${order_number}_${id}`. This
+    // matches the Darkroom Pro dispatcher at :2003 for the same
+    // reason it exists there — the id names the staging folder, and
+    // stageImages `rm -rf`'s that folder before staging. If two jobs
+    // of one order both fell back to bare `order_number`, the second
+    // dispatch would wipe the first's staged images before
+    // OrderGateway had delivered them — one blank order at the
+    // printer and one good one. Every OrderHub API response observed
+    // in production populates job_name (cache surveyed 2026-08-14:
+    // 517/517 populated across 60 multi-job orders), so this is a
+    // defensive fallback, not a live-incident fix — but the
+    // collision hazard is real if OrderHub ever returns a job
+    // without job_name, and matching Darkroom Pro's pattern costs
+    // nothing.
+    //
     // v1.13.0: apply the per-controller Strip Order Number Prefix, if
     // any. The same helper is used by the order-level dispatch method
     // and both must strip identically — otherwise switching
     // mergeOrderJobs on/off on a controller would change the id shape
     // partway through the wait window. Blank prefix (the default) is
     // a no-op.
-    const rawOrderId = job.job_name || job.order_number || '';
+    const rawOrderId = job.job_name || `${job.order_number || ''}_${job.id}`;
     const orderId    = stripOrderNumberPrefix(rawOrderId, route.stripOrderNumberPrefix);
 
     let stageResult;
