@@ -3284,8 +3284,20 @@ button {
   gap: 12px;
   padding: 8px 10px;
   border: 1px solid var(--app-border, #ddd);
+  border-left: 3px solid var(--app-border, #ddd);
   border-radius: 4px;
   background: var(--app-surface, #fff);
+}
+/* M5 visual affordance for last-pass state:
+     --fail-pass = whole-pass failure (connect/auth/list rejected)
+     --fail-file = pass ran but at least one file failed
+   The list-side border is 3px in the base rule above so switching
+   colour doesn't jitter the row width. */
+.ftp-source-row--fail-pass {
+  border-left-color: var(--app-red, #c92a2a);
+}
+.ftp-source-row--fail-file {
+  border-left-color: var(--app-amber, #e67700);
 }
 .ftp-source-row__main {
   flex: 1;

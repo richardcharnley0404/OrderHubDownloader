@@ -7909,14 +7909,27 @@ async function handleBackupRelaunchNow() {
 
   function _summariseResult(lastResult) {
     if (!lastResult) return 'No pass has run yet';
-    const parts = [
-      lastResult.moved   + ' moved',
-      lastResult.skipped + ' skipped',
-      lastResult.failed  + ' failed',
-    ];
+    // Whole-pass failure gets the reason on its own — the "0 moved,
+    // 0 skipped, 0 failed" prefix would be misleading (the pass
+    // didn't attempt any files, it failed at connect/auth/list).
     const wholePassErr = (lastResult.errors || []).find((e) => e && e.filename === null);
-    if (wholePassErr) return parts.join(', ') + ' — pass failed: ' + wholePassErr.message;
-    return parts.join(', ');
+    if (wholePassErr) return 'pass failed: ' + wholePassErr.message;
+    return (
+      lastResult.moved   + ' moved, ' +
+      lastResult.skipped + ' skipped, ' +
+      lastResult.failed  + ' failed'
+    );
+  }
+
+  function _rowClassFor(lastResult) {
+    // Whole-pass fail = red; some per-file failures but pass itself
+    // ran = amber; otherwise no highlight. M5 visual affordance for
+    // "you can see something is wrong without opening the modal".
+    if (!lastResult) return 'ftp-source-row';
+    const wholePassErr = (lastResult.errors || []).find((e) => e && e.filename === null);
+    if (wholePassErr) return 'ftp-source-row ftp-source-row--fail-pass';
+    if (lastResult.failed > 0) return 'ftp-source-row ftp-source-row--fail-file';
+    return 'ftp-source-row';
   }
 
   async function refreshList() {
@@ -7956,7 +7969,7 @@ async function handleBackupRelaunchNow() {
       const lastRunTitle = s.lastRunAt ? new Date(s.lastRunAt).toLocaleString() : '';
       const runningTag   = s.running ? ' <em style="color:#888">(running…)</em>' : '';
       return (
-        '<div class="ftp-source-row" data-source-id="' + escapeHtml(s.id) + '">' +
+        '<div class="' + escapeHtml(_rowClassFor(s.lastResult)) + '" data-source-id="' + escapeHtml(s.id) + '">' +
           '<div class="ftp-source-row__main">' +
             '<div class="ftp-source-row__title">' +
               '<strong>' + escapeHtml(s.name) + '</strong> ' + badge + runningTag +
@@ -8165,4 +8178,28 @@ async function handleBackupRelaunchNow() {
   // file wraps around — cachedFtpSources populates and the list
   // renders before the operator gets to the Downloads sub-tab.
   refreshList();
+
+  // M5: auto-refresh while the Downloads sub-tab is visible. A silent
+  // file mover is undebuggable per brief §M5 — the operator should be
+  // able to WATCH a pass complete without leaving Settings and coming
+  // back. Poll every 5 s but skip the IPC call when the sub-tab isn't
+  // active (cheap classList check; no wasted round-trip while the
+  // operator is on Jobs or a sibling sub-tab).
+  //
+  // Interval is unref'd so it never keeps the render process from
+  // shutting down (belt-and-braces — renderer teardown is
+  // window-lifecycle driven, but the pattern matches every other
+  // background timer in main).
+  const _refreshIntervalMs = 5000;
+  const downloadsPanel = document.getElementById('subtab-downloads');
+  const refreshTimer = setInterval(() => {
+    // Skip when the sub-tab isn't the visible one. `document.hidden`
+    // covers the whole-window case (backgrounded / minimised); the
+    // sub-tab `.active` class covers "operator is on a different
+    // sub-tab in Settings". Either way — no visible list to update.
+    if (typeof document !== 'undefined' && document.hidden) return;
+    if (downloadsPanel && !downloadsPanel.classList.contains('active')) return;
+    refreshList();
+  }, _refreshIntervalMs);
+  if (refreshTimer && typeof refreshTimer.unref === 'function') refreshTimer.unref();
 })();
