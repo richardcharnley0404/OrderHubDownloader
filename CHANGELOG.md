@@ -1,3 +1,38 @@
+## Unreleased
+
+**New: "Send batches automatically" for Darkroom Pro.** A new tick to
+the right of the "Maximum prints per job" input on the Darkroom Pro
+controller settings. With it on, a job that would normally be held for
+your review because it exceeds the cap is split and dispatched
+straightaway — the resulting `{job_name}_1.txt`, `{job_name}_2.txt`
+files land in Darkroom Pro without anyone touching OHD. Off by default:
+existing controllers keep waiting for Send to Print. Only the batch-cap
+hold is suppressed; a job that's also on manual artwork, on a
+hold-for-manual-release process, or held for AI quality still waits as
+today. The tick is only enabled when a cap is set — with the maximum
+blank it has nothing to gate on and disables itself with a hint.
+
+**Fix: ticks in the Add/Edit Controller modal now sit next to their
+labels.** Every checkbox in the controller settings modal — Auto Print,
+Check Order Status, Banner Sheet, Include customer surname, Send
+[release] command, Include Customer Name, Merge sibling jobs, and the
+new Send-batches-automatically — was rendering with the tick on the
+line above the text instead of beside it. Long labels wrap under the
+text now rather than under the tick. The same layout fix reaches the
+"Sections to restore" ticks in the Backup Restore modal and the "All
+pages" tick in the PDF Pipeline builder, which were broken the same
+way and are now correct.
+
+**Fix: the main-window Order XML tab is hidden when the feature is
+off.** Toggling "Order XML" off in Settings → Order XML now removes
+the top-of-window Order XML tab so operators on a PC that doesn't use
+that mode don't see it. Toggling it back on returns the tab without a
+restart. The Settings → Order XML sub-tab stays visible either way —
+that's where the enable checkbox lives, so hiding it would make the
+feature impossible to switch back on.
+
+---
+
 ## v1.12.2 - 2026-08-14
 
 **New: per-controller "Strip order number prefix" for Fuji PIC Pro.**
