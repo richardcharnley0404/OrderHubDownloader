@@ -77,13 +77,12 @@ const REASON_TEXT = Object.freeze({
  *   Routing. Supplied by the caller (job-service / runAutoPrint) which
  *   reads it from routing-service.getRoutingHeldProcesses() — passed in
  *   so this module stays pure and electron-store-free for node:test.
- * @param {(job: object) => {cap:number, prints:number, autoSendBatches?:boolean}|null} [ctx.batchThresholdCheck] -
+ * @param {(job: object) => {cap:number, prints:number|null, unsizable?:boolean, autoSendBatches?:boolean}|null} [ctx.batchThresholdCheck] -
  *   Per-job resolver returning both sides of the comparison already
  *   evaluated: the controller's maxPrintsPerJob cap (positive integer)
- *   AND the job's total print count. Returns null when the check
- *   cannot be made — no cap configured, route is not a
- *   darkroompro-family controller, the job is unrouted, or the print
- *   count cannot be determined (e.g. manifest not yet on disk).
+ *   AND the job's total print count. Returns null when the batch
+ *   feature is off entirely — no cap configured, route is not a
+ *   darkroompro-family controller, or the job is unrouted.
  *
  *   The caller owns both sides so this module stays pure — no
  *   dependency on routing-service (electron-store) or fs.
@@ -103,8 +102,19 @@ const REASON_TEXT = Object.freeze({
  *   Any non-`true` value (undefined, false, null, non-boolean) leaves
  *   the reason emission intact.
  *
+ *   Optional `unsizable: true` (added 2026-08-15, fail-safe hold): the
+ *   resolver knows the cap IS configured but cannot determine the
+ *   print count (e.g. manifest on disk but unreadable or unparseable).
+ *   Setting this flag raises OVER_BATCH_THRESHOLD unconditionally —
+ *   `autoSendBatches` does NOT bypass it. Rationale: we won't
+ *   split-dispatch a job we can't size. The resolver is expected to
+ *   log a warn line at the same time so the operator has a
+ *   traceable diagnostic; this module stays fs-free and log-free.
+ *
  *   Backward-compatible: when the resolver is absent OR returns null,
- *   the batch-threshold reason is never emitted (M1 behaviour).
+ *   the batch-threshold reason is never emitted (M1 behaviour). A
+ *   pre-fix resolver that omits both `unsizable` and returns `{cap,
+ *   prints}` continues to work identically.
  * @returns {{ _holdForReview: boolean, _holdReasons: string[] }}
  *   `_holdForReview` is `_holdReasons.length > 0` (kept for read-site
  *   ergonomics; callers may also check the array length directly).
@@ -168,18 +178,27 @@ function computeHoldForReview(job, ctx = {}) {
   const check = ctx && ctx.batchThresholdCheck;
   if (typeof check === 'function') {
     const r = check(job);
-    if (
-      r
-      && Number.isFinite(r.cap) && r.cap > 0
-      && Number.isFinite(r.prints) && r.prints > r.cap
-      // autoSendBatches (M2, 2026-08-15): controller opted into
-      // unattended dispatch of over-cap jobs. Strict `=== true` so a
-      // stray truthy non-boolean (e.g. a string from a hand-edited
-      // config) can't silently suppress the operator-review gate; the
-      // IPC boundary validates on save, this is defence-in-depth.
-      && r.autoSendBatches !== true
-    ) {
-      reasons.push(REASON.OVER_BATCH_THRESHOLD);
+    if (r && Number.isFinite(r.cap) && r.cap > 0) {
+      // Two paths raise OVER_BATCH_THRESHOLD:
+      //
+      //   1. Unsizable (fail-safe, 2026-08-15): resolver signalled it
+      //      knows the cap is configured but couldn't determine the
+      //      print count. `autoSendBatches` does NOT bypass — we
+      //      won't split-dispatch a job we can't size. The resolver
+      //      warns; this branch is silent so the module stays pure.
+      //
+      //   2. Prints known + over cap + autoSendBatches not on
+      //      (M2/M3 behaviour). Strict `=== true` on the flag so a
+      //      stray truthy non-boolean (hand-edited config) can't
+      //      silently suppress the operator-review gate; the IPC
+      //      boundary validates on save — this is defence-in-depth.
+      const unsizable = r.unsizable === true;
+      const overCap   = Number.isFinite(r.prints)
+                     && r.prints > r.cap
+                     && r.autoSendBatches !== true;
+      if (unsizable || overCap) {
+        reasons.push(REASON.OVER_BATCH_THRESHOLD);
+      }
     }
   }
 
