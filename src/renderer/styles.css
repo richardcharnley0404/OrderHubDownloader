@@ -3268,6 +3268,33 @@ button {
   border-color: var(--app-red);
 }
 
+/* Per-batch resend button (M4 of docs/epson-batch-splitting-brief.md).
+   Sits under the batch-dispatch-chip in the flags cell when one or
+   more batches are in a resendable state (write-error, accepted, or
+   failed-import). Compact enough to fit in a flags cell alongside the
+   chip. Uses the app's yellow tokens — the action is "bring an
+   operator's attention" not "everything is fine" or "everything is
+   broken". */
+.btn-resend-batch {
+  display: block;
+  width: fit-content;
+  margin: 2px auto;
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: var(--app-yellow-weak, #fffbe6);
+  color: var(--app-yellow, #a37c00);
+  border: 1px solid var(--app-yellow, #a37c00);
+  white-space: nowrap;
+  cursor: pointer;
+  font-family: inherit;
+}
+.btn-resend-batch:hover:not(:disabled) { filter: brightness(0.95); }
+.btn-resend-batch:disabled             { opacity: 0.6; cursor: default; }
+
 /* ── FTP Sources list (M4b of docs/ftp-sources-brief.md) ─────────────
    One row per configured FTP source in Settings → Downloads. Row is a
    flex row with the meta on the left and the Edit/Delete buttons on

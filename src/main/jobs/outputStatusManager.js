@@ -29,6 +29,9 @@ const PREFIXES = ['p', 'o', 'q', 'e'];
  * @param {object}      [nameOpts]    - Forwarded to buildFolderName
  *   - includeCustomerName: boolean (default false)
  *   - customerName: string (default job.customer_name)
+ *   - batch: {index, total}  (M4) — when set, looks for the batch-suffixed
+ *     folder name (e.g. `e{jobStuff}_2of5_{rest}`). When absent, behaves
+ *     as pre-M4 (single-folder-per-job lookup).
  * @returns {Promise<{ prefix: string, folderName: string, folderPath: string }|null>}
  *          Returns null if no matching folder is found (job not yet sent).
  */
@@ -37,6 +40,9 @@ async function getJobOutputStatus(job, destBasePath, reprintSuffix = null, nameO
     includeCustomerName: !!nameOpts.includeCustomerName,
     customerName: nameOpts.customerName != null ? nameOpts.customerName : (job.customer_name || ''),
   };
+  // M4: forward the batch descriptor so a split job's poll targets the
+  // right folder-for-a-batch, not the never-written base folder.
+  if (nameOpts.batch) resolvedOpts.batch = nameOpts.batch;
   const baseName = buildFolderName('', job, reprintSuffix, resolvedOpts); // no prefix
 
   for (const prefix of PREFIXES) {

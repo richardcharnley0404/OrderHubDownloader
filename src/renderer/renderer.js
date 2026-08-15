@@ -1215,13 +1215,43 @@ function renderJobTable(jobs) {
       const chipClass = partial ? 'batch-dispatch-chip batch-dispatch-chip--error' : 'batch-dispatch-chip';
       const chipText  = partial ? `Sent ${succeeded}/${total} batches` : `Sent as ${total} batches`;
       const perBatch  = batches
-        .map(b => `${b.filename || '(unnamed)'} — ${b.outcome}${b.error ? `: ${b.error}` : ''}`)
+        .map(b => {
+          const parts = [`${b.filename || '(unnamed)'} — ${b.outcome}`];
+          if (b.error) parts.push(`: ${b.error}`);
+          if (b.acceptedPrefix === 'e') parts.push(' [accepted]');
+          if (b.acceptedPrefix === 'q') parts.push(' [failed import]');
+          return parts.join('');
+        })
         .join('\n');
       const header    = partial
         ? `Batches: ${succeeded} of ${total} written, ${total - succeeded} not written. Cap ${ledger.cap}, ${ledger.totalPrints} prints total.`
         : `Batches: ${total} of ${total} written. Cap ${ledger.cap}, ${ledger.totalPrints} prints total.`;
       const tipText   = perBatch ? `${header}\n\n${perBatch}` : header;
       flagsHtml += `<span class="${chipClass}" title="${escapeHtml(tipText)}">${escapeHtml(chipText)}</span>`;
+
+      // M4 (docs/epson-batch-splitting-brief.md) — per-batch resend
+      // link for the DPOF split path. Rendered ONLY for batches that
+      // carry the `images` field (M4 writer contract; DP entries omit
+      // it, and pre-M4 DPOF ledgers do too). The resend flow is a
+      // no-op for DP: recordBatchDispatched never stored images on
+      // that path, so the link simply won't render.
+      //
+      // We show a mini-button per batch in these states:
+      //   - outcome === 'error'      → the write failed; obvious resend
+      //   - acceptedPrefix === 'q'   → controller rejected; needs resend
+      //   - acceptedPrefix === 'e'   → already accepted; guarded by
+      //                                confirm modal in the click handler
+      // Batches still pending (dispatched, no accept signal) are NOT
+      // resendable — nothing has failed yet.
+      for (const b of batches) {
+        if (!b || !Array.isArray(b.images) || b.images.length === 0) continue;
+        const resendable = b.outcome === 'error' || b.acceptedPrefix === 'q' || b.acceptedPrefix === 'e';
+        if (!resendable) continue;
+        const stateLabel = b.acceptedPrefix === 'e'
+          ? 'accepted'
+          : (b.acceptedPrefix === 'q' ? 'rejected' : 'failed to write');
+        flagsHtml += `<button class="btn-resend-batch" data-job-id="${escapeHtml(String(job.id))}" data-batch-index="${b.index}" data-batch-total="${b.total}" data-batch-state="${escapeHtml(stateLabel)}" title="Resend batch ${b.index} of ${b.total} (${stateLabel})">Resend batch ${b.index}/${b.total}</button>`;
+      }
     }
 
     // For error-status jobs, surface the _errorMessage right next to the
@@ -1337,6 +1367,66 @@ function renderJobTable(jobs) {
   });
 
   // ── DPOF output-status action handlers ──
+
+  // Per-batch resend (M4, docs/epson-batch-splitting-brief.md) — writes
+  // one folder for a single batch, reusing the batch's stored image
+  // set from the ledger (never re-splits). Confirms before resending
+  // a batch already at `e` (accepted) to prevent the obvious
+  // double-print.
+  document.querySelectorAll('.btn-resend-batch[data-job-id][data-batch-index]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const jobId      = btn.dataset.jobId;
+      const batchIndex = parseInt(btn.dataset.batchIndex, 10);
+      const batchTotal = btn.dataset.batchTotal;
+      const state      = btn.dataset.batchState || '';
+      const originalTx = btn.textContent;
+
+      // Front-end confirm for already-accepted batches. The main-side
+      // guard is authoritative (needsConfirm is returned on any 'e'
+      // batch regardless of what we do here) — this is the operator-
+      // friendly first stop that surfaces the risk before an IPC hop.
+      if (state === 'accepted') {
+        const ok = window.confirm(
+          `Batch ${batchIndex} of ${batchTotal} was already accepted by the printer.\n\n` +
+          `Resending will write it to the hot folder AGAIN and print duplicates. ` +
+          `Continue?`
+        );
+        if (!ok) return;
+      }
+
+      btn.disabled = true;
+      btn.textContent = 'Resending...';
+      try {
+        let result = await window.electronAPI.resendDpofBatch({ jobId, batchIndex, confirmed: state === 'accepted' });
+
+        // Belt-and-braces: if the front-end confirm was skipped for
+        // some reason and the main side still asked for one, prompt
+        // now and re-invoke.
+        if (result && result.needsConfirm) {
+          const ok = window.confirm(
+            `Batch ${batchIndex} of ${batchTotal} was already accepted by the printer.\n\n` +
+            `Resending will write it to the hot folder AGAIN. Continue?`
+          );
+          if (!ok) {
+            btn.disabled = false; btn.textContent = originalTx;
+            return;
+          }
+          result = await window.electronAPI.resendDpofBatch({ jobId, batchIndex, confirmed: true });
+        }
+
+        if (result && result.success) {
+          showToast(`Batch ${batchIndex}/${batchTotal} resent`, 'success');
+          loadJobs();
+        } else {
+          btn.disabled = false; btn.textContent = originalTx;
+          showToast('Batch resend failed: ' + ((result && result.error) || 'Unknown error'), 'error', 8000);
+        }
+      } catch (error) {
+        btn.disabled = false; btn.textContent = originalTx;
+        showToast('Batch resend error: ' + error.message, 'error', 8000);
+      }
+    });
+  });
 
   // "Resend" (q status) — full re-send through DPOF pipeline
   document.querySelectorAll('.btn-resend-dpof[data-job-id]').forEach(btn => {

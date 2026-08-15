@@ -8,6 +8,13 @@ const { printControllerStore } = require('./print-controller-store');
 const routingService = require('./routing-service');
 const { printControllerService } = require('./print-controller-service');
 const { FolderMonitor } = require('./folder-monitor');
+const {
+  CANONICAL_FIELD:  BATCH_LEDGER_FIELD,
+  recordBatchAccepted,
+  completeLedger,
+  allBatchesAccepted,
+  readLedger,
+} = require('../../shared/batchLedger');
 const logger = require('./logger');
 
 // S3 artwork downloader — singleton, sibling of the FTP channel.
@@ -817,7 +824,11 @@ class PollingService {
   _handleFolderStatusChange(statusUpdate, controller) {
     if (!configService.get('autoCompleteOnPrinterAccept')) return;
 
-    const { jobId, productCode, status, timestamp } = statusUpdate;
+    // M1 (docs/epson-batch-splitting-brief.md) renamed the payload's
+    // `productCode` → `rest`. Read both for graceful transition; the
+    // field is used only in a diagnostic log line.
+    const { jobId, batch, reprintSuffix, status, timestamp } = statusUpdate;
+    const rest = statusUpdate.rest || statusUpdate.productCode;
 
     if (status !== 'accepted' && status !== 'failed') return;
 
@@ -826,12 +837,93 @@ class PollingService {
       logger.info('Hot folder status change for job not in local cache — ignored', {
         controller: controller.name,
         jobId,
-        productCode,
-        status
+        rest,
+        batch,
+        reprintSuffix,
+        status,
       });
       return;
     }
 
+    // M1-review carry: a reprint folder must NOT mark the parent job
+    // completed. The reprint's `_rN` sits in the folder-name
+    // discriminator slot and comes through as `reprintSuffix` on the
+    // callback. Log and stop — a reprint's terminal state is not the
+    // parent's completion signal.
+    if (reprintSuffix) {
+      logger.info('Hot folder status change for a REPRINT folder — parent-job completion NOT stamped', {
+        controller: controller.name,
+        jobId:      job.id,
+        reprintSuffix,
+        status,
+      });
+      return;
+    }
+
+    // M4 completion roll-up (docs/epson-batch-splitting-brief.md).
+    // Split-dispatch jobs carry a batch ledger; a single-batch signal
+    // must NOT complete the parent — that only happens when every
+    // batch reaches `e`. Any `q` marks the job errored (with the
+    // failing batch named) but leaves the ledger visible for a
+    // targeted resend.
+    const ledger = readLedger(job);
+    if (ledger && batch && Number.isInteger(batch.index)) {
+      recordBatchAccepted(ledger, {
+        index:  batch.index,
+        prefix: status === 'accepted' ? 'e' : 'q',
+        at:     timestamp.toISOString(),
+      });
+      jobService.updateJobLocally(job.id, { [BATCH_LEDGER_FIELD]: ledger });
+
+      if (status === 'failed') {
+        jobService.updateJobLocally(job.id, {
+          _dpofFailed:   true,
+          _dpofFailedAt: timestamp.toISOString(),
+          _status:       'error',
+          _errorMessage: `Batch ${batch.index} of ${batch.total} was rejected by the printer. Resend that batch from the job's actions.`,
+        });
+        logger.logWarning(`[dpof-batch] batch ${batch.index}/${batch.total} rejected`, {
+          jobId: job.id, controller: controller.name,
+        });
+        this._notifyJobsUpdated();
+        return;
+      }
+
+      // status === 'accepted' → check roll-up.
+      if (allBatchesAccepted(ledger)) {
+        completeLedger(ledger, timestamp.toISOString());
+        jobService.updateJobLocally(job.id, {
+          [BATCH_LEDGER_FIELD]: ledger,
+          _dpofAccepted:        true,
+          _dpofAcceptedAt:      timestamp.toISOString(),
+        });
+        logger.info('All batches accepted by printer — auto-marking split job as completed', {
+          jobId:        job.id,
+          totalBatches: ledger.totalBatches,
+        });
+        jobService.markCompleted(job.id)
+          .then(() => this._notifyJobsUpdated())
+          .catch((err) => {
+            logger.logWarning('DPOF auto-complete API call failed — split job left uncompleted for manual retry', {
+              jobId: job.id, error: err.message,
+            });
+            this._notifyJobsUpdated();
+          });
+        return;
+      }
+
+      logger.info(`[dpof-batch] batch ${batch.index}/${batch.total} accepted — awaiting remaining batches`, {
+        jobId:            job.id,
+        controller:       controller.name,
+        acceptedSoFar:    ledger.batches.filter((b) => b && b.acceptedPrefix === 'e').length,
+        totalBatches:     ledger.totalBatches,
+      });
+      this._notifyJobsUpdated();
+      return;
+    }
+
+    // Unsplit dispatch (no ledger, or a monitor event without a batch
+    // descriptor) — pre-M4 behaviour, byte-identical.
     if (status === 'accepted') {
       jobService.updateJobLocally(job.id, {
         _dpofAccepted: true,

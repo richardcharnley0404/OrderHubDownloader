@@ -493,3 +493,191 @@ test('split success + checkOrderStatus false → _markCompleted fires (not _mark
   assert.equal(calls.markCompleted,    1);
   assert.equal(calls.markInProduction, 0);
 }));
+
+// ── M4: per-batch image storage on the ledger (resend source of truth) ───────
+
+test('split success → each ledger entry carries its batch\'s image set (M4 resend contract)', withDpofBatchingHarness(async (t, calls, store) => {
+  stubImagesOnFindJob(images(40, 1), calls);
+  await printService.sendViaDPOFRouted(makeJob(), makeRoute({ maxPrintsPerJob: 20 }));
+
+  const stored = store.get(42);
+  assert.ok(stored._batchLedger);
+  const ledger = stored._batchLedger;
+  assert.equal(ledger.batches.length, 2);
+
+  // Batch 1 → images 1..20; batch 2 → images 21..40. Preserves input order.
+  const b1Files = ledger.batches[0].images.map(im => im.filename);
+  const b2Files = ledger.batches[1].images.map(im => im.filename);
+  assert.equal(b1Files.length, 20);
+  assert.equal(b2Files.length, 20);
+  assert.equal(b1Files[0],  'img-1.jpg');
+  assert.equal(b1Files[19], 'img-20.jpg');
+  assert.equal(b2Files[0],  'img-21.jpg');
+  assert.equal(b2Files[19], 'img-40.jpg');
+  // Quantity carried too.
+  for (const im of ledger.batches[0].images) assert.equal(im.quantity, 1);
+}));
+
+// ── M4: resendDpofBatch — happy path (previously-errored batch) ──────────────
+
+test('resendDpofBatch: batch previously in error → writes one folder, resets ledger entry to success', withDpofBatchingHarness(async (t, calls, store) => {
+  // Set up initial split dispatch where batch 2 fails.
+  stubImagesOnFindJob(images(40, 1), calls);
+  let firstPassCall = 0;
+  orderFolderWriter.writeOrderFolder = async (outputPath, job, _dpof, imageFiles, _extra, nameOpts) => {
+    firstPassCall++;
+    const batch = nameOpts && nameOpts.batch;
+    const folderName = batch ? `p${job.id}_${batch.index}of${batch.total}_folder` : `p${job.id}_folder`;
+    const snapshotAtEntry = JSON.parse(JSON.stringify(store.get(job.id) || {}));
+    calls.writes.push({ nameOpts: JSON.parse(JSON.stringify(nameOpts)), folderName, imageFiles: imageFiles.map(f => f.filename), snapshotAtEntry });
+    if (firstPassCall === 2) throw new Error('ENOSPC hot folder full');
+    return { folderPath: path.join(outputPath, folderName), folderName };
+  };
+  const firstResult = await printService.sendViaDPOFRouted(makeJob(), makeRoute({ maxPrintsPerJob: 20 }));
+  assert.equal(firstResult.success, false);
+  const ledgerAfterFirstPass = store.get(42)._batchLedger;
+  assert.equal(ledgerAfterFirstPass.batches[1].outcome, 'error');
+  assert.match(ledgerAfterFirstPass.batches[1].error, /ENOSPC/);
+
+  // Reset writer to always-succeed for the resend pass.
+  const resendWrites = [];
+  orderFolderWriter.writeOrderFolder = async (outputPath, job, _dpof, imageFiles, _extra, nameOpts) => {
+    const batch = nameOpts && nameOpts.batch;
+    const folderName = batch ? `p${job.id}_${batch.index}of${batch.total}_resent` : `p${job.id}_resent`;
+    resendWrites.push({ nameOpts: JSON.parse(JSON.stringify(nameOpts)), folderName, imageFiles: imageFiles.map(f => f.filename) });
+    return { folderPath: path.join(outputPath, folderName), folderName };
+  };
+
+  // Wire the manifest lookup: printService.resendDpofBatch calls
+  // findJobById to read the (now-stamped) job with its ledger.
+  const jobFromStore = { ...makeJob(), ...(store.get(42) || {}) };
+  jobService.findJobById = (id) => (String(id) === '42' ? jobFromStore : null);
+  // resolveRoute must return the split route.
+  const route = makeRoute({ maxPrintsPerJob: 20 });
+  const routingService = require(path.join(__dirname, '..', 'routing-service.js'));
+  const origResolveRoute = routingService.resolveRoute;
+  routingService.resolveRoute = () => route;
+  t.after(() => { routingService.resolveRoute = origResolveRoute; });
+
+  const result = await printService.resendDpofBatch({ jobId: 42, batchIndex: 2 });
+  assert.equal(result.success, true, `expected success, got: ${JSON.stringify(result)}`);
+  assert.equal(result.batchIndex, 2);
+  assert.equal(result.batchTotal, 2);
+  assert.equal(result.folderName, 'p42_2of2_resent');
+
+  // Exactly one write, for batch 2 with the ORIGINAL batch descriptor.
+  assert.equal(resendWrites.length, 1);
+  assert.deepEqual(resendWrites[0].nameOpts.batch, { index: 2, total: 2 });
+  // Image set matches ledger's batch-2 images (imgs 21..40, no banner).
+  assert.equal(resendWrites[0].imageFiles.length, 20);
+  assert.equal(resendWrites[0].imageFiles[0],  'img-21.jpg');
+  assert.equal(resendWrites[0].imageFiles[19], 'img-40.jpg');
+
+  // Ledger entry now flipped back to success, error cleared, filename swapped.
+  const ledgerAfterResend = store.get(42)._batchLedger;
+  assert.equal(ledgerAfterResend.batches[1].outcome, 'success');
+  assert.equal('error' in ledgerAfterResend.batches[1], false);
+  assert.equal(ledgerAfterResend.batches[1].filename, 'p42_2of2_resent');
+  // completedAt cleared (resend re-opens the pass).
+  assert.equal(ledgerAfterResend.completedAt, null);
+}));
+
+// ── M4: resendDpofBatch — double-print guard on an already-accepted batch ────
+
+test('resendDpofBatch: batch already at "e" (accepted) → refuses without `confirmed`, returns needsConfirm', withDpofBatchingHarness(async (t, calls, store) => {
+  // Set up a completed split, then stamp batch 1 as accepted.
+  stubImagesOnFindJob(images(40, 1), calls);
+  await printService.sendViaDPOFRouted(makeJob(), makeRoute({ maxPrintsPerJob: 20 }));
+  const { recordBatchAccepted } = require(path.join(__dirname, '..', '..', '..', 'shared', 'batchLedger.js'));
+  const ledger = store.get(42)._batchLedger;
+  recordBatchAccepted(ledger, { index: 1, prefix: 'e' });
+  recordBatchAccepted(ledger, { index: 2, prefix: 'e' });
+  store.set(42, { ...store.get(42), _batchLedger: ledger });
+
+  const jobFromStore = { ...makeJob(), ...(store.get(42) || {}) };
+  jobService.findJobById = (id) => (String(id) === '42' ? jobFromStore : null);
+  const routingService = require(path.join(__dirname, '..', 'routing-service.js'));
+  const origResolveRoute = routingService.resolveRoute;
+  routingService.resolveRoute = () => makeRoute({ maxPrintsPerJob: 20 });
+  t.after(() => { routingService.resolveRoute = origResolveRoute; });
+
+  // Track any writer calls — there must be NONE on the refused resend.
+  const writesBeforeResend = calls.writes.length;
+
+  const result = await printService.resendDpofBatch({ jobId: 42, batchIndex: 1 });
+  assert.equal(result.success,      false);
+  assert.equal(result.needsConfirm, true);
+  assert.equal(result.batchIndex,   1);
+  assert.equal(result.currentPrefix, 'e');
+  // No new writer calls — the guard bailed before any I/O.
+  assert.equal(calls.writes.length, writesBeforeResend, 'no write attempted when confirmation required');
+
+  // With confirmed:true → proceeds.
+  const result2 = await printService.resendDpofBatch({ jobId: 42, batchIndex: 1, opts: { confirmed: true } });
+  assert.equal(result2.success, true);
+  assert.equal(result2.batchIndex, 1);
+}));
+
+// ── M4: resendDpofBatch — validation & missing-image cases ───────────────────
+
+test('resendDpofBatch: unknown jobId → success:false, no write', withDpofBatchingHarness(async (t, calls) => {
+  jobService.findJobById = () => null;
+  const result = await printService.resendDpofBatch({ jobId: 999, batchIndex: 1 });
+  assert.equal(result.success, false);
+  assert.match(result.error, /not found/i);
+  assert.equal(calls.writes.length, 0);
+}));
+
+test('resendDpofBatch: job has no ledger → success:false (not a split dispatch)', withDpofBatchingHarness(async (t, calls) => {
+  jobService.findJobById = () => ({ id: 42, order_number: 'X' });
+  const result = await printService.resendDpofBatch({ jobId: 42, batchIndex: 1 });
+  assert.equal(result.success, false);
+  assert.match(result.error, /no batch ledger/i);
+}));
+
+test('resendDpofBatch: batch index out of range → success:false', withDpofBatchingHarness(async (t, calls, store) => {
+  stubImagesOnFindJob(images(40, 1), calls);
+  await printService.sendViaDPOFRouted(makeJob(), makeRoute({ maxPrintsPerJob: 20 }));
+  const jobFromStore = { ...makeJob(), ...(store.get(42) || {}) };
+  jobService.findJobById = (id) => (String(id) === '42' ? jobFromStore : null);
+  const result = await printService.resendDpofBatch({ jobId: 42, batchIndex: 99 });
+  assert.equal(result.success, false);
+  assert.match(result.error, /batch 99 not found/i);
+}));
+
+test('resendDpofBatch: ledger predates M4 (no images stored on entry) → refuses cleanly', withDpofBatchingHarness(async (t, calls, store) => {
+  // Construct a pre-M4 ledger by manually building an entry with no images.
+  const preM4Ledger = {
+    cap: 20, totalBatches: 2, totalPrints: 40,
+    startedAt: '2026-08-14T09:00:00.000Z', completedAt: null,
+    batches: [
+      { index: 1, total: 2, filename: 'p42_1of2', destPath: '/hot/p42_1of2', dispatchedAt: '2026-08-14T09:00:01.000Z', outcome: 'error', error: 'boom', acceptedAt: null, acceptedPrefix: null },
+    ],
+  };
+  jobService.findJobById = () => ({ id: 42, order_number: 'X', _batchLedger: preM4Ledger });
+  const result = await printService.resendDpofBatch({ jobId: 42, batchIndex: 1 });
+  assert.equal(result.success, false);
+  assert.match(result.error, /predates M4/i);
+}));
+
+test('resendDpofBatch: a stored image is missing from the current manifest → cleanly refuses naming the missing file(s)', withDpofBatchingHarness(async (t, calls, store) => {
+  stubImagesOnFindJob(images(40, 1), calls);
+  await printService.sendViaDPOFRouted(makeJob(), makeRoute({ maxPrintsPerJob: 20 }));
+
+  // Rebuild jobFromStore, then swap findJobInManifest to return a shorter
+  // manifest that no longer contains img-25.jpg.
+  const jobFromStore = { ...makeJob(), ...(store.get(42) || {}) };
+  jobService.findJobById = (id) => (String(id) === '42' ? jobFromStore : null);
+  const routingService = require(path.join(__dirname, '..', 'routing-service.js'));
+  const origResolveRoute = routingService.resolveRoute;
+  routingService.resolveRoute = () => makeRoute({ maxPrintsPerJob: 20 });
+  t.after(() => { routingService.resolveRoute = origResolveRoute; });
+
+  const shortManifest = images(40, 1).filter(img => img.filename !== 'img-25.jpg');
+  printService._findJobInManifest = () => ({ jobId: 42, images: shortManifest });
+
+  const result = await printService.resendDpofBatch({ jobId: 42, batchIndex: 2 });
+  assert.equal(result.success, false);
+  assert.match(result.error, /no longer in the manifest/i);
+  assert.match(result.error, /img-25\.jpg/);
+}));

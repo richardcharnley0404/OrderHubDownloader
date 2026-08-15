@@ -24,7 +24,9 @@ const {
   recordBatchDispatched,
   recordBatchError,
   recordBatchAccepted,
+  resetBatchForResend,
   completeLedger,
+  allBatchesAccepted,
   readLedger,
 } = require('../batchLedger.js');
 
@@ -239,4 +241,188 @@ test('a DP-authored ledger (no acceptedPrefix ever stamped) reads correctly via 
     assert.equal(b.acceptedAt,     null, 'DP entries never have an accept signal');
     assert.equal(b.acceptedPrefix, null);
   }
+});
+
+// ── M4: per-batch image storage (resend-one-batch source of truth) ─────────
+
+test('recordBatchDispatched: `images` present → stored on the entry as a defensive copy', () => {
+  const ledger = newLedger({ cap: 20, totalBatches: 2, totalPrints: 40 });
+  const inputImages = [
+    { filename: 'img-1.jpg', quantity: 1 },
+    { filename: 'img-2.jpg', quantity: 2 },
+  ];
+  recordBatchDispatched(ledger, {
+    index: 1, total: 2, filename: 'o_1of2_folder', destPath: '/hot/o_1of2_folder',
+    images: inputImages,
+  });
+
+  const b = ledger.batches[0];
+  assert.deepEqual(b.images, [
+    { filename: 'img-1.jpg', quantity: 1 },
+    { filename: 'img-2.jpg', quantity: 2 },
+  ]);
+
+  // Defensive copy — mutating the caller's array must not corrupt the ledger.
+  inputImages.push({ filename: 'INJECTED.jpg', quantity: 99 });
+  inputImages[0].quantity = 999;
+  assert.equal(b.images.length, 2, 'ledger array unaffected by caller mutation');
+  assert.equal(b.images[0].quantity, 1, 'ledger element unaffected by caller mutation');
+});
+
+test('recordBatchDispatched: `images` omitted → entry has no `images` field (DP writer contract)', () => {
+  // DP writers don't pass images and don't want the field polluting
+  // their entries. Verify the field is absent (not `null` or `undefined`).
+  const ledger = newLedger({ cap: 100, totalBatches: 1, totalPrints: 100 });
+  recordBatchDispatched(ledger, { index: 1, total: 1, filename: 'x', destPath: '/x' });
+  const b = ledger.batches[0];
+  assert.equal('images' in b, false, 'DP writer entries have no `images` key at all');
+});
+
+test('recordBatchError: `images` accepted symmetrically so a failed-write batch is still resendable', () => {
+  // Without this, the failed batch's entry would carry no images and
+  // resendDpofBatch would refuse it as "pre-M4 ledger" — which would
+  // strand exactly the batches that most need to be resent. Locks the
+  // symmetry between the two writers.
+  const ledger = newLedger({ cap: 20, totalBatches: 2, totalPrints: 40 });
+  recordBatchError(ledger, {
+    index: 2, total: 2, filename: 'p_2of2_stale', error: 'ENOSPC',
+    images: [{ filename: 'img-21.jpg', quantity: 1 }],
+  });
+  assert.deepEqual(ledger.batches[0].images, [{ filename: 'img-21.jpg', quantity: 1 }]);
+});
+
+test('recordBatchDispatched: `images` is non-array → treated as omitted (defensive)', () => {
+  // A caller that passed `images: undefined` or a non-array by mistake
+  // shouldn't crash. Field simply absent from the entry.
+  const ledger = newLedger({ cap: 10, totalBatches: 1, totalPrints: 5 });
+  recordBatchDispatched(ledger, { index: 1, total: 1, filename: 'x', destPath: '/x', images: undefined });
+  assert.equal('images' in ledger.batches[0], false);
+
+  const ledger2 = newLedger({ cap: 10, totalBatches: 1, totalPrints: 5 });
+  recordBatchDispatched(ledger2, { index: 1, total: 1, filename: 'x', destPath: '/x', images: 'not-array' });
+  assert.equal('images' in ledger2.batches[0], false);
+});
+
+// ── M4: resetBatchForResend ────────────────────────────────────────────────
+
+test('resetBatchForResend: previously-accepted (e) batch → clears accept signal, keeps images, re-stamps dispatchedAt', () => {
+  const ledger = newLedger({ cap: 20, totalBatches: 2, totalPrints: 40 });
+  recordBatchDispatched(ledger, {
+    index: 1, total: 2, filename: 'e_1of2_folder', destPath: '/hot/e_1of2_folder',
+    images: [{ filename: 'a.jpg', quantity: 1 }],
+  });
+  recordBatchAccepted(ledger, { index: 1, prefix: 'e', at: '2026-08-15T10:00:00.000Z' });
+  completeLedger(ledger, '2026-08-15T10:05:00.000Z');
+
+  const before = ledger.batches[0].dispatchedAt;
+  // Sleep a beat so the new dispatchedAt is measurably later.
+  const at = new Date(Date.parse(before) + 1000).toISOString();
+  resetBatchForResend(ledger, {
+    index: 1,
+    filename: 'o_1of2_folder',  // new p→o folder from the resend write
+    destPath: '/hot/o_1of2_folder',
+    at,
+  });
+
+  const b = ledger.batches[0];
+  assert.equal(b.filename,       'o_1of2_folder',  'filename swapped to resend write');
+  assert.equal(b.destPath,       '/hot/o_1of2_folder');
+  assert.equal(b.dispatchedAt,   at,                'dispatchedAt re-stamped');
+  assert.equal(b.outcome,        'success');
+  assert.equal(b.acceptedAt,     null,              'accept signal cleared — batch is back in-flight');
+  assert.equal(b.acceptedPrefix, null);
+  // Images preserved — the whole point of resend is to send the SAME images.
+  assert.deepEqual(b.images, [{ filename: 'a.jpg', quantity: 1 }]);
+  // Index/total preserved — resend never renumbers.
+  assert.equal(b.index, 1);
+  assert.equal(b.total, 2);
+  // Ledger completedAt cleared — the resend has reopened the pass.
+  assert.equal(ledger.completedAt, null,
+    'completedAt cleared so polling roll-up can re-mark completion once the resent batch reaches terminal state');
+});
+
+test('resetBatchForResend: previously-errored batch → outcome flips to success, `error` field removed', () => {
+  const ledger = newLedger({ cap: 20, totalBatches: 2, totalPrints: 40 });
+  recordBatchError(ledger, {
+    index: 1, total: 2, filename: 'p_1of2_stale', error: 'ENOSPC no space left on device',
+  });
+  assert.equal(ledger.batches[0].outcome, 'error');
+  assert.ok(ledger.batches[0].error);
+
+  resetBatchForResend(ledger, {
+    index: 1, filename: 'o_1of2_folder', destPath: '/hot/o_1of2_folder',
+  });
+
+  const b = ledger.batches[0];
+  assert.equal(b.outcome, 'success');
+  assert.equal('error' in b, false, 'stale error message removed — resend cleared the failure');
+});
+
+test('resetBatchForResend: unknown index → silent no-op, ledger unchanged', () => {
+  const ledger = newLedger({ cap: 10, totalBatches: 1, totalPrints: 5 });
+  recordBatchDispatched(ledger, { index: 1, total: 1, filename: 'x', destPath: '/x' });
+  const before = JSON.stringify(ledger);
+  resetBatchForResend(ledger, { index: 999, filename: 'nope', destPath: '/nope' });
+  assert.equal(JSON.stringify(ledger), before, 'ledger unchanged on unknown index');
+});
+
+test('resetBatchForResend: returns the same ledger (chaining)', () => {
+  const ledger = newLedger({ cap: 10, totalBatches: 1, totalPrints: 5 });
+  recordBatchDispatched(ledger, { index: 1, total: 1, filename: 'x', destPath: '/x' });
+  const r = resetBatchForResend(ledger, { index: 1, filename: 'y', destPath: '/y' });
+  assert.strictEqual(r, ledger);
+});
+
+// ── M4: allBatchesAccepted (completion roll-up predicate) ──────────────────
+
+test('allBatchesAccepted: every batch has acceptedPrefix === "e" → true', () => {
+  const ledger = newLedger({ cap: 20, totalBatches: 3, totalPrints: 60 });
+  for (let i = 1; i <= 3; i++) {
+    recordBatchDispatched(ledger, { index: i, total: 3, filename: `_${i}`, destPath: `/${i}` });
+    recordBatchAccepted(ledger, { index: i, prefix: 'e' });
+  }
+  assert.equal(allBatchesAccepted(ledger), true);
+});
+
+test('allBatchesAccepted: one batch pending (no accept signal yet) → false', () => {
+  const ledger = newLedger({ cap: 20, totalBatches: 3, totalPrints: 60 });
+  recordBatchDispatched(ledger, { index: 1, total: 3, filename: '_1', destPath: '/1' });
+  recordBatchDispatched(ledger, { index: 2, total: 3, filename: '_2', destPath: '/2' });
+  recordBatchDispatched(ledger, { index: 3, total: 3, filename: '_3', destPath: '/3' });
+  recordBatchAccepted(ledger, { index: 1, prefix: 'e' });
+  recordBatchAccepted(ledger, { index: 2, prefix: 'e' });
+  // Batch 3 not yet signalled.
+  assert.equal(allBatchesAccepted(ledger), false);
+});
+
+test('allBatchesAccepted: any batch failed (q) → false — completion is "all e" not "all terminal"', () => {
+  // A `q` (failed import) batch is terminal but the JOB is NOT complete.
+  // The caller distinguishes "all e → mark completed" from "any q → mark
+  // errored" — allBatchesAccepted answers only the former.
+  const ledger = newLedger({ cap: 20, totalBatches: 2, totalPrints: 40 });
+  recordBatchDispatched(ledger, { index: 1, total: 2, filename: '_1', destPath: '/1' });
+  recordBatchDispatched(ledger, { index: 2, total: 2, filename: '_2', destPath: '/2' });
+  recordBatchAccepted(ledger, { index: 1, prefix: 'e' });
+  recordBatchAccepted(ledger, { index: 2, prefix: 'q' });
+  assert.equal(allBatchesAccepted(ledger), false);
+});
+
+test('allBatchesAccepted: batches.length < totalBatches → false (partial-failure early return)', () => {
+  // The M3 partial-failure path stops writing after a mid-loop error, so
+  // ledger.batches may have FEWER entries than totalBatches. That's a
+  // structurally-incomplete ledger; must not read as "all accepted".
+  const ledger = newLedger({ cap: 20, totalBatches: 3, totalPrints: 60 });
+  recordBatchDispatched(ledger, { index: 1, total: 3, filename: '_1', destPath: '/1' });
+  recordBatchAccepted(ledger, { index: 1, prefix: 'e' });
+  // batches 2 and 3 never dispatched.
+  assert.equal(allBatchesAccepted(ledger), false);
+});
+
+test('allBatchesAccepted: nullish / empty / non-batch inputs → false (defensive)', () => {
+  assert.equal(allBatchesAccepted(null),      false);
+  assert.equal(allBatchesAccepted(undefined), false);
+  assert.equal(allBatchesAccepted({}),        false);
+  assert.equal(allBatchesAccepted({ totalBatches: 1 }), false, 'missing batches array');
+  assert.equal(allBatchesAccepted({ totalBatches: 0, batches: [] }), false,
+    'zero-batch ledger is nonsensical — not "vacuously true"');
 });

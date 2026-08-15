@@ -252,3 +252,161 @@ test('flag ON — non-numeric jobId string is rejected cleanly by findJobById', 
   assert.equal(__updateLocallyCalls.length, 0);
   assert.equal(__logCalls.warn.length, 0);
 });
+
+// ── M4 (docs/epson-batch-splitting-brief.md) — completion roll-up + failure ─
+//
+// Split-dispatch jobs carry a `_batchLedger`. Every folder-monitor event now
+// arrives with `batch = {index, total}` (M1) so the roll-up can attribute
+// per-batch. Completion only fires when EVERY batch reaches `e`; any `q`
+// marks the job errored naming the failing batch.
+
+const {
+  newLedger,
+  recordBatchDispatched,
+  recordBatchAccepted,
+} = require(path.join(REPO, 'src', 'shared', 'batchLedger.js'));
+
+function seedSplitJob({ id, totalBatches, alreadyAccepted = [] }) {
+  const ledger = newLedger({ cap: 20, totalBatches, totalPrints: totalBatches * 20 });
+  for (let i = 1; i <= totalBatches; i++) {
+    recordBatchDispatched(ledger, {
+      index: i, total: totalBatches,
+      filename: `o_${i}of${totalBatches}_folder`,
+      destPath: `/hot/o_${i}of${totalBatches}_folder`,
+      images:   [{ filename: `img-${i}.jpg`, quantity: 1 }],
+    });
+  }
+  for (const idx of alreadyAccepted) {
+    recordBatchAccepted(ledger, { index: idx, prefix: 'e' });
+  }
+  const job = { id, order_number: `SPLIT-${id}`, _status: 'in_production', _batchLedger: ledger };
+  seedJob(job);
+  return job;
+}
+
+test('M4 split job: single batch accepted, others still pending → NO markCompleted, ledger stamped', () => {
+  resetAll();
+  const job = seedSplitJob({ id: 100, totalBatches: 3 });
+  __flagEnabled = true;
+
+  pollingService._handleFolderStatusChange({
+    jobId:     '100',
+    batch:     { index: 1, total: 3 },
+    status:    'accepted',
+    timestamp: TIMESTAMP,
+  }, CONTROLLER);
+
+  // markCompleted MUST NOT fire — 2/3 batches still pending.
+  assert.equal(__markCompletedCalls.length, 0, 'first accept on a split job must not complete the parent');
+
+  // Ledger persisted with batch 1 stamped.
+  const ledgerWrite = __updateLocallyCalls.find(c => c.updates._batchLedger);
+  assert.ok(ledgerWrite, 'ledger persisted after per-batch stamp');
+  assert.equal(ledgerWrite.updates._batchLedger.batches[0].acceptedPrefix, 'e');
+  assert.equal(ledgerWrite.updates._batchLedger.batches[1].acceptedPrefix, null);
+  assert.equal(ledgerWrite.updates._batchLedger.batches[2].acceptedPrefix, null);
+  assert.equal(ledgerWrite.updates._batchLedger.completedAt, null);
+});
+
+test('M4 split job: final batch accepted (all 3 now `e`) → markCompleted fires ONCE, ledger completedAt stamped', async () => {
+  resetAll();
+  seedSplitJob({ id: 200, totalBatches: 3, alreadyAccepted: [1, 2] });
+  __flagEnabled = true;
+
+  pollingService._handleFolderStatusChange({
+    jobId:     '200',
+    batch:     { index: 3, total: 3 },
+    status:    'accepted',
+    timestamp: TIMESTAMP,
+  }, CONTROLLER);
+
+  assert.deepEqual(__markCompletedCalls, [200],
+    'markCompleted invoked ONCE when the final batch flips to e (not once per batch)');
+
+  // Ledger completedAt now stamped.
+  const ledgerWrite = __updateLocallyCalls.find(c => c.updates._batchLedger && c.updates._batchLedger.completedAt);
+  assert.ok(ledgerWrite, 'completedAt stamped once all batches are accepted');
+  assert.equal(ledgerWrite.updates._batchLedger.completedAt, TIMESTAMP.toISOString());
+
+  await new Promise(r => setImmediate(r));
+});
+
+test('M4 split job: one batch failed (q) → job stamped error naming the batch, NO markCompleted', () => {
+  resetAll();
+  seedSplitJob({ id: 300, totalBatches: 3, alreadyAccepted: [1] });
+  __flagEnabled = true;
+
+  pollingService._handleFolderStatusChange({
+    jobId:     '300',
+    batch:     { index: 2, total: 3 },
+    status:    'failed',
+    timestamp: TIMESTAMP,
+  }, CONTROLLER);
+
+  assert.equal(__markCompletedCalls.length, 0, 'a q on any batch must never complete the parent');
+
+  // Job marked errored with a message naming the batch. Written via a
+  // second updateJobLocally call (the first was the ledger stamp).
+  const errorWrite = __updateLocallyCalls.find(c => c.updates._status === 'error');
+  assert.ok(errorWrite, 'job stamped error on batch q');
+  assert.match(errorWrite.updates._errorMessage, /Batch 2 of 3/,
+    'error message must name the failing batch so the operator knows which one to resend');
+
+  // _dpofFailed / _dpofFailedAt also stamped.
+  assert.equal(errorWrite.updates._dpofFailed, true);
+  assert.equal(errorWrite.updates._dpofFailedAt, TIMESTAMP.toISOString());
+
+  // Ledger stamped with the q.
+  const ledgerWrite = __updateLocallyCalls.find(c => c.updates._batchLedger);
+  assert.equal(ledgerWrite.updates._batchLedger.batches[1].acceptedPrefix, 'q');
+});
+
+test('M4 split job: reprint folder event (reprintSuffix set) → parent completion NOT stamped', () => {
+  // A reprint's `_r1` folder must never mark the parent job completed.
+  // Cover the M1-review carry: an event with reprintSuffix present is
+  // logged and dropped, no ledger stamp, no markCompleted.
+  resetAll();
+  const job = seedSplitJob({ id: 400, totalBatches: 3, alreadyAccepted: [1, 2] });
+  __flagEnabled = true;
+
+  pollingService._handleFolderStatusChange({
+    jobId:         '400',
+    reprintSuffix: 'r1',
+    batch:         null,
+    status:        'accepted',
+    timestamp:     TIMESTAMP,
+  }, CONTROLLER);
+
+  // No markCompleted despite the parent being 1 batch away.
+  assert.equal(__markCompletedCalls.length, 0,
+    'a reprint folder must never complete the parent, even when the parent has 2/3 batches already accepted');
+  // No ledger stamp — the reprint is a separate concern.
+  assert.equal(
+    __updateLocallyCalls.filter(c => c.updates._batchLedger).length,
+    0,
+    'a reprint event must not touch the parent job\'s batch ledger',
+  );
+
+  // Info log for traceability.
+  const reprintLog = __logCalls.info.find(a => typeof a[0] === 'string' && a[0].includes('REPRINT'));
+  assert.ok(reprintLog, 'reprint event logged so an operator has a trace');
+});
+
+test('M4 unsplit job (no ledger, no batch on event) → pre-M4 behaviour byte-identical', async () => {
+  resetAll();
+  seedJob({ id: 500, order_number: 'UNSPLIT-500', _status: 'pending' });
+  __flagEnabled = true;
+
+  pollingService._handleFolderStatusChange({
+    jobId:     '500',
+    batch:     null,
+    status:    'accepted',
+    timestamp: TIMESTAMP,
+  }, CONTROLLER);
+
+  // Falls through to the pre-M4 branch: single markCompleted.
+  assert.deepEqual(__markCompletedCalls, [500]);
+  assert.equal(__updateLocallyCalls.length, 1);
+  assert.equal(__updateLocallyCalls[0].updates._dpofAccepted, true);
+  await new Promise(r => setImmediate(r));
+});

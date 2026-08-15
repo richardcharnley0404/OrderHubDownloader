@@ -29,11 +29,21 @@
  *         outcome:        'success' | 'error',
  *         error?:         string,          // present when outcome === 'error'
  *         acceptedAt:     ISO string|null, // DPOF only — when controller renamed to e/q
- *         acceptedPrefix: 'e' | 'q' | null // DPOF only — 'e' accepted, 'q' failed import
+ *         acceptedPrefix: 'e' | 'q' | null,// DPOF only — 'e' accepted, 'q' failed import
+ *         images?:        [{filename, quantity}]  // M4 DPOF — per-batch image set for resend
  *       },
  *       ...
  *     ]
  *   }
+ *
+ * `images` is a M4 addition (docs/epson-batch-splitting-brief.md M4 —
+ * resend-one-batch). Stored on DPOF writes so a resend of batch N can
+ * reconstruct that batch's exact image set from the ledger rather than
+ * re-splitting the current manifest, which would send different content
+ * under the same batch number if the manifest changed since dispatch
+ * (e.g. an image was operator-discarded). Optional field — DP writers
+ * omit it (DP has no resend-one-batch flow); when omitted the field is
+ * simply absent from the entry.
  *
  * DPOF fields (`acceptedAt`, `acceptedPrefix`) are ALWAYS present on
  * every batch entry — null for both when the controller hasn't (yet)
@@ -91,11 +101,16 @@ function newLedger({ cap, totalBatches, totalPrints }) {
  * after via updateJobLocally).
  *
  * @param {object} ledger
- * @param {{index:number, total:number, filename:string, destPath:string}} args
+ * @param {{index:number, total:number, filename:string, destPath:string,
+ *          images?:Array<{filename:string, quantity:number}>}} args
+ *   `images` is optional — DPOF writers pass it (needed for
+ *   resend-one-batch, see M4); DP writers omit it. Stored as-is on
+ *   the entry when present; absent from the entry when omitted (not
+ *   stored as `null` or `undefined` — the field is simply not there).
  * @returns {object} the same ledger
  */
-function recordBatchDispatched(ledger, { index, total, filename, destPath }) {
-  ledger.batches.push({
+function recordBatchDispatched(ledger, { index, total, filename, destPath, images }) {
+  const entry = {
     index,
     total,
     filename,
@@ -108,19 +123,35 @@ function recordBatchDispatched(ledger, { index, total, filename, destPath }) {
     // forever on DP entries.
     acceptedAt:     null,
     acceptedPrefix: null,
-  });
+  };
+  // `images` only added when the caller passed it — keeps DP entries
+  // free of a null-forever field they don't need. See docblock.
+  if (Array.isArray(images)) {
+    entry.images = images.map((im) => ({
+      filename: im.filename,
+      quantity: im.quantity,
+    }));
+  }
+  ledger.batches.push(entry);
   return ledger;
 }
 
 /**
  * Record a failed batch write (the write threw). Mutates + returns.
  *
+ * Accepts the same optional `images` parameter as recordBatchDispatched
+ * — a batch that failed the write still needs its image set stored so
+ * a resend can reconstruct exactly what should have gone out. Without
+ * this, an errored batch's entry would be un-resendable (fields ok,
+ * images absent → resend rejects as "pre-M4 ledger").
+ *
  * @param {object} ledger
- * @param {{index:number, total:number, filename:string, error:string}} args
+ * @param {{index:number, total:number, filename:string, error:string,
+ *          images?:Array<{filename:string, quantity:number}>}} args
  * @returns {object} the same ledger
  */
-function recordBatchError(ledger, { index, total, filename, error }) {
-  ledger.batches.push({
+function recordBatchError(ledger, { index, total, filename, error, images }) {
+  const entry = {
     index,
     total,
     filename,
@@ -130,7 +161,14 @@ function recordBatchError(ledger, { index, total, filename, error }) {
     error,
     acceptedAt:     null,
     acceptedPrefix: null,
-  });
+  };
+  if (Array.isArray(images)) {
+    entry.images = images.map((im) => ({
+      filename: im.filename,
+      quantity: im.quantity,
+    }));
+  }
+  ledger.batches.push(entry);
   return ledger;
 }
 
@@ -169,6 +207,61 @@ function completeLedger(ledger, at) {
 }
 
 /**
+ * Reset a single batch entry so a resend can re-dispatch it. Clears
+ * the DPOF accept signal, flips outcome back to 'success', re-stamps
+ * dispatchedAt, and swaps in the new filename / destPath produced by
+ * the resend write. Preserves the entry's `images` (the whole point
+ * of resend is to re-send the SAME images). Preserves the entry's
+ * `index` / `total` — a resend never renumbers.
+ *
+ * Silent no-op on an unknown index so a race between UI clicks and
+ * ledger state doesn't throw. Also clears the ledger's `completedAt`
+ * so a resend after all-batches-accepted correctly marks the ledger
+ * back in-progress until the resent batch reaches a terminal state.
+ *
+ * @param {object} ledger
+ * @param {{index:number, filename:string, destPath:string, at?:string}} args
+ * @returns {object} the same ledger
+ */
+function resetBatchForResend(ledger, { index, filename, destPath, at }) {
+  const entry = (ledger.batches || []).find((b) => b && b.index === index);
+  if (!entry) return ledger;
+  entry.filename       = filename;
+  entry.destPath       = destPath;
+  entry.dispatchedAt   = at || new Date().toISOString();
+  entry.outcome        = 'success';
+  entry.acceptedAt     = null;
+  entry.acceptedPrefix = null;
+  // outcome went from 'error' back to 'success' — clear the stale error.
+  if ('error' in entry) delete entry.error;
+  // Roll-up flag: if this batch's resend reopens the ledger, the
+  // completion marker must be cleared. The polling roll-up sets it
+  // again once every batch reaches its terminal state.
+  ledger.completedAt = null;
+  return ledger;
+}
+
+/**
+ * True when every batch in the ledger has reached its terminal DPOF
+ * state (acceptedPrefix === 'e' on all). Used by the M4 completion
+ * roll-up in polling-service. Returns false for a ledger with any
+ * pending, 'q' (failed import), or error-outcome entries — the
+ * caller decides what to do with those.
+ *
+ * @param {object} ledger
+ * @returns {boolean}
+ */
+function allBatchesAccepted(ledger) {
+  if (!ledger || !Array.isArray(ledger.batches)) return false;
+  // Guard the vacuous-true case: `every` on an empty array is true, so a
+  // ledger with totalBatches === 0 would read as "all accepted". That's
+  // nonsensical (no batches were ever dispatched); return false explicitly.
+  if (!Number.isInteger(ledger.totalBatches) || ledger.totalBatches < 1) return false;
+  if (ledger.batches.length !== ledger.totalBatches) return false;
+  return ledger.batches.every((b) => b && b.acceptedPrefix === 'e');
+}
+
+/**
  * Read the ledger off a job, checking the canonical field first and
  * falling back to the legacy field for pre-M2 persisted jobs. Returns
  * null when neither is present (unsplit dispatch — no ledger written).
@@ -193,6 +286,8 @@ module.exports = {
   recordBatchDispatched,
   recordBatchError,
   recordBatchAccepted,
+  resetBatchForResend,
   completeLedger,
+  allBatchesAccepted,
   readLedger,
 };

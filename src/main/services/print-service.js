@@ -17,7 +17,9 @@ const {
   newLedger:           newBatchLedger,
   recordBatchDispatched,
   recordBatchError,
+  resetBatchForResend,
   completeLedger,
+  readLedger,
 } = require('../../shared/batchLedger');
 const { frontlineGenerator } = require('./frontline-generator');
 const { frontlineFileWriter } = require('./frontline-file-writer');
@@ -459,6 +461,14 @@ class PrintService {
             total:    totalBatches,
             filename: tempFolderName,
             error:    writeErr.message,
+            // Same images the write attempted — needed so a resend
+            // can reconstruct this batch's exact image set from the
+            // ledger. Without this the failed batch's entry would
+            // read as "pre-M4 ledger" and resend would refuse.
+            images:   batchRecords.map((r) => ({
+              filename: r.filename,
+              quantity: r.quantity,
+            })),
           });
           jobService.updateJobLocally(job.id, { [BATCH_LEDGER_FIELD]: ledger });
         }
@@ -494,6 +504,15 @@ class PrintService {
           total:    totalBatches,
           filename: writeResult.folderName,
           destPath: writeResult.folderPath,
+          // Per-batch image set — the SOURCE OF TRUTH for
+          // resendDpofBatch. Stored as {filename, quantity} pairs
+          // (sourcePath is intentionally omitted; the resend re-runs
+          // the per-job pipeline to resolve current enhanced /
+          // corrected files, matching what the operator would want).
+          images: batchRecords.map((r) => ({
+            filename: r.filename,
+            quantity: r.quantity,
+          })),
         });
         // Persist after every batch so a mid-loop crash still leaves a
         // record of what went out — same posture as the DP loop.
@@ -544,6 +563,257 @@ class PrintService {
       destPath:   lastResult.folderPath,
       folderName: lastResult.folderName,
       ...(isSplit ? { batches: batches.length, ledger } : {}),
+    };
+  }
+
+  /**
+   * Resend a single batch of a previously split DPOF dispatch
+   * (docs/epson-batch-splitting-brief.md M4).
+   *
+   * Reads the batch's stored image set from the job's ledger and
+   * writes a single hot-folder for that batch only — the ledger's
+   * `images` is the authoritative source, NOT a fresh split of the
+   * current manifest. Re-splitting would send different content
+   * under the same batch number if the manifest changed since
+   * dispatch (e.g. an image was operator-discarded), and the
+   * operator has already seen the original batch label at the
+   * printer — the resend must match that label byte-for-byte.
+   *
+   * Per-job pipeline (enhanced-map, corrections, applyCorrections)
+   * runs fresh so newly-enhanced or newly-corrected files are used;
+   * the ledger's `images` list restricts WHICH files go, not which
+   * VERSION. If the operator wanted the exact pixel state of the
+   * original dispatch, they'd resend the whole job — this call
+   * intentionally uses current pixel state.
+   *
+   * Guard against double-print: a batch already at `acceptedPrefix
+   * === 'e'` refuses without `opts.confirmed === true`. Returns
+   * `{ success:false, needsConfirm:true, batchIndex, currentPrefix }`
+   * so the renderer can prompt.
+   *
+   * Does NOT touch the job's completion lifecycle — the polling
+   * roll-up owns that, and a resend re-opens the ledger (via
+   * resetBatchForResend clearing `completedAt`) so the roll-up
+   * will fire again when the resent batch reaches its terminal
+   * state.
+   *
+   * @param {object} args
+   * @param {number|string} args.jobId
+   * @param {number} args.batchIndex - 1-based, matches the ledger entry
+   * @param {object} [args.opts]
+   * @param {boolean} [args.opts.confirmed]
+   * @returns {Promise<object>} { success, folderName?, destPath?, needsConfirm?, error? }
+   */
+  async resendDpofBatch({ jobId, batchIndex, opts = {} }) {
+    const job = jobService.findJobById(jobId);
+    if (!job) {
+      return { success: false, error: `Job ${jobId} not found in local cache.` };
+    }
+
+    const ledger = readLedger(job);
+    if (!ledger) {
+      return { success: false, error: `Job ${jobId} has no batch ledger — not a split dispatch.` };
+    }
+
+    const batchEntry = (ledger.batches || []).find((b) => b && b.index === batchIndex);
+    if (!batchEntry) {
+      return { success: false, error: `Batch ${batchIndex} not found on job ${jobId} (ledger has ${ledger.batches.length} entries).` };
+    }
+
+    if (!Array.isArray(batchEntry.images) || batchEntry.images.length === 0) {
+      // Only reachable for a ledger written pre-M4 (no images stored).
+      // Refuse rather than fall back to re-splitting.
+      return { success: false, error: `Batch ${batchIndex} has no stored image set — this ledger predates M4 and cannot be resent.` };
+    }
+
+    // Guard: already-accepted batch → require explicit confirm to prevent
+    // an accidental double-print (the batch is already at the printer or
+    // in the print queue).
+    if (batchEntry.acceptedPrefix === 'e' && !opts.confirmed) {
+      return {
+        success:       false,
+        needsConfirm:  true,
+        batchIndex,
+        currentPrefix: batchEntry.acceptedPrefix,
+        error:         `Batch ${batchIndex} was already accepted by the printer. Confirm to resend.`,
+      };
+    }
+
+    // Lazy require — same pattern as _sendViaDarkroomProRouted (breaks
+    // the routing-service ↔ print-service load-order cycle).
+    const { resolveRoute } = require('./routing-service');
+    const route = resolveRoute(job);
+    if (!route || route.type !== 'controller') {
+      return { success: false, error: `No controller route resolves for job ${jobId}.` };
+    }
+    if (!isDpofType(route.controllerType)) {
+      return { success: false, error: `Batch resend only supported for DPOF controllers (got '${route.controllerType}').` };
+    }
+
+    const downloadDirectory = configService.get('downloadDirectory');
+    if (!downloadDirectory) {
+      return { success: false, error: 'Download directory is not configured.' };
+    }
+
+    const orderFolderName = `${job.order_number}_${job.order_id}`;
+    const jobFolderName   = `${job.order_number}_${job.id}`;
+    const orderFolderPath = path.join(downloadDirectory, orderFolderName);
+    const jobFolderPath   = path.join(orderFolderPath, jobFolderName);
+    if (!fs.existsSync(jobFolderPath)) {
+      return { success: false, error: `Job folder not found: ${jobFolderPath}` };
+    }
+
+    let manifest, jobManifest;
+    try {
+      manifest    = await this._readManifest(orderFolderPath, job.order_number);
+      jobManifest = this._findJobInManifest(manifest, job);
+    } catch (err) {
+      return { success: false, error: `Manifest read failed: ${err.message}` };
+    }
+    if (!jobManifest) {
+      return { success: false, error: `Job ${job.id} not in manifest.` };
+    }
+
+    // Per-job pipeline (matches sendViaDPOFRouted). enhanced/corrections
+    // are RESOLVED FRESH — if a batch's images were re-enhanced after the
+    // original dispatch, the resend picks up the new versions.
+    const enhancedMap    = await this._getEnhancedPathMap(jobFolderName, jobFolderPath);
+    const correctionsMap = await this._getCorrectionsMap(jobFolderName, jobFolderPath);
+
+    let currentImageFiles = jobManifest.images.map((img) => {
+      const basename     = path.basename(img.filename);
+      const enhancedPath = enhancedMap.get(basename);
+      return {
+        sourcePath: resolveDispatchImageSource({
+          rootPath:     path.join(orderFolderPath, img.filename),
+          jobFolderPath, basename, enhancedPath,
+        }),
+        filename: basename,
+        quantity: img.quantity || 1,
+      };
+    });
+    currentImageFiles = await this._applyCorrectionsToImageFiles(
+      currentImageFiles,
+      path.join(jobFolderPath, 'working'),
+      correctionsMap,
+    );
+
+    // Restrict to the batch's stored image set — preserve LEDGER order,
+    // not manifest order (the ledger reflects the batch as originally
+    // dispatched and the operator has seen those images in that order
+    // on the printer's failure display, if any).
+    const currentByFilename = new Map(currentImageFiles.map((f) => [f.filename, f]));
+    const missing           = [];
+    const batchImageFiles   = [];
+    const batchLineItems    = [];
+    for (let i = 0; i < batchEntry.images.length; i++) {
+      const ledgerImg = batchEntry.images[i];
+      const current   = currentByFilename.get(ledgerImg.filename);
+      if (!current) {
+        missing.push(ledgerImg.filename);
+        continue;
+      }
+      batchImageFiles.push({ sourcePath: current.sourcePath, filename: current.filename });
+      batchLineItems.push({
+        lineItemNumber: i + 1,
+        quantity:       ledgerImg.quantity,   // preserve original quantity
+        filename:       ledgerImg.filename,
+      });
+    }
+    if (missing.length > 0) {
+      return {
+        success: false,
+        error:   `Cannot resend batch ${batchIndex}: ${missing.length} image(s) from the original batch are no longer in the manifest: ${missing.slice(0, 3).join(', ')}${missing.length > 3 ? `, +${missing.length - 3} more` : ''}.`,
+      };
+    }
+    for (const img of batchImageFiles) {
+      if (!fs.existsSync(img.sourcePath)) {
+        return { success: false, error: `Image not found on disk for resend: ${img.sourcePath}` };
+      }
+    }
+
+    // Banner sheet — same rule as split dispatch: one per batch,
+    // carrying the batch descriptor. Failures swallowed.
+    if (route.bannerSheet && batchImageFiles.length > 0) {
+      try {
+        const { generateBannerSheet } = require('../banner-sheet-service');
+        const Jimp = require('jimp');
+        const firstImg = await Jimp.read(batchImageFiles[0].sourcePath);
+        const widthPx  = firstImg.getWidth();
+        const heightPx = firstImg.getHeight();
+        const jobCode  = job.job_name || job.order_number || '';
+        const bannerBuffer = await generateBannerSheet(jobCode, widthPx, heightPx, {
+          batch: { index: batchEntry.index, total: batchEntry.total },
+        });
+        const bannerDir      = path.join(jobFolderPath, 'working');
+        const bannerFilename = `BANNER_${batchEntry.index}of${batchEntry.total}.JPG`;
+        const bannerPath     = path.join(bannerDir, bannerFilename);
+        await fs.promises.mkdir(bannerDir, { recursive: true });
+        await fs.promises.writeFile(bannerPath, bannerBuffer);
+        batchImageFiles.unshift({ sourcePath: bannerPath, filename: bannerFilename });
+        batchLineItems.unshift({ lineItemNumber: 0, quantity: 1, filename: bannerFilename });
+      } catch (bannerErr) {
+        logger.logError('[dpof-batch-resend] banner sheet generation failed — continuing without banner', bannerErr, {
+          jobId: job.id, batchIndex,
+        });
+      }
+    }
+
+    const dpofContent = dpofGenerator.generate({
+      orderNumber:    job.order_number || manifest.orderNumber || '',
+      jobId:          job.id,
+      customerName:   job.customer_name || '',
+      channelNumber:  route.channelNumber,
+      printSizeCode:  route.printSizeCode,
+      images:         batchLineItems.map((li) => ({ filename: li.filename, quantity: li.quantity })),
+      controllerType: route.controllerType || 'noritsu',
+    });
+
+    // Preserve original batch descriptor — resend NEVER renumbers.
+    const nameOpts = {
+      includeCustomerName: route.includeCustomerInFolder !== false,
+      customerName:        job.customer_name || '',
+      batch:               { index: batchEntry.index, total: batchEntry.total },
+    };
+
+    let writeResult;
+    try {
+      writeResult = await orderFolderWriter.writeOrderFolder(
+        route.outputPath, job, dpofContent, batchImageFiles, null, nameOpts,
+      );
+    } catch (writeErr) {
+      const tempFolderName = buildFolderName('p', job, null, nameOpts);
+      logger.logError(`[dpof-batch-resend] batch ${batchIndex}/${batchEntry.total} write failed`, writeErr, {
+        jobId: job.id, controller: route.controllerName, tempFolder: tempFolderName,
+      });
+      return { success: false, error: writeErr.message, folderName: tempFolderName };
+    }
+
+    // Update ledger — clears the accept signal and re-stamps
+    // dispatchedAt; ALSO clears ledger.completedAt so the roll-up
+    // re-fires when this batch reaches its next terminal state.
+    resetBatchForResend(ledger, {
+      index:    batchEntry.index,
+      filename: writeResult.folderName,
+      destPath: writeResult.folderPath,
+    });
+    jobService.updateJobLocally(job.id, { [BATCH_LEDGER_FIELD]: ledger });
+
+    logger.info(`[dpof-batch-resend] batch ${batchIndex}/${batchEntry.total} sent`, {
+      jobId:      job.id,
+      controller: route.controllerName,
+      hotFolder:  writeResult.folderPath,
+      folderName: writeResult.folderName,
+      images:     batchImageFiles.length,
+    });
+
+    return {
+      success:    true,
+      method:     'dpof-resend',
+      folderName: writeResult.folderName,
+      destPath:   writeResult.folderPath,
+      batchIndex: batchEntry.index,
+      batchTotal: batchEntry.total,
     };
   }
 

@@ -980,6 +980,63 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
     }
   });
 
+  /**
+   * ohd:job:resend-dpof-batch
+   * Payload:  { jobId, batchIndex, confirmed? }
+   * Returns:  { success: true, folderName, destPath, batchIndex, batchTotal }
+   *         | { success: false, needsConfirm: true, batchIndex, currentPrefix, error }
+   *         | { success: false, error }
+   *
+   * Resends a SINGLE batch of a previously split DPOF dispatch
+   * (docs/epson-batch-splitting-brief.md M4). Delegates to
+   * printService.resendDpofBatch which reads the batch's stored
+   * image set from the ledger (does NOT re-split the current
+   * manifest — that would send different content under the same
+   * batch number if the manifest changed since dispatch).
+   *
+   * Double-print guard: a batch already at acceptedPrefix === 'e'
+   * refuses without `confirmed === true`. Renderer prompts and
+   * re-invokes with `confirmed:true`.
+   *
+   * Clears the per-batch and per-job terminal-tracking state so the
+   * resent batch's new o→e/q cycle is picked up by the poller and
+   * pushed to the renderer.
+   */
+  ipcMain.handle('ohd:job:resend-dpof-batch', async (event, { jobId, batchIndex, confirmed } = {}) => {
+    try {
+      if (jobId === undefined || jobId === null) return { success: false, error: 'jobId required.' };
+      if (!Number.isInteger(batchIndex) || batchIndex < 1) return { success: false, error: 'batchIndex must be a positive integer.' };
+
+      const result = await printService.resendDpofBatch({
+        jobId,
+        batchIndex,
+        opts: { confirmed: confirmed === true },
+      });
+
+      if (result.success) {
+        // Clear terminal-state trackers so the poller re-notifies on
+        // the new o→e/q cycle for this batch AND for the job as a whole
+        // (allBatchesAccepted may fire again once every batch settles).
+        _terminalJobs.delete(String(jobId));
+        _terminalJobs.delete(`${jobId}:${batchIndex}`);
+        jobService.updateJobLocally(jobId, { _dpofNotified: false });
+        startStatusPolling(windowManager);
+
+        if (windowManager) {
+          const mainWindow = windowManager.getWindow();
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('jobs:updated', jobService.getLocalJobs());
+          }
+        }
+      }
+
+      return result;
+    } catch (error) {
+      logger.logError('ohd:job:resend-dpof-batch error', error, { jobId, batchIndex });
+      return { success: false, error: error.message };
+    }
+  });
+
   // ── Activity log handlers ──
 
   // Read and parse log file
@@ -3066,33 +3123,28 @@ let _pollWindowManager  = null;
 // Cleared per job when the operator resends it so the new o→e/q cycle is tracked.
 const _terminalJobs = new Set();
 
-// M1 of docs/epson-batch-splitting-brief.md — this poller is
-// deliberately NOT yet batch-aware. Rationale:
+// M4 of docs/epson-batch-splitting-brief.md — this poller is now
+// batch-aware. Two paths:
 //
-//   - M1 extends buildFolderName + folder-monitor + printUtils.parseFolderName
-//     to CARRY batch identity through the naming and event surface, but
-//     does NOT yet PRODUCE split folders (M3 does that in
-//     _sendViaDPOFRouted).
-//   - M2 adds the per-job batch ledger that this poller will consult to
-//     iterate every batch's folder for a split job.
-//   - Until M2/M3 land, every DPOF job produces exactly one folder,
-//     which this poller finds correctly via getJobOutputStatus (single
-//     baseName lookup). No batch-splits exist yet on disk to
-//     mis-attribute.
-//
-// Post-M2 the pattern will be: read job._batchLedger (if present),
-// call getJobOutputStatus per batch, aggregate to a single status.
-// Single-folder jobs continue on the current code path unchanged.
+//   - Unsplit job (no _batchLedger): single getJobOutputStatus lookup,
+//     terminal state notified once per job. Pre-M4 behaviour, unchanged.
+//   - Split job (with _batchLedger): iterate ledger.batches, poll each
+//     batch's folder. Notify per-batch (composite terminal key
+//     `${jobId}:${batchIndex}`) so a batch already at `e` isn't
+//     re-toasted while its siblings are still pending. Aggregate:
+//       - `Imported` UI event only when EVERY batch has reached `e`
+//         (matches polling-service._handleFolderStatusChange's roll-up
+//         via allBatchesAccepted — the event-driven path is the
+//         primary; this fs-based poll is the safety net).
+//       - `Failed Import (batch N)` when any batch is at `q`.
 //
 // The reprint-attribution risk the brief flags (a reprint's folder
-// might be confused with the parent's) is closed at THIS layer today
-// by getJobOutputStatus's per-baseName lookup: it builds
+// might be confused with the parent's) is closed at THIS layer by
+// getJobOutputStatus's per-baseName lookup: it builds
 // buildFolderName('', job, reprintSuffix=null) and matches exactly,
 // so a reprint's folder (which has `_r1_` in the middle) never matches
-// the parent's baseName. Documented here rather than left as an
-// implicit "it happens to work" — the invariant is enforced by
-// per-baseName lookup, and any future refactor that switches to
-// jobId-prefix matching must preserve it.
+// the parent's baseName. Any future refactor that switches to
+// jobId-prefix matching must preserve this invariant.
 async function _pollAwaitingJobs() {
   if (!_pollWindowManager) return;
 
@@ -3100,6 +3152,7 @@ async function _pollAwaitingJobs() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
 
   const { jobs } = jobService.getLocalJobs();
+  const { readLedger } = require('../shared/batchLedger');
 
   // Collect { job, outputFolderPath } pairs for all DPOF jobs.
   // New routing system takes priority; old printControllerStore is the fallback.
@@ -3128,11 +3181,71 @@ async function _pollAwaitingJobs() {
 
   for (const { job, outputFolderPath, includeCustomerInFolder } of dpofJobs) {
     try {
-      const status     = await getJobOutputStatus(job, outputFolderPath, null, { includeCustomerName: includeCustomerInFolder });
+      const jid    = String(job.id);
+      const ledger = readLedger(job);
+
+      // ── Split-job path (M4) ───────────────────────────────────────
+      if (ledger && Array.isArray(ledger.batches) && ledger.batches.length > 0) {
+        // Poll every batch's folder-for-a-batch. Track per-batch
+        // terminal state via composite key so a `Failed Import
+        // (batch N)` for one batch doesn't gate the poll on unrelated
+        // batches, and a batch already at `e` doesn't re-toast on
+        // every cycle.
+        let anyPending = false;
+        let anyFailed  = null;   // { batchIndex, total }
+        let allAccepted = true;
+        for (const entry of ledger.batches) {
+          if (!entry || !Number.isInteger(entry.index)) continue;
+          const batchDescr = { index: entry.index, total: entry.total };
+          const status = await getJobOutputStatus(job, outputFolderPath, null, {
+            includeCustomerName: includeCustomerInFolder,
+            batch:               batchDescr,
+          });
+          if (!status) { allAccepted = false; continue; }
+          const bkey = `${jid}:${entry.index}`;
+          if (status.prefix === 'o') { anyPending = true; allAccepted = false; }
+          else if (status.prefix === 'p') { anyPending = true; allAccepted = false; }
+          else if (status.prefix === 'q') {
+            allAccepted = false;
+            if (!anyFailed) anyFailed = { batchIndex: entry.index, total: entry.total };
+            if (!_terminalJobs.has(bkey)) _terminalJobs.add(bkey);
+          } else if (status.prefix === 'e') {
+            if (!_terminalJobs.has(bkey)) _terminalJobs.add(bkey);
+          }
+        }
+
+        if (anyPending) hasAwaitingJobs = true;
+
+        // Per-job (not per-batch) UI notification — same channel the
+        // renderer already listens on, exactly-once per terminal
+        // transition. Guarded by `_dpofNotified` for restart-safety.
+        if (anyFailed && !_terminalJobs.has(jid)) {
+          _terminalJobs.add(jid);
+          jobService.updateJobLocally(job.id, { _dpofNotified: true });
+          mainWindow.webContents.send('ohd:job:status-changed', {
+            jobId:      jid,
+            status:     `Failed Import (batch ${anyFailed.batchIndex}/${anyFailed.total})`,
+            prefix:     'q',
+            batchIndex: anyFailed.batchIndex,
+            batchTotal: anyFailed.total,
+          });
+        } else if (allAccepted && !anyFailed && !_terminalJobs.has(jid)) {
+          _terminalJobs.add(jid);
+          jobService.updateJobLocally(job.id, { _dpofNotified: true });
+          mainWindow.webContents.send('ohd:job:status-changed', {
+            jobId:   jid,
+            status:  'Imported',
+            prefix:  'e',
+            batches: ledger.totalBatches,
+          });
+        }
+        continue;
+      }
+
+      // ── Unsplit-job path (pre-M4 behaviour, unchanged) ────────────
+      const status = await getJobOutputStatus(job, outputFolderPath, null, { includeCustomerName: includeCustomerInFolder });
 
       if (!status) continue;
-
-      const jid = String(job.id);
 
       if (status.prefix === 'o') {
         hasAwaitingJobs = true;

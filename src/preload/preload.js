@@ -238,6 +238,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getJobOutputStatus: (jobId) => ipcRenderer.invoke('ohd:job:get-output-status', { jobId }),
   markPrinted:        (jobId) => ipcRenderer.invoke('ohd:job:mark-printed',      { jobId }),
   resendJob:          (jobId) => ipcRenderer.invoke('ohd:job:resend',             { jobId }),
+  resendDpofBatch:    ({ jobId, batchIndex, confirmed }) => ipcRenderer.invoke('ohd:job:resend-dpof-batch', { jobId, batchIndex, confirmed }),
   onJobStatusChanged: (callback) => ipcRenderer.on('ohd:job:status-changed', (event, data) => callback(data)),
 
   // Dismissed jobs
