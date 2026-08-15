@@ -1138,7 +1138,17 @@ function renderJobTable(jobs) {
     // has no module imports). Fallback preserves the pre-fix label for any
     // legacy jobs-cache entry that lacks _holdChipLabel — the next poll
     // stamps it and the badge updates.
-    if (job._holdForReview) {
+    //
+    // Gate on live status (received / pending): computeHoldForReview is a
+    // pure derivation over job properties — it correctly reports "this
+    // job's total prints exceed the cap" even for a job already
+    // dispatched (Processed / In Production / errored). The chip is a
+    // signal that auto-print is CURRENTLY holding the job; rendering it
+    // on a Processed job would tell the operator a dispatched job is
+    // stuck at the gate. Same isLive shape the AI Quality Release
+    // button uses above.
+    const isHoldChipLive = job._status === 'received' || job._status === 'pending';
+    if (job._holdForReview && isHoldChipLive) {
       let chipLabel  = job._holdChipLabel   || 'Manual — review required';
       let reasonText = job._holdReasonsText || 'Manual artwork — review before printing';
       let tipText    = `Auto-print held: ${reasonText}. Click Send to Print to dispatch anyway.`;
