@@ -15,6 +15,7 @@ The only artifact this repo produces is a single Windows NSIS installer:
   - `1.12.1` — 576,578,833 bytes (+231 vs 1.12.0 — renderer.js fix only)
   - `1.12.2` — 576,581,873 bytes (+3,040 vs 1.12.1 — Strip Order Number Prefix feature: new field + wiring across shared/main/renderer)
   - `1.13.0` — 576,586,887 bytes (+5,014 vs 1.12.2 — auto-batch-and-ui-tidy release: modal-tick layout fix, Darkroom Pro autoSendBatches opt-in, Order XML tab visibility, plus the critical fix for the batch-splitting hold that had been silently broken in auto-print since v1.10.0)
+  - `1.14.0` — 576,623,107 bytes (+36,220 vs 1.13.0 — Epson DPOF batch-splitting release: per-batch folder naming (`_NofM_` marker), per-batch banner sheets, completion roll-up (job completes only when every batch reaches `e`), batch-attributed failure with a resend-one-batch job-row action, epson Settings for the cap + auto-send tick, and the reprint-attribution fix. Includes the fix for order-folder-writer dropping `nameOpts.batch` — every batch of a split job produced the same folder name and batch 2 hit EPERM on p→o rename)
 - **Signing**: none (see [Unsigned installer — SmartScreen](#unsigned-installer--smartscreen))
 - **Distribution**: Richard uploads the `.exe` to S3 by hand and pastes
   the link into OrderHub. Labs download from that link and install it

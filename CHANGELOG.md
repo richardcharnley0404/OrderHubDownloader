@@ -1,5 +1,7 @@
 ## Unreleased
 
+## v1.14.0 - 2026-08-16
+
 **New: batch splitting for Epson OrderController jobs.** The Darkroom
 Pro "Maximum prints per job" feature is now available on Epson
 controllers too. Set a cap on the Epson controller in Settings →
