@@ -36,13 +36,16 @@ const PREFIXES = ['p', 'o', 'q', 'e'];
  *          Returns null if no matching folder is found (job not yet sent).
  */
 async function getJobOutputStatus(job, destBasePath, reprintSuffix = null, nameOpts = {}) {
+  // Spread FIRST so any current or future field on nameOpts flows through
+  // to buildFolderName; then normalise the two we defensively coerce.
+  // Same posture as order-folder-writer.js — see the fix commit for the
+  // bug where the pre-spread cherry-pick silently dropped `batch` and
+  // every batch of a split job produced the same folder name.
   const resolvedOpts = {
+    ...nameOpts,
     includeCustomerName: !!nameOpts.includeCustomerName,
-    customerName: nameOpts.customerName != null ? nameOpts.customerName : (job.customer_name || ''),
+    customerName:        nameOpts.customerName != null ? nameOpts.customerName : (job.customer_name || ''),
   };
-  // M4: forward the batch descriptor so a split job's poll targets the
-  // right folder-for-a-batch, not the never-written base folder.
-  if (nameOpts.batch) resolvedOpts.batch = nameOpts.batch;
   const baseName = buildFolderName('', job, reprintSuffix, resolvedOpts); // no prefix
 
   for (const prefix of PREFIXES) {
