@@ -56,17 +56,6 @@ count because camera filenames repeat across orders constantly
 (`IMG_0001.jpg` from two customers is the exact case the guard
 prevents).
 
-**New: strip order number prefix now on Folder Copy too.** Same
-field, same helper text, same behaviour as the existing Fuji PIC
-Pro one (added in 1.13.0). If your OrderHub order numbers start
-with a fixed tag like `PXDEMO-` or `DIVPRINTS-`, enter it here to
-trim the tag off the destination folder name and any resolved
-`{orderNumber}`/`{jobName}` token in the filename template. Case-
-insensitive leading match; never strips down to empty. The tag
-is only stripped from the destination — the source folder OHD
-reads from is not affected, so the ingester's own filenames are
-never in doubt.
-
 **New: live preview in Settings.** Right under the template field a
 preview panel shows the resolved sample filenames and the full
 destination path, updating live as you type. It runs the same rename
@@ -106,11 +95,58 @@ it can never be mistaken for a real resolution.
 
 **Nothing changes for an existing Folder Copy controller.** Leave
 the three new fields at their defaults (blank template, per-job
-subfolder, blank strip prefix) and every folder, every filename is
+subfolder, no strip prefixes) and every folder, every filename is
 byte-identical to today — no drift, no wrappers, no rename. Files
 still land at `{OutputPath}/{orderNumber}_{jobId}/{original filename}`.
 The whole feature is opt-in per controller; type a template in when
 you want to opt in, don't touch anything to opt out.
+
+---
+
+**Changed: strip order number prefix is now a LIST, and applies to
+both Folder Copy and Fuji PIC Pro.** Settings → Routing → Order
+Controllers → Edit → **Strip order number prefixes**. A single
+OrderHub org can ship orders with several source-website prefixes —
+this install already has `ORD-`, `PXDEMO-` and `POS-` live on the
+same Pixfizz account — so the field is a repeating-row list rather
+than a single value. One prefix per row, `+ Add prefix` below.
+Longest match wins, so `PXDEMO` and `PXDEMO1` can coexist safely:
+`PXDEMO1-091YEC` always strips via `PXDEMO1` regardless of the order
+the two entries were typed. Case-insensitive on the match; the
+surviving tail keeps its original casing. Never strips down to empty.
+
+**The prefix must be followed by `-` or `_` in the order number.**
+`PXDEMO` and `PXDEMO-` behave identically on `PXDEMO-091YEC` — both
+produce `091YEC` — but neither touches `PXDEMOX-1`, because there's
+no separator between `PXDEMO` and `X`. This is a deliberate rule so a
+configured `PXDEMO` can't silently strip any leading-substring match.
+Every real OrderHub order number is `PREFIX-CODE`, so the "no
+separator" case doesn't occur in practice.
+
+A controller carried over from 1.13.0 with the old single-value
+prefix still reads correctly and renders as a one-row list on load —
+nothing to do to migrate. On Folder Copy, the strip applies to the
+destination folder name AND any `{orderNumber}` / `{jobName}` token
+in the filename template. On Fuji PIC Pro it applies to the
+submission id (staging folder, `{orderId}.txt` filename, DIGIN
+folder) exactly as it did in 1.13.0.
+
+**Fuji PIC Pro submission folders are now collision-proof across
+prefixes.** If two orders on different source websites strip to the
+same base — `PXDEMO-091YEC` and `POS-091YEC` both strip to `091YEC` —
+the second one dispatched gets `091YEC-2`, the same `-2`/`-3`
+resubmission suffix scheme the merge path already used. Before this,
+the second dispatch would have named its staging folder `091YEC` too
+and cleared it before writing, wiping the first order's staged images
+before PIC Pro moved them into DIGIN.
+
+**Re-sending the same job still reuses its own id — a retry does NOT
+create a duplicate.** The idempotence guarantee is per-job: the first
+dispatch of a given job allocates a submission id and remembers the
+pairing; every subsequent dispatch of that same job returns the same
+id, so no second submission appears in DIGIN. Nothing about resend
+behaviour changes — the collision protection above is strictly about
+DIFFERENT jobs whose prefixes happen to strip to the same base.
 
 ---
 
