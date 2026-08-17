@@ -549,3 +549,202 @@ test('read-only: no dep is ever mutated by the call', async () => {
   );
   assert.ok(out);
 });
+
+// ═════════════════════════════════════════════════════════════════════════
+// M8 — sampleOptionNames + machine-value warning on {options}
+// ═════════════════════════════════════════════════════════════════════════
+//
+// The preview surfaces the sample job's option NAMES so the renderer can
+// render them as clickable chips. `{option:NAME}` is unusable without
+// knowing the name; before M8 nothing in the app told the operator.
+//
+// The `{options}` token is honest, not filtered — some products send
+// every option including machine-shaped ids (photo:db:... on MetalPrint,
+// shopify_*), and filtering would (a) hide that from the operator and
+// (b) be a no-op for folder_copy anyway (ignoredOptionNames is only
+// populated from Assign-channel modals, which folder_copy controllers
+// never see). Instead we warn in the preview so the operator can pick
+// {option:NAME} for the specific option they want.
+
+const {
+  _looksLikeMachineValue,
+} = require(path.join(SVC, 'folder-copy-preview.js'));
+
+function fixtureRealJobWithOptions(options) {
+  // Assembles a listJobs + readManifest deps pair that resolves to a
+  // real (any-manifest) sample carrying `options`. Manifest has one
+  // trivial image so buildCopyFilenames has something to iterate.
+  const jobId = JOB_RECENT.id;
+  const job = { ...JOB_RECENT, options };
+  return {
+    listJobs:             () => [job],
+    resolveRouteFor:      () => null,
+    getDownloadDirectory: () => '/tmp',
+    readManifest:         manifestReaderFor({
+      [job.order_number]: {
+        jobs: [{ jobId: String(jobId), images: [{ filename: 'IMG_0001.jpg', quantity: 1 }] }],
+      },
+    }),
+  };
+}
+
+// ── sampleOptionNames ───────────────────────────────────────────────────
+
+test('M8 sampleOptionNames: real job returns option NAMES in array order', async () => {
+  const out = await buildFolderCopyPreview({}, fixtureRealJobWithOptions([
+    { name: 'finish-options', value: 'lustre' },
+    { name: 'photo',          value: 'db:203545638' },
+  ]));
+  assert.equal(out.source.kind, 'any-manifest');
+  assert.deepEqual(out.sampleOptionNames, ['finish-options', 'photo']);
+});
+
+test('M8 sampleOptionNames: synthetic sample returns synthetic option names', async () => {
+  const out = await buildFolderCopyPreview({}, NO_JOBS_DEPS);
+  assert.equal(out.source.kind, 'synthetic');
+  // SYNTHETIC_JOB is frozen with { finish-options, layout-options }.
+  assert.deepEqual(out.sampleOptionNames, ['finish-options', 'layout-options']);
+});
+
+test('M8 sampleOptionNames: hyphens preserved so chip insertion produces valid {option:...} tokens', async () => {
+  // The renderer wraps each name as `{option:${name}}`. The template-
+  // tokens resolver already accepts any character except `}` inside the
+  // capture, so hyphens work end-to-end. Locking here that the NAME
+  // itself doesn't get mangled on the way through the preview module.
+  const out = await buildFolderCopyPreview({}, fixtureRealJobWithOptions([
+    { name: 'finish-options',  value: 'lustre' },
+    { name: 'border-options',  value: '0.25in' },
+    { name: 'foam-core-mount', value: 'yes' },
+  ]));
+  assert.deepEqual(out.sampleOptionNames, ['finish-options', 'border-options', 'foam-core-mount']);
+});
+
+test('M8 sampleOptionNames: whitespace-only or missing names filtered out (defensive)', async () => {
+  const out = await buildFolderCopyPreview({}, fixtureRealJobWithOptions([
+    { name: 'finish-options', value: 'lustre' },
+    { name: '   ',            value: 'noise' },
+    { name: '',               value: 'more' },
+    { value: 'nameless' },
+  ]));
+  assert.deepEqual(out.sampleOptionNames, ['finish-options']);
+});
+
+test('M8 sampleOptionNames: empty options array yields []', async () => {
+  const out = await buildFolderCopyPreview({}, fixtureRealJobWithOptions([]));
+  assert.deepEqual(out.sampleOptionNames, []);
+});
+
+// ── Machine-value classifier ────────────────────────────────────────────
+
+test('M8 _looksLikeMachineValue: db: prefix (case-insensitive) is machine', () => {
+  for (const v of ['db:203545638', 'DB:12345', 'Db:abc', '  db:trimmed  ']) {
+    assert.equal(_looksLikeMachineValue(v), true, `${JSON.stringify(v)} should be machine`);
+  }
+});
+
+test('M8 _looksLikeMachineValue: all-digits length > 8 is machine', () => {
+  assert.equal(_looksLikeMachineValue('123456789'),    true,  'length 9 = machine');
+  assert.equal(_looksLikeMachineValue('1234567890'),   true,  'length 10 = machine');
+  assert.equal(_looksLikeMachineValue('12345678'),     false, 'length 8 = borderline, NOT machine');
+  assert.equal(_looksLikeMachineValue('123'),          false, 'short numeric = size, not machine');
+  assert.equal(_looksLikeMachineValue('12x18'),        false, 'has non-digit = not all-digits');
+});
+
+test('M8 _looksLikeMachineValue: readable values are NOT machine', () => {
+  for (const v of ['lustre', 'full-bleed', '0.25in', 'MetalPrint 16x20', 'yes', '']) {
+    assert.equal(_looksLikeMachineValue(v), false, `${JSON.stringify(v)} should not be machine`);
+  }
+});
+
+test('M8 _looksLikeMachineValue: non-string is not machine (defensive)', () => {
+  for (const v of [null, undefined, 123456789, {}, []]) {
+    assert.equal(_looksLikeMachineValue(v), false);
+  }
+});
+
+// ── Machine-value warning on the preview ────────────────────────────────
+
+test('M8 warning: {options} + db: value → machine-value warning fires and names the fix', async () => {
+  const out = await buildFolderCopyPreview(
+    { filenameTemplate: '{jobId}_{options}', outputPath: '/x' },
+    fixtureRealJobWithOptions([{ name: 'photo', value: 'db:203545638' }]),
+  );
+  const warn = out.warnings.find(w => w.kind === 'machine-value');
+  assert.ok(warn, 'machine-value warning must fire for a db: option value');
+  // Wording NAMES the fix — same posture as the auto-suffix warning.
+  assert.match(warn.text, /\{option:NAME\}/);
+  // The offending option is named in the warning so the operator can
+  // spot it immediately.
+  assert.match(warn.text, /photo=db:203545638/);
+});
+
+test('M8 warning: {options} + long numeric value → machine-value warning fires', async () => {
+  const out = await buildFolderCopyPreview(
+    { filenameTemplate: 'x_{options}', outputPath: '/x' },
+    fixtureRealJobWithOptions([{ name: 'variant-id', value: '9876543210' }]),
+  );
+  const warn = out.warnings.find(w => w.kind === 'machine-value');
+  assert.ok(warn, 'long numeric option value must trigger the warning');
+});
+
+test('M8 warning: lustre is NOT flagged as machine-shaped', async () => {
+  const out = await buildFolderCopyPreview(
+    { filenameTemplate: '{jobId}_{options}', outputPath: '/x' },
+    fixtureRealJobWithOptions([{ name: 'finish-options', value: 'lustre' }]),
+  );
+  const warn = out.warnings.find(w => w.kind === 'machine-value');
+  assert.equal(warn, undefined, 'a plain readable value must NOT trigger the warning');
+});
+
+test('M8 warning: template without {options} → warning does NOT fire even on a db: option value', async () => {
+  // The fix is "use {option:NAME}" — if the operator already isn't using
+  // {options} there is nothing to warn about.
+  const out = await buildFolderCopyPreview(
+    { filenameTemplate: '{jobId}_{index}', outputPath: '/x' },
+    fixtureRealJobWithOptions([{ name: 'photo', value: 'db:203545638' }]),
+  );
+  const warn = out.warnings.find(w => w.kind === 'machine-value');
+  assert.equal(warn, undefined,
+    'no machine-value warning when the template does not use {options}');
+});
+
+test('M8 warning: template uses {option:NAME} for the machine value (not {options}) → no warning', async () => {
+  // Belt-and-braces: {option:photo} is a per-option lookup, not the
+  // whole-set join. That's the fix the warning was pointing at — using
+  // it should silence the warning.
+  const out = await buildFolderCopyPreview(
+    { filenameTemplate: '{jobId}_{option:photo}', outputPath: '/x' },
+    fixtureRealJobWithOptions([{ name: 'photo', value: 'db:203545638' }]),
+  );
+  const warn = out.warnings.find(w => w.kind === 'machine-value');
+  assert.equal(warn, undefined,
+    'per-option lookup ({option:NAME}) is not the {options} join and must not fire the warning');
+});
+
+test('M8 warning: names ALL machine-shaped values when there are several', async () => {
+  const out = await buildFolderCopyPreview(
+    { filenameTemplate: '{options}', outputPath: '/x' },
+    fixtureRealJobWithOptions([
+      { name: 'finish-options', value: 'lustre' },      // readable — not named
+      { name: 'photo',          value: 'db:203545638' },// machine — named
+      { name: 'variant-id',     value: '9876543210' },  // machine — named
+    ]),
+  );
+  const warn = out.warnings.find(w => w.kind === 'machine-value');
+  assert.ok(warn);
+  assert.match(warn.text, /photo=db:203545638/);
+  assert.match(warn.text, /variant-id=9876543210/);
+  // lustre is readable — must NOT appear in the warning.
+  assert.doesNotMatch(warn.text, /lustre/,
+    'readable values must not be named in the warning; only machine-shaped ones');
+});
+
+test('M8 warning: synthetic sample never triggers machine-value (its options are readable)', async () => {
+  const out = await buildFolderCopyPreview(
+    { filenameTemplate: '{options}', outputPath: '/x' },
+    NO_JOBS_DEPS,
+  );
+  assert.equal(out.source.kind, 'synthetic');
+  const warn = out.warnings.find(w => w.kind === 'machine-value');
+  assert.equal(warn, undefined, 'SYNTHETIC_JOB carries only readable option values');
+});

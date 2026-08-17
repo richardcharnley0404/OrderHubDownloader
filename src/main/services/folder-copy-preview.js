@@ -178,7 +178,23 @@ async function _resolveSample({ controllerId, listJobs, resolveRouteFor, readMan
 
 // ── Warning synthesis ───────────────────────────────────────────────────
 
-function _synthWarnings(stats, sampleSize) {
+// The pattern regex could live inline; broken out here so the "what counts
+// as machine-shaped" definition is one line and the tests can lock it.
+// - Starts with "db:" (case-insensitive) — Pixfizz photo-database keys.
+// - OR all digits and longer than 8 characters — Shopify variant ids,
+//   OrderHub internal ids, etc. Length 8+ is chosen so common short
+//   numeric options like "12x18" widths or a two-digit border thickness
+//   never trip the check.
+function _looksLikeMachineValue(v) {
+  if (typeof v !== 'string') return false;
+  const s = v.trim();
+  if (!s) return false;
+  if (/^db:/i.test(s)) return true;
+  if (/^\d+$/.test(s) && s.length > 8) return true;
+  return false;
+}
+
+function _synthWarnings(stats, sampleSize, filenameTemplate, jobOptions) {
   const warnings = [];
   if (stats.suffixed > 0) {
     warnings.push({
@@ -197,6 +213,28 @@ function _synthWarnings(stats, sampleSize) {
       kind: 'fallback',
       text: `${stats.fallbacks.length} of ${sampleSize} preview names resolved to empty and fell back to the original basename. Check the tokens in the template.`,
     });
+  }
+  // {options} machine-value warning (M8). Only fires when the template
+  // ACTUALLY uses the {options} token AND at least one option on the
+  // sample job resolves to a machine-shaped value — otherwise there is
+  // nothing to fix. Regex is `\{options\}` (literal): the closing `}`
+  // after `s` distinguishes it from `{option:NAME}` which has `:` after
+  // `option`. Doesn't match inside a resolved value because the check
+  // runs on the RAW template string.
+  const templateUsesOptions = typeof filenameTemplate === 'string' && /\{options\}/.test(filenameTemplate);
+  if (templateUsesOptions && Array.isArray(jobOptions)) {
+    const machineHits = jobOptions
+      .filter(o => o && _looksLikeMachineValue(o.value))
+      .map(o => `${o.name}=${String(o.value).trim()}`);
+    if (machineHits.length > 0) {
+      warnings.push({
+        kind: 'machine-value',
+        text:
+          `{options} on this job resolves to include a machine value (${machineHits.join(', ')}). ` +
+          `That will land in the filename. Use {option:NAME} for the specific option you want — ` +
+          `the option chips above show what's available on this job.`,
+      });
+    }
   }
   return warnings;
 }
@@ -280,6 +318,18 @@ async function buildFolderCopyPreview(input = {}, deps = {}) {
     destPath:     path.join(destFolder, f.destFilename),
   }));
 
+  // M8 — surface the sample job's option NAMES so the renderer can render
+  // them as clickable chips ("what options does this job actually have?").
+  // `{option:NAME}` is unusable without knowing the name; nothing else in
+  // the app tells the operator. Names come straight from the resolved
+  // sample so no second lookup is needed; if the sample has no options
+  // (some products don't) this is [].
+  const sampleOptionNames = Array.isArray(source.job.options)
+    ? source.job.options
+        .map(o => (o && typeof o.name === 'string') ? o.name.trim() : '')
+        .filter(Boolean)
+    : [];
+
   return {
     source: {
       kind:  source.kind,
@@ -289,14 +339,17 @@ async function buildFolderCopyPreview(input = {}, deps = {}) {
     outputPath,
     destinationLayout,
     destFolder,
-    totalImageCount: source.images.length,
-    sampleSize:      displayedFiles.length,
-    files:           filesWithPaths,
+    totalImageCount:   source.images.length,
+    sampleSize:        displayedFiles.length,
+    files:             filesWithPaths,
+    sampleOptionNames,
     // Warnings synthesised from the FULL-run stats — sampleSize below is
     // deliberately allFiles.length so the wording ("N of M preview names")
     // reflects the honest count the planner just computed on every image,
-    // not the display truncation.
-    warnings:        _synthWarnings(stats, allFiles.length),
+    // not the display truncation. `filenameTemplate` and the sample's
+    // options are also passed in so the M8 {options}-with-machine-value
+    // check knows what to warn about.
+    warnings:          _synthWarnings(stats, allFiles.length, filenameTemplate, source.job.options),
     // Full-run stats passed through so the equality-with-M2 test can lock
     // the preview against buildCopyFilenames' return for the FULL list.
     stats,
@@ -310,4 +363,7 @@ module.exports = {
   MAX_PREVIEW_SAMPLES,
   // Exported for tests that want to override the default fs-based reader.
   _defaultReadManifest,
+  // Exported for the M8 machine-value test to lock the "what counts as
+  // machine-shaped" definition in one place.
+  _looksLikeMachineValue,
 };

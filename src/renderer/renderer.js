@@ -5314,6 +5314,26 @@ async function _runFolderCopyPreview() {
   }
 }
 
+// M8 — insert `{option:<name>}` at the template input's current cursor
+// position. If no selection exists (or the input has never been focused
+// and selectionStart is null on older browsers), append at end. Fires an
+// `input` event afterwards so scheduleFolderCopyPreview picks up the
+// change and re-runs — otherwise the preview would only refresh on the
+// next keystroke and the operator would think the click did nothing.
+function _insertOptionToken(name) {
+  const input = document.getElementById('ocFilenameTemplate');
+  if (!input) return;
+  const token = `{option:${name}}`;
+  const value = input.value || '';
+  const start = typeof input.selectionStart === 'number' ? input.selectionStart : value.length;
+  const end   = typeof input.selectionEnd   === 'number' ? input.selectionEnd   : value.length;
+  input.value = value.slice(0, start) + token + value.slice(end);
+  const newPos = start + token.length;
+  input.focus();
+  try { input.setSelectionRange(newPos, newPos); } catch (_) { /* not all input types support selection */ }
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
 function renderFolderCopyPreview(preview) {
   const container = document.getElementById('ocFolderCopyPreview');
   if (!container) return;
@@ -5336,6 +5356,46 @@ function renderFolderCopyPreview(preview) {
     + ';font-style:' + (isSynthetic ? 'italic' : 'normal');
   label.textContent = (preview.source && preview.source.label) || '';
   container.appendChild(label);
+
+  // M8 — option chips for the sample job. Whole point of the milestone:
+  // {option:NAME} is unusable without knowing NAME, and nothing else in
+  // the app tells the operator. Click inserts `{option:<name>}` at the
+  // current cursor position in the template input (or appends if the
+  // input isn't focused; the input's selection state persists across
+  // focus loss so this works even after clicking a chip).
+  const optionNames = Array.isArray(preview.sampleOptionNames) ? preview.sampleOptionNames : [];
+  if (optionNames.length > 0) {
+    const optRow = document.createElement('div');
+    optRow.style.cssText = 'display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-bottom:6px';
+    const lbl = document.createElement('small');
+    lbl.style.cssText = 'color:var(--text-muted,#666)';
+    // Wording distinguishes real vs synthetic so a "sample data" chip is
+    // never mistaken for something on the operator's actual job.
+    lbl.textContent = isSynthetic
+      ? 'Sample options — click to insert:'
+      : 'Options on this job — click to insert:';
+    optRow.appendChild(lbl);
+    const chipCss = [
+      'font-family:ui-monospace,Menlo,Consolas,monospace',
+      'font-size:12px',
+      'padding:3px 8px',
+      'background:var(--surface-muted,#f5f5f5)',
+      'border:1px solid var(--border,#ddd)',
+      'border-radius:3px',
+      'cursor:pointer',
+      'color:var(--text,#333)',
+    ].join(';');
+    for (const name of optionNames) {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.textContent = name;
+      chip.title = `Insert {option:${name}} into the template`;
+      chip.style.cssText = chipCss;
+      chip.addEventListener('click', () => _insertOptionToken(name));
+      optRow.appendChild(chip);
+    }
+    container.appendChild(optRow);
+  }
 
   // Destination folder — path length is half the point (§7 of the brief).
   // Show the FULL destination path per file, plus the folder as its own
@@ -5427,9 +5487,30 @@ function renderFolderCopyTokens() {
   const c2 = document.createElement('code'); c2.textContent = 'NAME';
   const c3 = document.createElement('code'); c3.textContent = '{option:finish-options}'; c3.style.cssText = codeCss;
   helper.append(
-    'Plus ', c1, ' — replace ', c2, ' with an option name, e.g. ', c3, '.',
+    'Plus ', c1, ' — replace ', c2, ' with an option name, e.g. ', c3,
+    '. The preview panel below shows the option names on the sample job as clickable chips.',
   );
   container.appendChild(helper);
+
+  // M8 — honesty about {options}. It joins EVERY option value; on some
+  // products that includes machine references (photo:db:… on MetalPrint,
+  // shopify_* ids). The chip stays click-to-copy for operators who want
+  // that shape, but the hint tells the other 90% to prefer {option:NAME}
+  // for a specific one. Same DOM-nodes approach; no innerHTML.
+  const helperOptions = document.createElement('div');
+  helperOptions.style.cssText = [
+    'flex-basis:100%',
+    'margin-top:4px',
+    'font-size:12px',
+    'color:var(--text-muted,#666)',
+  ].join(';');
+  const cOpts     = document.createElement('code'); cOpts.textContent     = '{options}';        cOpts.style.cssText     = codeCss;
+  const cSpecific = document.createElement('code'); cSpecific.textContent = '{option:NAME}';    cSpecific.style.cssText = codeCss;
+  helperOptions.append(
+    'Note: ', cOpts, ' joins ALL option values — on some products (e.g. MetalPrint) that includes machine references like ',
+    'photo ids. Prefer ', cSpecific, ' when you want a specific option in the filename.',
+  );
+  container.appendChild(helperOptions);
 }
 
 function renderSizeTranslations(translations) {

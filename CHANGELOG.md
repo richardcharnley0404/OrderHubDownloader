@@ -25,8 +25,8 @@ source file — a template like `{product}` on a `.tif` source produces
 | `{productCode}` | product code | e.g. `0406-cut-print` |
 | `{category}` | job category | |
 | `{process}` | job process | e.g. `Lab` |
-| `{options}` | all option values joined with `_` | e.g. `lustre_full-bleed` |
-| `{option:NAME}` | one option value by name | `{option:finish-options}` → `lustre`. Case-insensitive on the name; replace `NAME` with the option's actual name — don't paste the literal `{option:NAME}` |
+| `{options}` | all option values joined with `_` | includes machine values (photo ids like `photo:db:…`, shopify variant ids) on products that carry them — prefer `{option:NAME}` for a specific one |
+| `{option:NAME}` | one option value by name | `{option:finish-options}` → `lustre`. Case-insensitive on the name; replace `NAME` with the option's actual name. Settings shows the option names on the sample job as **clickable chips** in the preview panel — click one to insert its `{option:…}` token at the cursor |
 | `{dueDate}` | job due date as `YYYY-MM-DD` | always ISO (see the note at the bottom) |
 | `{date}` | today's dispatch date as `YYYY-MM-DD` | local time |
 | `{filename}` | current filename | with extension |
@@ -80,9 +80,21 @@ and quantities. The preview also warns you about the same signals
 the dispatch log records: how many images auto-suffixed because the
 template didn't distinguish them, how many hit the 120-character
 stem cap, and how many fell back to the original basename because
-the template resolved to empty on that image. Catching any of those
-in Settings is much better than finding out after the lab has
-already picked up the folder.
+the template resolved to empty on that image. And if the template
+uses `{options}` on a job whose options include a machine reference
+(a `db:…` photo id, a long numeric shopify id), the preview names the
+offending option and tells you to switch to `{option:NAME}` for the
+specific one you want. Catching any of these in Settings is much
+better than finding out after the lab has already picked up the
+folder.
+
+**The preview also shows the option names on the sample job as
+clickable chips**, right under the "Preview using job 12345" line —
+click any chip and its `{option:…}` token is inserted at the cursor
+in the template field. Before this, you had to know your option
+names by heart to use `{option:NAME}` (they're API keys like
+`finish-options`, `photo`, `layout-options`); now Settings tells
+you what's actually on this order's jobs.
 
 **The preview labels its data source explicitly.** If OHD can find a
 recent job routed to this controller with a readable order manifest,
