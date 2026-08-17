@@ -254,7 +254,7 @@ function stripOrderNumberPrefix(orderNumber, prefix) {
 }
 
 /**
- * Multi-prefix variant of stripOrderNumberPrefix (M7).
+ * Multi-prefix variant of stripOrderNumberPrefix (M7 / M7a).
  *
  * A single OHD install talks to a single OrderHub org, but that org can
  * ship orders with several different prefixes distinguishing the source
@@ -269,16 +269,36 @@ function stripOrderNumberPrefix(orderNumber, prefix) {
  *     NOT push sorting to the caller — that puts the load-bearing rule
  *     one accident away from being wrong.
  *   - Case-insensitive on the prefix match; the surviving tail keeps
- *     its original casing. (Same rule as the single-prefix helper.)
- *   - After a match, drop ONE leading '-' or '_' if present. Both
- *     `PXDEMO-` (with hyphen) and `PXDEMO` (without) behave the same;
- *     an operator can't get it subtly wrong. Only these two separators
- *     — a configured `PXDEMO` must NOT strip `PXDEMOX`.
+ *     its original casing.
+ *   - **A separator is REQUIRED between the prefix and the rest of the
+ *     order number.** If the configured prefix already ends in `-` or
+ *     `_`, the operator baked the separator in and the match consumed
+ *     it — accept. Otherwise, the remainder MUST begin with `-` or `_`;
+ *     drop one and accept. If the remainder begins with any other
+ *     character, this candidate does NOT match — try the next.
+ *
+ *     Why mandatory (M7a): two approved requirements conflict — "let
+ *     the operator type PXDEMO or PXDEMO-, both should work on
+ *     PXDEMO-091YEC" AND "PXDEMO must NOT strip PXDEMOX to X". With an
+ *     optional separator the first is satisfied but any leading
+ *     substring match always wins, so the second is violated. Requiring
+ *     the separator resolves the conflict by making "PXDEMO" mean "the
+ *     word PXDEMO, followed by a separator" rather than "any string
+ *     starting with the letters P-X-D-E-M-O".
+ *
+ *     Accepted cost: a separator-less order-number scheme like
+ *     `PXDEMO091YEC` no longer strips. Every real OrderHub order number
+ *     observed on this install has the shape `PREFIX-CODE` (`ORD-K9AOA6`,
+ *     `PXDEMO-AZ5UKP`, `POS-JBML6D`), so the shape doesn't occur in
+ *     practice. If a future maintainer sees `PXDEMO091YEC` returning
+ *     unchanged and is tempted to relax this rule: **don't** — that
+ *     reopens the PXDEMOX hole (any leading substring match).
+ *   - Only `-` and `_` count as separators. A `.` or a letter between
+ *     the prefix and the tail does NOT match — same reason.
  *   - Never-strip-to-empty, PER CANDIDATE. If a match would leave
- *     nothing behind (empty after separator drop, or the whole order
- *     number IS the prefix), that candidate is skipped and the next
- *     one tried. If every candidate would empty the string, the
- *     original order number is returned unchanged.
+ *     nothing behind (`PXDEMO-` with prefix `PXDEMO`), that candidate
+ *     is skipped and the next one tried. If every candidate would empty
+ *     the string, the original order number is returned unchanged.
  *
  * Invariants preserved from the single-prefix world:
  *   - Empty / non-array `prefixList` → order number unchanged.
@@ -304,12 +324,26 @@ function stripOrderNumberPrefixMulti(orderNumber, prefixList) {
     if (orderNumber.length < prefix.length) continue;
     const head = orderNumber.slice(0, prefix.length);
     if (head.toLowerCase() !== prefix.toLowerCase()) continue;
-    let stripped = orderNumber.slice(prefix.length);
-    // Drop ONE leading '-' or '_' if present. Only these two — a
-    // configured `PXDEMO` must not strip `PXDEMOX`.
-    if (stripped.length > 0 && (stripped[0] === '-' || stripped[0] === '_')) {
-      stripped = stripped.slice(1);
+
+    // Separator handling (M7a). If the configured prefix already ends
+    // in '-' or '_', the operator baked the separator in and the head
+    // match consumed it — the remainder starts fresh with the code.
+    // Otherwise the remainder MUST begin with '-' or '_'; drop one.
+    // A remainder that starts with any other char (letter, digit, '.',
+    // etc.) is NOT a match under this prefix — skip to the next
+    // candidate rather than accept a leading-substring match that
+    // could strip PXDEMOX to X.
+    const prefixEndsWithSeparator =
+      prefix.endsWith('-') || prefix.endsWith('_');
+    let stripped;
+    if (prefixEndsWithSeparator) {
+      stripped = orderNumber.slice(prefix.length);
+    } else {
+      const nextChar = orderNumber.charAt(prefix.length);
+      if (nextChar !== '-' && nextChar !== '_') continue;
+      stripped = orderNumber.slice(prefix.length + 1);
     }
+
     // Never strip to empty — try the next candidate.
     if (stripped.length === 0) continue;
     return stripped;

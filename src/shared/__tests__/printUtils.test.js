@@ -451,13 +451,22 @@ test('multi: separator drop takes at most ONE character', () => {
   assert.equal(stripOrderNumberPrefixMulti('PXDEMO--091YEC', ['PXDEMO']), '-091YEC');
 });
 
-test('multi: only "-" and "_" are separators — a configured PXDEMO must NOT strip PXDEMOX', () => {
-  // No separator between "PXDEMO" and "X" — the prefix matches, but
-  // there is nothing to drop after. Behaviour is: prefix stripped, tail
-  // preserved. "X091YEC" is the result.
-  assert.equal(stripOrderNumberPrefixMulti('PXDEMOX091YEC', ['PXDEMO']), 'X091YEC');
-  // A '.' between prefix and tail is NOT stripped — only '-' and '_'.
-  assert.equal(stripOrderNumberPrefixMulti('PXDEMO.091YEC', ['PXDEMO']), '.091YEC');
+test('multi (M7a): configured PXDEMO must NOT strip PXDEMOX — separator is REQUIRED', () => {
+  // M7a fix. Pre-M7a this assertion was written the OTHER WAY —
+  // asserting the leading-substring strip succeeded to 'X091YEC' —
+  // codifying the bug it should have caught. That was worse than no
+  // test: the title said the right thing, the assertion said the
+  // wrong thing, and a passing suite gave false confidence.
+  //
+  // Rule now enforced in the helper: when the configured prefix does
+  // NOT itself end in '-'/'_', the character immediately after the
+  // prefix in the order number MUST be '-' or '_'. If it's anything
+  // else (a letter, digit, '.'), this candidate does NOT match and
+  // we try the next one — no leading-substring hijack.
+  assert.equal(stripOrderNumberPrefixMulti('PXDEMOX091YEC', ['PXDEMO']), 'PXDEMOX091YEC',
+    'no separator between PXDEMO and X — prefix must NOT strip');
+  assert.equal(stripOrderNumberPrefixMulti('PXDEMO.091YEC', ['PXDEMO']), 'PXDEMO.091YEC',
+    "'.' is not a separator — prefix must NOT strip");
 });
 
 test('multi: longest-match-first regardless of input order', () => {
@@ -493,15 +502,83 @@ test('multi: never strips to empty — per candidate', () => {
 });
 
 test('multi: never strips to empty — across candidates, one saves the day', () => {
-  // 'PXDEMO' would strip 'PXDEMO' to empty (skipped). 'ORD' is tried
-  // next, doesn't match, so the function returns the original.
+  // Case 1: only candidate would empty the string → skip → return original.
+  // 'PXDEMO' matched by prefix 'PXDEMO' leaves empty. 'ORD' doesn't match.
   assert.equal(stripOrderNumberPrefixMulti('PXDEMO', ['PXDEMO', 'ORD']), 'PXDEMO');
-  // Now include a prefix that WOULD leave something behind: 'PX' → 'DEMO'.
-  assert.equal(stripOrderNumberPrefixMulti('PXDEMO', ['PXDEMO', 'PX']),  'DEMO');
+  // Case 2 (M7a-adjusted): one candidate would empty, a SHORTER one
+  // that still requires a separator does NOT match without one; the
+  // save-the-day only works if the second candidate itself has a
+  // valid separator boundary. Pre-M7a this test asserted 'PX' →
+  // 'DEMO' via leading-substring hijack; under M7a that hijack no
+  // longer happens. Real save-the-day shape: same order number, two
+  // candidates where the longer would strip the whole thing empty
+  // and the shorter (with baked-in separator) still leaves something.
+  //   'ORD-1' with ['ORD-1', 'ORD']:
+  //     ['ORD-1'] matches whole 5 chars → remainder '' → skip
+  //     'ORD'    matches head 'ORD', remainder '-1', drop '-' → '1' ✓
+  assert.equal(stripOrderNumberPrefixMulti('ORD-1', ['ORD-1', 'ORD']), '1');
 });
 
 test('multi: order number shorter than any prefix → those candidates skipped', () => {
   assert.equal(stripOrderNumberPrefixMulti('AB', ['PXDEMO', 'PXDEMO1']), 'AB');
+});
+
+// ═════════════════════════════════════════════════════════════════════════
+// M7a — separator is REQUIRED (exact-string cases from the directive)
+// ═════════════════════════════════════════════════════════════════════════
+//
+// The M7 helper accepted leading-substring matches when the remainder
+// didn't start with a separator: 'PXDEMOX-1' with prefix ['PXDEMO']
+// returned 'X-1'. Under M7a the separator is mandatory unless it's
+// baked into the configured prefix, so leading-substring matches no
+// longer strip. Accepted cost: separator-less schemes like
+// 'PXDEMO091YEC' no longer strip either — but every real OrderHub
+// order number on this install carries the shape PREFIX-CODE
+// (ORD-K9AOA6, PXDEMO-AZ5UKP, POS-JBML6D), so it doesn't occur.
+//
+// Full exact-string list from the M7a directive, all with prefix
+// ['PXDEMO'] unless stated. Each is its own assertion so a regression
+// names the specific input that diverged.
+
+const M7A_CASES = [
+  { name: 'PXDEMO-091YEC   → 091YEC',                             in: 'PXDEMO-091YEC',  prefixes: ['PXDEMO'],   out: '091YEC' },
+  { name: 'PXDEMO_091YEC   → 091YEC  (underscore separator)',     in: 'PXDEMO_091YEC',  prefixes: ['PXDEMO'],   out: '091YEC' },
+  { name: 'PXDEMO-091YEC   → 091YEC  (prefix baked with hyphen)', in: 'PXDEMO-091YEC',  prefixes: ['PXDEMO-'],  out: '091YEC' },
+  { name: 'PXDEMOX-1       → PXDEMOX-1  (no separator = no match — the M7a fix)',
+    in: 'PXDEMOX-1', prefixes: ['PXDEMO'], out: 'PXDEMOX-1' },
+  { name: 'PXDEMOX         → PXDEMOX    (no separator = no match — the M7a fix)',
+    in: 'PXDEMOX',   prefixes: ['PXDEMO'], out: 'PXDEMOX' },
+  { name: 'PXDEMO091YEC    → PXDEMO091YEC  (accepted cost — no separator, no strip)',
+    in: 'PXDEMO091YEC', prefixes: ['PXDEMO'], out: 'PXDEMO091YEC' },
+  { name: 'PXDEMO-         → PXDEMO-   (would strip to empty)',   in: 'PXDEMO-',        prefixes: ['PXDEMO'],   out: 'PXDEMO-' },
+  { name: 'PXDEMO          → PXDEMO    (no separator + would empty)',
+    in: 'PXDEMO',    prefixes: ['PXDEMO'], out: 'PXDEMO' },
+  { name: 'PXDEMO--1       → -1        (only ONE separator dropped)',
+    in: 'PXDEMO--1', prefixes: ['PXDEMO'], out: '-1' },
+  { name: 'pxdemo-091yec   → 091yec    (case-insens match, tail casing preserved)',
+    in: 'pxdemo-091yec', prefixes: ['PXDEMO'], out: '091yec' },
+];
+
+for (const c of M7A_CASES) {
+  test(`M7a: ${c.name}`, () => {
+    assert.equal(stripOrderNumberPrefixMulti(c.in, c.prefixes), c.out);
+  });
+}
+
+test('M7a: longest-first regardless of input order — PXDEMO1-091YEC with [PXDEMO, PXDEMO1]', () => {
+  // Both input orders must produce the same result: the longer prefix
+  // wins because sort is inside the helper. Locking here explicitly
+  // — separately from the general longest-first test above — so the
+  // M7a directive's exact case survives even if the general test is
+  // ever refactored.
+  assert.equal(
+    stripOrderNumberPrefixMulti('PXDEMO1-091YEC', ['PXDEMO', 'PXDEMO1']),
+    '091YEC',
+  );
+  assert.equal(
+    stripOrderNumberPrefixMulti('PXDEMO1-091YEC', ['PXDEMO1', 'PXDEMO']),
+    '091YEC',
+  );
 });
 
 test('multi: empty and non-string entries in list are ignored', () => {
