@@ -69,15 +69,20 @@ never in doubt.
 
 **New: live preview in Settings.** Right under the template field a
 preview panel shows the resolved sample filenames and the full
-destination path, updating live as you type. This runs the same
-code path dispatch uses — what you see in the preview is exactly
-what will land on disk. The preview also warns you about the same
-signals the dispatch log records: how many images auto-suffixed
-because the template didn't distinguish them, how many hit the
-120-character stem cap, and how many fell back to the original
-basename because the template resolved to empty on that image.
-Catching any of those in Settings is much better than finding out
-after the lab has already picked up the folder.
+destination path, updating live as you type. It runs the same rename
+code the real dispatch uses, resolved against a recent real job when
+one is available — so the shape of the filenames, the token
+substitution, the folder path and the auto-suffix behaviour are all
+exactly what dispatch will do. The specific values you see are the
+sample job's, not the next job you're about to send: your next order
+will resolve the same tokens against its own customer name, product
+and quantities. The preview also warns you about the same signals
+the dispatch log records: how many images auto-suffixed because the
+template didn't distinguish them, how many hit the 120-character
+stem cap, and how many fell back to the original basename because
+the template resolved to empty on that image. Catching any of those
+in Settings is much better than finding out after the lab has
+already picked up the folder.
 
 **The preview labels its data source explicitly.** If OHD can find a
 recent job routed to this controller with a readable order manifest,

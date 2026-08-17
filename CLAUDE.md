@@ -112,6 +112,24 @@ with no visible change, check `git diff --ignore-cr-at-eol` before believing it.
 - **`artwork_files[].production_ready` only means anything when
   `artworkSource === 'manual'`.** On Pixfizz-sourced files it is default-state
   noise. Any branch on it must check both.
+- **The Folder Copy destination-folder rule lives ONLY in
+  `folder-copy-filename.buildDestFolder`.** Dispatch
+  (`_sendViaFolderCopyRouted`) and the Settings live preview both call it.
+  Re-deriving the rule anywhere else — an inline
+  `path.join(outputPath, ${orderNumber}_${jobId})`, a "helper for clarity",
+  a copy-paste at a new caller — makes the preview lie about where files
+  will land, which is the one thing the preview exists to be right about.
+  If you need to touch the layout / strip-prefix / blank-outputPath
+  behaviour, change the helper.
+- **`path.extname` must NEVER be applied to resolved template output** —
+  only to a real source path (`img.sourcePath`). `path.extname` returns
+  everything after the last dot in the last segment; a resolved template
+  is not a filename. It truncated `"8.5x11 Canvas"` (a Wide Format product
+  name) to `"8"` and silently dropped the `_2` from `"photo.jpg_2"`,
+  losing an image count. Locked by the audit meta-test in
+  `folder-copy-filename.test.js` (`M2-fix audit: exactly one path.extname
+  call is on img.sourcePath`) which reads the module source and counts
+  the calls — do NOT delete that test as noise; it is the tripwire.
 
 ## Misnamed / dead code — don't be misled
 
