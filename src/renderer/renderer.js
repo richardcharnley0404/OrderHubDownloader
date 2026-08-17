@@ -5145,6 +5145,21 @@ const PHOTO_LINE_MAX_ROWS = 2;
 
 // Token list mirrors SUPPORTED_TOKENS in src/main/services/template-tokens.js.
 // Kept in sync manually because the renderer can't require Node modules.
+//
+// Two SEPARATE lists per §5.2 of docs/folder-copy-filename-templates-brief.md:
+// PHOTO_LINE_TOKENS is Darkroom Pro's photo-line reference panel and MUST
+// advertise only tokens whose resolver context the photo-line caller
+// supplies (customer + order + per-image filename fields). Advertising
+// per-image {index}/{quantity} there would offer operators tokens that
+// silently resolve to blank in that context.
+//
+// FOLDER_COPY_TOKENS is the Folder Copy filename-template reference panel;
+// it advertises the whole set the folder-copy pipeline actually threads
+// (index, quantity, image-count-derived padding, dispatch date). `{option:
+// NAME}` is a PLACEHOLDER, not a literal token, so it is deliberately NOT
+// in this array — the render function surfaces it as helper text below
+// the click-to-copy chips so an operator can't paste "{option:NAME}"
+// verbatim and get a blank filename slot.
 const PHOTO_LINE_TOKENS = [
   '{customerName}',
   '{firstName}',
@@ -5154,6 +5169,16 @@ const PHOTO_LINE_TOKENS = [
   '{jobName}',
   '{filename}',
   '{originalFilename}',
+];
+
+const FOLDER_COPY_TOKENS = [
+  '{customerName}', '{firstName}', '{lastName}',
+  '{orderNumber}', '{jobName}', '{jobId}',
+  '{product}', '{productCode}', '{category}', '{process}',
+  '{dueDate}', '{date}',
+  '{options}',
+  '{filename}', '{originalFilename}',
+  '{quantity}', '{index}', '{indexPadded}',
 ];
 
 function _refreshPhotoLineAddBtnState() {
@@ -5246,6 +5271,62 @@ function renderPhotoLineTokens() {
   }
 }
 
+function renderFolderCopyTokens() {
+  const container = document.getElementById('ocFolderCopyTokens');
+  if (!container) return;
+  // Idempotent — safe to call every modal open.
+  if (container.children.length > 0) return;
+  const chipCss = [
+    'font-family:ui-monospace,Menlo,Consolas,monospace',
+    'font-size:12px',
+    'padding:3px 8px',
+    'background:var(--surface,#fff)',
+    'border:1px solid var(--border,#ddd)',
+    'border-radius:3px',
+    'cursor:pointer',
+    'color:var(--text,#333)',
+  ].join(';');
+  for (const token of FOLDER_COPY_TOKENS) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.textContent = token;
+    chip.title = `Click to copy ${token}`;
+    chip.style.cssText = chipCss;
+    chip.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(token);
+        showToast(`Copied ${token}`, 'success', 1500);
+      } catch (err) {
+        showToast('Could not copy — select and copy manually', 'error', 3000);
+      }
+    });
+    container.appendChild(chip);
+  }
+  // {option:NAME} is a placeholder, not a literal token — deliberately NOT
+  // click-to-copy per §5.2. Rendered on its own row below the chips so
+  // operators are told to substitute an actual option name (e.g.
+  // finish-options) rather than pasting the literal string and getting a
+  // blank filename slot at dispatch. Built with DOM nodes rather than
+  // innerHTML — the content is a compile-time literal (no XSS risk) but
+  // textContent + createElement matches the pattern in renderPhotoLineTokens
+  // and stays lint-clean against the innerHTML footgun class.
+  const helper = document.createElement('div');
+  helper.style.cssText = [
+    'flex-basis:100%',
+    'margin-top:6px',
+    'font-size:12px',
+    'color:var(--text-muted,#666)',
+  ].join(';');
+  const codeCss = 'font-family:ui-monospace,Menlo,Consolas,monospace';
+  const c1 = document.createElement('code'); c1.textContent = '{option:NAME}'; c1.style.cssText = codeCss;
+  const c2 = document.createElement('code'); c2.textContent = 'NAME';
+  const c3 = document.createElement('code'); c3.textContent = '{option:finish-options}'; c3.style.cssText = codeCss;
+  helper.append(
+    'Plus ', c1, ' — replace ', c2, ' with an option name, e.g. ', c3, '.',
+  );
+  container.appendChild(helper);
+}
+
 function renderSizeTranslations(translations) {
   const container = document.getElementById('ocSizeTranslationsList');
   container.innerHTML = '';
@@ -5332,6 +5413,7 @@ function updateOcTypeFields() {
   const type = document.getElementById('ocType').value;
   const isFujiJobMaker = type === 'fujijobmaker';
   const isFujiPicPro   = type === 'fujipicpro';
+  const isFolderCopy   = type === 'folder_copy';
   // Fields shared by both Fuji types (Image Staging Root, Back-Print mode
   // + template). Split out so PIC Pro can also get printer-independent
   // back-print without duplicating the JobMaker markup.
@@ -5354,7 +5436,15 @@ function updateOcTypeFields() {
   // and per-controller Strip Order Number Prefix (v1.13.0).
   document.getElementById('ocMergeOrderJobsGroup').style.display          = type === 'fujipicpro' ? '' : 'none';
   document.getElementById('ocOrderMergeWaitMinutesGroup').style.display    = type === 'fujipicpro' ? '' : 'none';
-  document.getElementById('ocStripOrderNumberPrefixGroup').style.display   = type === 'fujipicpro' ? '' : 'none';
+  // Strip Order Number Prefix is shared: PIC Pro (v1.13.0) + Folder Copy
+  // (M3 of docs/folder-copy-filename-templates-brief.md). Same field,
+  // same helper, same semantics.
+  document.getElementById('ocStripOrderNumberPrefixGroup').style.display   = (isFujiPicPro || isFolderCopy) ? '' : 'none';
+  // Folder Copy-specific fields (M3). The template group's built-in
+  // reference panel is rendered idempotently by renderFolderCopyTokens
+  // — called from openOrderControllerModal on modal open.
+  document.getElementById('ocDestinationLayoutGroup').style.display        = isFolderCopy ? '' : 'none';
+  document.getElementById('ocFilenameTemplateGroup').style.display         = isFolderCopy ? '' : 'none';
   // Frontline-specific fields
   document.getElementById('ocDeviceGroup').style.display     = type === 'frontline' ? '' : 'none';
   document.getElementById('ocBackPrint1Group').style.display = type === 'frontline' ? '' : 'none';
@@ -5496,12 +5586,31 @@ function openOrderControllerModal(ctrl = null) {
       ? String(ctrl.orderMergeWaitMinutes)
       : '';
   // v1.13.0 — per-controller Strip Order Number Prefix. Blank on
-  // non-picpro types (the field is hidden anyway; this keeps the
-  // input value in sync with what the controller actually stores).
+  // non-picpro / non-folder_copy types (the field is hidden anyway; this
+  // keeps the input value in sync with what the controller actually
+  // stores). Widened to folder_copy per M3 of
+  // docs/folder-copy-filename-templates-brief.md — same field, same
+  // helper, same semantics.
+  const isFolderCopyCtrl = ctrl && ctrl.type === 'folder_copy';
   document.getElementById('ocStripOrderNumberPrefix').value =
-    isFujiPicProCtrl && typeof ctrl.stripOrderNumberPrefix === 'string'
+    (isFujiPicProCtrl || isFolderCopyCtrl)
+      && typeof ctrl.stripOrderNumberPrefix === 'string'
       ? ctrl.stripOrderNumberPrefix
       : '';
+  // M3 — Folder Copy filename template + destination layout. Read-time
+  // defaults for a controller record with none of the fields set:
+  // template '', layout 'job'. Matches the routing-service literals
+  // (§5.1) so a controller that omits these keys behaves exactly like
+  // today's Folder Copy: original filenames under a per-job subfolder.
+  document.getElementById('ocFilenameTemplate').value =
+    isFolderCopyCtrl && typeof ctrl.filenameTemplate === 'string'
+      ? ctrl.filenameTemplate
+      : '';
+  document.getElementById('ocDestinationLayout').value =
+    isFolderCopyCtrl && ctrl.destinationLayout === 'root'
+      ? 'root'
+      : 'job';
+  renderFolderCopyTokens();
   // Load pipeline steps
   pipelineSteps = (ctrl && ctrl.pdfPipeline && ctrl.pdfPipeline.steps) ? JSON.parse(JSON.stringify(ctrl.pdfPipeline.steps)) : [];
   renderPipelineSteps();
@@ -6133,6 +6242,47 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
     // what the writer consumes, and persisting a non-empty value
     // would let polling-service._startFolderMonitors attach a DPOF
     // FolderMonitor to it.
+  }
+  // M3 — Folder Copy filename template + destination layout + prefix.
+  // Assigned in its OWN type block (do NOT hoist stripOrderNumberPrefix
+  // to a shared position — the per-type discipline is what the comment
+  // at :6004 is about, and it's why the 1.12.0 PIC Pro merge bug
+  // happened: a field assigned in the wrong type block that silently
+  // never persisted). Rules per §5.3 of the brief; error text names the
+  // fix rather than the rule so the operator sees what to do.
+  if (type === 'folder_copy') {
+    const filenameTemplate  = document.getElementById('ocFilenameTemplate').value;
+    const destinationLayout = document.getElementById('ocDestinationLayout').value;
+    if (destinationLayout !== 'job' && destinationLayout !== 'root') {
+      alert('Destination layout must be either "Per-job subfolder" or "Files directly in the copy-to folder".');
+      return;
+    }
+    if (destinationLayout === 'root') {
+      const trimmed = filenameTemplate.trim();
+      if (!trimmed) {
+        alert(
+          'A filename template is required when files go in the root of the copy-to folder, ' +
+          'and it must include at least one of {orderNumber}, {jobName}, {jobId}, {filename} ' +
+          'or {originalFilename} so files from different jobs don\'t overwrite each other.'
+        );
+        return;
+      }
+      // At least one job-distinguishing token per §5.3. Within-dispatch
+      // de-duplication (§4.4) cannot see collisions across dispatches by
+      // design, so the guard has to be here at save time where it can
+      // actually be explained.
+      if (!/\{(?:orderNumber|jobName|jobId|filename|originalFilename)\}/.test(trimmed)) {
+        alert(
+          'The filename template must include at least one of {orderNumber}, {jobName}, ' +
+          '{jobId}, {filename} or {originalFilename} when files go in the root of the copy-to ' +
+          'folder — otherwise files from different jobs will overwrite each other.'
+        );
+        return;
+      }
+    }
+    controller.filenameTemplate       = filenameTemplate;
+    controller.destinationLayout      = destinationLayout;
+    controller.stripOrderNumberPrefix = document.getElementById('ocStripOrderNumberPrefix').value.trim();
   }
   try {
     const result = await window.electronAPI.saveOrderController(controller);

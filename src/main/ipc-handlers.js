@@ -1373,6 +1373,85 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
         Object.assign(controller, normalized);
       }
 
+      // Folder Copy — filename template + destination layout guards
+      // (§5.3 of docs/folder-copy-filename-templates-brief.md). IPC
+      // mirror of the renderer-side check in ocSaveBtn. A blank
+      // template + 'job' layout is the existing-installation shape
+      // and must pass; a 'root' layout requires a non-blank template
+      // that carries at least one job-distinguishing token, otherwise
+      // files from different jobs would silently overwrite each other
+      // in the shared root folder (within-dispatch de-dup cannot see
+      // that by design — the guard has to be at save time).
+      //
+      // Error strings NAME THE FIX rather than the rule; they surface
+      // in the renderer via showToast when the IPC returns
+      // {success:false, error}, so an operator who somehow bypassed
+      // the renderer-side check gets the same actionable message here.
+      if (controller && controller.type === 'folder_copy') {
+        const layout = controller.destinationLayout;
+        if (layout !== undefined && layout !== 'job' && layout !== 'root') {
+          const msg = 'Destination layout must be "job" or "root".';
+          logger.logWarning('[routing] save-controller rejected — invalid destinationLayout', {
+            controllerId: controller.id,
+            name:         controller.name,
+            destinationLayout: layout,
+          });
+          return { success: false, error: msg };
+        }
+        if (
+          controller.stripOrderNumberPrefix !== undefined &&
+          typeof controller.stripOrderNumberPrefix !== 'string'
+        ) {
+          const msg = 'stripOrderNumberPrefix must be a string.';
+          logger.logWarning('[routing] save-controller rejected — invalid stripOrderNumberPrefix', {
+            controllerId: controller.id,
+            name:         controller.name,
+            stripOrderNumberPrefix: controller.stripOrderNumberPrefix,
+          });
+          return { success: false, error: msg };
+        }
+        const rawTemplate = typeof controller.filenameTemplate === 'string'
+          ? controller.filenameTemplate
+          : '';
+        if (
+          controller.filenameTemplate !== undefined &&
+          typeof controller.filenameTemplate !== 'string'
+        ) {
+          const msg = 'filenameTemplate must be a string.';
+          logger.logWarning('[routing] save-controller rejected — invalid filenameTemplate type', {
+            controllerId: controller.id,
+            name:         controller.name,
+          });
+          return { success: false, error: msg };
+        }
+        if (layout === 'root') {
+          const trimmed = rawTemplate.trim();
+          if (!trimmed) {
+            const msg =
+              'A filename template is required when files go in the root of the copy-to folder, ' +
+              'and it must include at least one of {orderNumber}, {jobName}, {jobId}, {filename} ' +
+              'or {originalFilename} so files from different jobs don\'t overwrite each other.';
+            logger.logWarning('[routing] save-controller rejected — root layout with blank template', {
+              controllerId: controller.id,
+              name:         controller.name,
+            });
+            return { success: false, error: msg };
+          }
+          if (!/\{(?:orderNumber|jobName|jobId|filename|originalFilename)\}/.test(trimmed)) {
+            const msg =
+              'The filename template must include at least one of {orderNumber}, {jobName}, ' +
+              '{jobId}, {filename} or {originalFilename} when files go in the root of the copy-to ' +
+              'folder — otherwise files from different jobs will overwrite each other.';
+            logger.logWarning('[routing] save-controller rejected — root layout template lacks distinguishing token', {
+              controllerId: controller.id,
+              name:         controller.name,
+              filenameTemplate: rawTemplate,
+            });
+            return { success: false, error: msg };
+          }
+        }
+      }
+
       routingService.saveController(controller);
 
       // Darkroom Pro controllers are dual-written to the legacy printControllerStore

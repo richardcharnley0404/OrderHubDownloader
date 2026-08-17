@@ -407,17 +407,29 @@ function resolveRoute(job) {
   }
 
   // ── Folder-copy controllers skip Layer 3 (no channel mapping needed) ────────
+  //
+  // NOTE: This literal is DUPLICATED in resolveRouteForController below.
+  // Both must produce the same shape for the same controller — the parity
+  // test at __tests__/routing-service-folder-copy-parity.test.js locks
+  // that (tripwire #2 of §11 of docs/folder-copy-filename-templates-
+  // brief.md). When adding a field to one, add it to the other in the
+  // same commit.
   if (controller.type === 'folder_copy') {
     return {
-      type:             'controller',
-      controllerType:   'folder_copy',
-      controllerId:     controller.id,
-      controllerName:   controller.name,
-      outputPath:       controller.outputPath,
-      channelNumber:    null,
-      printSizeCode:    null,
-      bannerSheet:      false,
-      checkOrderStatus: controller.checkOrderStatus !== false,
+      type:                   'controller',
+      controllerType:         'folder_copy',
+      controllerId:           controller.id,
+      controllerName:         controller.name,
+      outputPath:             controller.outputPath,
+      channelNumber:          null,
+      printSizeCode:          null,
+      bannerSheet:            false,
+      checkOrderStatus:       controller.checkOrderStatus !== false,
+      // M3 fields — read-time defaults ('' / 'job' / '') so a controller
+      // record that predates M3 behaves exactly like today's Folder Copy.
+      filenameTemplate:       (typeof controller.filenameTemplate === 'string') ? controller.filenameTemplate : '',
+      destinationLayout:      controller.destinationLayout === 'root' ? 'root' : 'job',
+      stripOrderNumberPrefix: (typeof controller.stripOrderNumberPrefix === 'string') ? controller.stripOrderNumberPrefix : '',
     };
   }
 
@@ -781,16 +793,22 @@ function resolveRouteForController(job, controllerId) {
     };
   }
   if (controller.type === 'folder_copy') {
+    // NOTE: mirror of the folder_copy literal in resolveRoute above. Same
+    // shape, same defaults, same order — parity test locks it. When adding
+    // a field to one, add it to the other in the same commit.
     return {
-      type:             'controller',
-      controllerType:   'folder_copy',
-      controllerId:     controller.id,
-      controllerName:   controller.name,
-      outputPath:       controller.outputPath,
-      channelNumber:    null,
-      printSizeCode:    null,
-      bannerSheet:      false,
-      checkOrderStatus: controller.checkOrderStatus !== false,
+      type:                   'controller',
+      controllerType:         'folder_copy',
+      controllerId:           controller.id,
+      controllerName:         controller.name,
+      outputPath:             controller.outputPath,
+      channelNumber:          null,
+      printSizeCode:          null,
+      bannerSheet:            false,
+      checkOrderStatus:       controller.checkOrderStatus !== false,
+      filenameTemplate:       (typeof controller.filenameTemplate === 'string') ? controller.filenameTemplate : '',
+      destinationLayout:      controller.destinationLayout === 'root' ? 'root' : 'job',
+      stripOrderNumberPrefix: (typeof controller.stripOrderNumberPrefix === 'string') ? controller.stripOrderNumberPrefix : '',
     };
   }
 
