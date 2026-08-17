@@ -1,8 +1,25 @@
 # Folder Copy — filename templates & destination layout (build brief)
 
-**Status:** ready to build, 2026-08-17. Supersedes the decisions section of
+**Status:** built, 2026-08-17. Supersedes the decisions section of
 `docs/folder-copy-filename-templates-investigation.md` (that doc stays as the
 research record — read it first for *why*, read this for *what to build*).
+
+**Commits (bisectable, one milestone per commit):**
+
+| Commit | Milestone |
+|---|---|
+| `3100e0b` | M1 + M1a — `template-tokens`: 4-arg `resolveTemplate`, 11 new tokens, `{option:NAME}`, single-pass regex, typed `opts.now`, `{date}` back-print fix |
+| `090b72f` | M2 — `folder-copy-filename.js` pure module (`buildCopyFilenames`), including the `_stripSourceExt` fix that replaced `path.extname`-on-template-output |
+| `bcc1691` | M2b — Win32 reserved device names guarded on the stem (CON, PRN, AUX, NUL, COM1-9, LPT1-9) |
+| `b70f215` | M3 — three per-controller fields, UI, save-time validation |
+| `c6e6564` | M3a — distinguishing-token set narrowed to `{orderNumber}`/`{jobName}`/`{jobId}`; template trimmed at store time |
+| `932f726` | M4 — wire into `_sendViaFolderCopyRouted` (dispatch), reprint comment + BACKLOG entry |
+| `7d9ba28` | M5 — live preview in Settings, runs the real M1+M2 code path |
+| `d96d98e` | M5a — extracted `buildDestFolder` (one implementation of §6.2); preview runs planner on FULL image list |
+
+Read the brief top-to-bottom AND §12 "Amendments during build" below
+before assuming any part is still current — several sections were
+superseded in flight.
 
 **Goal:** when a named **Folder Copy** controller writes files out, the
 receiving operator should be able to tell from the filename alone what needs
@@ -518,3 +535,176 @@ separately so the preview can be iterated on without re-testing dispatch.
 4. **An fs-based no-overwrite check** getting added later and breaking retry
    idempotence. Mitigation: §4.4's reasoning in the module docstring, and the
    double-dispatch test.
+
+---
+
+## 12. Amendments during build
+
+The brief was updated in flight — future-me reading it needs to know which
+parts were superseded and which parts of the code no longer match the
+original spec. Every commit in the table at the top of this file corresponds
+to at least one amendment listed here.
+
+### M2 amendments A / B / C (before implementation, per operator note)
+
+Three shape corrections agreed before M2 was written:
+
+- **A. Return shape carries `stats`.** §4 as originally written had
+  `buildCopyFilenames` returning a bare `[{ sourcePath, destFilename }]`
+  array. Amended to
+  `{ files: [...], stats: { suffixed, truncated, fallbacks } }`. The
+  module stays logger-free (test-friendly, no stub needed); M4 reads
+  the stats and logs once per dispatch. `fallbacks` is an array of
+  original basenames so the log can name them individually rather than
+  just count.
+- **B. `opts.now` is TEST-ONLY.** Passed through to `resolveTemplate`
+  when the caller supplies one, but M4 must NEVER thread one through
+  in production: M1a made `resolveTemplate` throw on a non-Date
+  `opts.now`, and any value round-tripped through config or JSON
+  arrives as a string. M4 lets the real clock default; the M2
+  docstring calls this out explicitly.
+- **C. Index context owned by the module.** §4 as originally written
+  had the caller passing `ctx.index` / `ctx.imageCount`. Amended:
+  M2 owns the loop, so it sets `index` (1-based, from the loop
+  variable) and `imageCount` (from `images.length`) per iteration.
+  Caller-supplied values are ignored. A dedicated test passes
+  `index: 999` from the caller and confirms the module overrides.
+
+### M2b — Win32 reserved device names (added, not in original brief)
+
+CON, PRN, AUX, NUL, COM1-COM9 and LPT1-LPT9 are refused by Win32
+regardless of extension. Without a guard a resolved stem matching one
+of those would fail `fs.copyFileSync` at dispatch with a generic
+OS-layer error that points nowhere near the template that caused it.
+Guard prefixes with an underscore (`CON` → `_CON`) on the templated
+path only; fallback path is deliberately unguarded (upstream data
+issue, should stay visible).
+
+Not in the original brief because the failure mode wasn't spotted
+until the operator asked about it after M2 shipped. Added as its own
+commit (`bcc1691`) before M3 landed.
+
+### M2 fix — `path.extname` on template output (bug caught by operator review)
+
+`_stripTemplateExt(s)` in the initial M2 called `path.extname` on the
+RESOLVED template value. `path.extname` finds the LAST dot in the
+last path segment, so any resolved value containing an embedded dot
+got truncated there. `{product}` = `"8.5x11 Canvas"` with a `.tif`
+source produced `"8.tif"` — the whole product name silently lost.
+Decimal sizes (8.5x11, 11x8.5, 1.5in) are normal in Wide Format,
+which is the *primary* use case for this feature, so the bug would
+have hit real dispatches on day one.
+
+`_nextSuffixed` had the same flaw for the fallback path — a dotted
+no-ext name like `"8.5x11 Canvas"` would suffix mid-name as
+`"8_2.5x11 Canvas"`.
+
+Fix, bundled into the M2 commit `090b72f`:
+
+- `_stripSourceExt(s, sourceExt)` removes case-insensitive occurrences
+  of the LITERAL source extension; caller appends `sourceExt` once.
+  Never calls `path.extname` on template output.
+- `_nextSuffixed(name, sourceExt, issued)` takes the source ext
+  explicitly, inserts `_N` before it when the name ends in it,
+  appends at end otherwise.
+- Meta-test reads the module source and asserts exactly ONE
+  `path.extname` call remains, and that it is on `img.sourcePath`
+  (the trusted anchor). A future maintainer who reintroduces the
+  pattern gets a loud test failure naming the exact signature.
+
+The gap that let the initial bug ship was that no test used a
+resolved value with an embedded dot. Closed with 19 targeted cases
+across sanitisation, truncation, collision path, and fallback.
+
+Removing ALL occurrences of the source ext (not just the trailing
+one) is a deliberate trade — a product named `"Canvas.jpg Print"`
+with source `.jpg` becomes `"Canvas Print.jpg"` rather than
+`"Canvas.jpg Print.jpg"`. End-anchoring would preserve that name but
+would break the `{filename}_{quantity}` case (`"photo.jpg_2"` →
+must not survive as the forbidden `"photo.jpg_2"`, must strip to
+`"photo_2.jpg"`). Optimise for the natural template-mistake shape;
+the mid-name-`.jpg`-in-a-product-name shape is vanishingly rare.
+
+### M3a — §5.3 token set was WRONG (correction to the brief itself)
+
+§5.3 originally listed FIVE tokens as job-distinguishing under the
+root layout: `{orderNumber}`, `{jobName}`, `{jobId}`, `{filename}`,
+`{originalFilename}`. That was wrong, and the error was in the
+brief.
+
+`{filename}` resolves to a manifest basename like `"5_IMG.jpg"` — an
+index-prefixed customer filename. `{originalFilename}` is the same
+value with the leading `N_` index prefix stripped, so it is strictly
+weaker at distinguishing. Camera filenames repeat across orders
+constantly (`IMG_0001.jpg`, `DSC_0001.jpg`): two orders each
+carrying that name at the same slot resolve identically and would
+overwrite in root layout. Only job-level identifiers distinguish
+across jobs. A root-layout template of `{originalFilename}_{index}`
+passed the pre-M3a check and was unsafe.
+
+Narrowed in commit `c6e6564` to `{orderNumber}` / `{jobName}` /
+`{jobId}` in both the renderer regex AND the IPC mirror. Regex sites
+carry a comment auditing each excluded token so a future maintainer
+can't quietly widen it back. §5.3 above updated with a dated
+correction note.
+
+Same commit also fixed a distinct bug: `controller.filenameTemplate`
+was stored untrimmed while validation ran on the trimmed value. A
+whitespace-only `"   "` template under 'job' layout stored as truthy
+and M2 later treated it as a real template, resolved to blank, and
+sent every image down the empty-resolution fallback. Both the
+renderer and the IPC boundary now trim at store time (symmetric with
+`stripOrderNumberPrefix`).
+
+### M5a — `buildDestFolder` extracted + preview runs planner on full images
+
+Two related shape corrections after M5 shipped:
+
+1. **The destination-folder rule was implemented twice.** M4 inlined
+   the layout switch and `destJobFolderName` derivation in
+   `_sendViaFolderCopyRouted`; M5 re-derived the same rule in
+   `folder-copy-preview.js`. Two copies of §6.2 in two files — same
+   drift hazard as the two route literals in routing-service, but
+   here the fix is a single helper rather than a parity test.
+
+   Extracted `buildDestFolder({ outputPath, orderNumber, jobId,
+   destinationLayout, stripPrefix })` into
+   `src/main/services/folder-copy-filename.js` alongside
+   `buildCopyFilenames`. Both callers go through it. The
+   blank-outputPath branch — previously a preview-only special case —
+   is now handled inside the helper so preview and dispatch cannot
+   disagree even in the mid-edit "before Save" case.
+
+   **The single-implementation rule for the destination folder lives
+   in `buildDestFolder`.** If a future caller re-derives the rule
+   inline, the code contains two truths and one of them is going to
+   drift. Update the helper; don't copy.
+
+2. **The preview was slicing images to 3 BEFORE calling the M2
+   planner.** Two silent failures:
+
+   - `ctx.imageCount` was 3, so `{indexPadded}` width was 1. A
+     40-image job with template `x{indexPadded}` previewed as
+     `x1, x2, x3` and then dispatched as `x01…x40`. The preview
+     showed filenames that were NOT the filenames.
+   - Within-call collision detection only saw 3 of 40 images. A
+     template lacking any index token previewed with no auto-suffix
+     warning and then suffixed 39 files at dispatch. The warning
+     went quiet exactly when it mattered.
+
+   Fixed in commit `d96d98e`: preview runs `buildCopyFilenames` on
+   the FULL image list (pure and cheap — 40 iterations of string
+   replacement costs nothing), slices for display only. Stats and
+   warning counts derive from the full run; the response's
+   `sampleSize` is the display truncation, `totalImageCount` is the
+   real image count, and the operator-facing warning wording quotes
+   the count out of the real total ("39 of 40 preview names…").
+
+### Docs (§9) — deferred pieces
+
+Also worth recording: §9 called for an "operator note" separate
+from the CHANGELOG. That is folded into the "Unreleased" CHANGELOG
+entry instead — the two would have said the same thing and drift
+between them is a nuisance. A `RELEASE-NOTES-*-operator.md` file
+will be created at release time when the version number is picked;
+the content is the same.

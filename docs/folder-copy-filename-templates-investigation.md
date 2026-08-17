@@ -1,5 +1,10 @@
 # Folder Copy — configurable filenames: available variables
 
+> **Superseded by `docs/folder-copy-filename-templates-brief.md`.** This
+> document is the research record — read it for *why* each decision looks
+> the way it does. The brief is the decisions-of-record and lists every
+> in-flight amendment; when the two disagree, trust the brief.
+
 **Status:** investigation, 2026-08-16. Nothing built.
 **Ask:** when Folder Copy writes files out, let each controller define a
 filename template so the receiving operator can tell from the name alone what

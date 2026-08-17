@@ -1,3 +1,131 @@
+## Unreleased
+
+**New: filename templates for Folder Copy controllers.** Rename the
+image files that a Folder Copy controller writes out so the receiving
+operator can tell from the filename alone what needs doing — product,
+quantity, finish options and so on. Settings → Routing → Order
+Controllers → Edit a `folder_copy` controller → **Filename template**.
+Leave the field blank to keep today's original filenames (nothing
+changes for existing controllers — see the reassurance at the bottom
+of this note). When set, every image in the job is renamed per the
+template, one file per image. The extension always comes from the
+source file — a template like `{product}` on a `.tif` source produces
+`{product}.tif`, never `{product}.jpg`.
+
+**Available tokens** (click any chip in Settings to copy):
+
+| Token | Resolves to | Notes |
+|---|---|---|
+| `{customerName}` | full customer name | e.g. `Richard Charnley` |
+| `{firstName}` / `{lastName}` | derived from the name | first word / rest |
+| `{orderNumber}` | e.g. `PXDEMO-091YEC` | see strip prefix below |
+| `{jobName}` | e.g. `PXDEMO-091YEC-1` | falls back to `{orderNumber}` |
+| `{jobId}` | OrderHub numeric job id | e.g. `38461218` |
+| `{product}` | product display name | e.g. `4x6" Photo Print` |
+| `{productCode}` | product code | e.g. `0406-cut-print` |
+| `{category}` | job category | |
+| `{process}` | job process | e.g. `Lab` |
+| `{options}` | all option values joined with `_` | e.g. `lustre_full-bleed` |
+| `{option:NAME}` | one option value by name | `{option:finish-options}` → `lustre`. Case-insensitive on the name; replace `NAME` with the option's actual name — don't paste the literal `{option:NAME}` |
+| `{dueDate}` | job due date as `YYYY-MM-DD` | always ISO (see the note at the bottom) |
+| `{date}` | today's dispatch date as `YYYY-MM-DD` | local time |
+| `{filename}` | current filename | with extension |
+| `{originalFilename}` | customer's original upload filename | index prefix stripped |
+| `{quantity}` | per-image copy count | from the manifest |
+| `{index}` / `{indexPadded}` | 1-based image position | padded zero-fills to the image count's width (`3` of 20 → `03`) |
+
+Same-name collisions within a single dispatch get `_2`, `_3` …
+suffixes automatically so no image ever silently overwrites its
+sibling. If a template resolves to duplicate names on more than one
+image the Settings preview says so — see "live preview" below —
+and adding `{index}` or `{indexPadded}` makes every name distinct.
+
+**New: destination layout — per-job subfolder or files in the root.**
+Settings → the same modal → **Destination layout**. The default,
+**Per-job subfolder (today's behaviour)**, writes each job's files
+under `{OutputPath}/{orderNumber}_{jobId}/` exactly as before.
+Selecting **Files directly in the copy-to folder** drops the images
+straight into the Output Path with no per-job wrapper — useful when
+the receiving system reads a single flat directory. Root layout is
+strict about templates: the field is required, and it must include
+at least one of `{orderNumber}`, `{jobName}` or `{jobId}`, otherwise
+files from different jobs would silently overwrite each other in the
+shared folder. Save is rejected with an explanation if the template
+is missing that token — per-image tokens like `{filename}` don't
+count because camera filenames repeat across orders constantly
+(`IMG_0001.jpg` from two customers is the exact case the guard
+prevents).
+
+**New: strip order number prefix now on Folder Copy too.** Same
+field, same helper text, same behaviour as the existing Fuji PIC
+Pro one (added in 1.13.0). If your OrderHub order numbers start
+with a fixed tag like `PXDEMO-` or `DIVPRINTS-`, enter it here to
+trim the tag off the destination folder name and any resolved
+`{orderNumber}`/`{jobName}` token in the filename template. Case-
+insensitive leading match; never strips down to empty. The tag
+is only stripped from the destination — the source folder OHD
+reads from is not affected, so the ingester's own filenames are
+never in doubt.
+
+**New: live preview in Settings.** Right under the template field a
+preview panel shows the resolved sample filenames and the full
+destination path, updating live as you type. This runs the same
+code path dispatch uses — what you see in the preview is exactly
+what will land on disk. The preview also warns you about the same
+signals the dispatch log records: how many images auto-suffixed
+because the template didn't distinguish them, how many hit the
+120-character stem cap, and how many fell back to the original
+basename because the template resolved to empty on that image.
+Catching any of those in Settings is much better than finding out
+after the lab has already picked up the folder.
+
+**The preview labels its data source explicitly.** If OHD can find a
+recent job routed to this controller with a readable order manifest,
+the preview uses it and says "Preview using job 12345". Otherwise
+it falls back to any recent job with a manifest. If nothing usable
+is available (fresh install, no jobs yet), it uses a synthetic
+sample and says "Preview using sample data" in italic muted text so
+it can never be mistaken for a real resolution.
+
+**Nothing changes for an existing Folder Copy controller.** Leave
+the three new fields at their defaults (blank template, per-job
+subfolder, blank strip prefix) and every folder, every filename is
+byte-identical to today — no drift, no wrappers, no rename. Files
+still land at `{OutputPath}/{orderNumber}_{jobId}/{original filename}`.
+The whole feature is opt-in per controller; type a template in when
+you want to opt in, don't touch anything to opt out.
+
+---
+
+**Changed: `{date}` on Fuji back-print templates now resolves to the
+dispatch date.** A Fuji controller (JobMaker or PIC Pro) with **Back
+Print Mode = Text** and a template containing `{date}` has, until now,
+been printing the literal four characters `{date}` on the back of every
+image. `{date}` was never handled by the template resolver, so the
+placeholder survived intact and reached the Frontier `BackPrint=` line
+verbatim. It now resolves to today's date as `YYYY-MM-DD`. To check
+whether your lab is affected: Settings → Routing → Order Controllers →
+Edit each Fuji controller → confirm Back Print Mode and inspect the
+Back Print Template field for a literal `{date}`. The default template
+the modal seeds is `{firstName}/{filename}/{date}` — a controller left
+on that default with Back Print Mode set to Text is the affected
+configuration. If you don't want the dispatch date on the back print,
+delete `{date}` from the template before this release lands at the lab.
+
+---
+
+**Note: `{dueDate}` and `{date}` are always `YYYY-MM-DD`.** The Jobs
+grid's date-format setting (DMY / YMD / MDY) controls how due dates
+render in the app UI. It deliberately does NOT apply to filename
+templates: filenames want ISO for two reasons — ISO date strings sort
+correctly by name in Explorer and every Windows tool that lists a
+folder, and the `/`s that DMY (`22/05/2026`) and MDY (`05/22/2026`)
+would otherwise insert are illegal in a filename. If you need a
+non-ISO date shape in a filename, string the date components together
+yourself — but ISO is what almost every downstream tool expects.
+
+---
+
 ## v1.14.0 - 2026-08-16
 
 **New: batch splitting for Epson OrderController jobs.** The Darkroom
