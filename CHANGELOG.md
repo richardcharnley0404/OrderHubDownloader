@@ -153,11 +153,11 @@ DIFFERENT jobs whose prefixes happen to strip to the same base.
 **Changed: `{date}` on Fuji back-print templates now resolves to the
 dispatch date.** A Fuji controller (JobMaker or PIC Pro) with **Back
 Print Mode = Text** and a template containing `{date}` has, until now,
-been printing the literal four characters `{date}` on the back of every
-image. `{date}` was never handled by the template resolver, so the
-placeholder survived intact and reached the Frontier `BackPrint=` line
-verbatim. It now resolves to today's date as `YYYY-MM-DD`. To check
-whether your lab is affected: Settings → Routing → Order Controllers →
+been printing the literal text `{date}` on the back of every image.
+`{date}` was never handled by the template resolver, so the placeholder
+survived intact and reached the Frontier `BackPrint=` line verbatim. It
+now resolves to today's date as `YYYY-MM-DD`. To check whether your
+lab is affected: Settings → Routing → Order Controllers →
 Edit each Fuji controller → confirm Back Print Mode and inspect the
 Back Print Template field for a literal `{date}`. The default template
 the modal seeds is `{firstName}/{filename}/{date}` — a controller left
@@ -173,9 +173,9 @@ render in the app UI. It deliberately does NOT apply to filename
 templates: filenames want ISO for two reasons — ISO date strings sort
 correctly by name in Explorer and every Windows tool that lists a
 folder, and the `/`s that DMY (`22/05/2026`) and MDY (`05/22/2026`)
-would otherwise insert are illegal in a filename. If you need a
-non-ISO date shape in a filename, string the date components together
-yourself — but ISO is what almost every downstream tool expects.
+would otherwise insert are illegal in a filename. The date shape in a
+filename is not configurable in this release; ISO is what almost every
+downstream tool expects anyway.
 
 ---
 
