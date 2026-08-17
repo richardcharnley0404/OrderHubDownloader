@@ -471,12 +471,21 @@ test('M2 per-image {quantity} threads through from the caller', () => {
   assert.equal(out.files[1].destFilename, 'p-x7.jpg');
 });
 
-test('M2 stripPrefix passes through to resolveTemplate', () => {
+test('M2 stripPrefixes passes through to resolveTemplate (M7: array)', () => {
   const out = buildCopyFilenames(
     [{ sourcePath: '/x/a.jpg', filename: 'a.jpg' }],
     { order_number: 'PXDEMO-091YEC', job_name: 'PXDEMO-091YEC-1' },
-    { template: '{orderNumber}_{jobName}', stripPrefix: 'PXDEMO-' },
+    { template: '{orderNumber}_{jobName}', stripPrefixes: ['PXDEMO-'] },
   );
+  assert.equal(out.files[0].destFilename, '091YEC_091YEC-1.jpg');
+});
+test('M7 buildCopyFilenames: multi-prefix, longest-match-first via resolveTemplate', () => {
+  const out = buildCopyFilenames(
+    [{ sourcePath: '/x/a.jpg', filename: 'a.jpg' }],
+    { order_number: 'PXDEMO1-091YEC', job_name: 'PXDEMO1-091YEC-1' },
+    { template: '{orderNumber}_{jobName}', stripPrefixes: ['PXDEMO', 'PXDEMO1'] },
+  );
+  // 'PXDEMO1' wins over 'PXDEMO' because it's longer.
   assert.equal(out.files[0].destFilename, '091YEC_091YEC-1.jpg');
 });
 
@@ -918,35 +927,57 @@ test('M2-fix audit: exactly one path.extname call is on img.sourcePath', () => {
 // `outputPath`, byte-identical to pre-M4 output. print-service-folder-
 // copy-routed.test.js's no-change-lock test then locks the whole chain.
 
-test('buildDestFolder no-change lock: layout=job + blank strip → path.join(outputPath, `${order}_${id}`)', () => {
+test('buildDestFolder no-change lock: layout=job + no prefixes → path.join(outputPath, `${order}_${id}`)', () => {
   const got = buildDestFolder({
     outputPath:  '/hot/wf',
     orderNumber: 'PXDEMO-091YEC',
     jobId:       42,
     // destinationLayout absent → defaults to 'job'
-    // stripPrefix absent      → defaults to blank
+    // stripPrefixes absent    → defaults to empty
   });
   assert.equal(got, path.join('/hot/wf', 'PXDEMO-091YEC_42'));
 });
 
-test('buildDestFolder no-change lock: explicit "job" + blank strip → byte-identical to pre-M4', () => {
+test('buildDestFolder no-change lock: explicit "job" + empty prefixes → byte-identical to pre-M4', () => {
   const got = buildDestFolder({
     outputPath:        '/hot/wf',
     orderNumber:       'PXDEMO-091YEC',
     jobId:             42,
     destinationLayout: 'job',
-    stripPrefix:       '',
+    stripPrefixes:     [],
   });
   assert.equal(got, path.join('/hot/wf', 'PXDEMO-091YEC_42'));
 });
 
-test('buildDestFolder layout=job + strip prefix: destination stripped, jobId preserved', () => {
+test('buildDestFolder layout=job + single-prefix array: destination stripped, jobId preserved', () => {
   const got = buildDestFolder({
     outputPath:        '/hot/wf',
     orderNumber:       'PXDEMO-091YEC',
     jobId:             42,
     destinationLayout: 'job',
-    stripPrefix:       'PXDEMO-',
+    stripPrefixes:     ['PXDEMO-'],
+  });
+  assert.equal(got, path.join('/hot/wf', '091YEC_42'));
+});
+
+test('M7 buildDestFolder layout=job + MULTIPLE prefixes: longest-match-first wins', () => {
+  const got = buildDestFolder({
+    outputPath:        '/hot/wf',
+    orderNumber:       'PXDEMO1-091YEC',
+    jobId:             42,
+    destinationLayout: 'job',
+    stripPrefixes:     ['PXDEMO', 'PXDEMO1'],  // longer wins regardless of input order
+  });
+  assert.equal(got, path.join('/hot/wf', '091YEC_42'));
+});
+
+test('M7 buildDestFolder layout=job + prefix without separator: leading "-" dropped', () => {
+  const got = buildDestFolder({
+    outputPath:        '/hot/wf',
+    orderNumber:       'PXDEMO-091YEC',
+    jobId:             42,
+    destinationLayout: 'job',
+    stripPrefixes:     ['PXDEMO'],   // no trailing hyphen
   });
   assert.equal(got, path.join('/hot/wf', '091YEC_42'));
 });
@@ -961,13 +992,13 @@ test('buildDestFolder layout=root: returns outputPath verbatim (no per-job subfo
   assert.equal(got, '/hot/wf');
 });
 
-test('buildDestFolder layout=root ignores stripPrefix (no folder segment to strip into)', () => {
+test('buildDestFolder layout=root ignores stripPrefixes (no folder segment to strip into)', () => {
   const got = buildDestFolder({
     outputPath:        '/hot/wf',
     orderNumber:       'PXDEMO-091YEC',
     jobId:             42,
     destinationLayout: 'root',
-    stripPrefix:       'PXDEMO-',
+    stripPrefixes:     ['PXDEMO-'],
   });
   assert.equal(got, '/hot/wf');
 });
@@ -1009,25 +1040,40 @@ test('buildDestFolder destinationLayout: anything not "root" resolves to "job"',
   }
 });
 
-test('buildDestFolder stripPrefix never strips to empty (delegates to printUtils rule)', () => {
-  // Delegated behaviour lock — if stripping the whole order number would
-  // produce blank, printUtils.stripOrderNumberPrefix returns the original.
+test('buildDestFolder stripPrefixes never strips to empty (delegates to printUtils rule)', () => {
+  // Delegated behaviour lock — the multi-prefix helper's per-candidate
+  // never-strip-to-empty rule.
   const got = buildDestFolder({
-    outputPath:  '/o',
-    orderNumber: 'PXDEMO-',
-    jobId:       42,
-    stripPrefix: 'PXDEMO-',
+    outputPath:    '/o',
+    orderNumber:   'PXDEMO-',
+    jobId:         42,
+    stripPrefixes: ['PXDEMO-'],
   });
   assert.equal(got, path.join('/o', 'PXDEMO-_42'),
     'stripped-to-empty must NOT happen — order number preserved when the strip would empty it');
 });
 
-test('buildDestFolder non-string stripPrefix ignored (defensive)', () => {
+test('buildDestFolder non-array stripPrefixes ignored (defensive)', () => {
   const got = buildDestFolder({
-    outputPath:  '/o',
-    orderNumber: 'PXDEMO-091',
-    jobId:       42,
-    stripPrefix: undefined,
+    outputPath:    '/o',
+    orderNumber:   'PXDEMO-091',
+    jobId:         42,
+    stripPrefixes: undefined,
+  });
+  assert.equal(got, path.join('/o', 'PXDEMO-091_42'));
+});
+
+test('M7 buildDestFolder legacy single-string stripPrefixes is IGNORED (caller must migrate)', () => {
+  // If a caller forgets to migrate from the old single-string
+  // stripPrefix arg to the new array stripPrefixes, we do NOT
+  // silently accept the string — it falls to the "not an array"
+  // defensive branch and no-op. Loud + fixable in tests, not a
+  // hidden production surprise.
+  const got = buildDestFolder({
+    outputPath:    '/o',
+    orderNumber:   'PXDEMO-091',
+    jobId:         42,
+    stripPrefixes: 'PXDEMO-',   // wrong shape (was the old API)
   });
   assert.equal(got, path.join('/o', 'PXDEMO-091_42'));
 });

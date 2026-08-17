@@ -3,7 +3,9 @@
  * resolved route (M3 of docs/folder-copy-filename-templates-brief.md):
  *   - filenameTemplate:       string, default ''
  *   - destinationLayout:      'job' | 'root', default 'job'
- *   - stripOrderNumberPrefix: string, default ''
+ *   - stripOrderNumberPrefixes: string[], default [] (M7; legacy
+ *     stripOrderNumberPrefix single-string still readable via the
+ *     tolerant reader in printUtils.readStripPrefixes)
  *
  * The critical tripwire (§11 #2 of the brief) is that both folder_copy
  * route literals — resolveRoute (~routing-service.js:410) and
@@ -97,9 +99,9 @@ const JOB = { id: 7, product_code: 'CANVAS8X10', process: 'Wide Format', options
 
 test('folder_copy route parity: resolveRoute and resolveRouteForController produce the same keys', () => {
   seedFolderCopy({
-    filenameTemplate:       '{orderNumber}_{product}_{indexPadded}',
-    destinationLayout:      'root',
-    stripOrderNumberPrefix: 'PXDEMO-',
+    filenameTemplate:         '{orderNumber}_{product}_{indexPadded}',
+    destinationLayout:        'root',
+    stripOrderNumberPrefixes: ['PXDEMO-'],
   });
   const viaJob  = resolveRoute(JOB);
   const viaCtrl = resolveRouteForController(JOB, FC_ID);
@@ -112,28 +114,28 @@ test('folder_copy route parity: resolveRoute and resolveRouteForController produ
 
 test('folder_copy route parity: BOTH literals carry the three M3 fields', () => {
   seedFolderCopy({
-    filenameTemplate:       'x',
-    destinationLayout:      'job',
-    stripOrderNumberPrefix: 'A-',
+    filenameTemplate:         'x',
+    destinationLayout:        'job',
+    stripOrderNumberPrefixes: ['A-'],
   });
   for (const route of [resolveRoute(JOB), resolveRouteForController(JOB, FC_ID)]) {
-    assert.equal(typeof route.filenameTemplate,       'string');
-    assert.equal(typeof route.destinationLayout,      'string');
-    assert.equal(typeof route.stripOrderNumberPrefix, 'string');
+    assert.equal(typeof route.filenameTemplate,          'string');
+    assert.equal(typeof route.destinationLayout,         'string');
+    assert.ok(Array.isArray(route.stripOrderNumberPrefixes));
   }
 });
 
 test('folder_copy route parity: identical values in both literals for the same controller', () => {
   seedFolderCopy({
-    filenameTemplate:       '{jobId}_{index}',
-    destinationLayout:      'root',
-    stripOrderNumberPrefix: 'PXDEMO-',
+    filenameTemplate:         '{jobId}_{index}',
+    destinationLayout:        'root',
+    stripOrderNumberPrefixes: ['PXDEMO-'],
   });
   const viaJob  = resolveRoute(JOB);
   const viaCtrl = resolveRouteForController(JOB, FC_ID);
   assert.equal(viaJob.filenameTemplate,       viaCtrl.filenameTemplate);
   assert.equal(viaJob.destinationLayout,      viaCtrl.destinationLayout);
-  assert.equal(viaJob.stripOrderNumberPrefix, viaCtrl.stripOrderNumberPrefix);
+  assert.deepEqual(viaJob.stripOrderNumberPrefixes, viaCtrl.stripOrderNumberPrefixes);
   assert.equal(viaJob.outputPath,             viaCtrl.outputPath);
 });
 
@@ -141,15 +143,15 @@ test('folder_copy route parity: identical values in both literals for the same c
 // Read-time defaults — pre-M3 controller record must behave like today
 // ═════════════════════════════════════════════════════════════════════════
 
-test('folder_copy defaults: controller with none of the three fields → "" / "job" / ""', () => {
+test('folder_copy defaults: controller with none of the three fields → "" / "job" / []', () => {
   // No overrides — this is what a controller record saved before M3
   // shipped looks like. The three fields must resolve to their defaults
   // via BOTH literals (parity again — the tripwire also fires here).
   seedFolderCopy();
   for (const route of [resolveRoute(JOB), resolveRouteForController(JOB, FC_ID)]) {
-    assert.equal(route.filenameTemplate,       '');
-    assert.equal(route.destinationLayout,      'job');
-    assert.equal(route.stripOrderNumberPrefix, '');
+    assert.equal(route.filenameTemplate,               '');
+    assert.equal(route.destinationLayout,              'job');
+    assert.deepEqual(route.stripOrderNumberPrefixes,   []);
   }
 });
 
@@ -160,10 +162,30 @@ test('folder_copy defaults: non-string filenameTemplate falls back to blank', ()
   }
 });
 
-test('folder_copy defaults: non-string stripOrderNumberPrefix falls back to blank', () => {
-  seedFolderCopy({ stripOrderNumberPrefix: true });
+test('folder_copy defaults: non-array stripOrderNumberPrefixes falls back to []', () => {
+  seedFolderCopy({ stripOrderNumberPrefixes: true });
   for (const route of [resolveRoute(JOB), resolveRouteForController(JOB, FC_ID)]) {
-    assert.equal(route.stripOrderNumberPrefix, '');
+    assert.deepEqual(route.stripOrderNumberPrefixes, []);
+  }
+});
+
+test('M7 folder_copy: legacy single-string stripOrderNumberPrefix wrapped as [oldValue]', () => {
+  // Downgrade-friendly: an existing (pre-M7) controller record stores
+  // a single string. The tolerant reader wraps it as a single-element
+  // array — both literals must surface it identically.
+  seedFolderCopy({ stripOrderNumberPrefix: 'PXDEMO-' });
+  for (const route of [resolveRoute(JOB), resolveRouteForController(JOB, FC_ID)]) {
+    assert.deepEqual(route.stripOrderNumberPrefixes, ['PXDEMO-']);
+  }
+});
+
+test('M7 folder_copy: new array wins even when legacy string is also present', () => {
+  seedFolderCopy({
+    stripOrderNumberPrefixes: ['ORD', 'POS'],
+    stripOrderNumberPrefix:   'PXDEMO-',   // stale — must be ignored
+  });
+  for (const route of [resolveRoute(JOB), resolveRouteForController(JOB, FC_ID)]) {
+    assert.deepEqual(route.stripOrderNumberPrefixes, ['ORD', 'POS']);
   }
 });
 
@@ -201,9 +223,9 @@ test('non-folder_copy controllers do NOT carry the three M3 fields on their rout
     name:       'Darkroom Pro',
     type:       'darkroompro',
     outputPath: 'C:\\dr\\hot',
-    filenameTemplate:       'should-not-leak',
-    destinationLayout:      'root',
-    stripOrderNumberPrefix: 'X-',
+    filenameTemplate:         'should-not-leak',
+    destinationLayout:        'root',
+    stripOrderNumberPrefixes: ['X-'],
   };
   __seed({
     processControllerMappings: [{ process: 'Wide Format', controllerId: 'ctrl-dr' }],
@@ -217,7 +239,7 @@ test('non-folder_copy controllers do NOT carry the three M3 fields on their rout
   });
   const route = resolveRoute(JOB);
   assert.equal(route.controllerType, 'darkroompro');
-  assert.equal(route.filenameTemplate,       undefined);
-  assert.equal(route.destinationLayout,      undefined);
-  assert.equal(route.stripOrderNumberPrefix, undefined);
+  assert.equal(route.filenameTemplate,          undefined);
+  assert.equal(route.destinationLayout,         undefined);
+  assert.equal(route.stripOrderNumberPrefixes,  undefined);
 });

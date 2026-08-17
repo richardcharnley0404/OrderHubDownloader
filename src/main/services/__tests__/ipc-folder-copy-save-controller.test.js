@@ -262,12 +262,29 @@ test('IPC rejects: filenameTemplate that is not a string', async () => {
   assert.match(result.error, /filenameTemplate must be a string/);
 });
 
-test('IPC rejects: stripOrderNumberPrefix that is not a string', async () => {
+test('IPC rejects: stripOrderNumberPrefixes that is not an array (M7)', async () => {
+  resetState();
+  const ctrl = makeFolderCopyCtrl({ stripOrderNumberPrefixes: 'PXDEMO-' });
+  const result = await saveController(null, ctrl);
+  assert.equal(result.success, false);
+  assert.match(result.error, /stripOrderNumberPrefixes must be an array of strings/);
+});
+
+test('M7 IPC rejects: stripOrderNumberPrefixes with a non-string entry', async () => {
+  resetState();
+  const ctrl = makeFolderCopyCtrl({ stripOrderNumberPrefixes: ['PXDEMO-', 42] });
+  const result = await saveController(null, ctrl);
+  assert.equal(result.success, false);
+  assert.match(result.error, /array of strings/);
+});
+
+test('M7 IPC rejects: legacy stripOrderNumberPrefix (string field) with wrong type', async () => {
+  // Legacy field still valid when present-and-string; wrong type rejected.
   resetState();
   const ctrl = makeFolderCopyCtrl({ stripOrderNumberPrefix: true });
   const result = await saveController(null, ctrl);
   assert.equal(result.success, false);
-  assert.match(result.error, /stripOrderNumberPrefix must be a string/);
+  assert.match(result.error, /legacy field.*must be a string/);
 });
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -326,9 +343,9 @@ test('IPC accepts: "root" layout + template with EACH allowed distinguishing tok
 test('round-trip: save all three fields via IPC → read back via getControllers, all three persist', async () => {
   resetState();
   const ctrl = makeFolderCopyCtrl({
-    filenameTemplate:       '{orderNumber}_{product}_{indexPadded}',
-    destinationLayout:      'root',
-    stripOrderNumberPrefix: 'PXDEMO-',
+    filenameTemplate:         '{orderNumber}_{product}_{indexPadded}',
+    destinationLayout:        'root',
+    stripOrderNumberPrefixes: ['PXDEMO-'],
   });
   const result = await saveController(null, ctrl);
   assert.equal(result.success, true);
@@ -340,7 +357,35 @@ test('round-trip: save all three fields via IPC → read back via getControllers
   assert.ok(persisted, 'controller must persist');
   assert.equal(persisted.filenameTemplate,       '{orderNumber}_{product}_{indexPadded}');
   assert.equal(persisted.destinationLayout,      'root');
-  assert.equal(persisted.stripOrderNumberPrefix, 'PXDEMO-');
+  assert.deepEqual(persisted.stripOrderNumberPrefixes, ['PXDEMO-']);
+});
+
+test('M7 IPC round-trip: multi-prefix array persists as an array', async () => {
+  resetState();
+  const ctrl = makeFolderCopyCtrl({
+    filenameTemplate:         '{orderNumber}_{index}',
+    destinationLayout:        'root',
+    stripOrderNumberPrefixes: ['ORD', 'PXDEMO', 'POS'],
+  });
+  const result = await saveController(null, ctrl);
+  assert.equal(result.success, true);
+  const persisted = __controllers.find(c => c.id === 'ctrl-fc-1');
+  assert.deepEqual(persisted.stripOrderNumberPrefixes, ['ORD', 'PXDEMO', 'POS']);
+});
+
+test('M7 IPC normalises: whitespace trimmed on each entry, empties dropped, case-insens dedupe', async () => {
+  resetState();
+  const ctrl = makeFolderCopyCtrl({
+    filenameTemplate:         '{orderNumber}_{index}',
+    destinationLayout:        'root',
+    stripOrderNumberPrefixes: ['  PXDEMO-  ', '', 'ORD', 'pxdemo-', 'ORD'],
+  });
+  const result = await saveController(null, ctrl);
+  assert.equal(result.success, true);
+  const persisted = __controllers.find(c => c.id === 'ctrl-fc-1');
+  // First 'PXDEMO-' wins (trimmed, deduped case-insens against 'pxdemo-'
+  // which arrives later). ORD appears once. Empty is dropped.
+  assert.deepEqual(persisted.stripOrderNumberPrefixes, ['PXDEMO-', 'ORD']);
 });
 
 test('M3a: whitespace-only filenameTemplate under "job" layout is stored as "" (trim at store time)', async () => {
@@ -375,10 +420,9 @@ test('M3a: leading/trailing whitespace on a real template is trimmed at store ti
     'leading/trailing whitespace stripped — the inner content is preserved verbatim');
 });
 
-test('M3a: whitespace-only stripOrderNumberPrefix is trimmed to blank at IPC boundary', async () => {
-  // Symmetric with the filenameTemplate trim. Renderer already trims;
-  // the IPC mirror does too so an external caller can't persist a
-  // stripPrefix that looks blank in the UI but silently isn't.
+test('M3a: whitespace-only legacy stripOrderNumberPrefix is trimmed to blank at IPC boundary', async () => {
+  // Symmetric with the filenameTemplate trim. Legacy single-string
+  // field still trimmed for the downgrade-friendly write path.
   resetState();
   const ctrl = makeFolderCopyCtrl({
     destinationLayout:      'job',
@@ -394,20 +438,20 @@ test('round-trip: update-then-read preserves the three fields (no silent drop on
   resetState();
   // First save — the "add" path.
   await saveController(null, makeFolderCopyCtrl({
-    filenameTemplate:       '{orderNumber}',
-    destinationLayout:      'root',
-    stripOrderNumberPrefix: '',
+    filenameTemplate:         '{orderNumber}',
+    destinationLayout:        'root',
+    stripOrderNumberPrefixes: [],
   }));
   // Second save — the "edit" path. Different template, same id.
   const edited = makeFolderCopyCtrl({
-    filenameTemplate:       '{jobName}_{indexPadded}',
-    destinationLayout:      'job',
-    stripOrderNumberPrefix: 'PXDEMO-',
+    filenameTemplate:         '{jobName}_{indexPadded}',
+    destinationLayout:        'job',
+    stripOrderNumberPrefixes: ['PXDEMO-'],
   });
   const result = await saveController(null, edited);
   assert.equal(result.success, true);
   const persisted = __controllers.find(c => c.id === 'ctrl-fc-1');
   assert.equal(persisted.filenameTemplate,       '{jobName}_{indexPadded}');
   assert.equal(persisted.destinationLayout,      'job');
-  assert.equal(persisted.stripOrderNumberPrefix, 'PXDEMO-');
+  assert.deepEqual(persisted.stripOrderNumberPrefixes, ['PXDEMO-']);
 });

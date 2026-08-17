@@ -499,3 +499,204 @@ test('displayBase: changing the prefix mid-lifecycle creates a fresh id under th
   assert.equal(seq.nextSubmissionId('PXDEMO-1234', '1234'), '1234',
     'second submission with prefix now set — different base, fresh counter, distinct folder name');
 });
+
+// ═════════════════════════════════════════════════════════════════════════
+// M7 — getOrCreateSubmissionId + rawIds map + joint prune
+// ═════════════════════════════════════════════════════════════════════════
+//
+// The single-job PIC Pro path (print-service.js:3095-3096) needs to
+// stay idempotent across retries — a retry must reuse the same id so
+// stageImages' rm -rf targets the folder it already knows about. The
+// order-level merge path keeps using nextSubmissionId (documented
+// resubmission suffix). Different rawOrderIds that strip to the same
+// displayBase still collide-and-suffix via the shared counter.
+
+test('M7 getOrCreateSubmissionId: idempotent per rawOrderId — retry returns SAME id', () => {
+  const seq = makeSeq();
+  const first  = seq.getOrCreateSubmissionId('PXDEMO-091YEC-1', '091YEC-1');
+  const second = seq.getOrCreateSubmissionId('PXDEMO-091YEC-1', '091YEC-1');
+  const third  = seq.getOrCreateSubmissionId('PXDEMO-091YEC-1', '091YEC-1');
+  assert.equal(first,  '091YEC-1');
+  assert.equal(second, '091YEC-1', 'retry must return the SAME id (this is the test that would have caught option 1)');
+  assert.equal(third,  '091YEC-1');
+  // Counter bumped exactly ONCE — subsequent calls hit the raw-id map,
+  // not the counter increment path.
+  assert.equal(seq.peek('091YEC-1').lastSeq, 1);
+});
+
+test('M7 getOrCreateSubmissionId: DIFFERENT rawOrderIds sharing displayBase get -2, -3', () => {
+  // The cross-prefix collision: Richard's own install has ORD-, PXDEMO-,
+  // POS- — a single org with multiple website-source prefixes. Two raw
+  // job_names sharing a suffix after prefix strip must be distinguished
+  // by the counter, not overwrite each other's staged folders.
+  const seq = makeSeq();
+  const first  = seq.getOrCreateSubmissionId('PXDEMO-091YEC-1', '091YEC-1');
+  const second = seq.getOrCreateSubmissionId('POS-091YEC-1',    '091YEC-1');
+  const third  = seq.getOrCreateSubmissionId('ORD-091YEC-1',    '091YEC-1');
+  assert.equal(first,  '091YEC-1');
+  assert.equal(second, '091YEC-1-2', 'different raw, same displayBase → next suffix');
+  assert.equal(third,  '091YEC-1-3');
+  // Each raw remembers its OWN id — a retry of any of them returns
+  // that exact id, not the next slot.
+  assert.equal(seq.getOrCreateSubmissionId('PXDEMO-091YEC-1', '091YEC-1'), '091YEC-1');
+  assert.equal(seq.getOrCreateSubmissionId('POS-091YEC-1',    '091YEC-1'), '091YEC-1-2');
+  assert.equal(seq.getOrCreateSubmissionId('ORD-091YEC-1',    '091YEC-1'), '091YEC-1-3');
+});
+
+test('M7 getOrCreateSubmissionId: idempotent across a store reload', () => {
+  const store = makeFakeStore();
+  const seqA = makeSeq({ store });
+  const first = seqA.getOrCreateSubmissionId('PXDEMO-091YEC-1', '091YEC-1');
+  assert.equal(first, '091YEC-1');
+  // Fresh instance against the SAME store — the raw-id map has been
+  // persisted, so the retry path picks it up.
+  const seqB = makeSeq({ store });
+  assert.equal(seqB.getOrCreateSubmissionId('PXDEMO-091YEC-1', '091YEC-1'), '091YEC-1');
+});
+
+test('M7 getOrCreateSubmissionId: honours displayBase omission (falls through to nextSubmissionId default)', () => {
+  const seq = makeSeq();
+  // No displayBase → the counter keys on rawOrderId itself; first call
+  // gets it unsuffixed.
+  assert.equal(seq.getOrCreateSubmissionId('PXDEMO-091YEC-1'), 'PXDEMO-091YEC-1');
+  // Retry hits the raw-id map — same id.
+  assert.equal(seq.getOrCreateSubmissionId('PXDEMO-091YEC-1'), 'PXDEMO-091YEC-1');
+});
+
+test('M7 getOrCreateSubmissionId: throws on missing/blank rawOrderId (caller bug, not runtime)', () => {
+  const seq = makeSeq();
+  assert.throws(() => seq.getOrCreateSubmissionId(''),        /non-empty rawOrderId/);
+  assert.throws(() => seq.getOrCreateSubmissionId('   '),     /non-empty rawOrderId/);
+  assert.throws(() => seq.getOrCreateSubmissionId(null),      /non-empty rawOrderId/);
+  assert.throws(() => seq.getOrCreateSubmissionId(undefined), /non-empty rawOrderId/);
+});
+
+test('M7 peekRawId: returns null for unknown raw; returns { issuedId, issuedAt } for known', () => {
+  const seq = makeSeq({ now: () => Date.UTC(2026, 7, 17, 12) });
+  assert.equal(seq.peekRawId('never-seen'), null);
+  seq.getOrCreateSubmissionId('PXDEMO-091YEC-1', '091YEC-1');
+  const p = seq.peekRawId('PXDEMO-091YEC-1');
+  assert.ok(p);
+  assert.equal(p.issuedId, '091YEC-1');
+  assert.ok(p.issuedAt, 'issuedAt is populated');
+});
+
+test('M7 mixed usage: getOrCreate + nextSubmissionId share the counter but rawIds is scoped to getOrCreate only', () => {
+  // Belt-and-braces: nextSubmissionId is used by the order-level merge
+  // path and MUST keep issuing fresh -2/-3 ids. It bumps the counter;
+  // getOrCreate reads from that same counter but ALSO writes to
+  // _rawIds. The two paths co-exist.
+  const seq = makeSeq();
+  assert.equal(seq.nextSubmissionId('order-A', 'displayA'),          'displayA');
+  assert.equal(seq.getOrCreateSubmissionId('raw-B', 'displayA'),     'displayA-2', 'sees existing counter entry, bumps to -2');
+  assert.equal(seq.getOrCreateSubmissionId('raw-B', 'displayA'),     'displayA-2', 'idempotent hit');
+  assert.equal(seq.nextSubmissionId('order-C', 'displayA'),          'displayA-3', 'nextSubmissionId keeps bumping');
+});
+
+// ── Joint prune ─────────────────────────────────────────────────────────
+
+test('M7 prune: raw-order map and counter prune together on the same horizon', () => {
+  const NOW = Date.UTC(2026, 7, 15);
+  const daysAgo = (n) => new Date(NOW - (n * DAY_MS)).toISOString();
+
+  const store = makeFakeStore({
+    entries: {
+      '091YEC-1':        { lastSeq: 1, lastIssuedAt: daysAgo(120) },  // past 90-day horizon
+      '091YEC-fresh':    { lastSeq: 1, lastIssuedAt: daysAgo(10)  },  // inside
+    },
+    rawIds: {
+      'PXDEMO-091YEC-1':  { issuedId: '091YEC-1',     issuedAt: daysAgo(120) },  // past
+      'PXDEMO-091YEC-fr': { issuedId: '091YEC-fresh', issuedAt: daysAgo(10)  },  // inside
+      // A raw-id whose timestamp is missing gets pruned too (matches
+      // the existing counter-map behaviour on missing timestamps).
+      'PXDEMO-no-ts':     { issuedId: 'some-id' },
+    },
+  });
+
+  const { logger, infos } = makeCapturingLogger();
+  const seq = makeSeq({
+    store, logger, now: () => NOW,
+    getJobDateRangeDays: () => 30,   // horizon still max(30, 90) = 90
+  });
+
+  // Counter map: past-horizon dropped, inside-horizon preserved.
+  assert.equal(seq.peek('091YEC-1'),           null, 'counter entry past 90 days dropped');
+  assert.equal(seq.peek('091YEC-fresh').lastSeq, 1,  'counter entry inside 90 days preserved');
+
+  // Raw-id map: past-horizon dropped, inside-horizon preserved,
+  // missing-timestamp dropped.
+  assert.equal(seq.peekRawId('PXDEMO-091YEC-1'),  null,                       'raw-id past 90 days dropped');
+  assert.equal(seq.peekRawId('PXDEMO-091YEC-fr').issuedId, '091YEC-fresh',   'raw-id inside 90 days preserved');
+  assert.equal(seq.peekRawId('PXDEMO-no-ts'),     null,                       'raw-id without timestamp dropped');
+
+  // Log names both counts.
+  const pruneLog = infos.find(e => /pruned old entries/.test(e.msg));
+  assert.ok(pruneLog);
+  assert.equal(pruneLog.meta.prunedEntries, 1);
+  assert.equal(pruneLog.meta.prunedRawIds,  2);
+  assert.equal(pruneLog.meta.days,          90);
+});
+
+test('M7 prune: a pruned pair cannot reissue a live id', () => {
+  // The failure mode this test guards: if the raw-id map were pruned
+  // but the counter were NOT, a re-dispatch of the pruned raw would
+  // hit the counter (lastSeq=1) and get displayBase-2 — colliding
+  // with wherever counter-key was originally issued. Or vice versa,
+  // if the counter were pruned but raw-id preserved, a "retry" would
+  // return an id whose folder had been recycled to a different order.
+  //
+  // Joint prune closes both. Assert: after both entries are pruned,
+  // a fresh dispatch of the SAME raw+displayBase gets the unsuffixed
+  // base cleanly (no ghost -2), and a DIFFERENT raw for the same
+  // displayBase gets -2 (counter has no stale ghost claiming seq 1).
+  const NOW = Date.UTC(2026, 7, 15);
+  const daysAgo = (n) => new Date(NOW - (n * DAY_MS)).toISOString();
+
+  const store = makeFakeStore({
+    entries: {
+      '091YEC-1': { lastSeq: 1, lastIssuedAt: daysAgo(120) },
+    },
+    rawIds: {
+      'PXDEMO-091YEC-1': { issuedId: '091YEC-1', issuedAt: daysAgo(120) },
+    },
+  });
+
+  const seq = makeSeq({ store, now: () => NOW });
+  // Both maps pruned on load.
+  assert.equal(seq.peek('091YEC-1'),                null);
+  assert.equal(seq.peekRawId('PXDEMO-091YEC-1'),    null);
+
+  // Fresh dispatch of the SAME raw — counter is clean, gets the base.
+  const reissued = seq.getOrCreateSubmissionId('PXDEMO-091YEC-1', '091YEC-1');
+  assert.equal(reissued, '091YEC-1',
+    'no ghost counter entry — the reissued id is the clean base');
+
+  // Different raw, same displayBase — counter is at 1 now, so this
+  // gets -2. The old entry is truly gone; nothing to collide with.
+  const other = seq.getOrCreateSubmissionId('POS-091YEC-1', '091YEC-1');
+  assert.equal(other, '091YEC-1-2');
+});
+
+test('M7 prune: nothing to prune → no log, no throw', () => {
+  const NOW = Date.UTC(2026, 7, 15);
+  const daysAgo = (n) => new Date(NOW - (n * DAY_MS)).toISOString();
+
+  const store = makeFakeStore({
+    entries: { fresh: { lastSeq: 1, lastIssuedAt: daysAgo(5) } },
+    rawIds:  { 'raw-fresh': { issuedId: 'fresh', issuedAt: daysAgo(5) } },
+  });
+  const { logger, infos } = makeCapturingLogger();
+  makeSeq({ store, logger, now: () => NOW });
+  const pruneLog = infos.find(e => /pruned old entries/.test(e.msg));
+  assert.equal(pruneLog, undefined, 'no prune log when nothing crossed the horizon');
+});
+
+test('M7 back-compat: fresh install with no rawIds key in store loads cleanly', () => {
+  // A store from v1.14.0 or earlier has no `rawIds` key. Loading must
+  // treat it as {} without throwing.
+  const store = makeFakeStore({ entries: {} });
+  const seq = makeSeq({ store });
+  assert.equal(seq.peekRawId('anything'), null);
+  // First getOrCreate works normally against the fresh raw-id map.
+  assert.equal(seq.getOrCreateSubmissionId('raw-1', 'base'), 'base');
+});

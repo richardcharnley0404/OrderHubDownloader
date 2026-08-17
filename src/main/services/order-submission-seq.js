@@ -84,11 +84,33 @@ class OrderSubmissionSeq {
       ? { ...stored }
       : {};
 
+    // M7 raw-order → issued-id idempotence map. Same rawOrderId in →
+    // same issued id out, every time, forever (subject to the shared
+    // prune horizon below). Keeps the single-job PIC Pro path safe
+    // under multi-prefix without changing retry semantics: a retry
+    // finds the raw in this map and returns the SAME id, so
+    // stageImages' rm -rf targets the folder it already knows about
+    // rather than orphaning it.
+    //
+    // Format: { [rawOrderId]: { issuedId, issuedAt } }.
+    const storedRawIds = this._store.get('rawIds', {});
+    this._rawIds = (storedRawIds && typeof storedRawIds === 'object' && !Array.isArray(storedRawIds))
+      ? { ...storedRawIds }
+      : {};
+
     // Prune on load. Horizon is max(jobDateRange, 90) days — see the
     // module doc-comment for the rationale. Short version: pruning an
     // entry destroys the never-reissue guarantee for that order, and
     // manual Process is not gated by jobDateRange, so the horizon has
     // to cover any realistic manual re-Process window.
+    //
+    // BOTH maps prune together on the SAME horizon. Pruning the raw-id
+    // map without pruning the counter (or vice versa) would leave one
+    // map dangling: a re-dispatch of a pruned raw would either see
+    // "no entry" and allocate a fresh unsuffixed id (collision with
+    // whatever remains keyed on the counter), or find an entry keyed
+    // on the counter but no matching raw and hand back an id whose
+    // provenance is unknown. Joint prune closes that gap.
     const jobDays = this._getJobDateRangeDays();
     const horizon = Math.max(jobDays, MIN_PRUNE_HORIZON_DAYS);
     this._pruneOlderThan(horizon);
@@ -177,6 +199,83 @@ class OrderSubmissionSeq {
   }
 
   /**
+   * Idempotent-by-rawOrderId allocation (M7). Same rawOrderId in →
+   * SAME issued id out, every time, forever (until the shared prune
+   * horizon reaches the entry). Different rawOrderIds that strip to
+   * the same displayBase go through the counter and get -2, -3, …
+   * — exactly the same suffix scheme as nextSubmissionId.
+   *
+   * Used by the PIC Pro single-job path (print-service.js:3095-3096).
+   * The order-level merge path deliberately uses nextSubmissionId
+   * instead: it wants a new id per dispatch (the documented
+   * resubmission suffix). Do NOT reroute merge through here.
+   *
+   * Why not just nextSubmissionId? nextSubmissionId is a pure
+   * incrementing counter (docstring above says so): calling it twice
+   * for the same rawOrderId returns two different ids. That means a
+   * retry of the same job would orphan the previously-staged folder
+   * and print the order twice. This method fixes that: the raw-order
+   * map is consulted first; only on a MISS do we increment the
+   * counter.
+   *
+   * Cross-prefix collision (the reason M7 needs this at all):
+   * one OHD install talks to one OrderHub org, but the org can ship
+   * orders with several different prefixes distinguishing the source
+   * website (e.g. `ORD-`, `PXDEMO-`, `POS-`). Two raw order ids
+   * `PXDEMO-091YEC` and `POS-091YEC` strip to the same displayBase
+   * `091YEC`. The counter keyed on displayBase distinguishes them:
+   * first call gets `091YEC`, second gets `091YEC-2`. Each raw id
+   * remembers ITS id via _rawIds so retries are idempotent per raw.
+   *
+   * @param {string} rawOrderId — the unstripped id (typically
+   *   `job.job_name` for single-job PIC Pro).
+   * @param {string} [displayBase] — the post-strip form. Used ONLY
+   *   when allocating a new id (rawOrderId not seen before). Ignored
+   *   on the idempotent hit path.
+   * @returns {string}
+   * @throws {Error} on missing/blank rawOrderId — caller bug.
+   */
+  getOrCreateSubmissionId(rawOrderId, displayBase) {
+    if (typeof rawOrderId !== 'string' || rawOrderId.trim().length === 0) {
+      throw new Error('getOrCreateSubmissionId requires a non-empty rawOrderId string');
+    }
+    // Idempotent hit: return the id already issued to this raw id.
+    // No counter increment, no folder churn. This is the retry path.
+    const existing = this._rawIds[rawOrderId];
+    if (existing && typeof existing.issuedId === 'string' && existing.issuedId.length > 0) {
+      return existing.issuedId;
+    }
+    // First time we've seen this raw id → allocate via the same
+    // counter logic nextSubmissionId uses, then remember the pairing.
+    // Note: this DOES call nextSubmissionId, so the counter's per-
+    // base entry is bumped exactly once per unique raw. The rawIds
+    // entry captures the returned id so future calls for the SAME
+    // raw are the idempotent hit path above.
+    const issuedId = this.nextSubmissionId(rawOrderId, displayBase);
+    this._rawIds[rawOrderId] = {
+      issuedId,
+      issuedAt: new Date(this._now()).toISOString(),
+    };
+    this._persist();
+    return issuedId;
+  }
+
+  /**
+   * Read-only snapshot of the raw-order → issued-id map for one raw
+   * id, for logging and tests. Returns null when no id has ever been
+   * issued for that raw id.
+   */
+  peekRawId(rawOrderId) {
+    if (typeof rawOrderId !== 'string' || rawOrderId.length === 0) return null;
+    const entry = this._rawIds[rawOrderId];
+    if (!entry || typeof entry.issuedId !== 'string' || entry.issuedId.length === 0) return null;
+    return {
+      issuedId: entry.issuedId,
+      issuedAt: entry.issuedAt || null,
+    };
+  }
+
+  /**
    * Read-only snapshot of the counter for one key, for logging and
    * tests. Returns null if no id has ever been issued under that key.
    * Never mutates.
@@ -214,27 +313,47 @@ class OrderSubmissionSeq {
   _pruneOlderThan(days) {
     if (!Number.isFinite(days) || days <= 0) return;
     const cutoffMs = this._now() - (days * MS_PER_DAY);
-    let pruned = 0;
+    let prunedEntries = 0;
+    let prunedRawIds  = 0;
+    // Prune the counter map. Missing / unparseable timestamps get
+    // pruned too — no evidence of recency, and keeping them would
+    // grow the store forever.
     for (const key of Object.keys(this._entries)) {
       const entry = this._entries[key];
       const ts = entry && entry.lastIssuedAt ? Date.parse(entry.lastIssuedAt) : NaN;
-      // Missing / unparseable timestamps get pruned too — they carry
-      // no evidence of recency, and keeping them would only grow the
-      // store forever. If a legitimate entry ever loses its timestamp,
-      // the worst that happens is the next id for that order is
-      // unsuffixed instead of `-N`; the operator sees a fresh order.
       if (!Number.isFinite(ts) || ts < cutoffMs) {
         delete this._entries[key];
-        pruned++;
+        prunedEntries++;
       }
     }
-    if (pruned > 0) {
-      this._logger.info('[order-submission-seq] pruned old entries on load', { pruned, days });
+    // M7: prune the raw-order map on the SAME horizon. Doing this in
+    // one pass — not two separate calls — is deliberate: any drift
+    // between the two prune horizons would leave one map dangling
+    // (see the constructor docstring's "joint prune" note).
+    for (const key of Object.keys(this._rawIds)) {
+      const entry = this._rawIds[key];
+      const ts = entry && entry.issuedAt ? Date.parse(entry.issuedAt) : NaN;
+      if (!Number.isFinite(ts) || ts < cutoffMs) {
+        delete this._rawIds[key];
+        prunedRawIds++;
+      }
+    }
+    if (prunedEntries > 0 || prunedRawIds > 0) {
+      this._logger.info('[order-submission-seq] pruned old entries on load', {
+        // `pruned` preserved as the counter-map count for back-compat
+        // with existing test assertions and any log-analysis tooling.
+        // `prunedRawIds` is the M7 addition.
+        pruned:        prunedEntries,
+        prunedEntries,
+        prunedRawIds,
+        days,
+      });
     }
   }
 
   _persist() {
     this._store.set('entries', this._entries);
+    this._store.set('rawIds',  this._rawIds);
   }
 }
 

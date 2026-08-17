@@ -1399,12 +1399,40 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
           });
           return { success: false, error: msg };
         }
+        // M7: stripOrderNumberPrefixes is a list. Reject shapes that
+        // aren't array-of-strings so a malformed payload can't persist.
+        // Legacy string field (stripOrderNumberPrefix) is accepted as
+        // input but the renderer normally sends only the new field; the
+        // route literal's tolerant reader picks up whichever is present.
+        if (
+          controller.stripOrderNumberPrefixes !== undefined &&
+          !Array.isArray(controller.stripOrderNumberPrefixes)
+        ) {
+          const msg = 'stripOrderNumberPrefixes must be an array of strings.';
+          logger.logWarning('[routing] save-controller rejected — invalid stripOrderNumberPrefixes', {
+            controllerId: controller.id,
+            name:         controller.name,
+            stripOrderNumberPrefixes: controller.stripOrderNumberPrefixes,
+          });
+          return { success: false, error: msg };
+        }
+        if (
+          Array.isArray(controller.stripOrderNumberPrefixes) &&
+          controller.stripOrderNumberPrefixes.some(p => typeof p !== 'string')
+        ) {
+          const msg = 'stripOrderNumberPrefixes must be an array of strings.';
+          logger.logWarning('[routing] save-controller rejected — non-string entry in stripOrderNumberPrefixes', {
+            controllerId: controller.id,
+            name:         controller.name,
+          });
+          return { success: false, error: msg };
+        }
         if (
           controller.stripOrderNumberPrefix !== undefined &&
           typeof controller.stripOrderNumberPrefix !== 'string'
         ) {
-          const msg = 'stripOrderNumberPrefix must be a string.';
-          logger.logWarning('[routing] save-controller rejected — invalid stripOrderNumberPrefix', {
+          const msg = 'stripOrderNumberPrefix (legacy field) must be a string when present.';
+          logger.logWarning('[routing] save-controller rejected — invalid legacy stripOrderNumberPrefix', {
             controllerId: controller.id,
             name:         controller.name,
             stripOrderNumberPrefix: controller.stripOrderNumberPrefix,
@@ -1429,11 +1457,28 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
         // on filenameTemplate so a payload from a future renderer bug (or
         // an external caller) can't persist a truthy whitespace-only value
         // that M2 would treat as a real template and resolve to blank on
-        // every image. Symmetric with stripOrderNumberPrefix. This runs
+        // every image. Symmetric with stripOrderNumberPrefixes. This runs
         // BEFORE the layout-specific checks so the "blank template under
         // root" rule fires on the normalised value.
         const trimmedTemplate = rawTemplate.trim();
         controller.filenameTemplate = trimmedTemplate;
+        // M7: trim + dedupe (case-insensitive) + drop empties on the
+        // prefixes list. Same posture as the renderer save path so a
+        // payload that bypassed the renderer trims to the same shape.
+        if (Array.isArray(controller.stripOrderNumberPrefixes)) {
+          const seen = new Set();
+          controller.stripOrderNumberPrefixes = controller.stripOrderNumberPrefixes
+            .map(p => (typeof p === 'string' ? p.trim() : ''))
+            .filter(p => p.length > 0)
+            .filter(p => {
+              const key = p.toLowerCase();
+              if (seen.has(key)) return false;
+              seen.add(key);
+              return true;
+            });
+        }
+        // Legacy single-string field also trimmed for symmetry (kept on
+        // the record for downgrade-friendly reads).
         if (typeof controller.stripOrderNumberPrefix === 'string') {
           controller.stripOrderNumberPrefix = controller.stripOrderNumberPrefix.trim();
         }

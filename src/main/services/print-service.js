@@ -34,7 +34,7 @@ const { ManifestNotFoundError } = require('./awaiting-manifest');
 const { resolveManifestPath } = require('./manifest-path');
 const { resolveDispatchImageSource } = require('./dispatch-image-source');
 const logger = require('./logger');
-const { buildFolderName, stripOrderNumberPrefix } = require('../../shared/printUtils');
+const { buildFolderName, stripOrderNumberPrefixMulti } = require('../../shared/printUtils');
 const { buildCopyFilenames, buildDestFolder } = require('./folder-copy-filename');
 
 // Manifest filename is {orderNumber}.json (e.g. PXDEMO-K9MYDG.json)
@@ -2277,8 +2277,9 @@ class PrintService {
    *
    * The route arrives from routing-service.js — both folder_copy literals
    * (resolveRoute + resolveRouteForController) supply filenameTemplate,
-   * destinationLayout, and stripOrderNumberPrefix with the same defaults
-   * ('' / 'job' / ''). The default-folder / process-folder auto-print path
+   * destinationLayout, and stripOrderNumberPrefixes (M7: array; legacy
+   * single-string field handled by the shared reader) with the same
+   * defaults ('' / 'job' / []). The default-folder / process-folder auto-print path
    * (ipc-handlers.js:4139) passes only { outputPath, controllerName }, so
    * every M3 field arrives undefined and the M2 planner takes the blank
    * branch → original filenames, per D4 of the brief.
@@ -2302,7 +2303,7 @@ class PrintService {
       throw new Error('Download directory is not configured.');
     }
 
-    const stripPrefix       = (route && typeof route.stripOrderNumberPrefix === 'string') ? route.stripOrderNumberPrefix : '';
+    const stripPrefixes     = (route && Array.isArray(route.stripOrderNumberPrefixes)) ? route.stripOrderNumberPrefixes : [];
     const destinationLayout = (route && route.destinationLayout === 'root') ? 'root' : 'job';
     const filenameTemplate  = (route && typeof route.filenameTemplate === 'string') ? route.filenameTemplate : '';
 
@@ -2363,12 +2364,12 @@ class PrintService {
       orderNumber: job.order_number,
       jobId:       job.id,
       destinationLayout,
-      stripPrefix,
+      stripPrefixes,
     });
 
     const { files, stats } = buildCopyFilenames(imageFiles, job, {
-      template:    filenameTemplate,
-      stripPrefix,
+      template:      filenameTemplate,
+      stripPrefixes,
       // opts.now is deliberately NOT threaded here — M4 must let the real
       // clock default. resolveTemplate throws on a non-Date opts.now, and
       // any value round-tripped through config would arrive as a string.
@@ -3086,14 +3087,35 @@ class PrintService {
     // without job_name, and matching Darkroom Pro's pattern costs
     // nothing.
     //
-    // v1.13.0: apply the per-controller Strip Order Number Prefix, if
-    // any. The same helper is used by the order-level dispatch method
-    // and both must strip identically — otherwise switching
-    // mergeOrderJobs on/off on a controller would change the id shape
-    // partway through the wait window. Blank prefix (the default) is
-    // a no-op.
+    // v1.12.2 → M7: apply the per-controller Strip Order Number
+    // Prefixes (now a list; longest-match-first via
+    // stripOrderNumberPrefixMulti). The same reader is used by the
+    // order-level dispatch method and both must strip identically —
+    // otherwise switching mergeOrderJobs on/off on a controller would
+    // change the id shape partway through the wait window. Empty list
+    // (the default) is a no-op.
+    //
+    // M7: route the resulting id through orderSubmissionSeq's new
+    // getOrCreateSubmissionId (idempotent per rawOrderId) rather than
+    // using the stripped form verbatim. A retry of the same job now
+    // reuses the previously-issued id — stageImages' rm -rf targets
+    // the folder it already knows about. And two raw job_names from
+    // different websites that strip to the same displayBase (Richard's
+    // ORD-/PXDEMO-/POS- config on one org) get -2/-3 via the shared
+    // counter instead of clobbering each other's staged folders.
+    // Order-level merge path below KEEPS nextSubmissionId — that
+    // path wants a new id per dispatch (the documented resubmission
+    // suffix). Do not conflate the two.
     const rawOrderId = job.job_name || `${job.order_number || ''}_${job.id}`;
-    const orderId    = stripOrderNumberPrefix(rawOrderId, route.stripOrderNumberPrefix);
+    const displayBase = stripOrderNumberPrefixMulti(
+      rawOrderId,
+      Array.isArray(route.stripOrderNumberPrefixes) ? route.stripOrderNumberPrefixes : [],
+    );
+    // Lazy require — same pattern as the order-level path below, and
+    // for the same reason (electron-store singleton at module load
+    // interferes with the test harness).
+    const { orderSubmissionSeq } = require('./order-submission-seq');
+    const orderId = orderSubmissionSeq.getOrCreateSubmissionId(rawOrderId, displayBase);
 
     let stageResult;
     try {
@@ -3393,10 +3415,18 @@ class PrintService {
     // job-service) so require-ing print-service.js doesn't force the
     // electron-store singleton at module load — needed for the
     // node:test harness which stubs orderSubmissionSeq in require.cache.
+    // M7: strip prefixes are now a LIST; use stripOrderNumberPrefixMulti
+    // (longest-first, separator drop). This path DELIBERATELY keeps
+    // nextSubmissionId — the order-level merge documents a resubmission
+    // suffix per dispatch, and idempotence is not the right semantic
+    // here. Single-job path above uses getOrCreateSubmissionId instead.
     let orderId;
     try {
       const { orderSubmissionSeq } = require('./order-submission-seq');
-      const displayBase = stripOrderNumberPrefix(orderNumber, sharedRoute.stripOrderNumberPrefix);
+      const displayBase = stripOrderNumberPrefixMulti(
+        orderNumber,
+        Array.isArray(sharedRoute.stripOrderNumberPrefixes) ? sharedRoute.stripOrderNumberPrefixes : [],
+      );
       orderId = orderSubmissionSeq.nextSubmissionId(orderNumber, displayBase);
     } catch (seqErr) {
       const msg = `Fuji PIC Pro order-level dispatch: failed to allocate submission id for order ${orderNumber}: ${seqErr.message}`;

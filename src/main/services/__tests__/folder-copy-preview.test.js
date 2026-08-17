@@ -119,15 +119,15 @@ test('preview runs the REAL M2 planner on the FULL image list — equality with 
     'preview stats must be identical to the planner stats for the FULL image list');
 });
 
-test('preview equality holds under strip prefix — full-list run reaches the planner unchanged', async () => {
+test('preview equality holds under strip prefixes — full-list run reaches the planner unchanged', async () => {
   const template = '{orderNumber}-{index}';
-  const stripPrefix = 'PXDEMO-';
+  const stripPrefixes = ['PXDEMO-'];
   const preview = await buildFolderCopyPreview(
-    { filenameTemplate: template, destinationLayout: 'job', outputPath: '/x', stripOrderNumberPrefix: stripPrefix },
+    { filenameTemplate: template, destinationLayout: 'job', outputPath: '/x', stripOrderNumberPrefixes: stripPrefixes },
     NO_JOBS_DEPS,
   );
   const allImages = SYNTHETIC_IMAGES.map(i => ({ ...i }));
-  const direct    = buildCopyFilenames(allImages, SYNTHETIC_JOB, { template, stripPrefix });
+  const direct    = buildCopyFilenames(allImages, SYNTHETIC_JOB, { template, stripPrefixes });
   assert.deepEqual(
     preview.files.map(f => f.destFilename),
     direct.files.slice(0, MAX_PREVIEW_SAMPLES).map(f => f.destFilename),
@@ -282,10 +282,10 @@ test('warnings: none when the template distinguishes every sample', async () => 
 test('destPath is the FULL path (§7 — path length is half the point)', async () => {
   const out = await buildFolderCopyPreview(
     {
-      outputPath:             '/hot/wf',
-      filenameTemplate:       '{jobId}-{index}',
-      destinationLayout:      'job',
-      stripOrderNumberPrefix: 'PXDEMO-',
+      outputPath:               '/hot/wf',
+      filenameTemplate:         '{jobId}-{index}',
+      destinationLayout:        'job',
+      stripOrderNumberPrefixes: ['PXDEMO-'],
     },
     NO_JOBS_DEPS,
   );
@@ -307,6 +307,27 @@ test('destPath under root layout: files land in outputPath itself', async () => 
   }
 });
 
+test('M7 preview: multi-prefix reaches both destFolder AND resolved filenames (parity via buildDestFolder + planner)', async () => {
+  // One prefix in the list matches the sample order_number
+  // ('PXDEMO-SAMPLE' → 'SAMPLE' after PXDEMO- strips). Same list also
+  // strips {orderNumber} inside the template. This is the M5a payoff:
+  // one signature change in buildDestFolder + resolveTemplate flows to
+  // BOTH sides through the shared preview helper.
+  const out = await buildFolderCopyPreview(
+    {
+      outputPath:               '/hot/wf',
+      filenameTemplate:         '{orderNumber}-{index}',
+      destinationLayout:        'job',
+      stripOrderNumberPrefixes: ['ORD', 'PXDEMO', 'POS'],   // longest-first sort inside the helper
+    },
+    NO_JOBS_DEPS,
+  );
+  // destFolder uses stripped order → 'SAMPLE_999999'.
+  assert.equal(out.destFolder, path.join('/hot/wf', 'SAMPLE_999999'));
+  // Filenames use stripped {orderNumber} too — 'SAMPLE-1.jpg' etc.
+  assert.equal(out.files[0].destFilename, 'SAMPLE-1.jpg');
+});
+
 test('destPath handles blank outputPath gracefully (new-controller mid-edit)', async () => {
   const out = await buildFolderCopyPreview(
     { outputPath: '', filenameTemplate: '{jobId}-{index}', destinationLayout: 'job' },
@@ -321,13 +342,13 @@ test('destPath handles blank outputPath gracefully (new-controller mid-edit)', a
 // Input trim + coercion (mirrors renderer + IPC boundary)
 // ═════════════════════════════════════════════════════════════════════════
 
-test('input hygiene: filenameTemplate is trimmed, stripPrefix trimmed, layout coerced', async () => {
+test('input hygiene: filenameTemplate is trimmed, stripPrefixes entries trimmed, layout coerced', async () => {
   const out = await buildFolderCopyPreview(
     {
-      outputPath:             '/o',
-      filenameTemplate:       '  {jobId}-{index}  ',
-      destinationLayout:      'garbage',   // → coerced to 'job'
-      stripOrderNumberPrefix: '  PXDEMO-  ',
+      outputPath:               '/o',
+      filenameTemplate:         '  {jobId}-{index}  ',
+      destinationLayout:        'garbage',   // → coerced to 'job'
+      stripOrderNumberPrefixes: ['  PXDEMO-  '],
     },
     NO_JOBS_DEPS,
   );

@@ -11,7 +11,14 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildFolderName, parseFolderName, extractSurname, stripOrderNumberPrefix } = require('../printUtils.js');
+const {
+  buildFolderName,
+  parseFolderName,
+  extractSurname,
+  stripOrderNumberPrefix,
+  stripOrderNumberPrefixMulti,
+  readStripPrefixes,
+} = require('../printUtils.js');
 
 const baseJob = {
   id: 38461218,
@@ -391,4 +398,197 @@ test('stripOrderNumberPrefix: non-string order number returned verbatim (defensi
   assert.equal(stripOrderNumberPrefix(null,      'X-'), null);
   assert.equal(stripOrderNumberPrefix(undefined, 'X-'), undefined);
   assert.equal(stripOrderNumberPrefix(1234,      'X-'), 1234);
+});
+
+// ═════════════════════════════════════════════════════════════════════════
+// stripOrderNumberPrefixMulti — the M7 multi-prefix helper
+// ═════════════════════════════════════════════════════════════════════════
+//
+// One OHD install talks to one OrderHub org, but the org can ship orders
+// with several prefixes distinguishing the source website (Richard's
+// config: ORD-, PXDEMO-, POS-). Rules enforced here:
+//   - Longest-match-first, sorted INSIDE the helper. This is the
+//     load-bearing rule; a lab finds the bug otherwise and a test doesn't
+//     unless someone writes it deliberately.
+//   - After a match, drop ONE leading '-' or '_' if present. Both
+//     'PXDEMO-' and 'PXDEMO' work the same way.
+//   - Never-strip-to-empty per candidate. If a match would empty the
+//     string, try the next candidate; if all would, return original.
+
+test('multi: empty prefix list → order number unchanged', () => {
+  assert.equal(stripOrderNumberPrefixMulti('PXDEMO-091YEC', []), 'PXDEMO-091YEC');
+});
+
+test('multi: non-array prefix list → order number unchanged (defensive)', () => {
+  assert.equal(stripOrderNumberPrefixMulti('PXDEMO-091YEC', 'PXDEMO-'), 'PXDEMO-091YEC');
+  assert.equal(stripOrderNumberPrefixMulti('PXDEMO-091YEC', null),       'PXDEMO-091YEC');
+  assert.equal(stripOrderNumberPrefixMulti('PXDEMO-091YEC', undefined),  'PXDEMO-091YEC');
+});
+
+test('multi: single-element list with trailing hyphen → same result as single-prefix helper', () => {
+  // Parity with the primitive: single-element ['PXDEMO-'] on 'PXDEMO-091YEC'
+  // must produce '091YEC' — same as stripOrderNumberPrefix('PXDEMO-091YEC', 'PXDEMO-').
+  const singleResult = stripOrderNumberPrefix('PXDEMO-091YEC', 'PXDEMO-');
+  const multiResult  = stripOrderNumberPrefixMulti('PXDEMO-091YEC', ['PXDEMO-']);
+  assert.equal(multiResult, singleResult);
+  assert.equal(multiResult, '091YEC');
+});
+
+test('multi: single-element list WITHOUT hyphen → separator dropped (M7-only behaviour)', () => {
+  // The primitive would leave the '-' on the front:
+  assert.equal(stripOrderNumberPrefix('PXDEMO-091YEC', 'PXDEMO'), '-091YEC');
+  // The multi helper drops one leading '-' after the match:
+  assert.equal(stripOrderNumberPrefixMulti('PXDEMO-091YEC', ['PXDEMO']), '091YEC');
+});
+
+test('multi: separator drop applies to underscore too', () => {
+  assert.equal(stripOrderNumberPrefixMulti('PXDEMO_091YEC', ['PXDEMO']),  '091YEC');
+  assert.equal(stripOrderNumberPrefixMulti('PXDEMO_091YEC', ['PXDEMO_']), '091YEC');
+});
+
+test('multi: separator drop takes at most ONE character', () => {
+  // '--091YEC' has two leading hyphens; only one is dropped.
+  assert.equal(stripOrderNumberPrefixMulti('PXDEMO--091YEC', ['PXDEMO']), '-091YEC');
+});
+
+test('multi: only "-" and "_" are separators — a configured PXDEMO must NOT strip PXDEMOX', () => {
+  // No separator between "PXDEMO" and "X" — the prefix matches, but
+  // there is nothing to drop after. Behaviour is: prefix stripped, tail
+  // preserved. "X091YEC" is the result.
+  assert.equal(stripOrderNumberPrefixMulti('PXDEMOX091YEC', ['PXDEMO']), 'X091YEC');
+  // A '.' between prefix and tail is NOT stripped — only '-' and '_'.
+  assert.equal(stripOrderNumberPrefixMulti('PXDEMO.091YEC', ['PXDEMO']), '.091YEC');
+});
+
+test('multi: longest-match-first regardless of input order', () => {
+  // With both 'PXDEMO' and 'PXDEMO1' configured, 'PXDEMO1-091YEC' must
+  // strip via 'PXDEMO1' — not via 'PXDEMO' (which would leave '1-091YEC').
+  // The load-bearing test: try BOTH input orders and both must produce
+  // the same result. If a future maintainer moves sorting to the caller,
+  // one of these fails.
+  assert.equal(stripOrderNumberPrefixMulti('PXDEMO1-091YEC', ['PXDEMO', 'PXDEMO1']),  '091YEC');
+  assert.equal(stripOrderNumberPrefixMulti('PXDEMO1-091YEC', ['PXDEMO1', 'PXDEMO']),  '091YEC');
+});
+
+test('multi: longest-match-first — real Richard config (ORD, PXDEMO, POS)', () => {
+  // The actual prefixes reported for Richard's install.
+  const list = ['ORD', 'PXDEMO', 'POS'];
+  assert.equal(stripOrderNumberPrefixMulti('ORD-091YEC',    list), '091YEC');
+  assert.equal(stripOrderNumberPrefixMulti('PXDEMO-091YEC', list), '091YEC');
+  assert.equal(stripOrderNumberPrefixMulti('POS-091YEC',    list), '091YEC');
+  assert.equal(stripOrderNumberPrefixMulti('ZZZ-091YEC',    list), 'ZZZ-091YEC'); // no match → unchanged
+});
+
+test('multi: case-insensitive on the match; tail keeps its original casing', () => {
+  assert.equal(stripOrderNumberPrefixMulti('pxdemo-Abc9', ['PXDEMO']), 'Abc9');
+  assert.equal(stripOrderNumberPrefixMulti('PXDEMO-Abc9', ['pxdemo']), 'Abc9');
+});
+
+test('multi: never strips to empty — per candidate', () => {
+  // Prefix equals the whole order number → the ONE candidate would empty
+  // the string → skipped → return original.
+  assert.equal(stripOrderNumberPrefixMulti('PXDEMO-', ['PXDEMO-']), 'PXDEMO-');
+  // Prefix + separator equals the whole order number → same story.
+  assert.equal(stripOrderNumberPrefixMulti('PXDEMO-', ['PXDEMO']), 'PXDEMO-');
+});
+
+test('multi: never strips to empty — across candidates, one saves the day', () => {
+  // 'PXDEMO' would strip 'PXDEMO' to empty (skipped). 'ORD' is tried
+  // next, doesn't match, so the function returns the original.
+  assert.equal(stripOrderNumberPrefixMulti('PXDEMO', ['PXDEMO', 'ORD']), 'PXDEMO');
+  // Now include a prefix that WOULD leave something behind: 'PX' → 'DEMO'.
+  assert.equal(stripOrderNumberPrefixMulti('PXDEMO', ['PXDEMO', 'PX']),  'DEMO');
+});
+
+test('multi: order number shorter than any prefix → those candidates skipped', () => {
+  assert.equal(stripOrderNumberPrefixMulti('AB', ['PXDEMO', 'PXDEMO1']), 'AB');
+});
+
+test('multi: empty and non-string entries in list are ignored', () => {
+  // Filter should skip these before the sort.
+  assert.equal(
+    stripOrderNumberPrefixMulti('PXDEMO-091YEC', ['', null, undefined, 42, 'PXDEMO']),
+    '091YEC',
+  );
+});
+
+test('multi: non-string order number → returned verbatim', () => {
+  assert.equal(stripOrderNumberPrefixMulti(null,      ['X']), null);
+  assert.equal(stripOrderNumberPrefixMulti(undefined, ['X']), undefined);
+  assert.equal(stripOrderNumberPrefixMulti(1234,      ['X']), 1234);
+});
+
+// ═════════════════════════════════════════════════════════════════════════
+// readStripPrefixes — the ONE tolerant reader
+// ═════════════════════════════════════════════════════════════════════════
+//
+// Every route literal calls this rather than duplicating the coercion.
+// Four copies of the same coercion would be the same drift hazard the
+// route-literal parity tests exist to catch.
+
+test('readStripPrefixes: new array field wins', () => {
+  assert.deepEqual(
+    readStripPrefixes({ stripOrderNumberPrefixes: ['ORD', 'PXDEMO'] }),
+    ['ORD', 'PXDEMO'],
+  );
+});
+
+test('readStripPrefixes: legacy string field wrapped as single-element array', () => {
+  assert.deepEqual(
+    readStripPrefixes({ stripOrderNumberPrefix: 'PXDEMO-' }),
+    ['PXDEMO-'],
+  );
+});
+
+test('readStripPrefixes: new array wins even when legacy string is also present', () => {
+  // Downgrade-friendly: we keep the legacy field on save so v1.12.2 code
+  // would still see something. On read, the new field wins.
+  assert.deepEqual(
+    readStripPrefixes({
+      stripOrderNumberPrefixes: ['ORD', 'POS'],
+      stripOrderNumberPrefix:   'PXDEMO-',
+    }),
+    ['ORD', 'POS'],
+  );
+});
+
+test('readStripPrefixes: neither field present → []', () => {
+  assert.deepEqual(readStripPrefixes({}),        []);
+  assert.deepEqual(readStripPrefixes(null),      []);
+  assert.deepEqual(readStripPrefixes(undefined), []);
+});
+
+test('readStripPrefixes: filters empty strings and non-strings from the new array', () => {
+  assert.deepEqual(
+    readStripPrefixes({ stripOrderNumberPrefixes: ['ORD', '', null, undefined, 42, 'POS'] }),
+    ['ORD', 'POS'],
+  );
+});
+
+test('readStripPrefixes: empty new array is not falsy — returns [] rather than falling back to legacy', () => {
+  // Operator explicitly cleared the list — respect that and do NOT
+  // fall back to a stale legacy value.
+  assert.deepEqual(
+    readStripPrefixes({
+      stripOrderNumberPrefixes: [],
+      stripOrderNumberPrefix:   'PXDEMO-',
+    }),
+    [],
+  );
+});
+
+test('readStripPrefixes: non-array new field falls through to legacy', () => {
+  // If the new field is present but the wrong shape, treat it as absent
+  // and try the legacy field. Defensive against a hand-edited config.
+  assert.deepEqual(
+    readStripPrefixes({
+      stripOrderNumberPrefixes: 'not-an-array',
+      stripOrderNumberPrefix:   'PXDEMO-',
+    }),
+    ['PXDEMO-'],
+  );
+});
+
+test('readStripPrefixes: legacy empty string → [] (never a single-element [""])', () => {
+  assert.deepEqual(readStripPrefixes({ stripOrderNumberPrefix: '' }), []);
 });

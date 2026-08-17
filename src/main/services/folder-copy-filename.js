@@ -1,7 +1,7 @@
 'use strict';
 
 const path = require('node:path');
-const { UNSAFE_CHARS, stripOrderNumberPrefix: _stripPrefix } = require('../../shared/printUtils');
+const { UNSAFE_CHARS, stripOrderNumberPrefixMulti: _stripPrefixMulti } = require('../../shared/printUtils');
 const { resolveTemplate } = require('./template-tokens');
 
 /**
@@ -30,13 +30,15 @@ const { resolveTemplate } = require('./template-tokens');
  *
  * `job` is passed through to resolveTemplate unchanged.
  *
- * `opts` carries { template, stripPrefix, now }:
+ * `opts` carries { template, stripPrefixes, now }:
  *   - `template`  — free-text template. Blank/absent → the no-change lock
  *                   (§4.1): the input basenames are returned verbatim. This
  *                   is what every existing installation gets today, so
  *                   every test for this module starts with the blank case.
- *   - `stripPrefix` — passed to resolveTemplate for {orderNumber} and
- *                   {jobName}. Blank/absent = no-op.
+ *   - `stripPrefixes` — array of prefixes (M7); passed to resolveTemplate
+ *                   for {orderNumber} and {jobName} via
+ *                   printUtils.stripOrderNumberPrefixMulti. Non-array or
+ *                   empty = no-op. Formerly a single-string `stripPrefix`.
  *   - `now`       — TEST-ONLY passthrough to resolveTemplate's opts.now.
  *                   M4 must NEVER thread one through in production:
  *                   resolveTemplate throws on a non-Date opts.now, and any
@@ -220,7 +222,7 @@ function buildCopyFilenames(images, job = {}, opts = {}) {
   }
 
   const template    = (opts && typeof opts.template === 'string') ? opts.template : '';
-  const stripPrefix = (opts && typeof opts.stripPrefix === 'string') ? opts.stripPrefix : '';
+  const stripPrefixes = (opts && Array.isArray(opts.stripPrefixes)) ? opts.stripPrefixes : [];
 
   const stats = { suffixed: 0, truncated: 0, fallbacks: [] };
 
@@ -244,7 +246,7 @@ function buildCopyFilenames(images, job = {}, opts = {}) {
   // when the caller supplied one — leaving it undefined for real dispatch
   // lets resolveTemplate use the wall clock. See the docstring for why M4
   // must not thread one through.
-  const baseResolveOpts = { stripPrefix };
+  const baseResolveOpts = { stripPrefixes };
   if (opts.now !== undefined) baseResolveOpts.now = opts.now;
 
   for (let i = 0; i < imageCount; i++) {
@@ -337,7 +339,7 @@ function buildCopyFilenames(images, job = {}, opts = {}) {
  *
  * ── The no-change lock (§6.2, §4.1) ─────────────────────────────────────
  *
- * With destinationLayout='job' and stripPrefix='' this returns EXACTLY
+ * With destinationLayout='job' and empty stripPrefixes this returns EXACTLY
  * `path.join(outputPath, `${orderNumber}_${jobId}`)`. That is the pre-M4
  * shape every existing installation depends on. The M4 test suite locks
  * it byte-for-byte at print-service-folder-copy-routed.test.js.
@@ -347,15 +349,23 @@ function buildCopyFilenames(images, job = {}, opts = {}) {
  * @param {string} args.orderNumber       — job.order_number
  * @param {string|number} args.jobId      — job.id
  * @param {'job'|'root'} [args.destinationLayout] — defaults to 'job'
- * @param {string} [args.stripPrefix]     — controller.stripOrderNumberPrefix
+ * @param {string[]} [args.stripPrefixes] — array of prefixes (M7); longest-
+ *   match-first, one leading '-'/'_' dropped after match, never strips to
+ *   empty. Non-array / empty → no strip. Formerly a single-string
+ *   `stripPrefix`; the field is now `stripOrderNumberPrefixes: string[]`
+ *   on controller records and the route literals read it via
+ *   printUtils.readStripPrefixes.
  * @returns {string}
  */
-function buildDestFolder({ outputPath, orderNumber, jobId, destinationLayout, stripPrefix }) {
+function buildDestFolder({ outputPath, orderNumber, jobId, destinationLayout, stripPrefixes }) {
   const layout   = destinationLayout === 'root' ? 'root' : 'job';
   const outRoot  = typeof outputPath === 'string' ? outputPath : '';
   if (layout === 'root') return outRoot;
 
-  const strippedOrder = _stripPrefix(orderNumber || '', typeof stripPrefix === 'string' ? stripPrefix : '');
+  const strippedOrder = _stripPrefixMulti(
+    orderNumber || '',
+    Array.isArray(stripPrefixes) ? stripPrefixes : [],
+  );
   const destJobFolderName = `${strippedOrder}_${jobId}`;
   return outRoot ? path.join(outRoot, destJobFolderName) : destJobFolderName;
 }

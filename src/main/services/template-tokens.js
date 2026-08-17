@@ -1,6 +1,6 @@
 'use strict';
 
-const { stripOrderNumberPrefix } = require('../../shared/printUtils');
+const { stripOrderNumberPrefixMulti } = require('../../shared/printUtils');
 
 /**
  * template-tokens
@@ -17,7 +17,7 @@ const { stripOrderNumberPrefix } = require('../../shared/printUtils');
  * Tokens are case-sensitive. The values come from three sources:
  *   - `job`  — order-level fields shared across every image in the job
  *   - `ctx`  — per-image context (filename, originalFilename, index, quantity, imageCount)
- *   - `opts` — dispatch-level options (stripPrefix, injected clock for {date})
+ *   - `opts` — dispatch-level options (stripPrefixes, injected clock for {date})
  *
  * Empty/missing values resolve to empty string rather than throwing — the
  * resulting line still gets written, just with the token slot blank. This
@@ -41,10 +41,13 @@ const { stripOrderNumberPrefix } = require('../../shared/printUtils');
  *   {lastName}         Everything after the first space (or empty)
  *   {jobId}            OrderHub job ID (numeric)
  *   {orderNumber}      Order number (e.g. "PXDEMO-091YEC")
- *                      — with opts.stripPrefix set, matching leading prefix
- *                      is removed via printUtils.stripOrderNumberPrefix
+ *                      — with opts.stripPrefixes set to an array of prefix
+ *                      strings, matching leading prefix is removed via
+ *                      printUtils.stripOrderNumberPrefixMulti (longest-first,
+ *                      case-insensitive, drops one trailing '-'/'_' separator,
+ *                      never strips to empty per candidate)
  *   {jobName}          Job name (e.g. "PXDEMO-091YEC-1") — falls back to
- *                      orderNumber; same stripPrefix rule as above
+ *                      orderNumber; same stripPrefixes rule as above
  *   {product}          Product display name (e.g. '4x6" Photo Print')
  *   {productCode}      Product code (e.g. '0406-cut-print')
  *   {category}         job.category
@@ -177,10 +180,10 @@ function _padIndex(index, imageCount) {
  * @param {object} [ctx]  — per-image context (filename, originalFilename,
  *   quantity, index, imageCount).
  * @param {object} [opts] — dispatch-level options.
- * @param {string} [opts.stripPrefix] — leading prefix stripped from
- *   {orderNumber} and {jobName}. Blank/absent = no stripping. See
- *   printUtils.stripOrderNumberPrefix for the exact rules (case-insensitive,
- *   never strips to empty).
+ * @param {string[]} [opts.stripPrefixes] — array of leading prefixes; the
+ *   longest match against {orderNumber} / {jobName} is stripped, dropping
+ *   one following '-' or '_'. Empty array / absent = no stripping. See
+ *   printUtils.stripOrderNumberPrefixMulti for the exact rules.
  * @param {Date}   [opts.now] — injected clock for {date}. Absent = real
  *   clock. Tests MUST inject.
  * @returns {string}
@@ -197,11 +200,14 @@ function resolveTemplate(template, job = {}, ctx = {}, opts = {}) {
   if (!template) return '';
 
   const { firstName, lastName } = _splitName(job.customer_name);
-  const stripPrefix = (opts && typeof opts.stripPrefix === 'string') ? opts.stripPrefix : '';
+  // opts.stripPrefixes: array of prefixes; anything else (missing, wrong
+  // type, non-array) is treated as no-strip. Non-string / empty entries
+  // are filtered by stripOrderNumberPrefixMulti so we don't have to.
+  const stripPrefixes = (opts && Array.isArray(opts.stripPrefixes)) ? opts.stripPrefixes : [];
   const rawOrderNumber = job.order_number || '';
   const rawJobName     = job.job_name || job.order_number || '';
-  const orderNumber = stripPrefix ? stripOrderNumberPrefix(rawOrderNumber, stripPrefix) : rawOrderNumber;
-  const jobName     = stripPrefix ? stripOrderNumberPrefix(rawJobName,     stripPrefix) : rawJobName;
+  const orderNumber = stripPrefixes.length > 0 ? stripOrderNumberPrefixMulti(rawOrderNumber, stripPrefixes) : rawOrderNumber;
+  const jobName     = stripPrefixes.length > 0 ? stripOrderNumberPrefixMulti(rawJobName,     stripPrefixes) : rawJobName;
 
   // opts.now: null/undefined = real clock; anything else must be a valid
   // Date. A test that meant to be deterministic and passed a timestamp

@@ -4,6 +4,7 @@ const Store  = require('electron-store');
 const logger = require('./logger');
 const { resolveSize, resolveMedia } = require('./darkroom-pro-output');
 const { isBareWxH: _sharedIsBareWxH } = require('../../shared/printSizeShapes');
+const { readStripPrefixes } = require('../../shared/printUtils');
 
 // Routing data lives in its own named store so that config-service's default
 // Store instance (which shares config.json) cannot inadvertently overwrite
@@ -231,11 +232,15 @@ function resolveRoute(job) {
               // this controller.
               mergeOrderJobs:        overrideCtrl.mergeOrderJobs === true,
               orderMergeWaitMinutes: _readOrderMergeWaitMinutes(overrideCtrl),
-              // v1.13.0 — per-controller Strip Order Number Prefix.
-              // String or ''; the stripping helper handles blank as
-              // "no strip" so passing '' here is equivalent to absent.
-              stripOrderNumberPrefix: typeof overrideCtrl.stripOrderNumberPrefix === 'string'
-                ? overrideCtrl.stripOrderNumberPrefix : '',
+              // v1.12.2 → M7 — per-controller Strip Order Number
+              // Prefixes. Reader accepts both the new
+              // stripOrderNumberPrefixes: string[] and the legacy
+              // stripOrderNumberPrefix: string field (single-element
+              // array). ONE reader — do not inline the coercion here;
+              // four copies is a drift hazard the parity tests exist
+              // to catch, and unlike the literals themselves the
+              // reader can just be shared.
+              stripOrderNumberPrefixes: readStripPrefixes(overrideCtrl),
               surface:             overrideMapping.surface,
               surfaceCode:         overrideSurfaceCode,
               printCode:           overrideMapping.printCode,
@@ -425,11 +430,12 @@ function resolveRoute(job) {
       printSizeCode:          null,
       bannerSheet:            false,
       checkOrderStatus:       controller.checkOrderStatus !== false,
-      // M3 fields — read-time defaults ('' / 'job' / '') so a controller
+      // M3 fields — read-time defaults ('' / 'job' / []) so a controller
       // record that predates M3 behaves exactly like today's Folder Copy.
-      filenameTemplate:       (typeof controller.filenameTemplate === 'string') ? controller.filenameTemplate : '',
-      destinationLayout:      controller.destinationLayout === 'root' ? 'root' : 'job',
-      stripOrderNumberPrefix: (typeof controller.stripOrderNumberPrefix === 'string') ? controller.stripOrderNumberPrefix : '',
+      // stripOrderNumberPrefixes (M7): array; reader handles legacy string.
+      filenameTemplate:         (typeof controller.filenameTemplate === 'string') ? controller.filenameTemplate : '',
+      destinationLayout:        controller.destinationLayout === 'root' ? 'root' : 'job',
+      stripOrderNumberPrefixes: readStripPrefixes(controller),
     };
   }
 
@@ -624,12 +630,10 @@ function resolveRoute(job) {
       // drift silently breaks reassigned jobs on this controller.
       mergeOrderJobs:        controller.mergeOrderJobs === true,
       orderMergeWaitMinutes: _readOrderMergeWaitMinutes(controller),
-      // v1.13.0 — per-controller Strip Order Number Prefix. Kept in
-      // exact parity with the override branch above. String or '';
-      // stripOrderNumberPrefix in src/shared/printUtils treats blank
-      // as "no strip".
-      stripOrderNumberPrefix: typeof controller.stripOrderNumberPrefix === 'string'
-        ? controller.stripOrderNumberPrefix : '',
+      // v1.12.2 → M7 — per-controller Strip Order Number Prefixes.
+      // Same reader as the override branch above; parity locked by
+      // routing-picpro-strip-prefixes-parity.test.js.
+      stripOrderNumberPrefixes: readStripPrefixes(controller),
       // Channel-resolved fields
       surface:             channelMapping.surface,
       surfaceCode,
@@ -806,9 +810,9 @@ function resolveRouteForController(job, controllerId) {
       printSizeCode:          null,
       bannerSheet:            false,
       checkOrderStatus:       controller.checkOrderStatus !== false,
-      filenameTemplate:       (typeof controller.filenameTemplate === 'string') ? controller.filenameTemplate : '',
-      destinationLayout:      controller.destinationLayout === 'root' ? 'root' : 'job',
-      stripOrderNumberPrefix: (typeof controller.stripOrderNumberPrefix === 'string') ? controller.stripOrderNumberPrefix : '',
+      filenameTemplate:         (typeof controller.filenameTemplate === 'string') ? controller.filenameTemplate : '',
+      destinationLayout:        controller.destinationLayout === 'root' ? 'root' : 'job',
+      stripOrderNumberPrefixes: readStripPrefixes(controller),
     };
   }
 

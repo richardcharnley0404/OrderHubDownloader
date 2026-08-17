@@ -253,7 +253,9 @@ function _synthWarnings(stats, sampleSize, filenameTemplate, jobOptions) {
  * @param {string} [input.filenameTemplate]       — free-text template.
  *   Blank keeps the original filenames (§4.1 no-change lock).
  * @param {'job'|'root'} [input.destinationLayout]— defaults to 'job'.
- * @param {string} [input.stripOrderNumberPrefix] — controller strip prefix.
+ * @param {string[]} [input.stripOrderNumberPrefixes] — controller strip
+ *   prefix list (M7). Non-array → treated as []. Entries trimmed;
+ *   empty entries filtered.
  *
  * @param {object} [deps] — injectable dependencies (all optional; sensible
  *   defaults for production wiring in the IPC handler).
@@ -269,7 +271,13 @@ async function buildFolderCopyPreview(input = {}, deps = {}) {
   const outputPath        = typeof input.outputPath === 'string' ? input.outputPath : '';
   const filenameTemplate  = typeof input.filenameTemplate === 'string' ? input.filenameTemplate.trim() : '';
   const destinationLayout = input.destinationLayout === 'root' ? 'root' : 'job';
-  const stripPrefix       = typeof input.stripOrderNumberPrefix === 'string' ? input.stripOrderNumberPrefix.trim() : '';
+  // M7: stripOrderNumberPrefixes is a list. Non-array → []. Each entry
+  // trimmed; empty entries filtered by the multi-prefix helper downstream.
+  const stripPrefixes = Array.isArray(input.stripOrderNumberPrefixes)
+    ? input.stripOrderNumberPrefixes
+        .map(p => typeof p === 'string' ? p.trim() : '')
+        .filter(p => p.length > 0)
+    : [];
 
   const {
     listJobs             = () => [],
@@ -296,8 +304,8 @@ async function buildFolderCopyPreview(input = {}, deps = {}) {
   // The planner is pure and cheap; running it on 40 iterations of
   // string replacement costs nothing. Slice for display only.
   const { files: allFiles, stats } = buildCopyFilenames(source.images, source.job, {
-    template:    filenameTemplate,
-    stripPrefix,
+    template:      filenameTemplate,
+    stripPrefixes,
   });
   const displayedFiles = allFiles.slice(0, MAX_PREVIEW_SAMPLES);
 
@@ -309,7 +317,7 @@ async function buildFolderCopyPreview(input = {}, deps = {}) {
     orderNumber: source.job.order_number,
     jobId:       source.job.id,
     destinationLayout,
-    stripPrefix,
+    stripPrefixes,
   });
 
   const filesWithPaths = displayedFiles.map(f => ({

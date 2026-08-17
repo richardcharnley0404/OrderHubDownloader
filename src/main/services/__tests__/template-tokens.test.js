@@ -65,9 +65,10 @@ test('existing tokens unaffected', () => {
 // operator an explanation.
 //
 // Concrete negative-control check performed OUT OF BAND during M1 build:
-// temporarily give the new opts.stripPrefix a default of 'PXDEMO-' and this
-// suite fails at the {orderNumber} and {jobName} rows for 'PXDEMO-091YEC'.
-// That confirms the tripwire notices the exact class of mistake the brief
+// temporarily give the new opts.stripPrefixes (M7-renamed from
+// opts.stripPrefix) a default of ['PXDEMO-'] and this suite fails at
+// the {orderNumber} and {jobName} rows for 'PXDEMO-091YEC'. That
+// confirms the tripwire notices the exact class of mistake the brief
 // warns about — do not codify that broken variant here (it is a build-time
 // verification, not a permanent test).
 
@@ -202,7 +203,7 @@ for (const c of TRIPWIRE_CASES) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════
-// M1 — new tokens, {option:NAME}, {indexPadded}, opts.stripPrefix, opts.now
+// M1 — new tokens, {option:NAME}, {indexPadded}, opts.stripPrefixes, opts.now
 // ═════════════════════════════════════════════════════════════════════════
 //
 // Per docs/folder-copy-filename-templates-brief.md §3.6. Every date-dependent
@@ -447,28 +448,33 @@ test('M1 {date} 3-arg call (no opts) falls back to real clock', () => {
   assert.match(out, /^\d{4}-\d{2}-\d{2}$/, `expected YYYY-MM-DD, got "${out}"`);
 });
 
-// ── opts.stripPrefix ────────────────────────────────────────────────────
-test('M1 stripPrefix applies to {orderNumber}', () => {
+// ── opts.stripPrefixes (M7: renamed from opts.stripPrefix; now an array) ─
+// Delegates to printUtils.stripOrderNumberPrefixMulti — see that module's
+// tests for the full multi-prefix semantics (longest-first sort inside the
+// helper, separator drop, never-strip-to-empty per candidate). The tests
+// here lock the resolver's wiring: which tokens the strip applies to,
+// how the empty-array/absent cases behave, and defensive typing.
+test('M1 stripPrefixes applies to {orderNumber}', () => {
   assert.equal(
-    resolveTemplate('{orderNumber}', JOB_M1, {}, { stripPrefix: 'PXDEMO-' }),
+    resolveTemplate('{orderNumber}', JOB_M1, {}, { stripPrefixes: ['PXDEMO-'] }),
     '091YEC',
   );
 });
-test('M1 stripPrefix applies to {jobName}', () => {
+test('M1 stripPrefixes applies to {jobName}', () => {
   assert.equal(
-    resolveTemplate('{jobName}', JOB_M1, {}, { stripPrefix: 'PXDEMO-' }),
+    resolveTemplate('{jobName}', JOB_M1, {}, { stripPrefixes: ['PXDEMO-'] }),
     '091YEC-1',
   );
 });
-test('M1 stripPrefix applies to {jobName} fallback (order_number)', () => {
+test('M1 stripPrefixes applies to {jobName} fallback (order_number)', () => {
   assert.equal(
     resolveTemplate('{jobName}',
-      { order_number: 'PXDEMO-091YEC' }, {}, { stripPrefix: 'PXDEMO-' }),
+      { order_number: 'PXDEMO-091YEC' }, {}, { stripPrefixes: ['PXDEMO-'] }),
     '091YEC',
   );
 });
-test('M1 stripPrefix does NOT apply to {jobId}, {customerName}, {product}', () => {
-  // stripPrefix is scoped to order-derived tokens. Verifying it doesn't
+test('M1 stripPrefixes does NOT apply to {jobId}, {customerName}, {product}', () => {
+  // stripPrefixes is scoped to order-derived tokens. Verifying it doesn't
   // leak into other tokens whose values happen to share the prefix text.
   const job = {
     id: 12345,
@@ -478,61 +484,104 @@ test('M1 stripPrefix does NOT apply to {jobId}, {customerName}, {product}', () =
     product: 'PXDEMO-Prints',
   };
   assert.equal(
-    resolveTemplate('{jobId}|{customerName}|{product}', job, {}, { stripPrefix: 'PXDEMO-' }),
+    resolveTemplate('{jobId}|{customerName}|{product}', job, {}, { stripPrefixes: ['PXDEMO-'] }),
     '12345|PXDEMO-Richard|PXDEMO-Prints',
   );
 });
-test('M1 stripPrefix blank is a no-op', () => {
+test('M1 stripPrefixes empty array is a no-op', () => {
   assert.equal(
-    resolveTemplate('{orderNumber}', JOB_M1, {}, { stripPrefix: '' }),
+    resolveTemplate('{orderNumber}', JOB_M1, {}, { stripPrefixes: [] }),
     'PXDEMO-091YEC',
   );
 });
-test('M1 stripPrefix absent is a no-op (opts unset)', () => {
+test('M1 stripPrefixes absent is a no-op (opts unset)', () => {
   assert.equal(
     resolveTemplate('{orderNumber}', JOB_M1, {}, {}),
     'PXDEMO-091YEC',
   );
 });
-test('M1 stripPrefix never strips to empty', () => {
-  // Delegates to printUtils.stripOrderNumberPrefix, which returns the original
-  // when the prefix matches the whole value. Locking the delegation here
-  // rather than duplicating the rule.
+test('M1 stripPrefixes never strips to empty', () => {
+  // Delegates to printUtils.stripOrderNumberPrefixMulti's per-candidate
+  // never-strip-to-empty rule. Locking the delegation here.
   assert.equal(
     resolveTemplate('{orderNumber}',
-      { order_number: 'PXDEMO-' }, {}, { stripPrefix: 'PXDEMO-' }),
+      { order_number: 'PXDEMO-' }, {}, { stripPrefixes: ['PXDEMO-'] }),
     'PXDEMO-',
   );
 });
-test('M1 stripPrefix is case-insensitive on the match', () => {
+test('M1 stripPrefixes is case-insensitive on the match', () => {
   assert.equal(
     resolveTemplate('{orderNumber}',
-      { order_number: 'pxdemo-Abc9' }, {}, { stripPrefix: 'PXDEMO-' }),
+      { order_number: 'pxdemo-Abc9' }, {}, { stripPrefixes: ['PXDEMO-'] }),
     'Abc9',
   );
   assert.equal(
     resolveTemplate('{orderNumber}',
-      { order_number: 'PXDEMO-Abc9' }, {}, { stripPrefix: 'pxdemo-' }),
+      { order_number: 'PXDEMO-Abc9' }, {}, { stripPrefixes: ['pxdemo-'] }),
     'Abc9',
   );
 });
-test('M1 stripPrefix non-leading match untouched', () => {
+test('M1 stripPrefixes non-leading match untouched', () => {
   assert.equal(
     resolveTemplate('{orderNumber}',
-      { order_number: 'X-PXDEMO-1' }, {}, { stripPrefix: 'PXDEMO-' }),
+      { order_number: 'X-PXDEMO-1' }, {}, { stripPrefixes: ['PXDEMO-'] }),
     'X-PXDEMO-1',
   );
 });
-test('M1 stripPrefix ignored for non-string values (defensive)', () => {
-  // opts.stripPrefix must be a string; anything else falls back to no-op.
-  // Belt-and-braces against a caller passing e.g. undefined via config load.
+test('M1 stripPrefixes ignored for non-array values (defensive)', () => {
+  // opts.stripPrefixes must be an array; anything else falls back to
+  // no-op. Belt-and-braces against a caller who forgot to migrate from
+  // the old single-string opts.stripPrefix (which would still be a
+  // string here) or a hand-edited config.
   assert.equal(
-    resolveTemplate('{orderNumber}', JOB_M1, {}, { stripPrefix: undefined }),
+    resolveTemplate('{orderNumber}', JOB_M1, {}, { stripPrefixes: undefined }),
     'PXDEMO-091YEC',
   );
   assert.equal(
-    resolveTemplate('{orderNumber}', JOB_M1, {}, { stripPrefix: null }),
+    resolveTemplate('{orderNumber}', JOB_M1, {}, { stripPrefixes: null }),
     'PXDEMO-091YEC',
+  );
+  // Old-shape string is IGNORED — the caller must migrate. The old
+  // opts.stripPrefix name is no longer read at all.
+  assert.equal(
+    resolveTemplate('{orderNumber}', JOB_M1, {}, { stripPrefixes: 'PXDEMO-' }),
+    'PXDEMO-091YEC',
+  );
+});
+
+// M7 — multi-prefix behaviour reaches the resolver
+test('M7 stripPrefixes: multi-prefix wins with longest-match-first', () => {
+  // Regardless of the operator's input order, PXDEMO1-091YEC must
+  // strip via PXDEMO1 to '091YEC' (never via PXDEMO to '1-091YEC').
+  const both = ['PXDEMO', 'PXDEMO1'];
+  assert.equal(
+    resolveTemplate('{orderNumber}',
+      { order_number: 'PXDEMO1-091YEC' }, {}, { stripPrefixes: both }),
+    '091YEC',
+  );
+  const reversed = ['PXDEMO1', 'PXDEMO'];
+  assert.equal(
+    resolveTemplate('{orderNumber}',
+      { order_number: 'PXDEMO1-091YEC' }, {}, { stripPrefixes: reversed }),
+    '091YEC',
+  );
+});
+test('M7 stripPrefixes: multiple prefixes strip whichever matches (Richard config)', () => {
+  const list = ['ORD', 'PXDEMO', 'POS'];
+  assert.equal(
+    resolveTemplate('{orderNumber}',
+      { order_number: 'ORD-091YEC' }, {}, { stripPrefixes: list }),
+    '091YEC',
+  );
+  assert.equal(
+    resolveTemplate('{orderNumber}',
+      { order_number: 'POS-091YEC' }, {}, { stripPrefixes: list }),
+    '091YEC',
+  );
+  assert.equal(
+    resolveTemplate('{orderNumber}',
+      { order_number: 'ZZZ-091YEC' }, {}, { stripPrefixes: list }),
+    'ZZZ-091YEC',
   );
 });
 

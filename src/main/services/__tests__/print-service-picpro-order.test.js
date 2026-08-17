@@ -45,6 +45,8 @@ const __markCommittedCalls       = [];
 const __dequeueCalls             = [];
 const __updateJobLocallyCalls    = [];
 const __seqCalls                 = [];   // orderNumber -> id issued
+const __rawIds                   = {};   // M7 idempotent map: rawOrderId → issuedId
+const __getOrCreateCalls         = [];   // M7: getOrCreateSubmissionId invocations
 let   __seqCounters              = {};   // orderNumber -> lastSeq
 let   __stageThrows              = null;
 let   __writeThrows              = null;
@@ -64,6 +66,9 @@ function resetCaptures() {
   __updateJobLocallyCalls.length = 0;
   __seqCalls.length              = 0;
   __seqCounters                  = {};
+  // M7: reset the raw-id map + call log.
+  for (const k of Object.keys(__rawIds)) delete __rawIds[k];
+  __getOrCreateCalls.length      = 0;
   __stageThrows                  = null;
   __writeThrows                  = null;
   __enqueueThrows                = null;
@@ -188,6 +193,38 @@ const fakeOrderSubmissionSeq = {
       return lastSeq
         ? { lastSeq, lastIssuedAt: '2026-01-01T00:00:00.000Z', lastId: lastSeq === 1 ? key : `${key}-${lastSeq}` }
         : null;
+    },
+    // M7 — idempotent-per-rawOrderId allocation. Same raw in → same id
+    // out (retry-safe). Different raw sharing a displayBase → -2/-3.
+    // Semantics locked directly in order-submission-seq.test.js; this
+    // fake reproduces the same contract so the print-service tests can
+    // observe the single-job dispatch behaviour end-to-end.
+    getOrCreateSubmissionId: (rawOrderId, displayBase) => {
+      __getOrCreateCalls.push({ rawOrderId, displayBase });
+      if (typeof rawOrderId !== 'string' || rawOrderId.trim().length === 0) {
+        throw new Error('getOrCreateSubmissionId requires a non-empty rawOrderId string');
+      }
+      const existing = __rawIds[rawOrderId];
+      if (existing) return existing;
+      // Miss: allocate via the counter and remember the pairing.
+      const base = (typeof displayBase === 'string' && displayBase.length > 0)
+        ? displayBase
+        : rawOrderId;
+      const key  = base;
+      const prev = __seqCounters[key] || 0;
+      const next = prev + 1;
+      __seqCounters[key] = next;
+      const id = next === 1 ? base : `${base}-${next}`;
+      __rawIds[rawOrderId] = id;
+      // Record on __seqCalls too — the merge-path tests inspect that
+      // capture; getOrCreate delegates to nextSubmissionId semantics
+      // so the observable capture stays consistent.
+      __seqCalls.push({ orderNumber: rawOrderId, displayBase });
+      return id;
+    },
+    peekRawId: (rawOrderId) => {
+      const id = __rawIds[rawOrderId];
+      return id ? { issuedId: id, issuedAt: '2026-01-01T00:00:00.000Z' } : null;
     },
   },
   OrderSubmissionSeq: function () {},
@@ -899,8 +936,8 @@ test('stripOrderNumberPrefix: no prefix set → id is the full order number (def
   const { items, orderNumber } = await setupTwoJobGroup(t);
   // picProRoute() default does not set stripOrderNumberPrefix — verify
   // the field is absent on the route and the resulting id is untouched.
-  assert.equal(items[0].route.stripOrderNumberPrefix, undefined,
-    'the test fixture defaults to no prefix — this is the byte-identical-when-off contract');
+  assert.equal(items[0].route.stripOrderNumberPrefixes, undefined,
+    'the test fixture defaults to no prefixes — this is the byte-identical-when-off contract');
 
   const result = await printService._sendViaFujiPicProOrderRouted(items);
   assert.equal(result.success, true, `unexpected failure: ${result.error}`);
@@ -909,7 +946,7 @@ test('stripOrderNumberPrefix: no prefix set → id is the full order number (def
 
 test('stripOrderNumberPrefix: matching leading prefix → id has the prefix stripped in all three plumbings', async (t) => {
   const { items } = await setupTwoJobGroup(t, { orderNumber: 'PXDEMO-M6-A' });
-  for (const it of items) it.route.stripOrderNumberPrefix = 'PXDEMO-';
+  for (const it of items) it.route.stripOrderNumberPrefixes = ['PXDEMO-'];
 
   const result = await printService._sendViaFujiPicProOrderRouted(items);
   assert.equal(result.success, true, `unexpected failure: ${result.error}`);
@@ -933,7 +970,7 @@ test('stripOrderNumberPrefix: matching leading prefix → id has the prefix stri
 test('stripOrderNumberPrefix: prefix set but not matching → id is the full order number', async (t) => {
   // Order number does not start with the prefix — stripping is a no-op.
   const { items, orderNumber } = await setupTwoJobGroup(t, { orderNumber: 'DIVPRINTS-99' });
-  for (const it of items) it.route.stripOrderNumberPrefix = 'PXDEMO-';
+  for (const it of items) it.route.stripOrderNumberPrefixes = ['PXDEMO-'];
 
   const result = await printService._sendViaFujiPicProOrderRouted(items);
   assert.equal(result.success, true);
@@ -945,7 +982,7 @@ test('stripOrderNumberPrefix: prefix equal to the whole order number → NOT str
   // filesystem operation. The stripping helper refuses; verify that
   // refusal reaches the dispatch id.
   const { items, orderNumber } = await setupTwoJobGroup(t, { orderNumber: 'PXDEMO-' });
-  for (const it of items) it.route.stripOrderNumberPrefix = 'PXDEMO-';
+  for (const it of items) it.route.stripOrderNumberPrefixes = ['PXDEMO-'];
 
   const result = await printService._sendViaFujiPicProOrderRouted(items);
   assert.equal(result.success, true);
@@ -962,7 +999,7 @@ test('stripOrderNumberPrefix: suffixed resubmission — the -N suffix is appende
   // (for a different raw order that strips to the same base) would
   // start from 1 again — covered in the M3 unit tests.
   const { items } = await setupTwoJobGroup(t, { orderNumber: 'PXDEMO-Q9' });
-  for (const it of items) it.route.stripOrderNumberPrefix = 'PXDEMO-';
+  for (const it of items) it.route.stripOrderNumberPrefixes = ['PXDEMO-'];
 
   const first = await printService._sendViaFujiPicProOrderRouted(items);
   assert.equal(first.success, true);
@@ -986,7 +1023,7 @@ test('stripOrderNumberPrefix: case-insensitive match — casing of the tail is p
   // the tail keeps its original casing (matches the pure-helper
   // contract in printUtils.test.js).
   const { items } = await setupTwoJobGroup(t, { orderNumber: 'pxdemo-AbC9' });
-  for (const it of items) it.route.stripOrderNumberPrefix = 'PXDEMO-';
+  for (const it of items) it.route.stripOrderNumberPrefixes = ['PXDEMO-'];
 
   const result = await printService._sendViaFujiPicProOrderRouted(items);
   assert.equal(result.success, true);

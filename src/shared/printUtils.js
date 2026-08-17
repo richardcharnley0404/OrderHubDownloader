@@ -253,4 +253,111 @@ function stripOrderNumberPrefix(orderNumber, prefix) {
   return stripped;
 }
 
-module.exports = { buildFolderName, parseFolderName, extractSurname, stripOrderNumberPrefix, UNSAFE_CHARS };
+/**
+ * Multi-prefix variant of stripOrderNumberPrefix (M7).
+ *
+ * A single OHD install talks to a single OrderHub org, but that org can
+ * ship orders with several different prefixes distinguishing the source
+ * website (Richard's config: `ORD-`, `PXDEMO-`, `POS-`). Operators need
+ * to strip whichever one is on each order.
+ *
+ * Rules — all deliberate, all locked by tests:
+ *
+ *   - Longest-match-first, sorted INSIDE this helper. With `PXDEMO` and
+ *     `PXDEMO1` both configured, `PXDEMO1-091YEC` strips via `PXDEMO1`
+ *     regardless of the order the operator typed the two entries. Do
+ *     NOT push sorting to the caller — that puts the load-bearing rule
+ *     one accident away from being wrong.
+ *   - Case-insensitive on the prefix match; the surviving tail keeps
+ *     its original casing. (Same rule as the single-prefix helper.)
+ *   - After a match, drop ONE leading '-' or '_' if present. Both
+ *     `PXDEMO-` (with hyphen) and `PXDEMO` (without) behave the same;
+ *     an operator can't get it subtly wrong. Only these two separators
+ *     — a configured `PXDEMO` must NOT strip `PXDEMOX`.
+ *   - Never-strip-to-empty, PER CANDIDATE. If a match would leave
+ *     nothing behind (empty after separator drop, or the whole order
+ *     number IS the prefix), that candidate is skipped and the next
+ *     one tried. If every candidate would empty the string, the
+ *     original order number is returned unchanged.
+ *
+ * Invariants preserved from the single-prefix world:
+ *   - Empty / non-array `prefixList` → order number unchanged.
+ *   - Non-string / empty `orderNumber` → returned verbatim (defensive).
+ *   - Result is never empty; the operator always has something to name
+ *     the folder / submission id after.
+ *
+ * @param {string}   orderNumber
+ * @param {string[]} prefixList — non-strings and empty strings ignored.
+ * @returns {string}
+ */
+function stripOrderNumberPrefixMulti(orderNumber, prefixList) {
+  if (typeof orderNumber !== 'string' || orderNumber.length === 0) return orderNumber;
+  if (!Array.isArray(prefixList) || prefixList.length === 0) return orderNumber;
+  const cleaned = prefixList.filter(p => typeof p === 'string' && p.length > 0);
+  if (cleaned.length === 0) return orderNumber;
+
+  // Stable sort by length desc — longest-first. Modern JS Array.sort is
+  // stable so ties preserve input order (harmless; deterministic).
+  const sorted = [...cleaned].sort((a, b) => b.length - a.length);
+
+  for (const prefix of sorted) {
+    if (orderNumber.length < prefix.length) continue;
+    const head = orderNumber.slice(0, prefix.length);
+    if (head.toLowerCase() !== prefix.toLowerCase()) continue;
+    let stripped = orderNumber.slice(prefix.length);
+    // Drop ONE leading '-' or '_' if present. Only these two — a
+    // configured `PXDEMO` must not strip `PXDEMOX`.
+    if (stripped.length > 0 && (stripped[0] === '-' || stripped[0] === '_')) {
+      stripped = stripped.slice(1);
+    }
+    // Never strip to empty — try the next candidate.
+    if (stripped.length === 0) continue;
+    return stripped;
+  }
+  return orderNumber;
+}
+
+/**
+ * Tolerant reader for a controller record's strip-prefix configuration
+ * (M7). This function is the ONE place the "which field carries the
+ * prefixes, and what shape is it" decision lives; every route literal
+ * calls this rather than reproducing the coercion inline. Four copies
+ * of the same coercion would be the same drift hazard the parity
+ * tests exist to catch.
+ *
+ * Shape precedence:
+ *   1. `stripOrderNumberPrefixes: string[]` (M7 field) — use if present.
+ *   2. `stripOrderNumberPrefix: string`     (legacy field, v1.12.2+) —
+ *      wrapped in a single-element array. Kept on the record when
+ *      writing the new field so a downgrade to v1.12.2 code still sees
+ *      the value.
+ *   3. Neither → `[]`.
+ *
+ * Empty strings and non-strings in the array are filtered out — same
+ * defensive posture as the multi-prefix helper.
+ *
+ * @param {object} controller
+ * @returns {string[]}
+ */
+function readStripPrefixes(controller) {
+  if (!controller || typeof controller !== 'object') return [];
+  const arr = controller.stripOrderNumberPrefixes;
+  if (Array.isArray(arr)) {
+    return arr.filter(p => typeof p === 'string' && p.length > 0);
+  }
+  const legacy = controller.stripOrderNumberPrefix;
+  if (typeof legacy === 'string' && legacy.length > 0) {
+    return [legacy];
+  }
+  return [];
+}
+
+module.exports = {
+  buildFolderName,
+  parseFolderName,
+  extractSurname,
+  stripOrderNumberPrefix,
+  stripOrderNumberPrefixMulti,
+  readStripPrefixes,
+  UNSAFE_CHARS,
+};
