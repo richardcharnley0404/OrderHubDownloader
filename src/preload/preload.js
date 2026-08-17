@@ -77,6 +77,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   routingResolve:        (job)     => ipcRenderer.invoke('ohd:routing:resolve',               { job }),
   getOrderControllers:   ()        => ipcRenderer.invoke('ohd:routing:get-controllers'),
   saveOrderController:   (ctrl)    => ipcRenderer.invoke('ohd:routing:save-controller',       ctrl),
+  folderCopyPreview:     (payload) => ipcRenderer.invoke('ohd:folder-copy:preview',           payload),
   deleteOrderController: (id)      => ipcRenderer.invoke('ohd:routing:delete-controller',     { id }),
   setIgnoredOptions:     (controllerId, ignoredOptionNames) => ipcRenderer.invoke('ohd:routing:set-ignored-options', { controllerId, ignoredOptionNames }),
   getProcessMappings:    ()        => ipcRenderer.invoke('ohd:routing:get-process-mappings'),

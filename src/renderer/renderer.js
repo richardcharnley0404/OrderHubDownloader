@@ -5271,6 +5271,111 @@ function renderPhotoLineTokens() {
   }
 }
 
+// ── Folder Copy live preview (M5) ────────────────────────────────────────
+//
+// Thin renderer binding. The heavy lifting is in
+// src/main/services/folder-copy-preview.js (testable, calls the REAL
+// M1+M2 code path). This function just gathers the modal's current field
+// values, invokes the IPC, and renders the response. Debounced so it
+// does not fire on every keystroke; called on modal open and on input
+// change of the three folder_copy fields.
+//
+// Rendering is textContent + createElement only — no innerHTML on values
+// derived from data (source label, filenames, warning text). The one
+// use of innerHTML sets the container to '' (clear), which is safe.
+
+const FOLDER_COPY_PREVIEW_DEBOUNCE_MS = 250;
+let __folderCopyPreviewTimer = null;
+
+function scheduleFolderCopyPreview() {
+  if (__folderCopyPreviewTimer) clearTimeout(__folderCopyPreviewTimer);
+  __folderCopyPreviewTimer = setTimeout(_runFolderCopyPreview, FOLDER_COPY_PREVIEW_DEBOUNCE_MS);
+}
+
+async function _runFolderCopyPreview() {
+  const modal = document.getElementById('orderControllerModal');
+  if (!modal || modal.classList.contains('hidden')) return;
+  if (document.getElementById('ocType').value !== 'folder_copy') return;
+
+  const payload = {
+    controllerId:           modal.dataset.editingId || null,
+    outputPath:             document.getElementById('ocOutputPath').value,
+    filenameTemplate:       document.getElementById('ocFilenameTemplate').value,
+    destinationLayout:      document.getElementById('ocDestinationLayout').value,
+    stripOrderNumberPrefix: document.getElementById('ocStripOrderNumberPrefix').value,
+  };
+  try {
+    const preview = await window.electronAPI.folderCopyPreview(payload);
+    renderFolderCopyPreview(preview);
+  } catch (err) {
+    // Preview is best-effort — surface the failure quietly rather than
+    // interrupting the operator's edit.
+    renderFolderCopyPreview({ error: (err && err.message) || String(err) });
+  }
+}
+
+function renderFolderCopyPreview(preview) {
+  const container = document.getElementById('ocFolderCopyPreview');
+  if (!container) return;
+  container.innerHTML = '';   // clear only — no value interpolation
+
+  if (!preview || preview.error) {
+    const err = document.createElement('div');
+    err.style.cssText = 'font-size:12px;color:var(--text-muted,#888)';
+    err.textContent = 'Preview unavailable' + (preview && preview.error ? `: ${preview.error}` : '.');
+    container.appendChild(err);
+    return;
+  }
+
+  // Source label — the operator MUST be able to tell "sample data" from
+  // "real job 12345" at a glance. Colour signals synthetic vs real.
+  const isSynthetic = preview.source && preview.source.kind === 'synthetic';
+  const label = document.createElement('div');
+  label.style.cssText = 'font-size:12px;margin-bottom:4px;color:'
+    + (isSynthetic ? 'var(--text-muted,#888)' : 'var(--text,#333)')
+    + ';font-style:' + (isSynthetic ? 'italic' : 'normal');
+  label.textContent = (preview.source && preview.source.label) || '';
+  container.appendChild(label);
+
+  // Destination folder — path length is half the point (§7 of the brief).
+  // Show the FULL destination path per file, plus the folder as its own
+  // line so layout + prefix strip are visible at a glance.
+  const monoStyle = 'font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;word-break:break-all';
+
+  if (preview.destFolder) {
+    const folderLine = document.createElement('div');
+    folderLine.style.cssText = monoStyle + ';color:var(--text,#333);margin-bottom:2px';
+    folderLine.textContent = preview.destFolder;
+    container.appendChild(folderLine);
+  }
+
+  const filesList = document.createElement('div');
+  filesList.style.cssText = 'margin-left:12px';
+  for (const f of (preview.files || [])) {
+    const line = document.createElement('div');
+    line.style.cssText = monoStyle + ';color:var(--text,#333)';
+    line.textContent = '└─ ' + f.destFilename;
+    filesList.appendChild(line);
+  }
+  container.appendChild(filesList);
+
+  if (preview.totalImageCount > preview.sampleSize) {
+    const more = document.createElement('div');
+    more.style.cssText = 'font-size:11px;color:var(--text-muted,#888);margin-top:4px';
+    more.textContent = `Showing ${preview.sampleSize} of ${preview.totalImageCount} images in this job.`;
+    container.appendChild(more);
+  }
+
+  // Warnings — visible in Settings where they can still be fixed. Same
+  // signals the M4 dispatch log emits after the fact.
+  for (const w of (preview.warnings || [])) {
+    const warnDiv = document.createElement('div');
+    warnDiv.style.cssText = 'font-size:12px;color:#c0392b;margin-top:6px';
+    warnDiv.textContent = '⚠ ' + (w.text || String(w));
+    container.appendChild(warnDiv);
+  }
+}
+
 function renderFolderCopyTokens() {
   const container = document.getElementById('ocFolderCopyTokens');
   if (!container) return;
@@ -5611,6 +5716,9 @@ function openOrderControllerModal(ctrl = null) {
       ? 'root'
       : 'job';
   renderFolderCopyTokens();
+  // Kick a first preview render — synchronous invocation is fine; the
+  // debounce inside scheduleFolderCopyPreview handles rapid re-opens.
+  scheduleFolderCopyPreview();
   // Load pipeline steps
   pipelineSteps = (ctrl && ctrl.pdfPipeline && ctrl.pdfPipeline.steps) ? JSON.parse(JSON.stringify(ctrl.pdfPipeline.steps)) : [];
   renderPipelineSteps();
@@ -5975,8 +6083,33 @@ document.getElementById('ocCancelBtn').addEventListener('click', () => {
 
 document.getElementById('ocBrowseBtn').addEventListener('click', async () => {
   const dir = await window.electronAPI.selectDirectory();
-  if (dir) document.getElementById('ocOutputPath').value = dir;
+  if (dir) {
+    document.getElementById('ocOutputPath').value = dir;
+    // Browse sets the value programmatically — doesn't fire an `input`
+    // event — so nudge the preview manually.
+    scheduleFolderCopyPreview();
+  }
 });
+
+// Folder Copy live preview — re-render on any change to the four fields
+// that shape the resolved output. `input` catches typing on text inputs;
+// `change` catches the <select> destinationLayout switch. Guarded per-
+// controller-type inside scheduleFolderCopyPreview (short-circuits when
+// type !== 'folder_copy'), so wiring here is safe for every controller
+// type — no dispatch of the preview when it isn't visible.
+for (const id of ['ocOutputPath', 'ocFilenameTemplate', 'ocStripOrderNumberPrefix']) {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('input', scheduleFolderCopyPreview);
+}
+{
+  const el = document.getElementById('ocDestinationLayout');
+  if (el) el.addEventListener('change', scheduleFolderCopyPreview);
+}
+// A controller-type flip must also refresh — moving from any other type
+// TO folder_copy needs the preview to appear without a keystroke on the
+// three folder_copy fields; moving FROM folder_copy to another type is
+// harmless because scheduleFolderCopyPreview short-circuits on type.
+document.getElementById('ocType').addEventListener('change', scheduleFolderCopyPreview);
 
 document.getElementById('ocProcessedFolderBrowseBtn').addEventListener('click', async () => {
   const dir = await window.electronAPI.selectDirectory();

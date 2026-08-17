@@ -9,6 +9,7 @@ const { awaitingReArmUpdates } = require('./services/awaiting-manifest');
 const { runTest: runPrintControllerTest } = require('./services/test-print-controller');
 const { printControllerStore } = require('./services/print-controller-store');
 const routingService = require('./services/routing-service');
+const { buildFolderCopyPreview } = require('./services/folder-copy-preview');
 const processFolderService = require('./services/process-folder-service');
 const fujiJobMakerConfig = require('./services/fuji-jobmaker-config');
 const fujiPicProConfig   = require('./services/fuji-pic-pro-config');
@@ -1505,6 +1506,35 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
     } catch (error) {
       logger.logError('ohd:routing:save-controller error', error);
       return { success: false, error: error.message };
+    }
+  });
+
+  // ── Live preview for Folder Copy filename templates (M5) ──────────────
+  //
+  // Given the three modal-editable fields (+ outputPath + optional
+  // controllerId), returns 2-3 resolved sample filenames plus the full
+  // destination path plus warnings synthesised from the M2 stats. The
+  // heavy lifting is in folder-copy-preview.js — deliberately in a
+  // testable module rather than inline here — and the sample source
+  // is deps-injected so tests can pin sample selection without touching
+  // real cached jobs or the on-disk manifest.
+  //
+  // READ-ONLY. The service module and the deps below never write.
+  ipcMain.handle('ohd:folder-copy:preview', async (event, payload) => {
+    try {
+      return await buildFolderCopyPreview(payload || {}, {
+        listJobs:             () => {
+          const snap = jobService.getLocalJobs();
+          return (snap && Array.isArray(snap.jobs)) ? snap.jobs : [];
+        },
+        resolveRouteFor:      (job) => routingService.resolveRoute(job),
+        getDownloadDirectory: () => configService.get('downloadDirectory'),
+      });
+    } catch (err) {
+      logger.logError('[folder-copy:preview] failed', err);
+      // A preview failure should not block the modal — surface a shape
+      // the renderer can safely render as "preview unavailable".
+      return { error: err.message || String(err) };
     }
   });
 
