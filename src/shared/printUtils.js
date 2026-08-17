@@ -10,6 +10,16 @@
 
 // Characters that are unsafe in Windows/NTFS folder names.
 // Spaces are intentionally left — they improve readability.
+//
+// EXPORTED (M2) so folder-copy-filename.js can share the same character
+// class rather than growing a second one. A divergence between folder
+// naming and file naming is a future bug. Additive export only — do not
+// change the character class without checking every caller.
+//
+// Sharp edge: this regex has the `g` flag, which makes it stateful under
+// .test() / .exec() (they mutate lastIndex). Every caller in the repo
+// uses it with .replace() only, where `g` just means "replace all" and
+// no state carries over. Keep it that way.
 const UNSAFE_CHARS = /["/\\:*?<>|]/g;
 
 /**
@@ -243,4 +253,4 @@ function stripOrderNumberPrefix(orderNumber, prefix) {
   return stripped;
 }
 
-module.exports = { buildFolderName, parseFolderName, extractSurname, stripOrderNumberPrefix };
+module.exports = { buildFolderName, parseFolderName, extractSurname, stripOrderNumberPrefix, UNSAFE_CHARS };
