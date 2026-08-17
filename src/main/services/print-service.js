@@ -35,7 +35,7 @@ const { resolveManifestPath } = require('./manifest-path');
 const { resolveDispatchImageSource } = require('./dispatch-image-source');
 const logger = require('./logger');
 const { buildFolderName, stripOrderNumberPrefix } = require('../../shared/printUtils');
-const { buildCopyFilenames } = require('./folder-copy-filename');
+const { buildCopyFilenames, buildDestFolder } = require('./folder-copy-filename');
 
 // Manifest filename is {orderNumber}.json (e.g. PXDEMO-K9MYDG.json)
 
@@ -2310,9 +2310,6 @@ class PrintService {
     // NEVER stripped — the ingester wrote the folder using the raw order
     // number. Reusing this for the destination would be tripwire #3.
     const sourceJobFolderName = `${job.order_number}_${job.id}`;
-    // Stripped when the controller opts in; byte-identical to
-    // sourceJobFolderName when stripPrefix is blank (§6.2 no-change lock).
-    const destJobFolderName   = `${stripOrderNumberPrefix(job.order_number, stripPrefix)}_${job.id}`;
 
     const orderFolderPath = path.join(downloadDirectory, orderFolderName);
     const jobFolderPath   = path.join(orderFolderPath, sourceJobFolderName);
@@ -2358,9 +2355,16 @@ class PrintService {
     // Layout decides only the destination folder. Filenames come from the
     // planner; a blank template → basenames verbatim (the no-change lock),
     // so the 'job' + blank branch reproduces pre-M4 output byte-for-byte.
-    const destFolder = (destinationLayout === 'root')
-      ? route.outputPath
-      : path.join(route.outputPath, destJobFolderName);
+    // The rule is implemented ONCE in folder-copy-filename.buildDestFolder
+    // — the M5 live preview calls the same helper, so preview + dispatch
+    // can never disagree on where a file will land.
+    const destFolder = buildDestFolder({
+      outputPath:  route.outputPath,
+      orderNumber: job.order_number,
+      jobId:       job.id,
+      destinationLayout,
+      stripPrefix,
+    });
 
     const { files, stats } = buildCopyFilenames(imageFiles, job, {
       template:    filenameTemplate,

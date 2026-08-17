@@ -84,51 +84,56 @@ const NO_JOBS_DEPS = {
 // THE core test: preview output == buildCopyFilenames output, directly
 // ═════════════════════════════════════════════════════════════════════════
 
-test('preview runs the REAL M2 planner — equality with buildCopyFilenames, no literal comparisons', async () => {
-  // Force the synthetic sample so the inputs to both calls are identical
-  // and reproducible. Under a template that produces a collision plus a
-  // truncation we exercise all three stats fields at once, so if any of
-  // {suffixed, truncated, fallbacks} silently drift between the preview
-  // and the planner this test catches it.
-  const template = '{product}';   // all 3 synthetic images collide on the same product name
+test('preview runs the REAL M2 planner on the FULL image list — equality with buildCopyFilenames on ALL images', async () => {
+  // The core invariant, restated for M5a: the preview must be honest
+  // about what dispatch will do. That means the planner runs on every
+  // image in the source, not on a display-slice, so ctx.imageCount and
+  // within-call collision detection see the true count. The displayed
+  // filenames are the first MAX_PREVIEW_SAMPLES of the planner's output.
+  // The stats are the planner's stats verbatim.
+  const template = '{product}';   // all synthetic images collide on the same product name
 
   const preview = await buildFolderCopyPreview(
     { filenameTemplate: template, destinationLayout: 'job', outputPath: '/x' },
     NO_JOBS_DEPS,
   );
 
-  // Recompute by calling the PLANNER DIRECTLY with the same sample.
-  const sample = SYNTHETIC_IMAGES.slice(0, MAX_PREVIEW_SAMPLES).map(i => ({ ...i }));
-  const direct = buildCopyFilenames(sample, SYNTHETIC_JOB, {
+  // Recompute by calling the PLANNER DIRECTLY with the FULL image list.
+  const allImages = SYNTHETIC_IMAGES.map(i => ({ ...i }));
+  const direct    = buildCopyFilenames(allImages, SYNTHETIC_JOB, {
     template,
     stripPrefix: '',
   });
 
-  // Filenames must match exactly.
+  // Displayed filenames == first MAX_PREVIEW_SAMPLES of the planner's
+  // full-run output. NOT compared against a literal — asserted against
+  // the planner's own return so any change to buildCopyFilenames flows
+  // through this test automatically.
   assert.deepEqual(
     preview.files.map(f => f.destFilename),
-    direct.files.map(f => f.destFilename),
-    'preview filenames must be byte-identical to what the M2 planner produced',
+    direct.files.slice(0, MAX_PREVIEW_SAMPLES).map(f => f.destFilename),
+    'displayed filenames must be the first MAX_PREVIEW_SAMPLES of the FULL planner run',
   );
-  // Stats must match exactly.
+  // Stats must match the FULL run exactly.
   assert.deepEqual(preview.stats, direct.stats,
-    'preview stats must be identical to the planner stats');
+    'preview stats must be identical to the planner stats for the FULL image list');
 });
 
-test('preview equality holds under strip prefix — {orderNumber}/{jobName} paths flow through', async () => {
+test('preview equality holds under strip prefix — full-list run reaches the planner unchanged', async () => {
   const template = '{orderNumber}-{index}';
   const stripPrefix = 'PXDEMO-';
   const preview = await buildFolderCopyPreview(
     { filenameTemplate: template, destinationLayout: 'job', outputPath: '/x', stripOrderNumberPrefix: stripPrefix },
     NO_JOBS_DEPS,
   );
-  const sample = SYNTHETIC_IMAGES.slice(0, MAX_PREVIEW_SAMPLES).map(i => ({ ...i }));
-  const direct = buildCopyFilenames(sample, SYNTHETIC_JOB, { template, stripPrefix });
+  const allImages = SYNTHETIC_IMAGES.map(i => ({ ...i }));
+  const direct    = buildCopyFilenames(allImages, SYNTHETIC_JOB, { template, stripPrefix });
   assert.deepEqual(
     preview.files.map(f => f.destFilename),
-    direct.files.map(f => f.destFilename),
+    direct.files.slice(0, MAX_PREVIEW_SAMPLES).map(f => f.destFilename),
     'stripPrefix must reach the planner through the preview call unchanged',
   );
+  assert.deepEqual(preview.stats, direct.stats);
 });
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -356,10 +361,10 @@ test('real manifest: sample size clamped to MAX_PREVIEW_SAMPLES and totalImageCo
   assert.equal(out.files.length,      MAX_PREVIEW_SAMPLES);
 });
 
-test('real manifest: preview filenames come from the REAL planner given the REAL sample', async () => {
+test('real manifest: preview filenames come from the REAL planner run on ALL images', async () => {
   // Same equality-with-planner test but using a real job manifest rather
-  // than the synthetic sample. If the sample extraction changes shape,
-  // the direct call below reproduces it.
+  // than the synthetic sample. The planner runs on the FULL image list;
+  // the preview shows the first MAX_PREVIEW_SAMPLES.
   const template = '{jobId}-x{quantity}';
   const out = await buildFolderCopyPreview(
     { filenameTemplate: template, outputPath: '/x' },
@@ -370,18 +375,158 @@ test('real manifest: preview filenames come from the REAL planner given the REAL
       readManifest:         manifestReaderFor({ 'PXDEMO-RECENT': REAL_MANIFEST }),
     },
   );
-  // Rebuild the same sample locally.
-  const sample = REAL_MANIFEST.jobs[0].images.slice(0, MAX_PREVIEW_SAMPLES).map(img => ({
+  // Rebuild the SAME sample the preview would have extracted — but for
+  // ALL images, not just the first three.
+  const allImages = REAL_MANIFEST.jobs[0].images.map(img => ({
     sourcePath:       path.basename(img.filename),
     filename:         path.basename(img.filename),
     quantity:         img.quantity,
     originalFilename: img.originalFilename,
   }));
-  const direct = buildCopyFilenames(sample, JOB_RECENT, { template, stripPrefix: '' });
+  const direct = buildCopyFilenames(allImages, JOB_RECENT, { template, stripPrefix: '' });
+  // Displayed filenames = first 3 of the full-run output.
   assert.deepEqual(
     out.files.map(f => f.destFilename),
-    direct.files.map(f => f.destFilename),
+    direct.files.slice(0, MAX_PREVIEW_SAMPLES).map(f => f.destFilename),
   );
+  // Stats come from the FULL run.
+  assert.deepEqual(out.stats, direct.stats);
+});
+
+// ═════════════════════════════════════════════════════════════════════════
+// M5a — planner runs on FULL images, slice for DISPLAY only
+// ═════════════════════════════════════════════════════════════════════════
+//
+// Pre-M5a the preview sliced source.images to 3 BEFORE calling the M2
+// planner. Two silent failures:
+//
+//   1. ctx.imageCount was 3, so {indexPadded} width was 1. A 40-image
+//      job with template `x{indexPadded}` previewed as x1, x2, x3 and
+//      then dispatched as x01 … x40. The preview showed filenames that
+//      were not the filenames.
+//   2. Within-call collision detection only saw 3 of 40, so the
+//      suffix warning under-reported. A template lacking any index
+//      token previewed with no warning at all and then auto-suffixed
+//      39 files at dispatch — the warning went quiet exactly when it
+//      mattered.
+//
+// Fix: run the planner on the FULL image list, slice for display only.
+
+function makeManyImageManifest(count) {
+  return {
+    jobs: [{
+      jobId: String(JOB_RECENT.id),
+      images: Array.from({ length: count }, (_, i) => ({
+        filename:         `IMG_${String(i + 1).padStart(4, '0')}.jpg`,
+        quantity:         1,
+        originalFilename: `IMG_${String(i + 1).padStart(4, '0')}.jpg`,
+      })),
+    }],
+  };
+}
+
+test('M5a: 40-image source with x{indexPadded} — displayed names are x01, x02, x03 (width from 40, not 3)', async () => {
+  const manifest40 = makeManyImageManifest(40);
+  const out = await buildFolderCopyPreview(
+    { filenameTemplate: 'x{indexPadded}', outputPath: '/x' },
+    {
+      listJobs:             () => [JOB_RECENT],
+      resolveRouteFor:      () => null,
+      getDownloadDirectory: () => '/tmp',
+      readManifest:         manifestReaderFor({ 'PXDEMO-RECENT': manifest40 }),
+    },
+  );
+  assert.equal(out.totalImageCount, 40);
+  assert.equal(out.sampleSize,       MAX_PREVIEW_SAMPLES);
+  // Width is String(40).length === 2, so 1 → '01', 2 → '02', 3 → '03'.
+  assert.deepEqual(
+    out.files.map(f => f.destFilename),
+    ['x01.jpg', 'x02.jpg', 'x03.jpg'],
+    'displayed padding width must come from the FULL image count (40 → width 2), not from the displayed slice (3 → width 1)',
+  );
+});
+
+test('M5a: 100-image source with {indexPadded} → width 3 in the displayed slice', async () => {
+  // Sanity extension: 100 images → String(100).length === 3, so index
+  // 1..3 pad to 001..003.
+  const manifest100 = makeManyImageManifest(100);
+  const out = await buildFolderCopyPreview(
+    { filenameTemplate: 'img-{indexPadded}', outputPath: '/x' },
+    {
+      listJobs:             () => [JOB_RECENT],
+      resolveRouteFor:      () => null,
+      getDownloadDirectory: () => '/tmp',
+      readManifest:         manifestReaderFor({ 'PXDEMO-RECENT': manifest100 }),
+    },
+  );
+  assert.deepEqual(
+    out.files.map(f => f.destFilename),
+    ['img-001.jpg', 'img-002.jpg', 'img-003.jpg'],
+  );
+});
+
+test('M5a: 40-image source with a template lacking any index token — suffix warning names the count from ALL 40', async () => {
+  const manifest40 = makeManyImageManifest(40);
+  const out = await buildFolderCopyPreview(
+    // Every image resolves to 'same.jpg' → 39 auto-suffixes across the
+    // FULL 40. Pre-fix the planner only saw 3 and reported suffixed=2.
+    { filenameTemplate: 'same', outputPath: '/x' },
+    {
+      listJobs:             () => [JOB_RECENT],
+      resolveRouteFor:      () => null,
+      getDownloadDirectory: () => '/tmp',
+      readManifest:         manifestReaderFor({ 'PXDEMO-RECENT': manifest40 }),
+    },
+  );
+  assert.equal(out.stats.suffixed, 39,
+    'stats.suffixed must reflect the full 40-image run (39 collisions), not the 3-image slice');
+  const suffixWarn = out.warnings.find(w => w.kind === 'suffixed');
+  assert.ok(suffixWarn, 'suffix warning must fire when 39 of 40 names auto-suffixed');
+  // Warning wording quotes the count out of the FULL image count, not
+  // the displayed sample size.
+  assert.match(suffixWarn.text, /39 of 40/,
+    `expected "39 of 40" in warning text, got: ${suffixWarn.text}`);
+});
+
+test('M5a: 40-image source with x{index} — displayed slice is 1,2,3 (index token is per-image, not padded)', async () => {
+  // Complement to the {indexPadded} test — plain {index} is unpadded so
+  // width doesn't matter, but this test still exercises the "run planner
+  // on all 40" path. The stats should show zero collisions.
+  const manifest40 = makeManyImageManifest(40);
+  const out = await buildFolderCopyPreview(
+    { filenameTemplate: 'x{index}', outputPath: '/x' },
+    {
+      listJobs:             () => [JOB_RECENT],
+      resolveRouteFor:      () => null,
+      getDownloadDirectory: () => '/tmp',
+      readManifest:         manifestReaderFor({ 'PXDEMO-RECENT': manifest40 }),
+    },
+  );
+  assert.deepEqual(out.files.map(f => f.destFilename), ['x1.jpg', 'x2.jpg', 'x3.jpg']);
+  assert.equal(out.stats.suffixed, 0, 'plain {index} distinguishes every image');
+});
+
+test('M5a: 40-image full-run equality — preview.stats == buildCopyFilenames.stats(full)', async () => {
+  const manifest40 = makeManyImageManifest(40);
+  const template = 'same';
+  const out = await buildFolderCopyPreview(
+    { filenameTemplate: template, outputPath: '/x' },
+    {
+      listJobs:             () => [JOB_RECENT],
+      resolveRouteFor:      () => null,
+      getDownloadDirectory: () => '/tmp',
+      readManifest:         manifestReaderFor({ 'PXDEMO-RECENT': manifest40 }),
+    },
+  );
+  const allImages = manifest40.jobs[0].images.map(img => ({
+    sourcePath:       path.basename(img.filename),
+    filename:         path.basename(img.filename),
+    quantity:         img.quantity,
+    originalFilename: img.originalFilename,
+  }));
+  const direct = buildCopyFilenames(allImages, JOB_RECENT, { template, stripPrefix: '' });
+  assert.deepEqual(out.stats, direct.stats,
+    'preview stats must equal buildCopyFilenames stats for the FULL 40-image list');
 });
 
 // ═════════════════════════════════════════════════════════════════════════

@@ -20,7 +20,7 @@ const assert = require('node:assert/strict');
 const path   = require('node:path');
 
 const REPO = path.resolve(__dirname, '..', '..', '..', '..');
-const { buildCopyFilenames } = require(
+const { buildCopyFilenames, buildDestFolder } = require(
   path.join(REPO, 'src', 'main', 'services', 'folder-copy-filename.js'),
 );
 
@@ -901,4 +901,133 @@ test('M2-fix audit: exactly one path.extname call is on img.sourcePath', () => {
   // And that one call must be on img.sourcePath — the trusted anchor.
   assert.match(codeOnly, /path\.extname\(img\.sourcePath\)/,
     'the surviving path.extname call must be on img.sourcePath');
+});
+
+// ═════════════════════════════════════════════════════════════════════════
+// M5a — buildDestFolder: one implementation of §6.2
+// ═════════════════════════════════════════════════════════════════════════
+//
+// Extracted from _sendViaFolderCopyRouted (dispatch) and the M5 preview
+// so both callers go through the same rule. Prevents the drift hazard of
+// two independent copies (same shape as the two folder_copy route
+// literals in routing-service — except here the fix is a single helper,
+// not a parity test).
+//
+// The critical case is the NO-CHANGE LOCK: layout 'job' + blank strip
+// prefix must produce EXACTLY `${orderNumber}_${jobId}` under
+// `outputPath`, byte-identical to pre-M4 output. print-service-folder-
+// copy-routed.test.js's no-change-lock test then locks the whole chain.
+
+test('buildDestFolder no-change lock: layout=job + blank strip → path.join(outputPath, `${order}_${id}`)', () => {
+  const got = buildDestFolder({
+    outputPath:  '/hot/wf',
+    orderNumber: 'PXDEMO-091YEC',
+    jobId:       42,
+    // destinationLayout absent → defaults to 'job'
+    // stripPrefix absent      → defaults to blank
+  });
+  assert.equal(got, path.join('/hot/wf', 'PXDEMO-091YEC_42'));
+});
+
+test('buildDestFolder no-change lock: explicit "job" + blank strip → byte-identical to pre-M4', () => {
+  const got = buildDestFolder({
+    outputPath:        '/hot/wf',
+    orderNumber:       'PXDEMO-091YEC',
+    jobId:             42,
+    destinationLayout: 'job',
+    stripPrefix:       '',
+  });
+  assert.equal(got, path.join('/hot/wf', 'PXDEMO-091YEC_42'));
+});
+
+test('buildDestFolder layout=job + strip prefix: destination stripped, jobId preserved', () => {
+  const got = buildDestFolder({
+    outputPath:        '/hot/wf',
+    orderNumber:       'PXDEMO-091YEC',
+    jobId:             42,
+    destinationLayout: 'job',
+    stripPrefix:       'PXDEMO-',
+  });
+  assert.equal(got, path.join('/hot/wf', '091YEC_42'));
+});
+
+test('buildDestFolder layout=root: returns outputPath verbatim (no per-job subfolder)', () => {
+  const got = buildDestFolder({
+    outputPath:        '/hot/wf',
+    orderNumber:       'PXDEMO-091YEC',
+    jobId:             42,
+    destinationLayout: 'root',
+  });
+  assert.equal(got, '/hot/wf');
+});
+
+test('buildDestFolder layout=root ignores stripPrefix (no folder segment to strip into)', () => {
+  const got = buildDestFolder({
+    outputPath:        '/hot/wf',
+    orderNumber:       'PXDEMO-091YEC',
+    jobId:             42,
+    destinationLayout: 'root',
+    stripPrefix:       'PXDEMO-',
+  });
+  assert.equal(got, '/hot/wf');
+});
+
+test('buildDestFolder blank outputPath + layout=job: relative folder segment (preview-friendly)', () => {
+  // Preview may call this before Save with a blank outputPath; the
+  // operator still gets to see the shape.
+  const got = buildDestFolder({
+    outputPath:        '',
+    orderNumber:       'PXDEMO-091YEC',
+    jobId:             42,
+    destinationLayout: 'job',
+  });
+  assert.equal(got, 'PXDEMO-091YEC_42');
+});
+
+test('buildDestFolder blank outputPath + layout=root: returns "" (nothing to show)', () => {
+  const got = buildDestFolder({
+    outputPath:        '',
+    orderNumber:       'PXDEMO-091YEC',
+    jobId:             42,
+    destinationLayout: 'root',
+  });
+  assert.equal(got, '');
+});
+
+test('buildDestFolder destinationLayout: anything not "root" resolves to "job"', () => {
+  // Belt-and-braces read-time coercion — matches the routing-service
+  // literal's read-time coercion at print-service.js.
+  for (const bad of [undefined, null, '', 'JOB', 'Root', 'garbage', 0, false]) {
+    const got = buildDestFolder({
+      outputPath:        '/o',
+      orderNumber:       'PXT',
+      jobId:             9,
+      destinationLayout: bad,
+    });
+    assert.equal(got, path.join('/o', 'PXT_9'),
+      `destinationLayout ${JSON.stringify(bad)} must fall back to "job"`);
+  }
+});
+
+test('buildDestFolder stripPrefix never strips to empty (delegates to printUtils rule)', () => {
+  // Delegated behaviour lock — if stripping the whole order number would
+  // produce blank, printUtils.stripOrderNumberPrefix returns the original.
+  const got = buildDestFolder({
+    outputPath:  '/o',
+    orderNumber: 'PXDEMO-',
+    jobId:       42,
+    stripPrefix: 'PXDEMO-',
+  });
+  assert.equal(got, path.join('/o', 'PXDEMO-_42'),
+    'stripped-to-empty must NOT happen — order number preserved when the strip would empty it');
+});
+
+test('buildDestFolder non-string stripPrefix ignored (defensive)', () => {
+  const got = buildDestFolder({
+    outputPath:  '/o',
+    orderNumber: 'PXDEMO-091',
+    jobId:       42,
+    stripPrefix: undefined,
+  });
+  assert.equal(got, path.join('/o', 'PXDEMO-091_42'));
 });

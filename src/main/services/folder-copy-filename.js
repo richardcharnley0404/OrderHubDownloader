@@ -1,7 +1,7 @@
 'use strict';
 
 const path = require('node:path');
-const { UNSAFE_CHARS } = require('../../shared/printUtils');
+const { UNSAFE_CHARS, stripOrderNumberPrefix: _stripPrefix } = require('../../shared/printUtils');
 const { resolveTemplate } = require('./template-tokens');
 
 /**
@@ -317,4 +317,47 @@ function buildCopyFilenames(images, job = {}, opts = {}) {
   return { files, stats };
 }
 
-module.exports = { buildCopyFilenames };
+/**
+ * Build the destination folder path for a folder-copy dispatch. The one
+ * implementation of §6.2 of the brief — every caller (M4 dispatch, M5
+ * preview) must go through here. Two copies of this rule in two files
+ * is the same drift hazard as the two route literals in routing-service,
+ * except here the fix is a single helper rather than a parity test.
+ *
+ * Semantics:
+ *   layout 'root' → `outputPath` verbatim (or '' if outputPath is blank)
+ *   layout 'job'  → path.join(outputPath, `${stripped(orderNumber)}_${jobId}`)
+ *
+ * The blank-outputPath branch is deliberately shared with the preview
+ * caller: on a new controller being edited before Save the preview
+ * returns just the relative folder segment so the operator still sees
+ * the shape. Dispatch never hits that branch (outputPath is required
+ * to save the controller) but the shared handling keeps preview and
+ * dispatch honest to the same rule.
+ *
+ * ── The no-change lock (§6.2, §4.1) ─────────────────────────────────────
+ *
+ * With destinationLayout='job' and stripPrefix='' this returns EXACTLY
+ * `path.join(outputPath, `${orderNumber}_${jobId}`)`. That is the pre-M4
+ * shape every existing installation depends on. The M4 test suite locks
+ * it byte-for-byte at print-service-folder-copy-routed.test.js.
+ *
+ * @param {object} args
+ * @param {string} args.outputPath        — controller.outputPath; blank ok
+ * @param {string} args.orderNumber       — job.order_number
+ * @param {string|number} args.jobId      — job.id
+ * @param {'job'|'root'} [args.destinationLayout] — defaults to 'job'
+ * @param {string} [args.stripPrefix]     — controller.stripOrderNumberPrefix
+ * @returns {string}
+ */
+function buildDestFolder({ outputPath, orderNumber, jobId, destinationLayout, stripPrefix }) {
+  const layout   = destinationLayout === 'root' ? 'root' : 'job';
+  const outRoot  = typeof outputPath === 'string' ? outputPath : '';
+  if (layout === 'root') return outRoot;
+
+  const strippedOrder = _stripPrefix(orderNumber || '', typeof stripPrefix === 'string' ? stripPrefix : '');
+  const destJobFolderName = `${strippedOrder}_${jobId}`;
+  return outRoot ? path.join(outRoot, destJobFolderName) : destJobFolderName;
+}
+
+module.exports = { buildCopyFilenames, buildDestFolder };

@@ -2,8 +2,7 @@
 
 const path = require('node:path');
 const fs   = require('node:fs');
-const { stripOrderNumberPrefix: _stripPrefix } = require('../../shared/printUtils');
-const { buildCopyFilenames } = require('./folder-copy-filename');
+const { buildCopyFilenames, buildDestFolder } = require('./folder-copy-filename');
 const { resolveManifestPath } = require('./manifest-path');
 
 /**
@@ -245,29 +244,40 @@ async function buildFolderCopyPreview(input = {}, deps = {}) {
     controllerId, listJobs, resolveRouteFor, readManifest, getDownloadDirectory,
   });
 
-  const sampleImages = source.images.slice(0, MAX_PREVIEW_SAMPLES);
-
-  // THE ONE POINT OF THIS MODULE: the real M2 planner. Any change to
-  // buildCopyFilenames flows through this call and — because the test
-  // asserts equality against buildCopyFilenames directly — through the
-  // suite too.
-  const { files, stats } = buildCopyFilenames(sampleImages, source.job, {
+  // Run the planner on the FULL image list (M5a fix). Slicing to 3 BEFORE
+  // the planner call was two lies:
+  //   - ctx.imageCount = 3 → {indexPadded} widths derived from 3, not
+  //     the real image count. Preview showed 1/2/3; dispatch shipped
+  //     01..40. The preview was showing filenames that were not the
+  //     filenames.
+  //   - Within-call collision detection only saw 3 of 40, so
+  //     stats.suffixed under-reported. A template without an index
+  //     token previewed with no auto-suffix warning and then suffixed
+  //     39 files at dispatch — the warning went quiet exactly when it
+  //     mattered.
+  // The planner is pure and cheap; running it on 40 iterations of
+  // string replacement costs nothing. Slice for display only.
+  const { files: allFiles, stats } = buildCopyFilenames(source.images, source.job, {
     template:    filenameTemplate,
     stripPrefix,
   });
+  const displayedFiles = allFiles.slice(0, MAX_PREVIEW_SAMPLES);
 
-  // Destination folder — mirrors the M4 layout switch in
-  // _sendViaFolderCopyRouted. When outputPath is blank (a new controller
-  // being edited before Save), we return the relative part so the operator
-  // still sees the shape.
-  const destJobFolderName = `${_stripPrefix(source.job.order_number || '', stripPrefix)}_${source.job.id}`;
-  const destFolder = destinationLayout === 'root'
-    ? outputPath
-    : (outputPath ? path.join(outputPath, destJobFolderName) : destJobFolderName);
+  // Destination folder — ONE implementation of §6.2, shared with the M4
+  // dispatch path via folder-copy-filename.buildDestFolder. Preview and
+  // dispatch cannot disagree on where a file will land.
+  const destFolder = buildDestFolder({
+    outputPath,
+    orderNumber: source.job.order_number,
+    jobId:       source.job.id,
+    destinationLayout,
+    stripPrefix,
+  });
 
-  const filesWithPaths = files.map(f => ({
+  const filesWithPaths = displayedFiles.map(f => ({
     destFilename: f.destFilename,
-    destPath:     destFolder ? path.join(destFolder, f.destFilename) : f.destFilename,
+    // path.join('', name) → name, so this handles blank destFolder cleanly.
+    destPath:     path.join(destFolder, f.destFilename),
   }));
 
   return {
@@ -280,11 +290,15 @@ async function buildFolderCopyPreview(input = {}, deps = {}) {
     destinationLayout,
     destFolder,
     totalImageCount: source.images.length,
-    sampleSize:      sampleImages.length,
+    sampleSize:      displayedFiles.length,
     files:           filesWithPaths,
-    warnings:        _synthWarnings(stats, files.length),
-    // Pass stats through so the equality-with-M2 test can lock the
-    // preview against the planner's return without duplicating the shape.
+    // Warnings synthesised from the FULL-run stats — sampleSize below is
+    // deliberately allFiles.length so the wording ("N of M preview names")
+    // reflects the honest count the planner just computed on every image,
+    // not the display truncation.
+    warnings:        _synthWarnings(stats, allFiles.length),
+    // Full-run stats passed through so the equality-with-M2 test can lock
+    // the preview against buildCopyFilenames' return for the FULL list.
     stats,
   };
 }
