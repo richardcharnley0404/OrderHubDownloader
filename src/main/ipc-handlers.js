@@ -1424,24 +1424,44 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
           });
           return { success: false, error: msg };
         }
+        // Normalise at the IPC boundary — trim leading/trailing whitespace
+        // on filenameTemplate so a payload from a future renderer bug (or
+        // an external caller) can't persist a truthy whitespace-only value
+        // that M2 would treat as a real template and resolve to blank on
+        // every image. Symmetric with stripOrderNumberPrefix. This runs
+        // BEFORE the layout-specific checks so the "blank template under
+        // root" rule fires on the normalised value.
+        const trimmedTemplate = rawTemplate.trim();
+        controller.filenameTemplate = trimmedTemplate;
+        if (typeof controller.stripOrderNumberPrefix === 'string') {
+          controller.stripOrderNumberPrefix = controller.stripOrderNumberPrefix.trim();
+        }
         if (layout === 'root') {
-          const trimmed = rawTemplate.trim();
+          const trimmed = trimmedTemplate;
           if (!trimmed) {
             const msg =
               'A filename template is required when files go in the root of the copy-to folder, ' +
-              'and it must include at least one of {orderNumber}, {jobName}, {jobId}, {filename} ' +
-              'or {originalFilename} so files from different jobs don\'t overwrite each other.';
+              'and it must include at least one of {orderNumber}, {jobName} or {jobId} so files ' +
+              'from different jobs don\'t overwrite each other.';
             logger.logWarning('[routing] save-controller rejected — root layout with blank template', {
               controllerId: controller.id,
               name:         controller.name,
             });
             return { success: false, error: msg };
           }
-          if (!/\{(?:orderNumber|jobName|jobId|filename|originalFilename)\}/.test(trimmed)) {
+          // M3a: only {orderNumber}/{jobName}/{jobId} distinguish across
+          // jobs. Per-image tokens ({filename}/{originalFilename}) resolve
+          // to manifest basenames like "5_IMG.jpg" — camera filenames
+          // repeat across orders constantly, so two orders each carrying
+          // an IMG_0001.jpg at the same index resolve identically and
+          // would overwrite in root layout. Do NOT widen this regex —
+          // see the matching comment in renderer.js ocSaveBtn for the
+          // full reasoning and the token-by-token audit.
+          if (!/\{(?:orderNumber|jobName|jobId)\}/.test(trimmed)) {
             const msg =
-              'The filename template must include at least one of {orderNumber}, {jobName}, ' +
-              '{jobId}, {filename} or {originalFilename} when files go in the root of the copy-to ' +
-              'folder — otherwise files from different jobs will overwrite each other.';
+              'The filename template must include at least one of {orderNumber}, {jobName} ' +
+              'or {jobId} when files go in the root of the copy-to folder — otherwise files ' +
+              'from different jobs will overwrite each other.';
             logger.logWarning('[routing] save-controller rejected — root layout template lacks distinguishing token', {
               controllerId: controller.id,
               name:         controller.name,

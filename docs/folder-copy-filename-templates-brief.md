@@ -339,19 +339,30 @@ mirror it at the IPC boundary in `ohd:routing:save-controller`
    across orders those names *will* repeat, with nothing to disambiguate them.
 3. **`destinationLayout === 'root'` requires the template to contain at least
    one job-distinguishing token** — one of `{orderNumber}`, `{jobName}`,
-   `{jobId}`, `{filename}`, `{originalFilename}`. A root-layout template of
-   `{product}_{index}` resolves identically for every job that shares a product
-   and silently overwrites across dispatches. Within-dispatch de-duplication
-   (§4.4) cannot see that, by design — so the guard has to be here, at save
-   time, where it can actually be explained to the operator.
+   `{jobId}`. A root-layout template of `{product}_{index}` resolves
+   identically for every job that shares a product and silently overwrites
+   across dispatches. Within-dispatch de-duplication (§4.4) cannot see that,
+   by design — so the guard has to be here, at save time, where it can
+   actually be explained to the operator.
+
+   > **M3a correction (2026-08-17).** The first version of this rule listed
+   > five tokens: `{orderNumber}`, `{jobName}`, `{jobId}`, `{filename}`,
+   > `{originalFilename}`. That was wrong. `{filename}` resolves to a
+   > manifest basename like `5_IMG.jpg` — an index-prefixed customer
+   > filename — and `{originalFilename}` is the same value with the leading
+   > `N_` index prefix stripped. Camera filenames repeat across orders
+   > constantly (`IMG_0001.jpg`, `DSC_0001.jpg`), so two orders each
+   > containing that name at the same slot resolve identically and would
+   > overwrite in root layout. Only job-level identifiers actually
+   > distinguish across jobs; per-image tokens don't count.
 4. `filenameTemplate` is free text otherwise — no token-validity check. An
    unrecognised token resolving blank is the module's documented behaviour, and
    the live preview (M5) is the right place to catch typos.
 
 Error messages should name the fix, not the rule — e.g. *"A filename template
 is required when files go in the root of the copy-to folder, and it must
-include at least one of {orderNumber}, {jobName}, {jobId} or {filename} so
-files from different jobs don't overwrite each other."*
+include at least one of {orderNumber}, {jobName} or {jobId} so files from
+different jobs don't overwrite each other."* (M3a-narrowed set.)
 
 ### 5.4 M3 tests
 

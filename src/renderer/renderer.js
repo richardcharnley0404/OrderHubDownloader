@@ -6251,31 +6251,48 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
   // never persisted). Rules per §5.3 of the brief; error text names the
   // fix rather than the rule so the operator sees what to do.
   if (type === 'folder_copy') {
-    const filenameTemplate  = document.getElementById('ocFilenameTemplate').value;
+    // Trim at store time (M3a fix). Every other field in this handler
+    // trims; a whitespace-only template stored as "   " is truthy — M2
+    // would treat it as a real template, resolve to blank, and send
+    // every image down the empty-resolution fallback.
+    const filenameTemplate  = document.getElementById('ocFilenameTemplate').value.trim();
     const destinationLayout = document.getElementById('ocDestinationLayout').value;
     if (destinationLayout !== 'job' && destinationLayout !== 'root') {
       alert('Destination layout must be either "Per-job subfolder" or "Files directly in the copy-to folder".');
       return;
     }
     if (destinationLayout === 'root') {
-      const trimmed = filenameTemplate.trim();
-      if (!trimmed) {
+      if (!filenameTemplate) {
         alert(
           'A filename template is required when files go in the root of the copy-to folder, ' +
-          'and it must include at least one of {orderNumber}, {jobName}, {jobId}, {filename} ' +
-          'or {originalFilename} so files from different jobs don\'t overwrite each other.'
+          'and it must include at least one of {orderNumber}, {jobName} or {jobId} so files ' +
+          'from different jobs don\'t overwrite each other.'
         );
         return;
       }
-      // At least one job-distinguishing token per §5.3. Within-dispatch
-      // de-duplication (§4.4) cannot see collisions across dispatches by
-      // design, so the guard has to be here at save time where it can
-      // actually be explained.
-      if (!/\{(?:orderNumber|jobName|jobId|filename|originalFilename)\}/.test(trimmed)) {
+      // At least one JOB-distinguishing token per §5.3 (corrected in M3a).
+      // Only {orderNumber}, {jobName} and {jobId} distinguish across jobs.
+      // Per-image tokens do NOT count and MUST NOT be added here even
+      // though resolveTemplate accepts them:
+      //   - {filename} resolves to a manifest basename like "5_IMG.jpg"
+      //     — an index-prefixed customer filename. Camera filenames
+      //     (IMG_0001.jpg) repeat across orders constantly, so two
+      //     orders each containing that name at the same index resolve
+      //     identically and would overwrite in root layout.
+      //   - {originalFilename} is the same value with the leading
+      //     "N_" index prefix stripped, so it's strictly WEAKER than
+      //     {filename} — same repeat problem.
+      //   - {index}/{indexPadded}/{quantity}/{product}/{options} etc.
+      //     are per-image or per-job-shape values that identify a slot
+      //     WITHIN a job, not the job itself.
+      // Within-dispatch de-dup (§4.4) cannot see across-dispatch
+      // collisions by design — the guard has to be here at save time
+      // where it can actually be explained.
+      if (!/\{(?:orderNumber|jobName|jobId)\}/.test(filenameTemplate)) {
         alert(
-          'The filename template must include at least one of {orderNumber}, {jobName}, ' +
-          '{jobId}, {filename} or {originalFilename} when files go in the root of the copy-to ' +
-          'folder — otherwise files from different jobs will overwrite each other.'
+          'The filename template must include at least one of {orderNumber}, {jobName} ' +
+          'or {jobId} when files go in the root of the copy-to folder — otherwise files ' +
+          'from different jobs will overwrite each other.'
         );
         return;
       }

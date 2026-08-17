@@ -194,11 +194,15 @@ test('IPC rejects: root layout with blank template — error names the fix', asy
   const ctrl = makeFolderCopyCtrl({ destinationLayout: 'root', filenameTemplate: '' });
   const result = await saveController(null, ctrl);
   assert.equal(result.success, false);
-  // Error names the fix, per §5.3 spec.
+  // Error names the fix, per §5.3 spec (M3a-narrowed set).
   assert.match(result.error, /filename template is required/);
   assert.match(result.error, /root of the copy-to folder/);
   assert.match(result.error, /\{orderNumber\}/);
-  assert.match(result.error, /\{filename\}/);
+  assert.match(result.error, /\{jobName\}/);
+  assert.match(result.error, /\{jobId\}/);
+  // The narrower set explicitly does NOT include per-image tokens.
+  assert.doesNotMatch(result.error, /\{filename\}/);
+  assert.doesNotMatch(result.error, /\{originalFilename\}/);
   assert.equal(__controllers.length, 0);
 });
 
@@ -214,6 +218,39 @@ test('IPC rejects: root layout with template lacking any distinguishing token', 
   assert.equal(result.success, false);
   assert.match(result.error, /must include at least one of/);
   assert.match(result.error, /overwrite each other/);
+  assert.equal(__controllers.length, 0);
+});
+
+test('IPC rejects: root layout + {filename} — per-image token does NOT count as job-distinguishing', async () => {
+  // M3a correction. {filename} resolves to a manifest basename like
+  // "5_IMG.jpg" — an index-prefixed customer filename. Camera filenames
+  // (IMG_0001.jpg) repeat across orders constantly, so two orders each
+  // carrying that name at the same slot resolve identically and would
+  // overwrite in root layout. The initial M3 accepted {filename} here
+  // and this test was originally a positive case — the reject flip is
+  // the fix.
+  resetState();
+  const ctrl = makeFolderCopyCtrl({
+    destinationLayout: 'root',
+    filenameTemplate:  '{filename}_{index}',
+  });
+  const result = await saveController(null, ctrl);
+  assert.equal(result.success, false, '{filename} does not distinguish jobs — cameras produce the same names');
+  assert.match(result.error, /\{orderNumber\}/);
+  assert.equal(__controllers.length, 0);
+});
+
+test('IPC rejects: root layout + {originalFilename} — same repeat problem, strictly weaker than {filename}', async () => {
+  // {originalFilename} is {filename} with the leading "N_" index prefix
+  // stripped, so it is strictly WEAKER at distinguishing across jobs.
+  // Also a reject after M3a.
+  resetState();
+  const ctrl = makeFolderCopyCtrl({
+    destinationLayout: 'root',
+    filenameTemplate:  '{originalFilename}',
+  });
+  const result = await saveController(null, ctrl);
+  assert.equal(result.success, false);
   assert.equal(__controllers.length, 0);
 });
 
@@ -267,7 +304,11 @@ test('IPC accepts: "root" layout with a template carrying a distinguishing token
 });
 
 test('IPC accepts: "root" layout + template with EACH allowed distinguishing token in turn', async () => {
-  for (const token of ['{orderNumber}', '{jobName}', '{jobId}', '{filename}', '{originalFilename}']) {
+  // M3a — the accepted set is narrowed to job-level identifiers only.
+  // See the {filename}/{originalFilename} reject tests above for why
+  // per-image tokens are excluded, and the regex comment in
+  // ipc-handlers.js for the token-by-token audit.
+  for (const token of ['{orderNumber}', '{jobName}', '{jobId}']) {
     resetState();
     const ctrl = makeFolderCopyCtrl({
       destinationLayout: 'root',
@@ -300,6 +341,53 @@ test('round-trip: save all three fields via IPC → read back via getControllers
   assert.equal(persisted.filenameTemplate,       '{orderNumber}_{product}_{indexPadded}');
   assert.equal(persisted.destinationLayout,      'root');
   assert.equal(persisted.stripOrderNumberPrefix, 'PXDEMO-');
+});
+
+test('M3a: whitespace-only filenameTemplate under "job" layout is stored as "" (trim at store time)', async () => {
+  // The specific bug the M3a trim fix closes. Pre-fix, the renderer
+  // stored the raw string; validation ran on the trimmed value so a
+  // "   " template passed under 'job' layout — then M2 later saw a
+  // truthy template, tried to resolve it, produced blank, and sent
+  // every image down the empty-resolution fallback. Both the renderer
+  // (fast feedback) and the IPC handler (defence-in-depth) now trim.
+  resetState();
+  const ctrl = makeFolderCopyCtrl({
+    destinationLayout: 'job',
+    filenameTemplate:  '   ',
+  });
+  const result = await saveController(null, ctrl);
+  assert.equal(result.success, true);
+  const persisted = __controllers.find(c => c.id === ctrl.id);
+  assert.equal(persisted.filenameTemplate, '',
+    'whitespace-only template must NOT persist as a truthy string — M2 would treat it as a real template and fallback every image');
+});
+
+test('M3a: leading/trailing whitespace on a real template is trimmed at store time', async () => {
+  resetState();
+  const ctrl = makeFolderCopyCtrl({
+    destinationLayout: 'root',
+    filenameTemplate:  '  {orderNumber}_{index}  ',
+  });
+  const result = await saveController(null, ctrl);
+  assert.equal(result.success, true);
+  const persisted = __controllers.find(c => c.id === ctrl.id);
+  assert.equal(persisted.filenameTemplate, '{orderNumber}_{index}',
+    'leading/trailing whitespace stripped — the inner content is preserved verbatim');
+});
+
+test('M3a: whitespace-only stripOrderNumberPrefix is trimmed to blank at IPC boundary', async () => {
+  // Symmetric with the filenameTemplate trim. Renderer already trims;
+  // the IPC mirror does too so an external caller can't persist a
+  // stripPrefix that looks blank in the UI but silently isn't.
+  resetState();
+  const ctrl = makeFolderCopyCtrl({
+    destinationLayout:      'job',
+    stripOrderNumberPrefix: '   ',
+  });
+  const result = await saveController(null, ctrl);
+  assert.equal(result.success, true);
+  const persisted = __controllers.find(c => c.id === ctrl.id);
+  assert.equal(persisted.stripOrderNumberPrefix, '');
 });
 
 test('round-trip: update-then-read preserves the three fields (no silent drop on edit)', async () => {
