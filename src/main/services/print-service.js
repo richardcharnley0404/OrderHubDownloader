@@ -35,6 +35,7 @@ const { resolveManifestPath } = require('./manifest-path');
 const { resolveDispatchImageSource } = require('./dispatch-image-source');
 const logger = require('./logger');
 const { buildFolderName, stripOrderNumberPrefix } = require('../../shared/printUtils');
+const { buildCopyFilenames } = require('./folder-copy-filename');
 
 // Manifest filename is {orderNumber}.json (e.g. PXDEMO-K9MYDG.json)
 
@@ -1443,6 +1444,17 @@ class PrintService {
       return { success: false, error: 'Reprint has no images to send.' };
     }
 
+    // Filename templates DELIBERATELY DO NOT apply to reprints. See §8 of
+    // docs/folder-copy-filename-templates-brief.md — the sidecar's reprint
+    // images have `qtyCurrent` and no manifest, so {quantity} and {index}
+    // would need different plumbing and different semantics; and the
+    // `…_{id}-r{n}` folder name is the reprint's own disambiguator.
+    // Reprints keep their original filenames; the M3 template on the
+    // controller does not run here. Documented in the operator note and
+    // tracked in docs/BACKLOG.md so an operator who sets a template and
+    // then can't work out why reprints look different has a comment to
+    // point at.
+
     // Source is the reprint folder's /working/ directory — the operator-
     // reviewed copies reprintManager produced. No manifest, no enhanced-path
     // lookup, no CMY corrections (see method docstring).
@@ -2245,10 +2257,44 @@ class PrintService {
   /**
    * Folder-copy pipeline for "folder_copy" controllers (Wide Format, POD, etc.).
    *
-   * Copies the job's image files directly into {outputPath}/{orderNumber}_{jobId}/
-   * with no DPOF envelope, no IMAGE/MISC subdirectories, and no index file.
-   * Enhanced image substitution is applied if enhanced versions exist; CMY colour
+   * Copies the job's image files into the controller's output path with no
+   * DPOF envelope, no IMAGE/MISC subdirectories, and no index file. Enhanced
+   * image substitution is applied if enhanced versions exist; CMY colour
    * corrections are not applied (not relevant for wide-format/POD workflows).
+   *
+   * ── Layout, filename template, prefix strip (M3/M4) ─────────────────────
+   *
+   *   layout 'job'  (default)  → {outputPath}/{destJobFolderName}/{name}
+   *   layout 'root'            → {outputPath}/{name}   (no per-job subfolder)
+   *
+   *   destJobFolderName = `${stripped(job.order_number)}_${job.id}`
+   *   name              = buildCopyFilenames(...) result, or img.filename
+   *                       verbatim when template is blank
+   *
+   * With a blank template AND a blank stripPrefix the on-disk output must
+   * be BYTE-IDENTICAL to the pre-M4 behaviour: original filenames under
+   * `{outputPath}/{order_number}_{id}/`. Locked by a regression test.
+   *
+   * The route arrives from routing-service.js — both folder_copy literals
+   * (resolveRoute + resolveRouteForController) supply filenameTemplate,
+   * destinationLayout, and stripOrderNumberPrefix with the same defaults
+   * ('' / 'job' / ''). The default-folder / process-folder auto-print path
+   * (ipc-handlers.js:4139) passes only { outputPath, controllerName }, so
+   * every M3 field arrives undefined and the M2 planner takes the blank
+   * branch → original filenames, per D4 of the brief.
+   *
+   * ── Source folder must NEVER be stripped (tripwire #3) ──────────────────
+   *
+   * jobFolderName is used for TWO different things: (1) the source folder
+   * lookup under `downloadDirectory` and (2) the destination folder under
+   * `route.outputPath`. Only the destination gets the prefix strip. The
+   * source lookup MUST use the un-stripped `${job.order_number}_${job.id}`
+   * because that is what the ingester wrote to disk. Conflating them by
+   * reusing one variable sends OHD hunting for a source folder that does
+   * not exist and the error points at entirely the wrong thing.
+   *
+   * Two clearly-named variables — sourceJobFolderName and
+   * destJobFolderName — is the whole defence.
    */
   async _sendViaFolderCopyRouted(job, route) {
     const downloadDirectory = configService.get('downloadDirectory');
@@ -2256,10 +2302,20 @@ class PrintService {
       throw new Error('Download directory is not configured.');
     }
 
-    const orderFolderName = `${job.order_number}_${job.order_id}`;
-    const jobFolderName   = `${job.order_number}_${job.id}`;
+    const stripPrefix       = (route && typeof route.stripOrderNumberPrefix === 'string') ? route.stripOrderNumberPrefix : '';
+    const destinationLayout = (route && route.destinationLayout === 'root') ? 'root' : 'job';
+    const filenameTemplate  = (route && typeof route.filenameTemplate === 'string') ? route.filenameTemplate : '';
+
+    const orderFolderName     = `${job.order_number}_${job.order_id}`;
+    // NEVER stripped — the ingester wrote the folder using the raw order
+    // number. Reusing this for the destination would be tripwire #3.
+    const sourceJobFolderName = `${job.order_number}_${job.id}`;
+    // Stripped when the controller opts in; byte-identical to
+    // sourceJobFolderName when stripPrefix is blank (§6.2 no-change lock).
+    const destJobFolderName   = `${stripOrderNumberPrefix(job.order_number, stripPrefix)}_${job.id}`;
+
     const orderFolderPath = path.join(downloadDirectory, orderFolderName);
-    const jobFolderPath   = path.join(orderFolderPath, jobFolderName);
+    const jobFolderPath   = path.join(orderFolderPath, sourceJobFolderName);
 
     if (!fs.existsSync(jobFolderPath)) {
       throw new Error(`Job folder not found: ${jobFolderPath}`);
@@ -2272,8 +2328,13 @@ class PrintService {
       throw new Error(`Job ${job.id} not found in order manifest. Manifest has ${manifest.jobs ? manifest.jobs.length : 0} jobs.`);
     }
 
-    const enhancedMap = await this._getEnhancedPathMap(jobFolderName, jobFolderPath);
+    const enhancedMap = await this._getEnhancedPathMap(sourceJobFolderName, jobFolderPath);
 
+    // Per-image records fed into the M2 planner. `quantity` and
+    // `originalFilename` come from the manifest image so {quantity} and
+    // {originalFilename} resolve non-blank. A quiet blank on either would
+    // be invisible until an operator complains about a wrong-count file
+    // — assert on {quantity} threading in the M4 tests.
     const imageFiles = jobManifest.images.map(img => {
       const basename     = path.basename(img.filename);
       const enhancedPath = enhancedMap.get(basename);
@@ -2281,8 +2342,10 @@ class PrintService {
         logger.info('Using enhanced image for folder-copy print', { filename: basename, enhancedPath });
       }
       return {
-        sourcePath: resolveDispatchImageSource({ rootPath: path.join(orderFolderPath, img.filename), jobFolderPath, basename, enhancedPath }),
-        filename:   basename,
+        sourcePath:       resolveDispatchImageSource({ rootPath: path.join(orderFolderPath, img.filename), jobFolderPath, basename, enhancedPath }),
+        filename:         basename,
+        quantity:         img.quantity,
+        originalFilename: img.originalFilename,
       };
     });
 
@@ -2292,24 +2355,53 @@ class PrintService {
       }
     }
 
-    // Write directly to {outputPath}/{orderNumber}_{jobId}/
-    const destFolder = path.join(route.outputPath, jobFolderName);
+    // Layout decides only the destination folder. Filenames come from the
+    // planner; a blank template → basenames verbatim (the no-change lock),
+    // so the 'job' + blank branch reproduces pre-M4 output byte-for-byte.
+    const destFolder = (destinationLayout === 'root')
+      ? route.outputPath
+      : path.join(route.outputPath, destJobFolderName);
+
+    const { files, stats } = buildCopyFilenames(imageFiles, job, {
+      template:    filenameTemplate,
+      stripPrefix,
+      // opts.now is deliberately NOT threaded here — M4 must let the real
+      // clock default. resolveTemplate throws on a non-Date opts.now, and
+      // any value round-tripped through config would arrive as a string.
+    });
 
     try {
+      // Single mkdirSync — recursive:true is a no-op if destFolder already
+      // exists, so it works for both layouts. Under 'root' this equals
+      // route.outputPath (usually pre-existing); under 'job' it creates
+      // the per-job subfolder.
       fs.mkdirSync(destFolder, { recursive: true });
-      for (const img of imageFiles) {
-        fs.copyFileSync(img.sourcePath, path.join(destFolder, img.filename));
+      for (let i = 0; i < files.length; i++) {
+        fs.copyFileSync(files[i].sourcePath, path.join(destFolder, files[i].destFilename));
       }
     } catch (writeErr) {
       logger.logError('Folder-copy write failed', writeErr, { jobId: job.id, destFolder });
       return { success: false, error: writeErr.message };
     }
 
+    // One INFO log per dispatch with the operator-visible signal. A
+    // non-zero suffixed count means the template did not distinguish
+    // every image and the planner auto-suffixed; a non-zero truncated
+    // count means at least one stem hit the 120-char cap; a non-zero
+    // fallbacks length means at least one template resolution ended up
+    // empty and reverted to the original basename. All three are
+    // "operator should look at the template" signals.
     logger.info('Job sent to print via folder copy (routed)', {
-      jobId:      job.id,
-      controller: route.controllerName,
+      jobId:              job.id,
+      controller:         route.controllerName,
       destFolder,
-      images:     imageFiles.length,
+      destinationLayout,
+      templateApplied:    Boolean(filenameTemplate),
+      images:             files.length,
+      suffixedCount:      stats.suffixed,
+      truncatedCount:     stats.truncated,
+      fallbacksCount:     stats.fallbacks.length,
+      fallbackBasenames:  stats.fallbacks,
     });
 
     await this._markCompleted(job.id);
@@ -2319,6 +2411,7 @@ class PrintService {
       method:     'folder_copy',
       sourcePath: jobFolderPath,
       destPath:   destFolder,
+      stats,
     };
   }
 

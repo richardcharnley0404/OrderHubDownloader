@@ -161,6 +161,18 @@ Possible side effect worth checking when the lab's logs arrive: if `/checkin` re
 was the stopgap before the typed controller existed. Delete it once the lab confirms the
 real one works.
 
+**Filename templates deliberately don't apply to reprints (M4, 2026-08-17).**
+`_sendReprintViaFolderCopy` (`src/main/services/print-service.js`) keeps the
+original filenames into its `…_{id}-r{n}` folder — the M3 template on the
+controller is not consulted. Reprint images come from the sidecar
+(`qtyCurrent`, no manifest), so `{quantity}` and `{index}` would need
+different plumbing and different semantics, and the reprint folder name is
+its own disambiguator. Deferred per §8 of
+`docs/folder-copy-filename-templates-brief.md`. An operator who sets a
+template and then can't work out why reprints look different needs to know
+this is intentional; a comment in `_sendReprintViaFolderCopy` points here.
+Not blocking any release — pick up if a lab reports the inconsistency.
+
 **`basic-ftp` client construction is duplicated between `ftp-service.js` and
 `ftp-source-service.js`.** M2 of `docs/ftp-sources-brief.md` chose to hold
 one `basic-ftp` session open per pass in `ftp-source-service.js` for
