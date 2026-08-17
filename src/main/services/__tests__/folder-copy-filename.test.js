@@ -749,6 +749,129 @@ test('M2-fix fallback + collision: case preservation when tail matches case-inse
   assert.equal(out.files[1].destFilename, 'PHOTO_2.JPG');
 });
 
+// ═════════════════════════════════════════════════════════════════════════
+// M2b — Win32 reserved device names guarded on the stem
+// ═════════════════════════════════════════════════════════════════════════
+//
+// CON/PRN/AUX/NUL/COM1-9/LPT1-9 are refused by Win32 regardless of
+// extension, so a resolved stem that matches must be prefixed with an
+// underscore before dispatch. Applies to the templated path only; the
+// fallback path uses img.filename verbatim by design.
+
+const WIN32_RESERVED_NAMES = [
+  'CON', 'PRN', 'AUX', 'NUL',
+  'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+  'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9',
+];
+
+for (const reserved of WIN32_RESERVED_NAMES) {
+  test(`M2b Win32 reserved: stem "${reserved}" gets underscore prefix (with source ext)`, () => {
+    const out = buildCopyFilenames(
+      [{ sourcePath: '/x/source.jpg', filename: 'source.jpg' }],
+      { product: reserved },
+      { template: '{product}' },
+    );
+    assert.equal(out.files[0].destFilename, `_${reserved}.jpg`);
+  });
+}
+
+test('M2b Win32 reserved: guard triggers WITHOUT a source extension', () => {
+  // sourceExt is empty → the appended extension is empty. Guard still
+  // fires because the STEM is a reserved name — Win32 refuses "CON"
+  // just as flatly as "CON.jpg".
+  const out = buildCopyFilenames(
+    [{ sourcePath: '/x/no-extension-here', filename: 'no-extension-here' }],
+    { product: 'CON' },
+    { template: '{product}' },
+  );
+  assert.equal(out.files[0].destFilename, '_CON');
+});
+
+test('M2b Win32 reserved: case-insensitive on the match, but original case preserved', () => {
+  // Regex is /i so "con" / "Con" / "CON" all match. The template output
+  // preserves whatever casing the operator's data had — we only prefix.
+  for (const casing of ['con', 'Con', 'CoN', 'CON']) {
+    const out = buildCopyFilenames(
+      [{ sourcePath: '/x/source.jpg', filename: 'source.jpg' }],
+      { product: casing },
+      { template: '{product}' },
+    );
+    assert.equal(out.files[0].destFilename, `_${casing}.jpg`);
+  }
+});
+
+test('M2b Win32 reserved: names starting with a reserved prefix are NOT guarded', () => {
+  // "CONstruction" starts with "CON" but is not the reserved name. The
+  // regex is anchored on both ends so partial matches don't trigger.
+  const out = buildCopyFilenames(
+    [{ sourcePath: '/x/source.jpg', filename: 'source.jpg' }],
+    { product: 'CONstruction' },
+    { template: '{product}' },
+  );
+  assert.equal(out.files[0].destFilename, 'CONstruction.jpg');
+});
+
+test('M2b Win32 reserved: COM0/LPT0 and COM10+ are NOT reserved by this guard', () => {
+  // Per the M2b spec: COM1-COM9 and LPT1-LPT9 only. Node's own docs and
+  // Microsoft's list historically treat "COM0"/"LPT0" as unreserved on
+  // most Windows versions, and multi-digit COM/LPT are outside the
+  // legacy set. Locking the boundary so a future maintainer doesn't
+  // silently widen it.
+  for (const nonReserved of ['COM0', 'LPT0', 'COM10', 'LPT10', 'COM']) {
+    const out = buildCopyFilenames(
+      [{ sourcePath: '/x/source.jpg', filename: 'source.jpg' }],
+      { product: nonReserved },
+      { template: '{product}' },
+    );
+    assert.equal(out.files[0].destFilename, `${nonReserved}.jpg`,
+      `${nonReserved} should not be guarded`);
+  }
+});
+
+test('M2b Win32 reserved: guard composes with collision de-dup', () => {
+  // Two images resolving to the same reserved-name stem: first becomes
+  // "_CON.jpg", second collides (issued set already has "_CON.jpg") and
+  // _nextSuffixed inserts _2 before the ext → "_CON_2.jpg".
+  const images = [
+    { sourcePath: '/x/a.jpg', filename: 'a.jpg' },
+    { sourcePath: '/x/b.jpg', filename: 'b.jpg' },
+  ];
+  const out = buildCopyFilenames(
+    images,
+    { product: 'CON' },
+    { template: '{product}' },
+  );
+  assert.equal(out.files[0].destFilename, '_CON.jpg');
+  assert.equal(out.files[1].destFilename, '_CON_2.jpg');
+  assert.equal(out.stats.suffixed, 1);
+});
+
+test('M2b Win32 reserved: fallback path is NOT guarded (by design)', () => {
+  // If img.filename is literally "CON.jpg" and the template resolves to
+  // empty (fallback), we pass img.filename through verbatim. That is a
+  // data-plumbing problem upstream, and dressing it up here would hide
+  // it from whoever needs to fix it. Documented behaviour.
+  const out = buildCopyFilenames(
+    [{ sourcePath: '/x/actual.jpg', filename: 'CON.jpg' }],
+    {},
+    { template: '{option:nonexistent}' },
+  );
+  assert.equal(out.files[0].destFilename, 'CON.jpg');
+  assert.deepEqual(out.stats.fallbacks, ['CON.jpg']);
+});
+
+test('M2b Win32 reserved: full option-lookup source (not just literals)', () => {
+  // Reserved names can slip in via any resolved token, not just {product}.
+  // Prove it via an option value — the same guard fires regardless of
+  // which token produced the stem.
+  const out = buildCopyFilenames(
+    [{ sourcePath: '/x/source.jpg', filename: 'source.jpg' }],
+    { options: [{ name: 'device', value: 'PRN' }] },
+    { template: '{option:device}' },
+  );
+  assert.equal(out.files[0].destFilename, '_PRN.jpg');
+});
+
 test('M2-fix audit: exactly one path.extname call is on img.sourcePath', () => {
   // Meta-test — path.extname on template output was the whole reason for
   // the bug. Reading the module source with fs is the only way to lock

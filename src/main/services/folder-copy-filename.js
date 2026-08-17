@@ -68,6 +68,15 @@ const { resolveTemplate } = require('./template-tokens');
  * Keeping this module logger-free keeps it pure and testable with no
  * stubbing. All the operator-visible signal lives in the returned `stats`
  * — M4 reads it and logs once per dispatch.
+ *
+ * ── Win32 device-name guard (M2b) ───────────────────────────────────────
+ *
+ * A resolved stem of CON/PRN/AUX/NUL/COM1-9/LPT1-9 is prefixed with an
+ * underscore before the extension is appended. Win32 refuses to create
+ * those regardless of extension, so an unguarded "CON.jpg" would fail
+ * copyFileSync with an OS-layer error that points nowhere near the
+ * template that caused it. See _guardWin32Reserved for details, and
+ * the tests for the full case matrix.
  */
 
 const STEM_MAX = 120;
@@ -96,6 +105,33 @@ function _sanitise(raw) {
     .trim()
     .replace(/^[. ]+/g, '')
     .replace(/[. ]+$/g, '');
+}
+
+/**
+ * Windows reserves a handful of device names (CON, PRN, AUX, NUL,
+ * COM1-COM9, LPT1-LPT9). The reservation applies to the STEM regardless
+ * of extension — Win32 refuses to create "CON.jpg" as flatly as it
+ * refuses "CON". Without a guard the dispatch would fail at
+ * copyFileSync with a generic EACCES/ENOENT that points at the OS layer
+ * rather than at the template that caused it, so the operator sees a
+ * cryptic error and has no idea their `{product}` happened to resolve
+ * to "CON".
+ *
+ * This guard is Win32-specific — POSIX has no such reservation — but
+ * the app ships and runs on Windows, so the guard runs unconditionally.
+ * Prefixing with an underscore is enough to disarm the reservation
+ * while keeping the operator's intended name legible ("_CON" beats
+ * "CON_safe" or a random-uuid rename). Applies to the STEM only: the
+ * appended source extension is not part of the match.
+ *
+ * Not guarded: the fallback path (img.filename verbatim). If an upstream
+ * step handed us a source file literally named "CON.jpg", that is a
+ * data-plumbing problem before it reaches this module and dressing it
+ * up here would hide it from whoever needs to fix it upstream.
+ */
+const WIN32_RESERVED = /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
+function _guardWin32Reserved(stem) {
+  return WIN32_RESERVED.test(stem) ? `_${stem}` : stem;
 }
 
 // Backslash-escape every regex metachar in a literal source-extension so
@@ -129,6 +165,17 @@ const REGEX_META = /[.*+?^${}()|[\]\\]/g;
  *   "8.5x11 Canvas"      src ".tif"      -> "8.5x11 Canvas.tif"
  *   "12x18 Canvas 1.5in" src ".tif"      -> "12x18 Canvas 1.5in.tif"
  *   "Jpg Print"                          -> "Jpg Print.jpg"  (no dot, no match)
+ *
+ * Removing ALL occurrences (not just the trailing one) is a deliberate
+ * trade: a product named "Canvas.jpg Print" becomes "Canvas Print.jpg"
+ * with source ".jpg". Chosen, not missed. Anchoring the removal to the
+ * end of the string (`.jpg$`) would restore that value's readability but
+ * would break the {filename}_{quantity} case above — the ".jpg" that
+ * {filename} smuggled in sits in the middle, not the end, and would
+ * survive an end-anchored strip, yielding the forbidden "photo.jpg_2".
+ * The mid-name-.jpg-in-a-product-name shape is vanishingly rare in real
+ * data; the {filename}_{quantity} shape is a natural template mistake.
+ * Optimise for the common case.
  */
 function _stripSourceExt(s, sourceExt) {
   if (!sourceExt) return s;
@@ -235,6 +282,12 @@ function buildCopyFilenames(images, job = {}, opts = {}) {
         stem = stem.slice(0, STEM_MAX);
         stats.truncated += 1;
       }
+      // Win32 device-name guard runs AFTER truncation on the off-chance
+      // truncation itself landed on a reserved name (a 121-char stem
+      // starting with "CON" + junk sliced to exactly "CON"). Prefix adds
+      // at most one character; the +1 over STEM_MAX is deliberate — the
+      // reservation must win over the cap.
+      stem = _guardWin32Reserved(stem);
       destFilename = stem + sourceExt;
     }
 
