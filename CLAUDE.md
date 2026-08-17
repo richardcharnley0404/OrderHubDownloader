@@ -83,6 +83,19 @@ assertions complete; the `npm test` script already passes the flag, but a
 package.json script:
 `node --test --test-force-exit --test-concurrency=1 <files>`.
 
+**Assertions come from the invariant, never from observed output.** A test's
+expected value must be derived from the invariant its title states — write the
+expected value first, then run it; if it fails, decide which of the two is
+wrong rather than editing the assertion to match. The M7 regression is the
+worked example: `src/shared/__tests__/printUtils.test.js:454` was titled *"only
+`-`/`_` are separators — a configured PXDEMO must NOT strip PXDEMOX"* and
+asserted `'PXDEMOX091YEC'` → `'X091YEC'`, which is the bug. The suite was
+green and the area read as covered, so the bug survived review and was
+committed as M7. Fix landed in M7a; the corrected assertion is `'PXDEMOX091YEC'`
+→ `'PXDEMOX091YEC'`. A test written from observed output turns an untested area
+into a *falsely-confident* one, which is strictly worse than leaving it
+untested — reviewers see the title and move on.
+
 **Singletons.** Most services export a live instance (`module.exports = new
 Foo()`); some export `{ instance, Class }` so tests can construct their own.
 Services hold mutable in-process state, so tests must stub or reset rather than
