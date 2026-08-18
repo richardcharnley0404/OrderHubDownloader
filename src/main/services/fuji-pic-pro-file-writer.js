@@ -400,11 +400,21 @@ function _padNegNumber(n) {
  *     `\\host/share/DIGIN` matches `\\host\share\DIGIN`.
  *   - Mismatched shapes (one local, one UNC) are definitively
  *     different volumes.
- *   - An unrecognisable shape (`null`, non-string, empty, a POSIX-
- *     looking `/etc/foo`, a bare `\\server` without a share segment)
- *     returns `ok: true` — we can't confidently reject, so let it
- *     through to the dispatch-time guard rather than block a save on
- *     a shape we don't understand.
+ *   - An unrecognisable STRING (empty, a POSIX-looking `/etc/foo`,
+ *     a bare `\\server` without a share segment, `.`, `relative\path`)
+ *     returns `{ ok: true, code: 'indeterminate' }`. The caller
+ *     treats that as a pass at save time — the dispatch-time EXDEV
+ *     guard is authoritative for any shape the string compare can't
+ *     reason about, so blocking a save on "shape I don't recognise"
+ *     would be worse than passing it through. The distinct
+ *     `code: 'indeterminate'` (versus a bare `{ ok: true }`) means a
+ *     future caller that wants to be strict — a diagnostic tool, an
+ *     integration test — can branch on it without re-parsing the
+ *     paths. A check that answers "yes, definitely" when it cannot
+ *     know is a trap for the next caller.
+ *   - Non-string input (`null`, `undefined`, numbers, objects) THROWS.
+ *     That's a programmer error, not a runtime configuration state —
+ *     matches the rest of this module's posture on bad arg types.
  *
  * Uses `path.win32` explicitly so the parsing works identically when
  * this runs on a Linux CI host — the PIC Pro delivery it guards is
@@ -413,15 +423,21 @@ function _padNegNumber(n) {
  *
  * @param {string} pathA
  * @param {string} pathB
- * @returns {{ ok: true } | { ok: false, code: 'cross-volume' }}
+ * @returns {{ ok: true } | { ok: true, code: 'indeterminate' } | { ok: false, code: 'cross-volume' }}
  */
 function isSameVolume(pathA, pathB) {
+  if (typeof pathA !== 'string') {
+    throw new Error('isSameVolume: pathA must be a string');
+  }
+  if (typeof pathB !== 'string') {
+    throw new Error('isSameVolume: pathB must be a string');
+  }
   const a = _volumeRoot(pathA);
   const b = _volumeRoot(pathB);
-  // If either shape is unrecognisable, don't reject — the dispatch-
-  // time EXDEV throw is the second line of defence. See the docstring
-  // "does not have to be authoritative" note.
-  if (a === null || b === null) return { ok: true };
+  // Indeterminate: string given, but not a shape we can extract a
+  // volume root from. Pass at save time; the dispatch-time EXDEV
+  // throw is the authoritative check. See docstring rule 5.
+  if (a === null || b === null) return { ok: true, code: 'indeterminate' };
   if (a === b) return { ok: true };
   return { ok: false, code: 'cross-volume' };
 }

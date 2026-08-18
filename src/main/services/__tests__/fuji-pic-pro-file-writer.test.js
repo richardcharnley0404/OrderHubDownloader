@@ -793,15 +793,39 @@ test('M7c isSameVolume: bare `\\\\server\\share` with no subpath is a valid volu
   );
 });
 
-test('M7c isSameVolume: unrecognisable shape returns ok (defer to dispatch EXDEV guard)', () => {
+test('M7c isSameVolume: unparseable STRING returns {ok:true, code:"indeterminate"}', () => {
   // Bias-to-accept: a shape the string compare can't parse must NOT
   // reject the save — the dispatch-time EXDEV throw is the authority
-  // for exotic paths. See the docstring "does not have to be
-  // authoritative" note. Bare `\\host` with no share is an example.
-  assert.deepEqual(isSameVolume('\\\\lonely-host', 'C:\\Fuji'), { ok: true });
-  assert.deepEqual(isSameVolume('',    'C:\\Fuji'),              { ok: true });
-  assert.deepEqual(isSameVolume(null,  'C:\\Fuji'),              { ok: true });
-  assert.deepEqual(isSameVolume('C:\\Fuji', undefined),          { ok: true });
+  // for exotic paths. But the return distinguishes indeterminate from
+  // a confident "yes, same volume" so a future caller (diagnostic
+  // tool, stricter integration) can branch on it without re-parsing.
+  // A check that answers "yes" when it cannot know is a trap for the
+  // next caller.
+  assert.deepEqual(isSameVolume('\\\\lonely-host', 'C:\\Fuji'),
+    { ok: true, code: 'indeterminate' }, 'bare `\\\\host` with no share is indeterminate');
+  assert.deepEqual(isSameVolume('', 'C:\\Fuji'),
+    { ok: true, code: 'indeterminate' }, 'empty string on either side is indeterminate');
+  assert.deepEqual(isSameVolume('C:\\Fuji', ''),
+    { ok: true, code: 'indeterminate' }, 'empty on side B is indeterminate too');
+  assert.deepEqual(isSameVolume('relative\\path', 'C:\\Fuji'),
+    { ok: true, code: 'indeterminate' }, 'relative path has no volume root');
+  assert.deepEqual(isSameVolume('/etc/foo', 'C:\\Fuji'),
+    { ok: true, code: 'indeterminate' }, 'POSIX path is not a Windows volume root');
+});
+
+test('M7c isSameVolume: non-string input throws (programmer error, not runtime state)', () => {
+  // Matches the module's posture on other bad-arg-type errors: throw
+  // for the class of mistakes that can only be a bug at the call
+  // site. Non-string here means null, undefined, number, object,
+  // boolean — all disallowed. A string that can't be parsed is
+  // separately handled as indeterminate.
+  assert.throws(() => isSameVolume(null,       'C:\\Fuji'), /pathA must be a string/);
+  assert.throws(() => isSameVolume(undefined,  'C:\\Fuji'), /pathA must be a string/);
+  assert.throws(() => isSameVolume(42,         'C:\\Fuji'), /pathA must be a string/);
+  assert.throws(() => isSameVolume({},         'C:\\Fuji'), /pathA must be a string/);
+  assert.throws(() => isSameVolume('C:\\Fuji', null),       /pathB must be a string/);
+  assert.throws(() => isSameVolume('C:\\Fuji', undefined),  /pathB must be a string/);
+  assert.throws(() => isSameVolume('C:\\Fuji', 42),         /pathB must be a string/);
 });
 
 test('M7c isSameVolume: does not touch the filesystem (paths need not exist)', () => {
