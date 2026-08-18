@@ -385,11 +385,23 @@ function parse(xmlString, hotFolderConfig = {}) {
   // Build OrderInput
   // -------------------------------------------------------------------------
 
-  // PhotoFinale orders arriving via the hot folder are always settled upstream
-  // (PhotoFinale handles the customer payment) — by the time the XML lands
-  // here, the order is paid. We hardcode `paid: true` rather than try to derive
-  // it from <OrderPayment>; per Richard's 2026-05-08 decision, payment fields
-  // (gateway, reference) are omitted entirely.
+  // PhotoFinale imports always arrive UNPAID, regardless of anything in the
+  // XML. This SUPERSEDES Richard's 2026-05-08 decision (which hardcoded
+  // `paid: true` on the reasoning that PhotoFinale settles payment upstream
+  // before the XML lands); the 2026-08-18 reversal is that the lab prefers
+  // to mark payment through the normal OrderHub flow, so PhotoFinale
+  // imports must land unpaid and let the operator move them forward. Both
+  // dates are named so the next reader sees a deliberate reversal, not one
+  // of the two being a mistake.
+  //
+  // Payment fields (gateway, reference) remain omitted entirely — unchanged
+  // from the 2026-05-08 decision. Nothing about them was reversed.
+  //
+  // ROES (order-xml-parsers/roes.js:284-285) DOES derive `paid` from
+  // <PaymentStatus>; that difference is INTENTIONAL — ROES XML carries an
+  // authoritative payment status that the lab wants honoured, PhotoFinale
+  // doesn't. Do NOT "harmonise" the two parsers to a shared shape without
+  // re-checking both requirements.
   const order = {
     // organization_id is injected by the API client just before submit; the
     // parser keeps zero awareness of API credentials.
@@ -397,7 +409,7 @@ function parse(xmlString, hotFolderConfig = {}) {
     customer_name:   customerName,
     customer_email:  customerEmail,
     external_source: EXTERNAL_SOURCE,
-    paid:            true,
+    paid:            false,
   };
 
   setIfPresent(order, 'customer_phone',  strField(orderRaw.CustomerPhone));

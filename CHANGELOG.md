@@ -1,5 +1,23 @@
 ## Unreleased
 
+**Changed: PhotoFinale XML orders now arrive UNPAID and need marking
+paid through the normal OrderHub flow.** Previously (from 2026-05-08)
+PhotoFinale imports were pre-marked as paid on the reasoning that
+PhotoFinale settles the customer payment upstream before the XML
+lands. The lab preference has changed: payment is marked in OrderHub
+now, alongside every other order source, so PhotoFinale imports land
+`paid: false` regardless of anything in the XML. Every PhotoFinale
+order that comes in after this update will show up as unpaid until an
+operator marks it paid in OrderHub. Payment gateway / reference
+fields are still omitted from the import — that part is unchanged.
+
+ROES XML imports are UNAFFECTED. ROES continues to derive paid from
+`<PaymentStatus>` (Paid → paid, everything else → unpaid), because
+the ROES XML carries an authoritative payment status the lab wants
+honoured. The two parsers deliberately diverge on this point.
+
+---
+
 **New: filename templates for Folder Copy controllers.** Rename the
 image files that a Folder Copy controller writes out so the receiving
 operator can tell from the filename alone what needs doing — product,

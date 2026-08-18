@@ -101,10 +101,13 @@ test('43192748 (multi-product UPS): maps order-level fields correctly', () => {
   assert.equal(order.shipping_zipcode,'59047');
   assert.equal(order.shipping_country,'US');
   assert.equal(order.website_code,    'TEST123');
-  assert.equal(order.paid,            true);
+  assert.equal(order.paid,            false);
 
-  // Payment fields are intentionally omitted — these orders are settled
-  // upstream by PhotoFinale; OrderHub only needs to know the order is paid.
+  // Payment fields are intentionally omitted. The `paid` value is
+  // hardcoded false — PhotoFinale imports always land unpaid so the
+  // lab can mark payment through the normal OrderHub flow (2026-08-18
+  // reversal of the 2026-05-08 always-paid decision — see photo-finale.js
+  // for the rationale, and note this deliberately diverges from ROES).
   assert.equal('payment_gateway'   in order, false);
   assert.equal('payment_reference' in order, false);
   // organization_id is the API client's responsibility, not the parser's.
@@ -466,11 +469,14 @@ test('product_code is always a string even though XML parses as number', () => {
   }
 });
 
-test('paid is hardcoded true regardless of OrderPayment state', () => {
-  // Even in synthesised XML with no <OrderPayment> element, `paid` must be true.
+test('paid is hardcoded false regardless of OrderPayment state (2026-08-18 always-unpaid rule)', () => {
+  // Even in synthesised XML with no <OrderPayment> element, `paid` must
+  // be false — the 2026-08-18 reversal of the 2026-05-08 always-paid
+  // decision (see photo-finale.js for the rationale and the deliberate
+  // divergence from ROES).
   const xml = makeMinimalXml({});
   const { request } = parser.parse(xml, HOT_FOLDER_MINIMAL);
-  assert.equal(request.order.paid, true);
+  assert.equal(request.order.paid, false);
 });
 
 test('quantity is rounded down to a positive integer', () => {
@@ -823,4 +829,77 @@ test('wholesale rollup is rounded to 2 decimal places (no FP drift to OrderHub U
   </OrderDataSet>`;
   const { request } = parser.parse(xml, HOT_FOLDER_MINIMAL);
   assert.equal(request.order.total_amount, 0.30);
+});
+
+// ---------------------------------------------------------------------------
+// Cross-parser contrast — PhotoFinale always-unpaid vs ROES <PaymentStatus>
+// ---------------------------------------------------------------------------
+//
+// The two parsers deliberately diverge on `paid`: PhotoFinale is hardcoded
+// false regardless of XML content (2026-08-18 reversal of the 2026-05-08
+// always-paid decision — see photo-finale.js), ROES honours <PaymentStatus>.
+// This test pins the divergence in ONE place so a future "harmonise the
+// parsers" refactor sees the contrast and stops. If it becomes tempting to
+// merge them, both requirements have to change first.
+
+test('cross-parser contrast: PhotoFinale is unpaid even with payment data; ROES with PaymentStatus=Paid is paid', () => {
+  // PhotoFinale — synthesise an XML that CARRIES an OrderPayment block, then
+  // assert `paid: false` regardless. The 2026-08-18 rule is "always unpaid,
+  // regardless of XML content"; XML-carried payment data must not sway it.
+  const pfXml = `<OrderDataSet xmlns="http://www.trevoli.com/OrderDataSet.xsd">
+  <OrderLineItem>
+    <idOrderLineItem>1</idOrderLineItem>
+    <idSourceProduct>123</idSourceProduct>
+    <Quantity>1</Quantity>
+    <WholesaleCost>1.00</WholesaleCost>
+  </OrderLineItem>
+  <Order>
+    <ExternalId>9999</ExternalId>
+    <CustomerFirstName>Jane</CustomerFirstName>
+    <CustomerLastName>Doe</CustomerLastName>
+    <CustomerEmail>jane@example.com</CustomerEmail>
+    <OrderPayment>
+      <PaymentGateway>Stripe</PaymentGateway>
+      <PaymentReference>ch_deadbeef</PaymentReference>
+      <PaymentStatus>Paid</PaymentStatus>
+    </OrderPayment>
+  </Order>
+</OrderDataSet>`;
+  const pfResult = parser.parse(pfXml, HOT_FOLDER_MINIMAL);
+  assert.equal(pfResult.request.order.paid, false,
+    'PhotoFinale MUST be unpaid regardless of XML — even with a full OrderPayment block carrying PaymentStatus=Paid');
+  // Payment fields still omitted entirely — the 2026-05-08 decision on that
+  // point was NOT reversed. Same-file lock as the fixture-based test above.
+  assert.equal('payment_gateway'   in pfResult.request.order, false);
+  assert.equal('payment_reference' in pfResult.request.order, false);
+
+  // ROES — parser required inline to keep the cross-parser assertion in ONE
+  // test rather than split across two files. The ROES parser MUST derive
+  // paid from <PaymentStatus>; PaymentStatus=Paid → paid:true.
+  const roesParser = require('../order-xml-parsers/roes');
+  const roesXml = `<OrderDataSet xmlns="http://www.trevoli.com/OrderDataSet.xsd">
+    <OrderLineItem>
+      <idOrderLineItem>1.0</idOrderLineItem>
+      <idProduct>PP1117</idProduct>
+      <Quantity>1.0</Quantity>
+      <UnitPrice>5.95</UnitPrice>
+    </OrderLineItem>
+    <Order>
+      <idOrder>RO000099</idOrder>
+      <BillToFirstName>Test</BillToFirstName>
+      <BillToEmail>t@e.com</BillToEmail>
+      <PaymentStatus>Paid</PaymentStatus>
+    </Order>
+  </OrderDataSet>`;
+  const roesHotFolder = {
+    id: 'hf-roes-contrast', label: 'ROES Contrast', websiteCode: 'RC',
+    // ROES requires either ShipTo or a pickup location; the XML above
+    // has neither ShipTo nor an idOrder-adjacent ship block, so provide
+    // pickupLocationId to satisfy the pickup branch.
+    pickupLocationId: '00000000-0000-0000-0000-000000000001',
+    productMap: new Map([['PP1117', { pixfizzCode: 'PX-PP1117', label: '7x10 ROES Print' }]]),
+  };
+  const roesResult = roesParser.parse(roesXml, roesHotFolder);
+  assert.equal(roesResult.request.order.paid, true,
+    'ROES MUST derive paid from <PaymentStatus> — Paid → true. This divergence from PhotoFinale is intentional; the ROES XML carries an authoritative payment status the lab wants honoured.');
 });
