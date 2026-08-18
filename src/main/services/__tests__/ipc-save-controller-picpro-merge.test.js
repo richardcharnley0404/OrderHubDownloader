@@ -110,15 +110,17 @@ function FakeStore() {
   };
 }
 
-// M7b: fuji-pic-pro-file-writer is required by the save-controller
-// handler for probeSameVolume (the co-location check). Stubbed here
-// with a mutable probe result so the existing merge-validation tests
-// don't fail on the fake C:\pp\... paths, and the new M7b tests can
-// flip it per-case. Default: ok:true (co-located).
+// M7b/M7c: fuji-pic-pro-file-writer is required by the save-controller
+// handler for isSameVolume (the co-location check). Stubbed here with
+// a mutable result so the existing merge-validation tests don't fail
+// on the fake C:\pp\... paths, and the co-location tests can flip it
+// per-case. Default: ok:true (co-located). Sync — mirrors the real
+// isSameVolume, which is a pure string compare (M7c). See the
+// isSameVolume docstring for the "no fs I/O" invariant.
 let __probeResult = { ok: true };
 function __setProbeResult(r) { __probeResult = r; }
 const fakePicProWriter = {
-  probeSameVolume: async () => __probeResult,
+  isSameVolume:    () => __probeResult,
   // Other exports are unused by this test file; give the shape so the
   // IPC handler's require doesn't fault on missing methods if anything
   // touches them.
@@ -289,17 +291,25 @@ test('fujipicpro controller with a valid maxPrintsPerJob-shaped value is NOT rej
 });
 
 // ═════════════════════════════════════════════════════════════════════════
-// M7b — co-location probe on Fuji PIC Pro save
+// M7b/M7c — co-location check on Fuji PIC Pro save
 // ═════════════════════════════════════════════════════════════════════════
 //
 // deliverToDigin's atomic rename requires imageStagingRoot and diginPath
 // to be on the same volume. The previous EXDEV fallback (`.ohdtmp` inside
 // DIGIN) was ingested by PIC Pro's watcher as a blank duplicate order
 // (customer report, 2026-08-18); the fallback was removed. Save-time
-// probeSameVolume() enforces the requirement so operators see the fix at
+// isSameVolume() enforces the requirement so operators see the fix at
 // edit time rather than a dispatch-time failure.
+//
+// M7c note: only `cross-volume` is a rejection now — the M7b probe's
+// pathA/pathB-not-writable diagnostics are gone with the probe itself.
+// The isSameVolume check is a pure string compare that CAN'T fail with
+// an fs error, and its "unknown shape" case biases to accept (defers to
+// the dispatch-time EXDEV throw). So this suite has one rejection test
+// and one ordering test — no path-not-writable test, because that
+// failure mode no longer exists.
 
-test('M7b: cross-volume PIC Pro save is rejected with the exact fix text', async () => {
+test('M7b/M7c: cross-volume PIC Pro save is rejected with the exact fix text', async () => {
   resetState();
   __setProbeResult({ ok: false, code: 'cross-volume' });
   try {
@@ -320,9 +330,9 @@ test('M7b: cross-volume PIC Pro save is rejected with the exact fix text', async
     assert.match(result.error, /Move Image Staging Root/,
       'error must name the specific fix so the operator knows what to change');
     assert.equal(__controllers.length, 0,
-      'controller must NOT persist when the probe rejects — the current state on disk stays whatever it was');
+      'controller must NOT persist when the check rejects — the current state on disk stays whatever it was');
 
-    const warn = __warns.find(w => /PIC Pro co-location probe failed/.test(w.msg));
+    const warn = __warns.find(w => /PIC Pro co-location check failed/.test(w.msg));
     assert.ok(warn, 'rejection must log at warn level with controller context');
     assert.equal(warn.meta.code,             'cross-volume');
     assert.equal(warn.meta.imageStagingRoot, 'C:\\pp\\stage');
@@ -333,44 +343,18 @@ test('M7b: cross-volume PIC Pro save is rejected with the exact fix text', async
   }
 });
 
-test('M7b: probe failure for path-not-writable is surfaced with the diagnostic code, not conflated with cross-volume', async () => {
-  // The other probe failure modes (missing folder, permission denied)
-  // need their own message so the operator knows to check for a
-  // typo/permission rather than assume a volume mismatch. If we
-  // conflate them, an operator who typo'd DIGIN Path spends time
-  // moving their staging folder before realising the actual problem
-  // is a nonexistent path.
-  resetState();
-  __setProbeResult({ ok: false, code: 'pathB-not-writable', error: 'ENOENT: no such file or directory, unlink ...' });
-  try {
-    const result = await saveController(null, makePicPro({
-      imageStagingRoot: 'C:\\pp\\stage',
-      diginPath:        'C:\\pp\\digin-typo',
-    }));
-    assert.equal(result.success, false);
-    // Different message — names the probe code and preserves the fs
-    // error so the operator can spot ENOENT vs EACCES.
-    assert.match(result.error, /Could not verify.*same volume/);
-    assert.match(result.error, /pathB-not-writable/);
-    assert.match(result.error, /ENOENT/);
-    assert.doesNotMatch(result.error, /blank duplicate order/,
-      'the blank-duplicate framing is cross-volume-specific — do not surface it for path-not-writable');
-  } finally {
-    __setProbeResult({ ok: true });
-  }
-});
-
-test('M7b: probe running AFTER the sync validator — save-time-only, always after normalisation', async () => {
-  // The probe runs INSIDE the fujipicpro branch AFTER
+test('M7b/M7c: co-location check runs AFTER the sync validator — save-time-only, always after normalisation', async () => {
+  // The check runs INSIDE the fujipicpro branch AFTER
   // validateControllerConfig has confirmed both fields are present and
   // Object.assign'd the normalised shape back. This test locks that
   // ordering by giving a controller with a MISSING diginPath —
   // validateControllerConfig should reject with its own message BEFORE
-  // the probe runs. If the probe ran first we'd get "pathB-not-writable"
-  // instead of the operator-friendly "diginPath is required".
+  // the co-location check runs. If the order were reversed we'd get
+  // the "same volume" message instead of the operator-friendly
+  // "diginPath is required".
   resetState();
-  // Even though the probe stub is set to reject, the sync validator
-  // should reject first because diginPath is missing.
+  // Even though the co-location stub is set to reject, the sync
+  // validator should reject first because diginPath is missing.
   __setProbeResult({ ok: false, code: 'cross-volume' });
   try {
     const bad = makePicPro();
@@ -378,9 +362,9 @@ test('M7b: probe running AFTER the sync validator — save-time-only, always aft
     const result = await saveController(null, bad);
     assert.equal(result.success, false);
     assert.match(result.error, /diginPath is required/,
-      'sync validator must catch the missing field BEFORE the async probe runs');
+      'sync validator must catch the missing field BEFORE the co-location check runs');
     assert.doesNotMatch(result.error, /same volume/,
-      'the probe message must not appear when the sync validator already rejected');
+      'the co-location message must not appear when the sync validator already rejected');
   } finally {
     __setProbeResult({ ok: true });
   }

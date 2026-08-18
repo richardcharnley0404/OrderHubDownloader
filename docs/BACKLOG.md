@@ -160,12 +160,14 @@ latent version of it waiting for a customer to trip.
   watch is presumed to filter by `.txt`. Presumed, not confirmed.
 
 Neither has a customer report today. Fix pattern is the same for both: introduce
-a save-time co-location check (same shape as M7b's `probeSameVolume`) between
-the tmp-write location and the watched folder, and stop dropping tmp artefacts
-in the watched folder. Do them together as a single "harden all
-tmp-in-watched-folder writers" milestone rather than one-off, so the class is
-closed rather than whacked case-by-case. Not release-blocking — the DIGIN one
-that DID burn a customer is fixed in M7b.
+a save-time co-location check between the tmp-write location and the watched
+folder (same shape as `isSameVolume` in `fuji-pic-pro-file-writer.js` — a pure
+string compare of volume roots, NOT a filesystem probe; the M7b probe version
+was itself an instance of the tmp-in-watched-folder bug and was replaced in
+M7c) and stop dropping tmp artefacts in the watched folder. Do them together
+as a single "harden all tmp-in-watched-folder writers" milestone rather than
+one-off, so the class is closed rather than whacked case-by-case. Not
+release-blocking — the DIGIN one that DID burn a customer is fixed in M7b.
 
 **Auto-update is wired but dormant.** `src/main/updater.js` polls a feed whose URL comes
 back from OrderHub's `/checkin`, but no `latest.yml` has ever been published, so it has

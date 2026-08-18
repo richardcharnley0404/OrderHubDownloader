@@ -50,7 +50,7 @@ const {
   writeOrderFile,
   deliverToDigin,
   writeCommandFile,
-  probeSameVolume,
+  isSameVolume,
   _internals,
 } = require('../fuji-pic-pro-file-writer');
 
@@ -384,10 +384,12 @@ test('M7b deliverToDigin: EXDEV throws the co-location error AND nothing is writ
   //   1. EXDEV throws the named error — never falls back to a
   //      copy-into-DIGIN slow path that could reintroduce the bug.
   //   2. DIGIN is untouched — no file, no folder, no `.ohdtmp`
-  //      sibling appears there. Save-time validation (probeSameVolume)
-  //      is the primary defence; this dispatch-time throw is the
+  //      sibling appears there. Save-time validation (isSameVolume,
+  //      M7c) is the primary defence; this dispatch-time throw is the
   //      belt-and-braces for a pre-M7b controller that was never
-  //      re-saved after the fix landed.
+  //      re-saved after the fix landed, and for exotic setups (subst,
+  //      DFS, reparse points) that a string-only check can't reason
+  //      about.
   const dir = await makeTempDir();
   t.after(() => fsp.rm(dir, { recursive: true, force: true }));
 
@@ -595,7 +597,7 @@ test('fix 7: destFolder AND staging both exist → refuse to merge (throws)', as
 // the EXDEV slow path they guarded. The bug they were originally
 // added to prevent (stale files merging into a live delivery) can no
 // longer occur: there is no `.ohdtmp` code path to leave anything
-// behind. Save-time co-location enforcement (probeSameVolume) plus
+// behind. Save-time co-location enforcement (isSameVolume, M7c) plus
 // the dispatch-time EXDEV throw above replace both. See M7b commit
 // for the customer incident that removed the slow path.
 
@@ -698,117 +700,140 @@ test('_padNegNumber pads to 4 digits and preserves longer strings', () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════
-// M7b — probeSameVolume (save-time co-location check)
+// M7c — isSameVolume (save-time co-location check, string compare only)
 // ═════════════════════════════════════════════════════════════════════════
 //
-// The rename-probe is the RIGHT check because statSync().dev is unreliable
-// across Windows network shares (SMB reports device numbers that don't map
-// cleanly to volumes, especially through DFS / mounted reparse points).
-// The probe tests the exact operation deliverToDigin will run at dispatch.
+// M7c replaced M7b's rename-probe with a pure string comparison of volume
+// roots. The probe was the exact class of bug M7b existed to remove: it
+// wrote `.ohd-volume-probe-*` INSIDE diginPath on every save of a
+// correctly-configured controller. See the docstring on isSameVolume for
+// the full rationale. Tests below cover the string-comparison rules the
+// docstring specifies. NO fs I/O — that's the invariant these tests exist
+// to protect.
+//
+// The dispatch-side EXDEV throw in deliverToDigin (see the M7b test near
+// line 380) is the second line of defence for exotic setups the string
+// compare can't reason about (subst, DFS, junctions). It stays unchanged.
 
-test('M7b probeSameVolume: same-volume returns {ok:true} and leaves no probe file behind', async (t) => {
-  const dir = await makeTempDir();
-  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
-  const staging = path.join(dir, 'staging'); await fsp.mkdir(staging);
-  const digin   = path.join(dir, 'digin');   await fsp.mkdir(digin);
+test('M7c isSameVolume: same drive letter (different subpaths) is ok', () => {
+  assert.deepEqual(isSameVolume('C:\\Fuji\\staging', 'C:\\Fuji\\DIGIN'), { ok: true });
+});
 
-  const result = await probeSameVolume(staging, digin);
+test('M7c isSameVolume: different drive letters is cross-volume', () => {
+  assert.deepEqual(
+    isSameVolume('C:\\Fuji\\staging', 'D:\\Fuji\\DIGIN'),
+    { ok: false, code: 'cross-volume' },
+  );
+});
+
+test('M7c isSameVolume: same UNC share (different subpaths) is ok', () => {
+  assert.deepEqual(
+    isSameVolume('\\\\labserver\\digin\\staging', '\\\\labserver\\digin\\ORD-1'),
+    { ok: true },
+  );
+});
+
+test('M7c isSameVolume: same server but different share is cross-volume', () => {
+  assert.deepEqual(
+    isSameVolume('\\\\labserver\\staging\\x', '\\\\labserver\\digin\\y'),
+    { ok: false, code: 'cross-volume' },
+  );
+});
+
+test('M7c isSameVolume: different servers with the same share name is cross-volume', () => {
+  // Two hosts happening to expose a share called `digin` are still two
+  // separate volumes — the host is part of the volume identity.
+  assert.deepEqual(
+    isSameVolume('\\\\hostA\\digin\\x', '\\\\hostB\\digin\\y'),
+    { ok: false, code: 'cross-volume' },
+  );
+});
+
+test('M7c isSameVolume: local vs UNC is cross-volume (mismatched shapes)', () => {
+  assert.deepEqual(
+    isSameVolume('C:\\Fuji\\staging', '\\\\labserver\\digin\\ORD-1'),
+    { ok: false, code: 'cross-volume' },
+  );
+  assert.deepEqual(
+    isSameVolume('\\\\labserver\\digin\\ORD-1', 'C:\\Fuji\\staging'),
+    { ok: false, code: 'cross-volume' },
+  );
+});
+
+test('M7c isSameVolume: trailing slashes and mixed separators are normalised', () => {
+  // Local: trailing backslash, trailing forward slash, and no trailing
+  // separator all resolve to the same drive root.
+  assert.deepEqual(isSameVolume('C:\\Fuji\\', 'C:/Fuji'),      { ok: true });
+  assert.deepEqual(isSameVolume('C:',        'C:\\'),          { ok: true });
+  // UNC: forward slashes and trailing slashes must not perturb the
+  // `\\host\share` extraction.
+  assert.deepEqual(
+    isSameVolume('\\\\labserver\\digin\\', '//labserver/digin/ORD-1'),
+    { ok: true },
+  );
+});
+
+test('M7c isSameVolume: case differences do not matter (Windows semantics)', () => {
+  assert.deepEqual(isSameVolume('c:\\fuji', 'C:\\FUJI'), { ok: true });
+  assert.deepEqual(
+    isSameVolume('\\\\LabServer\\DiGiN', '\\\\labserver\\digin\\sub'),
+    { ok: true },
+  );
+});
+
+test('M7c isSameVolume: bare `\\\\server\\share` with no subpath is a valid volume root', () => {
+  // Docstring rule: `\\server\share` on its own IS the volume root.
+  assert.deepEqual(
+    isSameVolume('\\\\labserver\\digin', '\\\\labserver\\digin\\ORD-1'),
+    { ok: true },
+  );
+  assert.deepEqual(
+    isSameVolume('\\\\labserver\\digin\\', '\\\\labserver\\digin'),
+    { ok: true },
+  );
+});
+
+test('M7c isSameVolume: unrecognisable shape returns ok (defer to dispatch EXDEV guard)', () => {
+  // Bias-to-accept: a shape the string compare can't parse must NOT
+  // reject the save — the dispatch-time EXDEV throw is the authority
+  // for exotic paths. See the docstring "does not have to be
+  // authoritative" note. Bare `\\host` with no share is an example.
+  assert.deepEqual(isSameVolume('\\\\lonely-host', 'C:\\Fuji'), { ok: true });
+  assert.deepEqual(isSameVolume('',    'C:\\Fuji'),              { ok: true });
+  assert.deepEqual(isSameVolume(null,  'C:\\Fuji'),              { ok: true });
+  assert.deepEqual(isSameVolume('C:\\Fuji', undefined),          { ok: true });
+});
+
+test('M7c isSameVolume: does not touch the filesystem (paths need not exist)', () => {
+  // Pointing at paths that definitely do not exist must still return a
+  // synchronous result without throwing — proves the check is a pure
+  // string compare, not an fs probe. This is the invariant that M7c
+  // exists to protect; if this test ever fails because someone added
+  // an fs call, that is the regression to catch.
+  const result = isSameVolume(
+    'C:\\definitely-not-a-real-path-1234',
+    'C:\\also-not-real-5678\\deeper',
+  );
   assert.deepEqual(result, { ok: true });
-
-  // Cleanup discipline: no `.ohd-volume-probe-*` file in either folder.
-  const stagingEntries = await fsp.readdir(staging);
-  const diginEntries   = await fsp.readdir(digin);
-  assert.equal(stagingEntries.filter(e => e.startsWith('.ohd-volume-probe-')).length, 0,
-    'probe file must not linger in the source folder');
-  assert.equal(diginEntries.filter(e => e.startsWith('.ohd-volume-probe-')).length, 0,
-    'probe file must not linger in the destination folder');
 });
 
-test('M7b probeSameVolume: cross-volume (injected EXDEV on rename) returns {ok:false, code:"cross-volume"}', async (t) => {
-  const dir = await makeTempDir();
-  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
-  const staging = path.join(dir, 'staging'); await fsp.mkdir(staging);
-  const digin   = path.join(dir, 'digin');   await fsp.mkdir(digin);
-
-  const injected = {
-    ...fsp,
-    rename: async () => { const err = new Error('EXDEV cross-device link'); err.code = 'EXDEV'; throw err; },
-  };
-  const result = await probeSameVolume(staging, digin, { fsPromises: injected });
-  assert.deepEqual(result, { ok: false, code: 'cross-volume' });
-
-  // Cleanup discipline: even on the cross-volume path, no probe file
-  // survives — the probe was written (writeFile succeeded) then never
-  // moved (EXDEV). unlink in the finally block must catch it.
-  const stagingEntries = await fsp.readdir(staging);
-  assert.equal(stagingEntries.filter(e => e.startsWith('.ohd-volume-probe-')).length, 0,
-    'probe file must not linger in source folder even when rename failed with EXDEV');
+test('M7c _volumeRoot: extracts drive letter, lowercased, no trailing sep', () => {
+  assert.equal(_internals._volumeRoot('C:\\Fuji\\DIGIN'), 'c:');
+  assert.equal(_internals._volumeRoot('D:'),               'd:');
+  assert.equal(_internals._volumeRoot('E:/x/y/'),          'e:');
 });
 
-test('M7b probeSameVolume: source folder missing → pathA-not-writable', async (t) => {
-  const dir = await makeTempDir();
-  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
-  const staging = path.join(dir, 'no-such-staging'); // deliberately absent
-  const digin   = path.join(dir, 'digin');           await fsp.mkdir(digin);
-
-  const result = await probeSameVolume(staging, digin);
-  assert.equal(result.ok,   false);
-  assert.equal(result.code, 'pathA-not-writable');
-  assert.match(result.error, /ENOENT/);
+test('M7c _volumeRoot: extracts UNC \\\\host\\share, lowercased', () => {
+  assert.equal(_internals._volumeRoot('\\\\LabServer\\DIGIN\\sub'), '\\\\labserver\\digin');
+  assert.equal(_internals._volumeRoot('\\\\host\\share'),           '\\\\host\\share');
+  assert.equal(_internals._volumeRoot('//host/share/sub'),          '\\\\host\\share');
 });
 
-test('M7b probeSameVolume: destination folder missing → pathB-not-writable', async (t) => {
-  const dir = await makeTempDir();
-  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
-  const staging = path.join(dir, 'staging'); await fsp.mkdir(staging);
-  const digin   = path.join(dir, 'no-such-digin'); // deliberately absent
-
-  const result = await probeSameVolume(staging, digin);
-  assert.equal(result.ok,   false);
-  assert.equal(result.code, 'pathB-not-writable');
-  assert.match(result.error, /ENOENT/);
-});
-
-test('M7b probeSameVolume: non-EXDEV rename error → pathB-not-writable, error preserved', async (t) => {
-  const dir = await makeTempDir();
-  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
-  const staging = path.join(dir, 'staging'); await fsp.mkdir(staging);
-  const digin   = path.join(dir, 'digin');   await fsp.mkdir(digin);
-
-  const injected = {
-    ...fsp,
-    rename: async () => { const err = new Error('EACCES permission denied'); err.code = 'EACCES'; throw err; },
-  };
-  const result = await probeSameVolume(staging, digin, { fsPromises: injected });
-  assert.equal(result.ok,   false);
-  assert.equal(result.code, 'pathB-not-writable');
-  assert.match(result.error, /EACCES/);
-});
-
-test('M7b probeSameVolume: throws on missing/blank arguments (programmer bug, not runtime)', async () => {
-  await assert.rejects(() => probeSameVolume('',        '/x'), /pathA must be a non-empty string/);
-  await assert.rejects(() => probeSameVolume(undefined, '/x'), /pathA must be a non-empty string/);
-  await assert.rejects(() => probeSameVolume('/x',      ''),   /pathB must be a non-empty string/);
-  await assert.rejects(() => probeSameVolume('/x',      null), /pathB must be a non-empty string/);
-});
-
-test('M7b probeSameVolume: concurrent probes do not collide (unique probe name per call)', async (t) => {
-  // The probe filename must include enough entropy that two concurrent
-  // calls don't step on each other. Runs two probes concurrently
-  // against the same folders; both must succeed and both must clean
-  // up cleanly.
-  const dir = await makeTempDir();
-  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
-  const staging = path.join(dir, 'staging'); await fsp.mkdir(staging);
-  const digin   = path.join(dir, 'digin');   await fsp.mkdir(digin);
-
-  const [r1, r2] = await Promise.all([
-    probeSameVolume(staging, digin),
-    probeSameVolume(staging, digin),
-  ]);
-  assert.deepEqual(r1, { ok: true });
-  assert.deepEqual(r2, { ok: true });
-  const stagingEntries = await fsp.readdir(staging);
-  assert.equal(stagingEntries.filter(e => e.startsWith('.ohd-volume-probe-')).length, 0,
-    'no probe file may survive either of the two concurrent calls');
+test('M7c _volumeRoot: returns null for shapes it does not confidently recognise', () => {
+  assert.equal(_internals._volumeRoot(''),                null);
+  assert.equal(_internals._volumeRoot(null),              null);
+  assert.equal(_internals._volumeRoot(undefined),         null);
+  assert.equal(_internals._volumeRoot('\\\\lonely-host'), null, 'bare host with no share is not a volume root');
+  assert.equal(_internals._volumeRoot('relative\\path'),  null);
+  assert.equal(_internals._volumeRoot('/etc/foo'),        null, 'POSIX path is not a Windows volume root');
 });

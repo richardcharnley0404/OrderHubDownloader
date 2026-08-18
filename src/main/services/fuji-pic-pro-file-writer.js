@@ -360,82 +360,108 @@ function _padNegNumber(n) {
 }
 
 /**
- * Save-time co-location probe (M7b). Confirms `pathA` and `pathB` are
- * on the SAME volume by attempting a rename between them — Windows
- * returns EXDEV across volumes, which is the exact operation
- * deliverToDigin's rename does at dispatch. Using the real rename
- * (rather than `fs.statSync().dev`) matches what actually matters:
- * `dev` is unreliable across Windows network shares (SMB reports
- * device numbers that don't map cleanly to volumes, especially for
- * mounted DFS/reparse points).
+ * Save-time co-location check (M7c). Compares the two paths' volume
+ * roots as PURE STRINGS — no fs I/O, no artefacts written anywhere.
  *
- * Cleans up the probe file on EVERY exit path — success, cross-volume
- * refusal, unrelated fs error. Never leaves state behind.
+ * ── Why this is a string compare and NOT a filesystem probe ───────────
  *
- * Never throws for expected outcomes (returns a `{ok, code, error}`
- * shape). Reserving throws for programmer bugs (bad args) keeps the
- * IPC-handler caller's flow simple: one branch on `ok`.
+ * The M7b (2026-08-18) version of this check used a rename-probe: write
+ * a probe file in staging, rename it INTO diginPath, rename it back,
+ * unlink. Same-day M7c review caught that this is the exact class of
+ * bug M7b existed to remove — the probe file `.ohd-volume-probe-*`
+ * appeared INSIDE `diginPath` on every save of a correctly-configured
+ * controller, and "brief" and "doesn't look like an order" are exactly
+ * the two arguments the deleted `.ohdtmp` comment made before
+ * production disproved them. Ironically the misconfigured (cross-
+ * volume) case was SAFE from the probe — the rename threw EXDEV and
+ * nothing landed in DIGIN. It was the correctly-configured labs whose
+ * watched folder got the probe. The probe is gone.
+ *
+ * This check does NOT have to be authoritative — that's the whole
+ * point. If it wrongly says "same volume" for an exotic setup
+ * (`subst`, DFS junction, reparse point), deliverToDigin's dispatch-
+ * time EXDEV throw catches it and names the fix. Two lines of
+ * defence, neither of which touches DIGIN.
+ *
+ * DO NOT replace this with a filesystem probe of any kind. If the
+ * string compare needs to become smarter about some new path shape
+ * (a mount-point convention we haven't seen, say), extend the string
+ * parsing — never introduce a write into diginPath.
+ *
+ * ── Rules ─────────────────────────────────────────────────────────────
+ *
+ *   - Local Windows paths: volume root is the drive designator, e.g.
+ *     `C:` from `C:\Fuji\DIGIN`. Case-insensitive.
+ *   - UNC paths: volume root is `\\server\share`, e.g. `\\host\digin`
+ *     from `\\host\digin\ORD-1`. Case-insensitive on both parts.
+ *     A bare `\\server\share` with no subpath IS a valid volume root.
+ *   - Trailing slashes and forward slashes are normalised before
+ *     extraction so `C:\` / `C:` / `C:/` behave the same, and
+ *     `\\host/share/DIGIN` matches `\\host\share\DIGIN`.
+ *   - Mismatched shapes (one local, one UNC) are definitively
+ *     different volumes.
+ *   - An unrecognisable shape (`null`, non-string, empty, a POSIX-
+ *     looking `/etc/foo`, a bare `\\server` without a share segment)
+ *     returns `ok: true` — we can't confidently reject, so let it
+ *     through to the dispatch-time guard rather than block a save on
+ *     a shape we don't understand.
+ *
+ * Uses `path.win32` explicitly so the parsing works identically when
+ * this runs on a Linux CI host — the PIC Pro delivery it guards is
+ * Windows-only, so Windows path semantics are the right ones
+ * regardless of where the check itself is executed.
  *
  * @param {string} pathA
  * @param {string} pathB
- * @param {object} [deps]
- * @returns {Promise<{ ok: true } | { ok: false, code: string, error?: string }>}
+ * @returns {{ ok: true } | { ok: false, code: 'cross-volume' }}
  */
-async function probeSameVolume(pathA, pathB, deps = {}) {
-  const fsPromises = deps.fsPromises || nodeFsPromises;
-  if (typeof pathA !== 'string' || pathA.length === 0) {
-    throw new Error('probeSameVolume: pathA must be a non-empty string');
-  }
-  if (typeof pathB !== 'string' || pathB.length === 0) {
-    throw new Error('probeSameVolume: pathB must be a non-empty string');
+function isSameVolume(pathA, pathB) {
+  const a = _volumeRoot(pathA);
+  const b = _volumeRoot(pathB);
+  // If either shape is unrecognisable, don't reject — the dispatch-
+  // time EXDEV throw is the second line of defence. See the docstring
+  // "does not have to be authoritative" note.
+  if (a === null || b === null) return { ok: true };
+  if (a === b) return { ok: true };
+  return { ok: false, code: 'cross-volume' };
+}
+
+/**
+ * Extract the case-insensitive volume root from a Windows-style path
+ * as a lowercased string. Returns `null` for shapes this helper
+ * doesn't recognise (POSIX paths, bare `\\server` without a share
+ * segment, empty / non-string input). Callers treat null as
+ * "unknown — accept and defer to dispatch".
+ */
+function _volumeRoot(p) {
+  if (typeof p !== 'string' || p.length === 0) return null;
+  // Normalise: '/' → '\', then strip any trailing separators so
+  // `C:\` / `C:` and `\\host\share\` / `\\host\share` behave the same.
+  const norm = p.replace(/\//g, '\\').replace(/\\+$/, '');
+  if (norm.length === 0) return null;
+
+  // UNC: starts with exactly two backslashes, then host, then share.
+  if (norm.startsWith('\\\\')) {
+    const afterMark  = norm.slice(2);
+    const firstSlash = afterMark.indexOf('\\');
+    if (firstSlash === -1) return null;                    // bare `\\server`, no share
+    const host       = afterMark.slice(0, firstSlash);
+    const afterHost  = afterMark.slice(firstSlash + 1);
+    if (host.length === 0 || afterHost.length === 0) return null;
+    const shareEnd   = afterHost.indexOf('\\');
+    const share      = shareEnd === -1 ? afterHost : afterHost.slice(0, shareEnd);
+    if (share.length === 0) return null;
+    return `\\\\${host}\\${share}`.toLowerCase();
   }
 
-  // Uniquify per call so two concurrent probes can't interfere and a
-  // leftover from a prior aborted run can't be mistaken for ours.
-  const stamp     = `${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
-  const probeName = `.ohd-volume-probe-${stamp}`;
-  const probeA    = path.join(pathA, probeName);
-  const probeB    = path.join(pathB, probeName);
-
-  // Best-effort cleanup helper — called from finally. Swallows every
-  // error so the primary result is the one the caller sees. Nothing to
-  // report either way: probe files are always safe to remove.
-  async function _cleanup() {
-    for (const p of [probeA, probeB]) {
-      try { await fsPromises.unlink(p); } catch (_) { /* ignore */ }
-    }
+  // Local: `X:` optionally followed by more. Drive letter is [A-Za-z].
+  if (/^[A-Za-z]:/.test(norm)) {
+    return norm.slice(0, 2).toLowerCase();
   }
 
-  try {
-    // Write the probe in A. If this fails, A is missing / not writable
-    // — surface that as its own code rather than as "cross-volume".
-    try {
-      await fsPromises.writeFile(probeA, '');
-    } catch (err) {
-      return { ok: false, code: 'pathA-not-writable', error: (err && err.message) || String(err) };
-    }
-    // Rename A→B. Same volume → succeeds. Cross-volume → EXDEV. Other
-    // codes (ENOENT if B is missing, EACCES if B is read-only) surface
-    // as their own class so the operator gets a useful message.
-    try {
-      await fsPromises.rename(probeA, probeB);
-    } catch (err) {
-      if (err && err.code === 'EXDEV') {
-        return { ok: false, code: 'cross-volume' };
-      }
-      return { ok: false, code: 'pathB-not-writable', error: (err && err.message) || String(err) };
-    }
-    // Rename B→A. Same-volume by definition (we just went the other
-    // way successfully) — if this fails, the FS is in an unusual state
-    // (someone else moved the file?) but we can still report success
-    // for the volume question. Errors here are swallowed by _cleanup.
-    try {
-      await fsPromises.rename(probeB, probeA);
-    } catch (_) { /* handled by _cleanup */ }
-    return { ok: true };
-  } finally {
-    await _cleanup();
-  }
+  // Anything else — POSIX path, bare `.`, relative path, gibberish —
+  // is a shape we don't confidently recognise.
+  return null;
 }
 
 module.exports = {
@@ -443,9 +469,10 @@ module.exports = {
   writeOrderFile,
   deliverToDigin,
   writeCommandFile,
-  probeSameVolume,
+  isSameVolume,
   _internals: {
     _padNegNumber,
+    _volumeRoot,
     CMD_FILENAME_PREFIX,
     ORDER_FILE_TMP_SUFFIX,
   },

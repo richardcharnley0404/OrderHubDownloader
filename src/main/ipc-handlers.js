@@ -1374,43 +1374,42 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
         }
         Object.assign(controller, normalized);
 
-        // M7b (2026-08-18) — co-location probe. Image Staging Root and
-        // DIGIN Path MUST be on the same volume, otherwise the atomic
-        // rename in deliverToDigin returns EXDEV and (pre-M7b) the
-        // slow-path fallback wrote `.ohdtmp` inside the DIGIN folder.
-        // Fuji PIC Pro's watcher ingested that partial folder as a
-        // blank duplicate order (customer report, 2026-08-18). The
-        // fallback was removed; co-location is now the enforced
-        // requirement. This is the save-time gate. Runs AFTER the pure
-        // validator so we only probe when the paths are otherwise
-        // valid — the sync validator has already confirmed both fields
-        // are present and non-blank.
+        // M7b/M7c (2026-08-18) — co-location gate. Image Staging Root
+        // and DIGIN Path MUST be on the same volume, otherwise the
+        // atomic rename in deliverToDigin returns EXDEV and (pre-M7b)
+        // the slow-path fallback wrote `.ohdtmp` inside the DIGIN
+        // folder — Fuji PIC Pro's watcher ingested that partial folder
+        // as a blank duplicate order (customer report, 2026-08-18).
+        // The fallback was removed; co-location is now the enforced
+        // requirement.
         //
-        // A pure sync validator can't do this (needs fs); the probe
-        // itself is in fuji-pic-pro-file-writer.js alongside
-        // deliverToDigin because that's the operation it's guarding.
-        const coLoc = await fujiPicProFileWriter.probeSameVolume(
+        // M7b tried a rename-probe here and hit the SAME class of bug
+        // it was meant to prevent — the probe file `.ohd-volume-probe-*`
+        // landed inside DIGIN on every save of a correctly-configured
+        // controller. M7c replaces that with a pure string compare of
+        // volume roots (see fuji-pic-pro-file-writer.js#isSameVolume).
+        // Sync — no fs I/O. The dispatch-time EXDEV throw in
+        // deliverToDigin is the authoritative second line of defence
+        // for exotic setups (subst, DFS, reparse points) that the
+        // string compare can't reason about.
+        const coLoc = fujiPicProFileWriter.isSameVolume(
           controller.imageStagingRoot,
           controller.diginPath,
         );
         if (!coLoc.ok) {
-          const msg = coLoc.code === 'cross-volume'
-            ? 'Image Staging Root and DIGIN Path must be on the same volume. ' +
-              'PIC Pro\'s DIGIN watcher would otherwise pick up the partial folder mid-write ' +
-              'and ship a blank duplicate order alongside the real one. ' +
-              `Image Staging Root: ${controller.imageStagingRoot}. ` +
-              `DIGIN Path: ${controller.diginPath}. ` +
-              'Move Image Staging Root onto the same volume as DIGIN and try Save again.'
-            : `Could not verify Image Staging Root and DIGIN Path are on the same volume ` +
-              `(${coLoc.code}${coLoc.error ? ': ' + coLoc.error : ''}). ` +
-              `Confirm both folders exist and OHD can read+write them, then try Save again.`;
-          logger.logWarning('[routing] save-controller rejected — PIC Pro co-location probe failed', {
+          const msg =
+            'Image Staging Root and DIGIN Path must be on the same volume. ' +
+            'PIC Pro\'s DIGIN watcher would otherwise pick up the partial folder mid-write ' +
+            'and ship a blank duplicate order alongside the real one. ' +
+            `Image Staging Root: ${controller.imageStagingRoot}. ` +
+            `DIGIN Path: ${controller.diginPath}. ` +
+            'Move Image Staging Root onto the same volume as DIGIN and try Save again.';
+          logger.logWarning('[routing] save-controller rejected — PIC Pro co-location check failed', {
             controllerId:     controller.id,
             name:             controller.name,
             imageStagingRoot: controller.imageStagingRoot,
             diginPath:        controller.diginPath,
             code:             coLoc.code,
-            error:            coLoc.error,
           });
           return { success: false, error: msg };
         }
