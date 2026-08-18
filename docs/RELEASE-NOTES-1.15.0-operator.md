@@ -6,19 +6,6 @@ Read this whole page before you install. There are two behaviour changes that
 affect what actually comes out of your printer, plus one that changes how
 PhotoFinale orders appear in OrderHub — all three are covered first.
 
-## Installing
-
-Windows will warn you that the publisher is unknown. That's expected — our
-installer isn't code-signed.
-
-1. **"Windows protected your PC"** → click **More info** → **Run anyway**
-2. **"Do you want to allow this app…"** → click **Yes**
-
-Close OrderHub Desktop before installing. Your settings, controllers and
-channel mappings are all preserved.
-
----
-
 ## Please read BEFORE installing — Fuji PIC Pro co-location check
 
 If you use a **Fuji PIC Pro** printer, check this now, not after upgrading.
@@ -52,6 +39,8 @@ the correct order printed.
 Save is blocked until the two paths are co-located, so you can't accidentally
 re-create the broken configuration.
 
+Once both paths sit on the same volume, jump to **## Installing** below.
+
 ---
 
 ## Please read BEFORE installing — {date} on Fuji back prints
@@ -74,6 +63,19 @@ needed — it now works as the template said it would.
 
 **If you don't want the date on the back print**, delete `{date}` from the
 Back Print Template before this release lands at the lab.
+
+---
+
+## Installing
+
+Windows will warn you that the publisher is unknown. That's expected — our
+installer isn't code-signed.
+
+1. **"Windows protected your PC"** → click **More info** → **Run anyway**
+2. **"Do you want to allow this app…"** → click **Yes**
+
+Close OrderHub Desktop before installing. Your settings, controllers and
+channel mappings are all preserved.
 
 ---
 
