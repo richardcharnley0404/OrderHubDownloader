@@ -1,8 +1,9 @@
 # Folder Copy — filename templates & destination layout (build brief)
 
-**Status:** built, 2026-08-17. Supersedes the decisions section of
-`docs/folder-copy-filename-templates-investigation.md` (that doc stays as the
-research record — read it first for *why*, read this for *what to build*).
+**Status:** shipped in v1.15.0 (2026-08-18). Supersedes the decisions
+section of `docs/folder-copy-filename-templates-investigation.md` (that
+doc stays as the research record — read it first for *why*, read this
+for *what to build*).
 
 **Commits (bisectable, one milestone per commit):**
 
@@ -16,6 +17,13 @@ research record — read it first for *why*, read this for *what to build*).
 | `932f726` | M4 — wire into `_sendViaFolderCopyRouted` (dispatch), reprint comment + BACKLOG entry |
 | `7d9ba28` | M5 — live preview in Settings, runs the real M1+M2 code path |
 | `d96d98e` | M5a — extracted `buildDestFolder` (one implementation of §6.2); preview runs planner on FULL image list |
+| `827ba5a` | M6 — CHANGELOG Unreleased entry (operator language) + brief amendments + investigation-doc header |
+| `7bd48ae` | M6a — preview-claim wording scoped honest; two Landmines added (buildDestFolder is the one implementation; never `path.extname` on template output) |
+| `7f46c43` | M8 — option-name discoverability chips in the preview + honest `{options}` machine-value warning |
+| `c23b491` | M7 — Strip Order Number Prefix widened from single string to a `string[]` list; PIC Pro single-job path routed through `getOrCreateSubmissionId` for cross-prefix collision safety |
+| `01a844a` | M7a — separator required between prefix and code (no more `PXDEMO → X` leading-substring hijack); flipped the mis-titled printUtils test that had codified the bug |
+| `0a81610` | M7b — order-number prefix rules now `{from,to}` pairs with optional REPLACEMENT (customer request); helper renamed `stripOrderNumberPrefixMulti` → `applyOrderNumberPrefixRules`; three-shape tolerant reader on the controller record |
+| `8f38729` | M7b UI — pair-row Prefix + Replace-with inputs; help text spells out the "match is replaced verbatim including separator" rule |
 
 Read the brief top-to-bottom AND §12 "Amendments during build" below
 before assuming any part is still current — several sections were
@@ -703,8 +711,79 @@ Two related shape corrections after M5 shipped:
 ### Docs (§9) — deferred pieces
 
 Also worth recording: §9 called for an "operator note" separate
-from the CHANGELOG. That is folded into the "Unreleased" CHANGELOG
-entry instead — the two would have said the same thing and drift
-between them is a nuisance. A `RELEASE-NOTES-*-operator.md` file
-will be created at release time when the version number is picked;
-the content is the same.
+from the CHANGELOG. Both landed: the CHANGELOG entry (now v1.15.0,
+2026-08-18) is the primary reference and drives release-time
+release-notes generation at
+`docs/RELEASE-NOTES-1.15.0-operator.md`.
+
+### M8 — option-name discoverability + honest `{options}` warning
+
+`{option:NAME}` was unusable without knowing the option name — they
+are API keys like `finish-options`, `photo`, `layout-options` that an
+operator has no way to see anywhere else in the app. Preview now
+renders the sample job's option names as click-to-insert chips beside
+the "Preview using job 12345" label.
+
+Also: the preview now warns when `{options}` on the sample job
+resolves to include a machine-shaped value (a `db:…` photo id, a
+long numeric shopify variant id). Names the offending option and
+suggests `{option:NAME}` for the specific value the operator wants.
+`{options}` remains available — click-to-copy — for cases where the
+lab actually wants the whole joined string.
+
+Landed in `7f46c43`.
+
+### M7 → M7a → M7b — Strip Order Number Prefix: shape shifted twice
+
+The `stripOrderNumberPrefix` field described in §5 and §6 of this
+brief was a single string. Two shape shifts landed after the initial
+brief, both in response to real customer configurations:
+
+**M7 (`c23b491`) — widened to a list.** One OHD install talks to one
+OrderHub org, but that org can ship orders with several source-website
+prefixes (Richard's install already had `ORD-`, `PXDEMO-`, `POS-`
+live on the same Pixfizz account). The single-string field couldn't
+express "match whichever of these three arrives". Changed to a
+repeating-row `string[]` on the controller record, longest-match-first
+sort inside the helper, PIC Pro single-job path routed through
+`getOrCreateSubmissionId` for cross-prefix collision safety on the
+staging folder / .txt / DIGIN folder.
+
+**M7a (`01a844a`) — separator required.** M7 accepted leading-substring
+matches when the remainder didn't start with `-` or `_`. A configured
+`PXDEMO` would strip `PXDEMOX-1` to `X-1`. Fix: unless the configured
+prefix already ends in `-` / `_`, the remainder MUST begin with one;
+otherwise this candidate does not match and the next is tried. Test
+that pinned the bug was mis-titled — the title said "PXDEMO must NOT
+strip PXDEMOX" but the assertion codified the strip. Flipped as part
+of M7a and CLAUDE.md now has a convention note: "assertions come from
+the invariant, never from observed output".
+
+**M7b (`0a81610` + `8f38729`) — pairs with optional REPLACEMENT.**
+Customer request: turn `PXDEMO-091YEC` into `PX-091YEC` (short prefix
+that reads better in the printer console), not just strip it. Each
+row became a `{from, to}` pair — blank `to` = pure strip (byte-
+identical to M7 behaviour), non-blank = replacement. Helper renamed
+`stripOrderNumberPrefixMulti` → `applyOrderNumberPrefixRules`, reader
+renamed `readStripPrefixes` → `readOrderNumberPrefixRules` (three-
+shape tolerant: pair-array wins, then M7 `string[]`, then legacy
+1.13.0 single string), field renamed on the controller record
+`stripOrderNumberPrefixes` → `orderNumberPrefixRules`, resolveTemplate
+`opts.stripPrefixes` → `opts.prefixRules`, buildDestFolder
+`args.stripPrefixes` → `args.prefixRules`. Every existing controller
+loads correctly with `to` blank; nothing to migrate.
+
+**Subtle rule spelled out in the field help text:** replacement
+substitutes for EXACTLY what was matched, including any separator
+the M7a rule consumed. `{from:'PXDEMO', to:'PX'}` on
+`PXDEMO-091YEC` produces `PX091YEC`, not `PX-091YEC` — the hyphen was
+consumed by the match. An operator who wants the hyphen writes
+`{from:'PXDEMO-', to:'PX-'}`. Predictable and matches how the request
+was phrased.
+
+The single-job PIC Pro counter (`order-submission-seq
+.getOrCreateSubmissionId`) is keyed on `displayBase`, so two rules
+that funnel different raw prefixes to the same replacement
+(`PXDEMO-` → `PX-` and `PXDEMO2-` → `PX-`) get `PX-091YEC` and
+`PX-091YEC-2` — the same collision safety net that already covered
+pure-strip collisions.

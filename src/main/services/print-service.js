@@ -3404,14 +3404,14 @@ class PrintService {
     // attempt gets -N+1 and stageImages does NOT rm -rf a folder from
     // a previous attempt — the whole reason M3 exists.
     //
-    // v1.13.0: apply the per-controller Strip Order Number Prefix
-    // BEFORE handing to nextSubmissionId as its displayBase. The
-    // counter stays keyed on the raw order number so two orders that
-    // strip to the same base still get independent counters (see the
-    // M3 module's "counter isolation" test); the returned id uses the
-    // stripped form for the staging folder / .txt filename / DIGIN
-    // folder — all three names come from this single `orderId`, so
-    // they cannot diverge.
+    // v1.13.0 → M7 → M7b: apply the per-controller Order Number Prefix
+    // Rules BEFORE handing to nextSubmissionId as its displayBase. The
+    // counter is keyed on displayBase so two orders that transform to
+    // the same base share a counter (`-2`/`-3` suffix — the collision
+    // safety net); see order-submission-seq.js#nextSubmissionId. The
+    // returned id uses the post-rules form for the staging folder /
+    // .txt filename / DIGIN folder — all three names come from this
+    // single `orderId`, so they cannot diverge.
     //
     // Lazy-required (same pattern as server-capabilities in
     // job-service) so require-ing print-service.js doesn't force the

@@ -5436,7 +5436,7 @@ function renderFolderCopyPreview(preview) {
   }
 }
 
-// ── Strip Order Number Prefixes list (M7) ────────────────────────────────
+// ── Order Number Prefix Rules list (v1.13.0 → M7 → M7b) ─────────────────
 //
 // Repeating-row UI matching the .mapping-row shape used by
 // sizeTranslations / mediaTranslations / photoLines. Each row is a
@@ -5743,13 +5743,12 @@ function updateOcTypeFields() {
   // (v1.10) and epson (M5 of docs/epson-batch-splitting-brief.md).
   // Kept off noritsu and untyped-dpof deliberately.
   document.getElementById('ocMaxPrintsPerJobGroup').style.display     = (type === 'darkroompro' || type === 'epson') ? '' : 'none';
-  // Fuji PIC Pro-only: order-level submission (mergeOrderJobs + wait cap)
-  // and per-controller Strip Order Number Prefix (v1.13.0).
+  // Fuji PIC Pro-only: order-level submission (mergeOrderJobs + wait cap).
   document.getElementById('ocMergeOrderJobsGroup').style.display          = type === 'fujipicpro' ? '' : 'none';
   document.getElementById('ocOrderMergeWaitMinutesGroup').style.display    = type === 'fujipicpro' ? '' : 'none';
-  // Strip Order Number Prefix is shared: PIC Pro (v1.13.0) + Folder Copy
-  // (M3 of docs/folder-copy-filename-templates-brief.md). Same field,
-  // same helper, same semantics.
+  // Order Number Prefix Rules is shared: PIC Pro (v1.13.0) + Folder Copy
+  // (M3 of docs/folder-copy-filename-templates-brief.md), pair-array
+  // shape from M7b. Same field, same helper, same semantics.
   document.getElementById('ocOrderNumberPrefixRulesGroup').style.display   = (isFujiPicPro || isFolderCopy) ? '' : 'none';
   // Folder Copy-specific fields (M3). The template group's built-in
   // reference panel is rendered idempotently by renderFolderCopyTokens
@@ -5896,9 +5895,10 @@ function openOrderControllerModal(ctrl = null) {
       && ctrl.orderMergeWaitMinutes <= 1440
       ? String(ctrl.orderMergeWaitMinutes)
       : '';
-  // v1.12.2 → M7 — per-controller Strip Order Number Prefixes. Empty on
-  // non-picpro / non-folder_copy types (the field is hidden anyway; this
-  // keeps the row list in sync with what the controller actually stores).
+  // v1.12.2 → M7 → M7b — per-controller Order Number Prefix Rules. Empty
+  // on non-picpro / non-folder_copy types (the field is hidden anyway;
+  // this keeps the row list in sync with what the controller actually
+  // stores).
   // Read-time uses the shared tolerant reader — accepts all three shapes
   // (M7b pair array, M7 string[], 1.13.0 single string) so a controller
   // record from any prior version renders as a filled row list.

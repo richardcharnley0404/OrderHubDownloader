@@ -1,4 +1,4 @@
-## Unreleased
+## v1.15.0 - 2026-08-18
 
 **Changed: PhotoFinale XML orders now arrive UNPAID and need marking
 paid through the normal OrderHub flow.** Previously (from 2026-05-08)
