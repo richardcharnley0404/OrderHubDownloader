@@ -103,42 +103,64 @@ you want to opt in, don't touch anything to opt out.
 
 ---
 
-**Changed: strip order number prefix is now a LIST, and applies to
-both Folder Copy and Fuji PIC Pro.** Settings → Routing → Order
-Controllers → Edit → **Strip order number prefixes**. A single
-OrderHub org can ship orders with several source-website prefixes —
-this install already has `ORD-`, `PXDEMO-` and `POS-` live on the
-same Pixfizz account — so the field is a repeating-row list rather
-than a single value. One prefix per row, `+ Add prefix` below.
-Longest match wins, so `PXDEMO` and `PXDEMO1` can coexist safely:
-`PXDEMO1-091YEC` always strips via `PXDEMO1` regardless of the order
-the two entries were typed. Case-insensitive on the match; the
-surviving tail keeps its original casing. Never strips down to empty.
+**Changed: order number prefixes can now be REPLACED, not just
+stripped, and the field is a LIST that applies to both Folder Copy
+and Fuji PIC Pro.** Settings → Routing → Order Controllers → Edit →
+**Order number prefix rules**. Each rule is a pair: **Prefix** on the
+left, **Replace with** on the right. Leave Replace with blank to
+strip the prefix (the previous behaviour). Fill it in to replace it:
+Prefix `PXDEMO-` → Replace with `PX-` turns `PXDEMO-091YEC` into
+`PX-091YEC`. Add as many rows as you need; `+ Add rule` sits below.
+
+**One thing to know about the replacement:** what's matched is
+replaced verbatim, including any separator between the prefix and
+the code. Prefix `PXDEMO` (no hyphen) → Replace with `PX` (no hyphen)
+turns `PXDEMO-091YEC` into `PX091YEC` — the hyphen is part of what
+the rule matched, so it's part of what gets replaced. If you want the
+hyphen in the output, type it on both sides: Prefix `PXDEMO-` →
+Replace with `PX-`. This is deliberate and predictable — the rule
+says "match this exact prefix, replace with this exact string" — but
+it's the one thing an operator will get wrong the first time. The
+field help text in Settings spells this out.
+
+One OrderHub org can ship orders with several source-website
+prefixes — this install already has `ORD-`, `PXDEMO-` and `POS-` live
+on the same Pixfizz account — so the list can mix strip-only and
+replacement rules. Longest match wins, so `PXDEMO` and `PXDEMO1` can
+coexist safely: `PXDEMO1-091YEC` always matches via `PXDEMO1`
+regardless of the order the two rules were typed. Case-insensitive on
+the match; the surviving tail keeps its original casing. Never
+produces empty.
 
 **The prefix must be followed by `-` or `_` in the order number.**
 `PXDEMO` and `PXDEMO-` behave identically on `PXDEMO-091YEC` — both
-produce `091YEC` — but neither touches `PXDEMOX-1`, because there's
-no separator between `PXDEMO` and `X`. This is a deliberate rule so a
-configured `PXDEMO` can't silently strip any leading-substring match.
-Every real OrderHub order number is `PREFIX-CODE`, so the "no
-separator" case doesn't occur in practice.
+match — but neither touches `PXDEMOX-1`, because there's no separator
+between `PXDEMO` and `X`. This is a deliberate rule so a configured
+`PXDEMO` can't silently match any leading-substring. Every real
+OrderHub order number is `PREFIX-CODE`, so the "no separator" case
+doesn't occur in practice.
 
 A controller carried over from 1.13.0 with the old single-value
-prefix still reads correctly and renders as a one-row list on load —
-nothing to do to migrate. On Folder Copy, the strip applies to the
-destination folder name AND any `{orderNumber}` / `{jobName}` token
-in the filename template. On Fuji PIC Pro it applies to the
+prefix still reads correctly, as does a v1.14.0 controller with the
+strip-only list — both render as pair rows with **Replace with**
+blank on load, nothing to do to migrate. On Folder Copy, rules apply
+to the destination folder name AND any `{orderNumber}` / `{jobName}`
+token in the filename template. On Fuji PIC Pro they apply to the
 submission id (staging folder, `{orderId}.txt` filename, DIGIN
-folder) exactly as it did in 1.13.0.
+folder) exactly as strip-only did before.
 
-**Fuji PIC Pro submission folders are now collision-proof across
-prefixes.** If two orders on different source websites strip to the
-same base — `PXDEMO-091YEC` and `POS-091YEC` both strip to `091YEC` —
-the second one dispatched gets `091YEC-2`, the same `-2`/`-3`
+**Fuji PIC Pro submission folders are collision-proof across rules
+that map to the same result.** If two rules deliberately funnel
+different prefixes to the same replacement — Prefix `PXDEMO-` →
+Replace with `PX-` and Prefix `PXDEMO2-` → Replace with `PX-` — the
+second order dispatched gets `PX-091YEC-2`, the same `-2`/`-3`
 resubmission suffix scheme the merge path already used. Before this,
-the second dispatch would have named its staging folder `091YEC` too
-and cleared it before writing, wiping the first order's staged images
-before PIC Pro moved them into DIGIN.
+the second dispatch would have named its staging folder `PX-091YEC`
+too and cleared it before writing, wiping the first order's staged
+images before PIC Pro moved them into DIGIN. Same safety net covers
+two different order numbers that pure-strip to the same base
+(`PXDEMO-091YEC` and `POS-091YEC` both stripping to `091YEC`) — no
+change from 1.14.0 on that shape.
 
 **Re-sending the same job still reuses its own id — a retry does NOT
 create a duplicate.** The idempotence guarantee is per-job: the first
@@ -146,7 +168,7 @@ dispatch of a given job allocates a submission id and remembers the
 pairing; every subsequent dispatch of that same job returns the same
 id, so no second submission appears in DIGIN. Nothing about resend
 behaviour changes — the collision protection above is strictly about
-DIFFERENT jobs whose prefixes happen to strip to the same base.
+DIFFERENT jobs whose rules map to the same result.
 
 ---
 
