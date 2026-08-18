@@ -5298,11 +5298,11 @@ async function _runFolderCopyPreview() {
   if (document.getElementById('ocType').value !== 'folder_copy') return;
 
   const payload = {
-    controllerId:             modal.dataset.editingId || null,
-    outputPath:               document.getElementById('ocOutputPath').value,
-    filenameTemplate:         document.getElementById('ocFilenameTemplate').value,
-    destinationLayout:        document.getElementById('ocDestinationLayout').value,
-    stripOrderNumberPrefixes: readStripPrefixesFromRows(),
+    controllerId:           modal.dataset.editingId || null,
+    outputPath:             document.getElementById('ocOutputPath').value,
+    filenameTemplate:       document.getElementById('ocFilenameTemplate').value,
+    destinationLayout:      document.getElementById('ocDestinationLayout').value,
+    orderNumberPrefixRules: readPrefixRulesFromRows(),
   };
   try {
     const preview = await window.electronAPI.folderCopyPreview(payload);
@@ -5439,91 +5439,124 @@ function renderFolderCopyPreview(preview) {
 // ── Strip Order Number Prefixes list (M7) ────────────────────────────────
 //
 // Repeating-row UI matching the .mapping-row shape used by
-// sizeTranslations / mediaTranslations / photoLines. Load populates the
-// list from the controller record via the tolerant reader (new array
-// field wins, legacy single-string wrapped as a one-row list). Save
-// collects trimmed non-empty values, deduped case-insensitively, into
-// stripOrderNumberPrefixes: string[]. Semantic validation
-// (longest-match-first sort, separator drop, never-strip-to-empty)
-// lives in printUtils.stripOrderNumberPrefixMulti — no renderer-side
-// check needed.
+// sizeTranslations / mediaTranslations / photoLines. Each row is a
+// PAIR: Prefix (from) + Replace with (to). Blank "Replace with" means
+// pure strip (byte-identical to today's behaviour). Load populates the
+// list from the controller record via the tolerant reader (new pair-
+// array field wins, then M7 string[], then legacy 1.13.0 single string
+// — both legacy shapes promote to {from, to:''} pairs). Save collects
+// trimmed non-empty-from pairs, deduped case-insensitively on `from`,
+// into orderNumberPrefixRules: Array<{from,to}>. Semantic validation
+// (longest-from-first sort, separator drop, replacement carries `to`
+// verbatim, never-produce-empty per rule) lives in
+// printUtils.applyOrderNumberPrefixRules — no renderer-side check
+// needed.
 
-// Renderer mirror of printUtils.readStripPrefixes (context isolation
-// prevents require(); kept minimal and grepable so the two can be
-// checked by hand). Reads a controller RECORD and returns string[].
-function readStripPrefixesForRender(ctrl) {
+// Renderer mirror of printUtils.readOrderNumberPrefixRules (context
+// isolation prevents require(); kept minimal and grepable so the two
+// can be checked by hand). Reads a controller RECORD and returns
+// Array<{from,to}>.
+function readPrefixRulesForRender(ctrl) {
   if (!ctrl || typeof ctrl !== 'object') return [];
+  const pairs = ctrl.orderNumberPrefixRules;
+  if (Array.isArray(pairs)) {
+    return pairs
+      .filter(r => r && typeof r === 'object' && typeof r.from === 'string' && r.from.length > 0)
+      .map(r => ({ from: r.from, to: typeof r.to === 'string' ? r.to : '' }));
+  }
   const arr = ctrl.stripOrderNumberPrefixes;
   if (Array.isArray(arr)) {
-    return arr.filter(p => typeof p === 'string' && p.length > 0);
+    return arr
+      .filter(p => typeof p === 'string' && p.length > 0)
+      .map(p => ({ from: p, to: '' }));
   }
   const legacy = ctrl.stripOrderNumberPrefix;
   if (typeof legacy === 'string' && legacy.length > 0) {
-    return [legacy];
+    return [{ from: legacy, to: '' }];
   }
   return [];
 }
 
-function addStripPrefixRow(container, value = '', focus = false) {
+function addPrefixRuleRow(container, from = '', to = '', focus = false) {
   if (!container) return null;
   const row = document.createElement('div');
   row.className = 'mapping-row';
   row.style.cssText = 'display:flex;align-items:center;gap:4px;margin-bottom:4px;';
-  const input = document.createElement('input');
-  input.type = 'text';
-  input.className = 'oc-strip-prefix';
-  input.placeholder = 'e.g. PXDEMO-';
-  input.value = value;
-  input.style.cssText = 'flex:1';
-  input.addEventListener('input', scheduleFolderCopyPreview);
+
+  const fromInput = document.createElement('input');
+  fromInput.type = 'text';
+  fromInput.className = 'oc-prefix-rule-from';
+  fromInput.placeholder = 'Prefix (e.g. PXDEMO-)';
+  fromInput.value = from;
+  fromInput.style.cssText = 'flex:1';
+  fromInput.addEventListener('input', scheduleFolderCopyPreview);
+
+  const arrow = document.createElement('span');
+  arrow.textContent = '→';
+  arrow.style.cssText = 'color:var(--text-muted,#666);font-size:14px;';
+
+  const toInput = document.createElement('input');
+  toInput.type = 'text';
+  toInput.className = 'oc-prefix-rule-to';
+  toInput.placeholder = 'Replace with (optional; blank = strip)';
+  toInput.value = to;
+  toInput.style.cssText = 'flex:1';
+  toInput.addEventListener('input', scheduleFolderCopyPreview);
+
   const removeBtn = document.createElement('button');
   removeBtn.type = 'button';
   removeBtn.textContent = '×';
-  removeBtn.title = 'Remove this prefix';
+  removeBtn.title = 'Remove this rule';
   removeBtn.style.cssText = 'background:none;border:none;color:#c0392b;cursor:pointer;font-size:18px;line-height:1;padding:0 4px';
   removeBtn.addEventListener('click', () => {
     row.remove();
     scheduleFolderCopyPreview();
   });
-  row.appendChild(input);
+
+  row.appendChild(fromInput);
+  row.appendChild(arrow);
+  row.appendChild(toInput);
   row.appendChild(removeBtn);
   container.appendChild(row);
-  if (focus) input.focus();
+  if (focus) fromInput.focus();
   return row;
 }
 
-function renderStripPrefixList(values) {
-  const container = document.getElementById('ocStripOrderNumberPrefixesList');
+function renderPrefixRulesList(rules) {
+  const container = document.getElementById('ocOrderNumberPrefixRulesList');
   if (!container) return;
   container.innerHTML = '';
-  const list = Array.isArray(values) ? values : [];
+  const list = Array.isArray(rules) ? rules : [];
   if (list.length === 0) {
     // Always render at least one empty row so the operator has
     // somewhere to type without hunting for the + Add button first.
-    addStripPrefixRow(container, '', /* focus */ false);
+    addPrefixRuleRow(container, '', '', /* focus */ false);
     return;
   }
-  for (const v of list) {
-    addStripPrefixRow(container, v, /* focus */ false);
+  for (const r of list) {
+    addPrefixRuleRow(container, r.from || '', r.to || '', /* focus */ false);
   }
 }
 
-// Collects the current row inputs into a normalised array — trim, drop
-// empties, dedupe case-insensitively (first occurrence wins). The IPC
-// mirror does the same normalisation defence-in-depth, so an operator
-// who accidentally types PXDEMO- twice or leaves whitespace at the
-// edges lands on the same shape either way.
-function readStripPrefixesFromRows() {
-  const rows = document.querySelectorAll('#ocStripOrderNumberPrefixesList .mapping-row .oc-strip-prefix');
+// Collects the current row inputs into a normalised pair array — trim
+// both sides, drop empty-from rows, dedupe case-insensitively on `from`
+// (first occurrence wins). The IPC mirror does the same normalisation
+// defence-in-depth, so an operator who accidentally types PXDEMO- twice
+// or leaves whitespace at the edges lands on the same shape either way.
+function readPrefixRulesFromRows() {
+  const rows = document.querySelectorAll('#ocOrderNumberPrefixRulesList .mapping-row');
   const seen = new Set();
   const out = [];
-  rows.forEach(input => {
-    const v = (input.value || '').trim();
-    if (!v) return;
-    const key = v.toLowerCase();
+  rows.forEach(row => {
+    const fromEl = row.querySelector('.oc-prefix-rule-from');
+    const toEl   = row.querySelector('.oc-prefix-rule-to');
+    const from = (fromEl && fromEl.value || '').trim();
+    const to   = (toEl   && toEl.value   || '').trim();
+    if (!from) return;
+    const key = from.toLowerCase();
     if (seen.has(key)) return;
     seen.add(key);
-    out.push(v);
+    out.push({ from, to });
   });
   return out;
 }
@@ -5717,7 +5750,7 @@ function updateOcTypeFields() {
   // Strip Order Number Prefix is shared: PIC Pro (v1.13.0) + Folder Copy
   // (M3 of docs/folder-copy-filename-templates-brief.md). Same field,
   // same helper, same semantics.
-  document.getElementById('ocStripOrderNumberPrefixGroup').style.display   = (isFujiPicPro || isFolderCopy) ? '' : 'none';
+  document.getElementById('ocOrderNumberPrefixRulesGroup').style.display   = (isFujiPicPro || isFolderCopy) ? '' : 'none';
   // Folder Copy-specific fields (M3). The template group's built-in
   // reference panel is rendered idempotently by renderFolderCopyTokens
   // — called from openOrderControllerModal on modal open.
@@ -5866,13 +5899,13 @@ function openOrderControllerModal(ctrl = null) {
   // v1.12.2 → M7 — per-controller Strip Order Number Prefixes. Empty on
   // non-picpro / non-folder_copy types (the field is hidden anyway; this
   // keeps the row list in sync with what the controller actually stores).
-  // Read-time uses the shared tolerant reader — accepts both the new
-  // array field and the legacy single-string field so a pre-M7 controller
-  // record renders as a one-row list.
+  // Read-time uses the shared tolerant reader — accepts all three shapes
+  // (M7b pair array, M7 string[], 1.13.0 single string) so a controller
+  // record from any prior version renders as a filled row list.
   const isFolderCopyCtrl = ctrl && ctrl.type === 'folder_copy';
-  const stripPrefixesForModal =
-    (isFujiPicProCtrl || isFolderCopyCtrl) && ctrl ? readStripPrefixesForRender(ctrl) : [];
-  renderStripPrefixList(stripPrefixesForModal);
+  const prefixRulesForModal =
+    (isFujiPicProCtrl || isFolderCopyCtrl) && ctrl ? readPrefixRulesForRender(ctrl) : [];
+  renderPrefixRulesList(prefixRulesForModal);
   // M3 — Folder Copy filename template + destination layout. Read-time
   // defaults for a controller record with none of the fields set:
   // template '', layout 'job'. Matches the routing-service literals
@@ -6268,19 +6301,20 @@ document.getElementById('ocBrowseBtn').addEventListener('click', async () => {
 // controller-type inside scheduleFolderCopyPreview (short-circuits when
 // type !== 'folder_copy'), so wiring here is safe for every controller
 // type — no dispatch of the preview when it isn't visible.
-// M7: the strip-prefixes list is a repeating-row list, not a single
-// input. renderStripPrefixList wires `input` on each row and the
-// remove-button click at row-creation time, so the top-level listener
-// only needs the other single-input fields plus the +Add button below.
+// M7b: the prefix-rules list is a repeating pair-row list, not a single
+// input. renderPrefixRulesList wires `input` on each side of each row
+// and the remove-button click at row-creation time, so the top-level
+// listener only needs the other single-input fields plus the +Add
+// button below.
 for (const id of ['ocOutputPath', 'ocFilenameTemplate']) {
   const el = document.getElementById(id);
   if (el) el.addEventListener('input', scheduleFolderCopyPreview);
 }
 {
-  const addBtn = document.getElementById('ocAddStripPrefixBtn');
+  const addBtn = document.getElementById('ocAddPrefixRuleBtn');
   if (addBtn) {
     addBtn.addEventListener('click', () => {
-      addStripPrefixRow(document.getElementById('ocStripOrderNumberPrefixesList'), '', /* focus */ true);
+      addPrefixRuleRow(document.getElementById('ocOrderNumberPrefixRulesList'), '', '', /* focus */ true);
       scheduleFolderCopyPreview();
     });
   }
@@ -6548,22 +6582,24 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
     controller.includeCustomerName = document.getElementById('ocPicProIncludeCustomerName').checked;
     controller.mergeOrderJobs        = !!mergeOrderJobs;
     controller.orderMergeWaitMinutes = orderMergeWaitMinutes;
-    // v1.12.2 → M7 — per-controller Strip Order Number Prefixes. List
-    // of trimmed non-empty strings, deduped case-insensitively. Empty
-    // list = no strip. Semantic validation (longest-match-first sort
-    // inside the helper, case-insensitive match, separator drop,
-    // never-strip-to-empty per candidate) is in
-    // src/shared/printUtils.stripOrderNumberPrefixMulti — no
+    // v1.12.2 → M7 → M7b — per-controller Order Number Prefix Rules.
+    // Array of {from, to} pairs; trimmed on both sides, empty-from
+    // dropped, deduped case-insensitively on `from`. Blank `to` = pure
+    // strip (today's behaviour). Empty list = no rules applied.
+    // Semantic validation (longest-from-first sort inside the helper,
+    // case-insensitive match, separator drop, replacement carries `to`
+    // verbatim, never-produce-empty per rule) is in
+    // src/shared/printUtils.applyOrderNumberPrefixRules — no
     // renderer-side check needed here.
-    controller.stripOrderNumberPrefixes = readStripPrefixesFromRows();
+    controller.orderNumberPrefixRules = readPrefixRulesFromRows();
     // `outputPath` is deliberately forced to '' at the top of the
     // handler for fujipicpro — the three explicit paths above are
     // what the writer consumes, and persisting a non-empty value
     // would let polling-service._startFolderMonitors attach a DPOF
     // FolderMonitor to it.
   }
-  // M3 — Folder Copy filename template + destination layout + prefix.
-  // Assigned in its OWN type block (do NOT hoist stripOrderNumberPrefix
+  // M3 — Folder Copy filename template + destination layout + prefix rules.
+  // Assigned in its OWN type block (do NOT hoist orderNumberPrefixRules
   // to a shared position — the per-type discipline is what the comment
   // at :6004 is about, and it's why the 1.12.0 PIC Pro merge bug
   // happened: a field assigned in the wrong type block that silently
@@ -6616,10 +6652,11 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
         return;
       }
     }
-    controller.filenameTemplate         = filenameTemplate;
-    controller.destinationLayout        = destinationLayout;
-    // M7: list of trimmed non-empty prefixes, deduped case-insens.
-    controller.stripOrderNumberPrefixes = readStripPrefixesFromRows();
+    controller.filenameTemplate       = filenameTemplate;
+    controller.destinationLayout      = destinationLayout;
+    // M7b: pair array {from,to}. Both sides trimmed, empty-from dropped,
+    // deduped case-insens on `from`.
+    controller.orderNumberPrefixRules = readPrefixRulesFromRows();
   }
   try {
     const result = await window.electronAPI.saveOrderController(controller);

@@ -1495,19 +1495,18 @@
         </div>
       </div>
 
-      <!-- v1.12.2 → M7: per-controller Strip Order Number Prefixes.
-           Applies to every submission from this controller (single-job and
-           merged), never a reprint. Available on Fuji PIC Pro AND Folder
-           Copy — same field, same helper, same semantics. M7 widened this
-           from a single string to a repeating-row list because one lab can
-           receive orders with several prefixes distinguishing the source
-           website (ORD-, PXDEMO-, POS-). Rows are read via the shared
-           printUtils.readStripPrefixes helper on save. -->
-      <div class="form-group" id="ocStripOrderNumberPrefixGroup" style="display:none">
-        <label style="font-weight:600;margin-bottom:4px;display:block">Strip order number prefixes <span style="font-weight:normal;color:#888">(optional)</span></label>
-        <small style="color:var(--text-muted,#888);display:block;margin-bottom:8px">If your OrderHub order numbers start with fixed tags (e.g. <code>PXDEMO-</code>, <code>DIVPRINTS-</code>, <code>ORD-</code>), add each one on its own row and OHD will trim whichever matches off the front of the submission id. Longest match wins, so <code>PXDEMO</code> and <code>PXDEMO1</code> can coexist. <strong>The prefix must be followed by <code>-</code> or <code>_</code> in the order number</strong>, so both <code>PXDEMO-</code> and <code>PXDEMO</code> behave the same on <code>PXDEMO-091YEC</code>, but neither strips <code>PXDEMOX-1</code> (no separator between <code>PXDEMO</code> and <code>X</code>). Case-insensitive on the match; tail keeps its original casing. Never strips down to empty; the <code>-2</code>/<code>-3</code> resubmission suffix still applies after stripping.</small>
-        <div id="ocStripOrderNumberPrefixesList"></div>
-        <button type="button" id="ocAddStripPrefixBtn" class="btn-secondary btn-sm" style="margin-top:6px">+ Add prefix</button>
+      <!-- v1.12.2 → M7 → M7b: per-controller Order Number Prefix Rules.
+           Each rule is a Prefix + optional Replace-with. Blank Replace-with
+           = pure strip (M7 behaviour). Applies to every submission from
+           this controller (single-job and merged), never a reprint.
+           Available on Fuji PIC Pro AND Folder Copy — same field, same
+           helper, same semantics. Rows are read via the shared
+           printUtils.readOrderNumberPrefixRules helper on save. -->
+      <div class="form-group" id="ocOrderNumberPrefixRulesGroup" style="display:none">
+        <label style="font-weight:600;margin-bottom:4px;display:block">Order number prefix rules <span style="font-weight:normal;color:#888">(optional)</span></label>
+        <small style="color:var(--text-muted,#888);display:block;margin-bottom:8px">If your OrderHub order numbers start with fixed tags (e.g. <code>PXDEMO-</code>, <code>DIVPRINTS-</code>, <code>ORD-</code>), add each one on its own row. Leave <strong>Replace with</strong> blank to strip the prefix (the previous behaviour); type a value there to replace it — <code>PXDEMO-</code> → <code>PX-</code> turns <code>PXDEMO-091YEC</code> into <code>PX-091YEC</code>. <strong>What's matched is replaced verbatim, including any separator</strong> — a rule with Prefix <code>PXDEMO</code> and Replace with <code>PX</code> turns <code>PXDEMO-091YEC</code> into <code>PX091YEC</code> (no hyphen); type <code>PXDEMO-</code> and <code>PX-</code> to keep it. Longest match wins, so <code>PXDEMO</code> and <code>PXDEMO1</code> can coexist. <strong>The prefix must be followed by <code>-</code> or <code>_</code> in the order number</strong>, so both <code>PXDEMO-</code> and <code>PXDEMO</code> behave the same on <code>PXDEMO-091YEC</code>, but neither matches <code>PXDEMOX-1</code> (no separator between <code>PXDEMO</code> and <code>X</code>). Case-insensitive on the match; tail keeps its original casing. Never produces empty; the <code>-2</code>/<code>-3</code> resubmission suffix still applies after the rule, and also disambiguates two rules that funnel different prefixes to the same result.</small>
+        <div id="ocOrderNumberPrefixRulesList"></div>
+        <button type="button" id="ocAddPrefixRuleBtn" class="btn-secondary btn-sm" style="margin-top:6px">+ Add rule</button>
       </div>
 
       <!-- PDF Pipeline Builder (pdf_copy controllers only) -->
