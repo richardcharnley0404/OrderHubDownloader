@@ -1,14 +1,21 @@
 # OrderHub API — customer lookup / create endpoint
 
-**Status:** specification for the OrderHub side, 2026-08-18. Nothing built.
-**Driver:** two OHD XML-import requirements that cannot be met with the API as
-it stands today.
+**Status:** partly resolved server-side, 2026-08-18. The customer-linking
+gap that motivated this brief was fixed on the OrderHub side and verified —
+see §2.1 for what was wrong and how it was verified. The only live ask that
+remains is §4.1 (`GET /customers/lookup`) for the PhotoFinale Settings
+save-time validation described in §3.2, and Richard has parked that with
+the client for now — it is not pending on the OrderHub team.
+**Driver:** two OHD XML-import requirements that could not be met with the
+API as it stood before 2026-08-18.
 
 - **ROES orders** — when the order's billing email doesn't correspond to an
   existing customer, a customer should be created from the `BillTo*` block.
+  (Now handled server-side by the webhook — §2.1.)
 - **PhotoFinale orders** — the per-retailer Customers directory in OHD Settings
   maps `<RetailerDealerCode>` to a Customer Name + Email. That email should be
   validated against a real OrderHub customer, rather than being trusted.
+  (Still open; parked.)
 
 ---
 
@@ -63,6 +70,25 @@ satisfied implicitly, and what's actually missing is:
 The answers decide whether §4 needs one endpoint or two.
 
 ### 2.1 Evidence from a live test — the webhook is NOT linking customers
+
+> **RESOLVED (2026-08-18, server-side).** The webhook was leaving
+> `customer_id` null on incoming XML orders where the derived
+> `customer_name` was a literal `-` (the honest transform of a ROES
+> `BillTo*` block whose `BillToFirstName` is `-` and `BillToLastName` is
+> empty). That `-` name appeared to block linking, rather than the
+> webhook falling back to matching on `customer_email` as the documented
+> behaviour would have. Fix applied server-side on 2026-08-18 and
+> back-filled against the affected order.
+>
+> **Verification.** `XML-ROES068876` — the order captured in the table
+> below — now shows `customer_id c22c7976-0c67-4b49-b50e-3d5f084fde88`
+> and `customer_name "Richard Charnley"` (was `null` and `"-"`),
+> back-filled at 09:26 on 2026-08-18. The webhook now links or creates
+> from `customer_email` as originally expected, so the ROES ask ("create
+> a customer if the email doesn't exist") is satisfied implicitly by the
+> webhook; §4.2 (`POST /customers`) is no longer needed.
+>
+> Investigation kept below because it is the reason the fix happened.
 
 **Read this before building anything in §4.** A ROES order imported on
 2026-08-18 into the Pixfizz demo org shows the following:
@@ -237,11 +263,19 @@ or tested first.
 
 ## 7. Open questions, collected
 
-1. What does `/api-webhook` do with `customer_email` today — match, create,
-   update? (§2 — decides whether §4.2 is needed at all.)
+1. ~~What does `/api-webhook` do with `customer_email` today — match, create,
+   update?~~ **Answered 2026-08-18** — the webhook resolves-or-creates from
+   `customer_email` within the organization (see §2.1 RESOLVED note). §4.2
+   `POST /customers` is no longer needed.
 2. Is `shipping_recipient_name` accepted and stored, or dropped? (§5.)
 3. On PhotoFinale validation failure at import, should the order fail into
    `failed/` as it does now for an unknown `RetailerDealerCode`, or submit with
    the configured details anyway and flag it?
-4. Should a customer created from a ROES `BillTo` block carry the address, or
-   only name/email/phone?
+4. ~~Should a customer created from a ROES `BillTo` block carry the address, or
+   only name/email/phone?~~ **Answered 2026-08-18** — the webhook handles
+   customer creation server-side, so the field set is whatever the webhook
+   populates from the order it received. Not an OHD-side decision.
+
+**Live ask:** §4.1 (`GET /customers/lookup`) for the PhotoFinale Settings
+save-time validation described in §3.2. **Parked with the client** rather
+than pending with the OrderHub team.
