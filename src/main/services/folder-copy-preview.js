@@ -4,6 +4,7 @@ const path = require('node:path');
 const fs   = require('node:fs');
 const { buildCopyFilenames, buildDestFolder } = require('./folder-copy-filename');
 const { resolveManifestPath } = require('./manifest-path');
+const { readOrderNumberPrefixRules } = require('../../shared/printUtils');
 
 /**
  * folder-copy-preview
@@ -253,9 +254,11 @@ function _synthWarnings(stats, sampleSize, filenameTemplate, jobOptions) {
  * @param {string} [input.filenameTemplate]       — free-text template.
  *   Blank keeps the original filenames (§4.1 no-change lock).
  * @param {'job'|'root'} [input.destinationLayout]— defaults to 'job'.
- * @param {string[]} [input.stripOrderNumberPrefixes] — controller strip
- *   prefix list (M7). Non-array → treated as []. Entries trimmed;
- *   empty entries filtered.
+ * @param {Array<{from:string,to:string}>} [input.orderNumberPrefixRules] —
+ *   controller prefix rules (M7b). Also accepts the legacy M7 shape
+ *   (`stripOrderNumberPrefixes: string[]`) and legacy 1.13.0 shape
+ *   (`stripOrderNumberPrefix: string`) via the tolerant reader —
+ *   whatever the modal has locally, unsaved or not.
  *
  * @param {object} [deps] — injectable dependencies (all optional; sensible
  *   defaults for production wiring in the IPC handler).
@@ -271,13 +274,16 @@ async function buildFolderCopyPreview(input = {}, deps = {}) {
   const outputPath        = typeof input.outputPath === 'string' ? input.outputPath : '';
   const filenameTemplate  = typeof input.filenameTemplate === 'string' ? input.filenameTemplate.trim() : '';
   const destinationLayout = input.destinationLayout === 'root' ? 'root' : 'job';
-  // M7: stripOrderNumberPrefixes is a list. Non-array → []. Each entry
-  // trimmed; empty entries filtered by the multi-prefix helper downstream.
-  const stripPrefixes = Array.isArray(input.stripOrderNumberPrefixes)
-    ? input.stripOrderNumberPrefixes
-        .map(p => typeof p === 'string' ? p.trim() : '')
-        .filter(p => p.length > 0)
-    : [];
+  // M7b: orderNumberPrefixRules is Array<{from,to}>. Coerce via the ONE
+  // tolerant reader — so a modal that still has the M7 string[] or the
+  // 1.13.0 single-string in an unsaved buffer is still previewable, and
+  // the coercion rule stays in one place (printUtils).
+  const rawRules = readOrderNumberPrefixRules(input);
+  // Trim each side so the preview reflects what save-time trimming
+  // will produce; drop rules that go empty on `from` after trim.
+  const prefixRules = rawRules
+    .map(r => ({ from: r.from.trim(), to: (r.to || '').trim() }))
+    .filter(r => r.from.length > 0);
 
   const {
     listJobs             = () => [],
@@ -304,8 +310,8 @@ async function buildFolderCopyPreview(input = {}, deps = {}) {
   // The planner is pure and cheap; running it on 40 iterations of
   // string replacement costs nothing. Slice for display only.
   const { files: allFiles, stats } = buildCopyFilenames(source.images, source.job, {
-    template:      filenameTemplate,
-    stripPrefixes,
+    template:    filenameTemplate,
+    prefixRules,
   });
   const displayedFiles = allFiles.slice(0, MAX_PREVIEW_SAMPLES);
 
@@ -317,7 +323,7 @@ async function buildFolderCopyPreview(input = {}, deps = {}) {
     orderNumber: source.job.order_number,
     jobId:       source.job.id,
     destinationLayout,
-    stripPrefixes,
+    prefixRules,
   });
 
   const filesWithPaths = displayedFiles.map(f => ({

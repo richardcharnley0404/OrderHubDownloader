@@ -34,7 +34,7 @@ const { ManifestNotFoundError } = require('./awaiting-manifest');
 const { resolveManifestPath } = require('./manifest-path');
 const { resolveDispatchImageSource } = require('./dispatch-image-source');
 const logger = require('./logger');
-const { buildFolderName, stripOrderNumberPrefixMulti } = require('../../shared/printUtils');
+const { buildFolderName, applyOrderNumberPrefixRules } = require('../../shared/printUtils');
 const { buildCopyFilenames, buildDestFolder } = require('./folder-copy-filename');
 
 // Manifest filename is {orderNumber}.json (e.g. PXDEMO-K9MYDG.json)
@@ -2271,18 +2271,19 @@ class PrintService {
    *   name              = buildCopyFilenames(...) result, or img.filename
    *                       verbatim when template is blank
    *
-   * With a blank template AND a blank stripPrefix the on-disk output must
-   * be BYTE-IDENTICAL to the pre-M4 behaviour: original filenames under
+   * With a blank template AND no prefix rules the on-disk output must be
+   * BYTE-IDENTICAL to the pre-M4 behaviour: original filenames under
    * `{outputPath}/{order_number}_{id}/`. Locked by a regression test.
    *
    * The route arrives from routing-service.js — both folder_copy literals
    * (resolveRoute + resolveRouteForController) supply filenameTemplate,
-   * destinationLayout, and stripOrderNumberPrefixes (M7: array; legacy
-   * single-string field handled by the shared reader) with the same
-   * defaults ('' / 'job' / []). The default-folder / process-folder auto-print path
-   * (ipc-handlers.js:4139) passes only { outputPath, controllerName }, so
-   * every M3 field arrives undefined and the M2 planner takes the blank
-   * branch → original filenames, per D4 of the brief.
+   * destinationLayout, and orderNumberPrefixRules (M7b: Array<{from,to}>;
+   * legacy M7 string[] and 1.13.0 single-string handled by the shared
+   * reader) with the same defaults ('' / 'job' / []). The default-folder
+   * / process-folder auto-print path (ipc-handlers.js:4139) passes only
+   * { outputPath, controllerName }, so every M3 field arrives undefined
+   * and the M2 planner takes the blank branch → original filenames,
+   * per D4 of the brief.
    *
    * ── Source folder must NEVER be stripped (tripwire #3) ──────────────────
    *
@@ -2303,7 +2304,7 @@ class PrintService {
       throw new Error('Download directory is not configured.');
     }
 
-    const stripPrefixes     = (route && Array.isArray(route.stripOrderNumberPrefixes)) ? route.stripOrderNumberPrefixes : [];
+    const prefixRules       = (route && Array.isArray(route.orderNumberPrefixRules)) ? route.orderNumberPrefixRules : [];
     const destinationLayout = (route && route.destinationLayout === 'root') ? 'root' : 'job';
     const filenameTemplate  = (route && typeof route.filenameTemplate === 'string') ? route.filenameTemplate : '';
 
@@ -2364,12 +2365,12 @@ class PrintService {
       orderNumber: job.order_number,
       jobId:       job.id,
       destinationLayout,
-      stripPrefixes,
+      prefixRules,
     });
 
     const { files, stats } = buildCopyFilenames(imageFiles, job, {
-      template:      filenameTemplate,
-      stripPrefixes,
+      template:    filenameTemplate,
+      prefixRules,
       // opts.now is deliberately NOT threaded here — M4 must let the real
       // clock default. resolveTemplate throws on a non-Date opts.now, and
       // any value round-tripped through config would arrive as a string.
@@ -3087,29 +3088,30 @@ class PrintService {
     // without job_name, and matching Darkroom Pro's pattern costs
     // nothing.
     //
-    // v1.12.2 → M7: apply the per-controller Strip Order Number
-    // Prefixes (now a list; longest-match-first via
-    // stripOrderNumberPrefixMulti). The same reader is used by the
-    // order-level dispatch method and both must strip identically —
+    // v1.12.2 → M7 → M7b: apply the per-controller Order Number
+    // Prefix Rules (list of {from,to} pairs; longest-from-first via
+    // applyOrderNumberPrefixRules). The same reader is used by the
+    // order-level dispatch method and both must transform identically —
     // otherwise switching mergeOrderJobs on/off on a controller would
     // change the id shape partway through the wait window. Empty list
     // (the default) is a no-op.
     //
     // M7: route the resulting id through orderSubmissionSeq's new
     // getOrCreateSubmissionId (idempotent per rawOrderId) rather than
-    // using the stripped form verbatim. A retry of the same job now
+    // using the displayBase verbatim. A retry of the same job now
     // reuses the previously-issued id — stageImages' rm -rf targets
-    // the folder it already knows about. And two raw job_names from
-    // different websites that strip to the same displayBase (Richard's
-    // ORD-/PXDEMO-/POS- config on one org) get -2/-3 via the shared
-    // counter instead of clobbering each other's staged folders.
+    // the folder it already knows about. And two raw job_names that
+    // map to the same displayBase (whether by pure-strip collision or
+    // by an M7b REPLACEMENT that deliberately funnels PXDEMO- and
+    // PXDEMO2- both to PX-) get -2/-3 via the shared counter keyed
+    // on displayBase — the counter is the collision safety net.
     // Order-level merge path below KEEPS nextSubmissionId — that
     // path wants a new id per dispatch (the documented resubmission
     // suffix). Do not conflate the two.
     const rawOrderId = job.job_name || `${job.order_number || ''}_${job.id}`;
-    const displayBase = stripOrderNumberPrefixMulti(
+    const displayBase = applyOrderNumberPrefixRules(
       rawOrderId,
-      Array.isArray(route.stripOrderNumberPrefixes) ? route.stripOrderNumberPrefixes : [],
+      Array.isArray(route.orderNumberPrefixRules) ? route.orderNumberPrefixRules : [],
     );
     // Lazy require — same pattern as the order-level path below, and
     // for the same reason (electron-store singleton at module load
@@ -3415,17 +3417,19 @@ class PrintService {
     // job-service) so require-ing print-service.js doesn't force the
     // electron-store singleton at module load — needed for the
     // node:test harness which stubs orderSubmissionSeq in require.cache.
-    // M7: strip prefixes are now a LIST; use stripOrderNumberPrefixMulti
-    // (longest-first, separator drop). This path DELIBERATELY keeps
-    // nextSubmissionId — the order-level merge documents a resubmission
-    // suffix per dispatch, and idempotence is not the right semantic
-    // here. Single-job path above uses getOrCreateSubmissionId instead.
+    // M7 → M7b: prefix rules are now a LIST of {from,to} pairs; use
+    // applyOrderNumberPrefixRules (longest-from-first, separator drop,
+    // replacement or pure strip depending on `to`). This path
+    // DELIBERATELY keeps nextSubmissionId — the order-level merge
+    // documents a resubmission suffix per dispatch, and idempotence is
+    // not the right semantic here. Single-job path above uses
+    // getOrCreateSubmissionId instead.
     let orderId;
     try {
       const { orderSubmissionSeq } = require('./order-submission-seq');
-      const displayBase = stripOrderNumberPrefixMulti(
+      const displayBase = applyOrderNumberPrefixRules(
         orderNumber,
-        Array.isArray(sharedRoute.stripOrderNumberPrefixes) ? sharedRoute.stripOrderNumberPrefixes : [],
+        Array.isArray(sharedRoute.orderNumberPrefixRules) ? sharedRoute.orderNumberPrefixRules : [],
       );
       orderId = orderSubmissionSeq.nextSubmissionId(orderNumber, displayBase);
     } catch (seqErr) {

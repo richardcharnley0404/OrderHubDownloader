@@ -1440,17 +1440,48 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
           });
           return { success: false, error: msg };
         }
-        // M7: stripOrderNumberPrefixes is a list. Reject shapes that
-        // aren't array-of-strings so a malformed payload can't persist.
-        // Legacy string field (stripOrderNumberPrefix) is accepted as
-        // input but the renderer normally sends only the new field; the
-        // route literal's tolerant reader picks up whichever is present.
+        // M7b: orderNumberPrefixRules is Array<{from,to}>. Reject
+        // shapes that aren't a pair array so a malformed payload can't
+        // persist. Legacy M7 (stripOrderNumberPrefixes: string[]) and
+        // 1.13.0 (stripOrderNumberPrefix: string) shapes are still
+        // accepted as inputs — the route literal's tolerant reader picks
+        // up whichever is present. Renderer normally sends only the new
+        // field.
+        if (
+          controller.orderNumberPrefixRules !== undefined &&
+          !Array.isArray(controller.orderNumberPrefixRules)
+        ) {
+          const msg = 'orderNumberPrefixRules must be an array of {from, to} pairs.';
+          logger.logWarning('[routing] save-controller rejected — invalid orderNumberPrefixRules', {
+            controllerId: controller.id,
+            name:         controller.name,
+            orderNumberPrefixRules: controller.orderNumberPrefixRules,
+          });
+          return { success: false, error: msg };
+        }
+        if (
+          Array.isArray(controller.orderNumberPrefixRules) &&
+          controller.orderNumberPrefixRules.some(
+            r => !r || typeof r !== 'object' || typeof r.from !== 'string' ||
+                 (r.to !== undefined && r.to !== null && typeof r.to !== 'string')
+          )
+        ) {
+          const msg = 'orderNumberPrefixRules entries must be objects with a string `from` (and optional string `to`).';
+          logger.logWarning('[routing] save-controller rejected — malformed orderNumberPrefixRules entry', {
+            controllerId: controller.id,
+            name:         controller.name,
+          });
+          return { success: false, error: msg };
+        }
+        // Legacy M7 shape still accepted at the boundary — reject only
+        // wrong TYPE (not-array); array-of-strings passes through and
+        // is coerced at read time by readOrderNumberPrefixRules.
         if (
           controller.stripOrderNumberPrefixes !== undefined &&
           !Array.isArray(controller.stripOrderNumberPrefixes)
         ) {
-          const msg = 'stripOrderNumberPrefixes must be an array of strings.';
-          logger.logWarning('[routing] save-controller rejected — invalid stripOrderNumberPrefixes', {
+          const msg = 'stripOrderNumberPrefixes (legacy field) must be an array of strings.';
+          logger.logWarning('[routing] save-controller rejected — invalid legacy stripOrderNumberPrefixes', {
             controllerId: controller.id,
             name:         controller.name,
             stripOrderNumberPrefixes: controller.stripOrderNumberPrefixes,
@@ -1461,8 +1492,8 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
           Array.isArray(controller.stripOrderNumberPrefixes) &&
           controller.stripOrderNumberPrefixes.some(p => typeof p !== 'string')
         ) {
-          const msg = 'stripOrderNumberPrefixes must be an array of strings.';
-          logger.logWarning('[routing] save-controller rejected — non-string entry in stripOrderNumberPrefixes', {
+          const msg = 'stripOrderNumberPrefixes (legacy field) must be an array of strings.';
+          logger.logWarning('[routing] save-controller rejected — non-string entry in legacy stripOrderNumberPrefixes', {
             controllerId: controller.id,
             name:         controller.name,
           });
@@ -1498,14 +1529,33 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
         // on filenameTemplate so a payload from a future renderer bug (or
         // an external caller) can't persist a truthy whitespace-only value
         // that M2 would treat as a real template and resolve to blank on
-        // every image. Symmetric with stripOrderNumberPrefixes. This runs
+        // every image. Symmetric with orderNumberPrefixRules. This runs
         // BEFORE the layout-specific checks so the "blank template under
         // root" rule fires on the normalised value.
         const trimmedTemplate = rawTemplate.trim();
         controller.filenameTemplate = trimmedTemplate;
-        // M7: trim + dedupe (case-insensitive) + drop empties on the
-        // prefixes list. Same posture as the renderer save path so a
-        // payload that bypassed the renderer trims to the same shape.
+        // M7b: trim from/to + dedupe (case-insensitive on `from`) + drop
+        // rules whose `from` goes empty after trim. `to` empty after trim
+        // is legal — that means "pure strip". Same posture as the
+        // renderer save path so a payload that bypassed the renderer
+        // trims to the same shape.
+        if (Array.isArray(controller.orderNumberPrefixRules)) {
+          const seen = new Set();
+          controller.orderNumberPrefixRules = controller.orderNumberPrefixRules
+            .map(r => ({
+              from: (r && typeof r.from === 'string') ? r.from.trim() : '',
+              to:   (r && typeof r.to   === 'string') ? r.to.trim()   : '',
+            }))
+            .filter(r => r.from.length > 0)
+            .filter(r => {
+              const key = r.from.toLowerCase();
+              if (seen.has(key)) return false;
+              seen.add(key);
+              return true;
+            });
+        }
+        // Legacy M7 string[] field also trimmed for symmetry (kept on
+        // the record for downgrade-friendly reads).
         if (Array.isArray(controller.stripOrderNumberPrefixes)) {
           const seen = new Set();
           controller.stripOrderNumberPrefixes = controller.stripOrderNumberPrefixes
@@ -1518,8 +1568,7 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
               return true;
             });
         }
-        // Legacy single-string field also trimmed for symmetry (kept on
-        // the record for downgrade-friendly reads).
+        // Legacy 1.13.0 single-string field also trimmed for symmetry.
         if (typeof controller.stripOrderNumberPrefix === 'string') {
           controller.stripOrderNumberPrefix = controller.stripOrderNumberPrefix.trim();
         }

@@ -906,9 +906,9 @@ test('successful dispatch enqueues + markCommitted in the correct order', async 
   assert.ok(__markCommittedCalls.length === 1);
 });
 
-// ── stripOrderNumberPrefix — v1.13.0 ────────────────────────────────────────
+// ── orderNumberPrefixRules — v1.13.0 → M7 → M7b ────────────────────────────
 //
-// Per-controller Strip Order Number Prefix on a Fuji PIC Pro
+// Per-controller Order Number Prefix Rules on a Fuji PIC Pro
 // controller. All three consumers of `orderId` — the staging folder
 // (stageImages), the .txt filename (via the generator), and the enqueue
 // orderId that drives DIGIN delivery — MUST see the same value.
@@ -917,7 +917,7 @@ test('successful dispatch enqueues + markCommitted in the correct order', async 
 // all three in the same call so a future refactor that pipes any of
 // them from a different source blows up loudly.
 //
-// The pure `stripOrderNumberPrefix` helper is covered in
+// The pure `applyOrderNumberPrefixRules` helper is covered in
 // printUtils.test.js; the `nextSubmissionId(orderNumber, displayBase)`
 // invariant is covered in order-submission-seq.test.js. These tests
 // pin the end-to-end wiring.
@@ -932,21 +932,21 @@ function stripAllThree(result, expectedId) {
   assert.equal(__markCommittedCalls[0],                     expectedId, 'markCommitted also names the same id');
 }
 
-test('stripOrderNumberPrefix: no prefix set → id is the full order number (default behaviour)', async (t) => {
+test('prefixRules: no rules set → id is the full order number (default behaviour)', async (t) => {
   const { items, orderNumber } = await setupTwoJobGroup(t);
-  // picProRoute() default does not set stripOrderNumberPrefix — verify
+  // picProRoute() default does not set orderNumberPrefixRules — verify
   // the field is absent on the route and the resulting id is untouched.
-  assert.equal(items[0].route.stripOrderNumberPrefixes, undefined,
-    'the test fixture defaults to no prefixes — this is the byte-identical-when-off contract');
+  assert.equal(items[0].route.orderNumberPrefixRules, undefined,
+    'the test fixture defaults to no rules — this is the byte-identical-when-off contract');
 
   const result = await printService._sendViaFujiPicProOrderRouted(items);
   assert.equal(result.success, true, `unexpected failure: ${result.error}`);
   stripAllThree(result, orderNumber);
 });
 
-test('stripOrderNumberPrefix: matching leading prefix → id has the prefix stripped in all three plumbings', async (t) => {
+test('prefixRules: matching pure-strip rule → id has the prefix stripped in all three plumbings', async (t) => {
   const { items } = await setupTwoJobGroup(t, { orderNumber: 'PXDEMO-M6-A' });
-  for (const it of items) it.route.stripOrderNumberPrefixes = ['PXDEMO-'];
+  for (const it of items) it.route.orderNumberPrefixRules = [{ from: 'PXDEMO-', to: '' }];
 
   const result = await printService._sendViaFujiPicProOrderRouted(items);
   assert.equal(result.success, true, `unexpected failure: ${result.error}`);
@@ -957,49 +957,62 @@ test('stripOrderNumberPrefix: matching leading prefix → id has the prefix stri
 
   // The counter is keyed on displayBase — uniqueness of the RETURNED
   // id is what matters (that string names the staging folder, the
-  // .txt and the DIGIN folder). Two raw orders stripping to the same
-  // base MUST share a counter; that shared-counter guarantee is
-  // covered directly in the M3 unit tests. Here just verify what the
-  // caller (print-service) passes to nextSubmissionId.
+  // .txt and the DIGIN folder). Two raw orders that yield the same
+  // displayBase MUST share a counter; covered directly in the
+  // order-submission-seq unit tests. Here verify what the caller
+  // (print-service) passes to nextSubmissionId.
   assert.equal(__seqCalls[0].orderNumber, 'PXDEMO-M6-A',
     'orderNumber arg is the raw value from the manifest');
   assert.equal(__seqCalls[0].displayBase, 'M6-A',
-    'displayBase arg is the post-strip form — used both for the returned id AND as the counter key');
+    'displayBase arg is the post-rules form — used both for the returned id AND as the counter key');
 });
 
-test('stripOrderNumberPrefix: prefix set but not matching → id is the full order number', async (t) => {
-  // Order number does not start with the prefix — stripping is a no-op.
+test('prefixRules: matching REPLACEMENT rule → id carries the operator-typed `to` in all three plumbings (M7b)', async (t) => {
+  // The M7b customer request: replace, not just strip.
+  const { items } = await setupTwoJobGroup(t, { orderNumber: 'PXDEMO-M6-A' });
+  for (const it of items) it.route.orderNumberPrefixRules = [{ from: 'PXDEMO-', to: 'PX-' }];
+
+  const result = await printService._sendViaFujiPicProOrderRouted(items);
+  assert.equal(result.success, true, `unexpected failure: ${result.error}`);
+  // "PXDEMO-M6-A" → "PX-M6-A" via the replacement.
+  stripAllThree(result, 'PX-M6-A');
+
+  assert.equal(__seqCalls[0].orderNumber, 'PXDEMO-M6-A',
+    'orderNumber arg is the raw value from the manifest');
+  assert.equal(__seqCalls[0].displayBase, 'PX-M6-A',
+    'displayBase arg is the post-replacement form');
+});
+
+test('prefixRules: rule set but not matching → id is the full order number', async (t) => {
+  // Order number does not start with the from-prefix — rule is a no-op.
   const { items, orderNumber } = await setupTwoJobGroup(t, { orderNumber: 'DIVPRINTS-99' });
-  for (const it of items) it.route.stripOrderNumberPrefixes = ['PXDEMO-'];
+  for (const it of items) it.route.orderNumberPrefixRules = [{ from: 'PXDEMO-', to: 'PX-' }];
 
   const result = await printService._sendViaFujiPicProOrderRouted(items);
   assert.equal(result.success, true);
   stripAllThree(result, orderNumber);
 });
 
-test('stripOrderNumberPrefix: prefix equal to the whole order number → NOT stripped (never empty)', async (t) => {
-  // Would strip to '' — which would name folders '' and break every
-  // filesystem operation. The stripping helper refuses; verify that
-  // refusal reaches the dispatch id.
+test('prefixRules: pure-strip rule that would empty the string → NOT applied (never-produce-empty)', async (t) => {
+  // Would produce '' — which would name folders '' and break every
+  // filesystem operation. The helper refuses; verify that refusal
+  // reaches the dispatch id.
   const { items, orderNumber } = await setupTwoJobGroup(t, { orderNumber: 'PXDEMO-' });
-  for (const it of items) it.route.stripOrderNumberPrefixes = ['PXDEMO-'];
+  for (const it of items) it.route.orderNumberPrefixRules = [{ from: 'PXDEMO-', to: '' }];
 
   const result = await printService._sendViaFujiPicProOrderRouted(items);
   assert.equal(result.success, true);
   // The id is the FULL order number, not empty.
   stripAllThree(result, orderNumber);
   assert.equal(result.orderId, 'PXDEMO-',
-    'never-strip-to-empty guardrail must be honoured at dispatch time');
+    'never-produce-empty guardrail must be honoured at dispatch time');
 });
 
-test('stripOrderNumberPrefix: suffixed resubmission — the -N suffix is appended to the stripped base', async (t) => {
-  // Dispatch twice; the second call must get -2 on the STRIPPED form,
-  // and every plumbing must carry it consistently. The M3 counter is
-  // still keyed on the raw order number so a fresh dispatch after this
-  // (for a different raw order that strips to the same base) would
-  // start from 1 again — covered in the M3 unit tests.
+test('prefixRules: suffixed resubmission — the -N suffix is appended to the post-rules displayBase', async (t) => {
+  // Dispatch twice; the second call must get -2 on the post-rules form,
+  // and every plumbing must carry it consistently.
   const { items } = await setupTwoJobGroup(t, { orderNumber: 'PXDEMO-Q9' });
-  for (const it of items) it.route.stripOrderNumberPrefixes = ['PXDEMO-'];
+  for (const it of items) it.route.orderNumberPrefixRules = [{ from: 'PXDEMO-', to: '' }];
 
   const first = await printService._sendViaFujiPicProOrderRouted(items);
   assert.equal(first.success, true);
@@ -1018,16 +1031,92 @@ test('stripOrderNumberPrefix: suffixed resubmission — the -N suffix is appende
   stripAllThree(second, 'Q9-2');
 });
 
-test('stripOrderNumberPrefix: case-insensitive match — casing of the tail is preserved', async (t) => {
-  // Lowercase order number, uppercase prefix — match still fires and
+test('prefixRules: case-insensitive from-match — casing of the tail preserved', async (t) => {
+  // Lowercase order number, uppercase from — match still fires and
   // the tail keeps its original casing (matches the pure-helper
   // contract in printUtils.test.js).
   const { items } = await setupTwoJobGroup(t, { orderNumber: 'pxdemo-AbC9' });
-  for (const it of items) it.route.stripOrderNumberPrefixes = ['PXDEMO-'];
+  for (const it of items) it.route.orderNumberPrefixRules = [{ from: 'PXDEMO-', to: '' }];
 
   const result = await printService._sendViaFujiPicProOrderRouted(items);
   assert.equal(result.success, true);
   stripAllThree(result, 'AbC9');
+});
+
+// ── PR8: collision safety net — two rules mapping to the same displayBase ──
+//
+// Design decision #4 checkpoint. With the M7b REPLACEMENT feature an
+// operator can now configure TWO rules that funnel different raw order
+// numbers to the SAME displayBase:
+//   {from: 'PXDEMO-',  to: 'PX-'}
+//   {from: 'PXDEMO2-', to: 'PX-'}
+// The single-job path uses getOrCreateSubmissionId keyed on displayBase,
+// so the SECOND raw dispatched with the same displayBase must get -2
+// appended — otherwise stageImages' rm -rf would wipe the first one's
+// staged folder. Also covers the case where a natural (already-unprefixed)
+// order number collides with a mapped result.
+//
+// The order-level merge path (this suite's target) uses nextSubmissionId
+// — which is a pure incrementing counter also keyed on displayBase —
+// so the same collision safety net applies there too. Sanity-checked
+// here at the dispatch integration level, in addition to the direct
+// unit tests in order-submission-seq.test.js.
+
+test('PR8: order-level merge — two rules mapping different raw orders to the same displayBase get distinct ids via the counter', async (t) => {
+  // Build TWO raw orders explicitly, sharing the fake counter across
+  // both dispatches. setupTwoJobGroup calls resetCaptures which would
+  // wipe the counter between calls — do the setup + dispatch by hand
+  // so __seqCounters survives from A to B.
+  const rules = [
+    { from: 'PXDEMO-',  to: 'PX-' },
+    { from: 'PXDEMO2-', to: 'PX-' },
+  ];
+
+  resetCaptures();
+
+  // First: PXDEMO-Y1 → PX-Y1
+  // Job ids 101/102 chosen to match DEFAULT_MANIFEST (the fake
+  // _readManifest returns that unconditionally). The RAW order number
+  // differs between the two calls — that's the collision axis.
+  const orderA = 'PXDEMO-Y1';
+  const rootA  = await makeOrderFolder(orderA, 'ord-1', [101, 102]);
+  t.after(() => fs.rmSync(rootA, { recursive: true, force: true }));
+  const itemsA = [
+    { job: makeJob(101, orderA), route: picProRoute({ printCode: '64', color: 'C' }) },
+    { job: makeJob(102, orderA), route: picProRoute({ printCode: '77', color: 'B' }) },
+  ];
+  for (const it of itemsA) it.route.orderNumberPrefixRules = rules;
+
+  const resultA = await printService._sendViaFujiPicProOrderRouted(itemsA);
+  assert.equal(resultA.success, true, `first dispatch failed: ${resultA.error}`);
+  assert.equal(resultA.orderId, 'PX-Y1',
+    'first order allocates the base id — no suffix yet');
+
+  // Clear per-call captures but LEAVE __seqCounters intact — that's the
+  // whole point of the collision safety net.
+  __stageCalls.length          = 0;
+  __generateCalls.length       = 0;
+  __writeOrderFileCalls.length = 0;
+  __enqueueCalls.length        = 0;
+  __markCommittedCalls.length  = 0;
+  __seqCalls.length            = 0;
+
+  // Second: PXDEMO2-Y1 (different raw) → also PX-Y1 via the second rule.
+  // makeOrderFolder resets __downloadRoot to point at the new tmpdir so
+  // the dispatch's manifest/image lookup finds the right files.
+  const orderB = 'PXDEMO2-Y1';
+  const rootB  = await makeOrderFolder(orderB, 'ord-1', [101, 102]);
+  t.after(() => fs.rmSync(rootB, { recursive: true, force: true }));
+  const itemsB = [
+    { job: makeJob(101, orderB), route: picProRoute({ printCode: '64', color: 'C' }) },
+    { job: makeJob(102, orderB), route: picProRoute({ printCode: '77', color: 'B' }) },
+  ];
+  for (const it of itemsB) it.route.orderNumberPrefixRules = rules;
+
+  const resultB = await printService._sendViaFujiPicProOrderRouted(itemsB);
+  assert.equal(resultB.success, true, `second dispatch failed: ${resultB.error}`);
+  assert.equal(resultB.orderId, 'PX-Y1-2',
+    'counter keyed on displayBase produces -2 for the second colliding raw — no staging-folder wipe');
 });
 
 // ── Single-job dispatch: unique id fallback when job_name is blank ─────────

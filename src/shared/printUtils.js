@@ -254,32 +254,39 @@ function stripOrderNumberPrefix(orderNumber, prefix) {
 }
 
 /**
- * Multi-prefix variant of stripOrderNumberPrefix (M7 / M7a).
+ * Multi-rule prefix REPLACEMENT for order numbers (M7 → M7b).
  *
  * A single OHD install talks to a single OrderHub org, but that org can
  * ship orders with several different prefixes distinguishing the source
- * website (Richard's config: `ORD-`, `PXDEMO-`, `POS-`). Operators need
- * to strip whichever one is on each order.
+ * website (Richard's config: `ORD-`, `PXDEMO-`, `POS-`). Each rule is
+ * a `{from, to}` pair:
+ *
+ *   {from: 'PXDEMO-', to: ''}      — pure strip (M7 behaviour)
+ *   {from: 'PXDEMO-', to: 'PX-'}   — replace "PXDEMO-" with "PX-"
+ *   {from: 'PXDEMO',  to: 'PX'}    — replace "PXDEMO" with "PX";
+ *                                    the M7a-consumed '-' is dropped
+ *                                    with the rest of the match, so
+ *                                    'PXDEMO-091YEC' → 'PX091YEC'
  *
  * Rules — all deliberate, all locked by tests:
  *
- *   - Longest-match-first, sorted INSIDE this helper. With `PXDEMO` and
- *     `PXDEMO1` both configured, `PXDEMO1-091YEC` strips via `PXDEMO1`
- *     regardless of the order the operator typed the two entries. Do
- *     NOT push sorting to the caller — that puts the load-bearing rule
- *     one accident away from being wrong.
- *   - Case-insensitive on the prefix match; the surviving tail keeps
+ *   - Longest-match-first BY `from`, sorted INSIDE this helper. With
+ *     `PXDEMO` and `PXDEMO1` both configured, `PXDEMO1-091YEC` matches
+ *     via `PXDEMO1` regardless of the order the operator typed the two
+ *     entries. Do NOT push sorting to the caller — that puts the
+ *     load-bearing rule one accident away from being wrong.
+ *   - Case-insensitive on the `from` match; the surviving tail keeps
  *     its original casing.
- *   - **A separator is REQUIRED between the prefix and the rest of the
- *     order number.** If the configured prefix already ends in `-` or
+ *   - **A separator is REQUIRED between `from` and the rest of the
+ *     order number.** If the configured `from` already ends in `-` or
  *     `_`, the operator baked the separator in and the match consumed
  *     it — accept. Otherwise, the remainder MUST begin with `-` or `_`;
  *     drop one and accept. If the remainder begins with any other
- *     character, this candidate does NOT match — try the next.
+ *     character, this rule does NOT match — try the next.
  *
  *     Why mandatory (M7a): two approved requirements conflict — "let
  *     the operator type PXDEMO or PXDEMO-, both should work on
- *     PXDEMO-091YEC" AND "PXDEMO must NOT strip PXDEMOX to X". With an
+ *     PXDEMO-091YEC" AND "PXDEMO must NOT match PXDEMOX to X". With an
  *     optional separator the first is satisfied but any leading
  *     substring match always wins, so the second is violated. Requiring
  *     the separator resolves the conflict by making "PXDEMO" mean "the
@@ -287,101 +294,129 @@ function stripOrderNumberPrefix(orderNumber, prefix) {
  *     starting with the letters P-X-D-E-M-O".
  *
  *     Accepted cost: a separator-less order-number scheme like
- *     `PXDEMO091YEC` no longer strips. Every real OrderHub order number
- *     observed on this install has the shape `PREFIX-CODE` (`ORD-K9AOA6`,
- *     `PXDEMO-AZ5UKP`, `POS-JBML6D`), so the shape doesn't occur in
- *     practice. If a future maintainer sees `PXDEMO091YEC` returning
- *     unchanged and is tempted to relax this rule: **don't** — that
- *     reopens the PXDEMOX hole (any leading substring match).
+ *     `PXDEMO091YEC` no longer matches. Every real OrderHub order
+ *     number observed on this install has the shape `PREFIX-CODE`
+ *     (`ORD-K9AOA6`, `PXDEMO-AZ5UKP`, `POS-JBML6D`), so the shape
+ *     doesn't occur in practice. If a future maintainer sees
+ *     `PXDEMO091YEC` returning unchanged and is tempted to relax this
+ *     rule: **don't** — that reopens the PXDEMOX hole.
  *   - Only `-` and `_` count as separators. A `.` or a letter between
- *     the prefix and the tail does NOT match — same reason.
- *   - Never-strip-to-empty, PER CANDIDATE. If a match would leave
- *     nothing behind (`PXDEMO-` with prefix `PXDEMO`), that candidate
- *     is skipped and the next one tried. If every candidate would empty
- *     the string, the original order number is returned unchanged.
+ *     the `from` and the tail does NOT match — same reason.
+ *   - **The `to` substitutes for EXACTLY what was matched, including
+ *     any separator the M7a rule consumed.** So `{from:'PXDEMO', to:'PX'}`
+ *     on 'PXDEMO-091YEC' produces 'PX091YEC', not 'PX-091YEC'. An
+ *     operator who wants the hyphen in the output writes
+ *     `{from:'PXDEMO-', to:'PX-'}`. Predictable, and matches how the
+ *     original request was phrased.
+ *   - Never-produce-empty, PER RULE. If replacement would leave the
+ *     order number empty (`{from:'PXDEMO-', to:''}` against just
+ *     `'PXDEMO-'`), that rule is skipped and the next one tried. If
+ *     every rule would empty the string, the original is returned
+ *     unchanged.
  *
  * Invariants preserved from the single-prefix world:
- *   - Empty / non-array `prefixList` → order number unchanged.
+ *   - Empty / non-array `rules` → order number unchanged.
  *   - Non-string / empty `orderNumber` → returned verbatim (defensive).
  *   - Result is never empty; the operator always has something to name
  *     the folder / submission id after.
  *
- * @param {string}   orderNumber
- * @param {string[]} prefixList — non-strings and empty strings ignored.
+ * @param {string} orderNumber
+ * @param {Array<{from: string, to: string}>} rules — non-objects,
+ *   entries with non-string `from`, and entries with empty `from`
+ *   are ignored. Missing / non-string `to` is treated as `''`.
  * @returns {string}
  */
-function stripOrderNumberPrefixMulti(orderNumber, prefixList) {
+function applyOrderNumberPrefixRules(orderNumber, rules) {
   if (typeof orderNumber !== 'string' || orderNumber.length === 0) return orderNumber;
-  if (!Array.isArray(prefixList) || prefixList.length === 0) return orderNumber;
-  const cleaned = prefixList.filter(p => typeof p === 'string' && p.length > 0);
+  if (!Array.isArray(rules) || rules.length === 0) return orderNumber;
+  const cleaned = rules
+    .filter(r => r && typeof r === 'object' && typeof r.from === 'string' && r.from.length > 0)
+    .map(r => ({ from: r.from, to: typeof r.to === 'string' ? r.to : '' }));
   if (cleaned.length === 0) return orderNumber;
 
-  // Stable sort by length desc — longest-first. Modern JS Array.sort is
-  // stable so ties preserve input order (harmless; deterministic).
-  const sorted = [...cleaned].sort((a, b) => b.length - a.length);
+  // Stable sort by `from` length desc — longest-first. Modern JS
+  // Array.sort is stable so ties preserve input order (harmless;
+  // deterministic).
+  const sorted = [...cleaned].sort((a, b) => b.from.length - a.from.length);
 
-  for (const prefix of sorted) {
-    if (orderNumber.length < prefix.length) continue;
-    const head = orderNumber.slice(0, prefix.length);
-    if (head.toLowerCase() !== prefix.toLowerCase()) continue;
+  for (const rule of sorted) {
+    const { from, to } = rule;
+    if (orderNumber.length < from.length) continue;
+    const head = orderNumber.slice(0, from.length);
+    if (head.toLowerCase() !== from.toLowerCase()) continue;
 
-    // Separator handling (M7a). If the configured prefix already ends
+    // Separator handling (M7a). If the configured `from` already ends
     // in '-' or '_', the operator baked the separator in and the head
     // match consumed it — the remainder starts fresh with the code.
-    // Otherwise the remainder MUST begin with '-' or '_'; drop one.
-    // A remainder that starts with any other char (letter, digit, '.',
-    // etc.) is NOT a match under this prefix — skip to the next
-    // candidate rather than accept a leading-substring match that
-    // could strip PXDEMOX to X.
-    const prefixEndsWithSeparator =
-      prefix.endsWith('-') || prefix.endsWith('_');
-    let stripped;
-    if (prefixEndsWithSeparator) {
-      stripped = orderNumber.slice(prefix.length);
+    // Otherwise the remainder MUST begin with '-' or '_'; the match
+    // consumes one. A remainder that starts with any other char is
+    // NOT a match under this rule — skip to the next candidate rather
+    // than accept a leading-substring match that could match PXDEMOX
+    // via PXDEMO.
+    const fromEndsWithSeparator = from.endsWith('-') || from.endsWith('_');
+    let tail;
+    if (fromEndsWithSeparator) {
+      tail = orderNumber.slice(from.length);
     } else {
-      const nextChar = orderNumber.charAt(prefix.length);
+      const nextChar = orderNumber.charAt(from.length);
       if (nextChar !== '-' && nextChar !== '_') continue;
-      stripped = orderNumber.slice(prefix.length + 1);
+      tail = orderNumber.slice(from.length + 1);
     }
 
-    // Never strip to empty — try the next candidate.
-    if (stripped.length === 0) continue;
-    return stripped;
+    // Replacement: `to` substitutes for the whole matched-and-consumed
+    // portion (including any separator M7a consumed). Then never-empty:
+    // if the result would be blank, skip this rule and try the next.
+    const result = to + tail;
+    if (result.length === 0) continue;
+    return result;
   }
   return orderNumber;
 }
 
 /**
- * Tolerant reader for a controller record's strip-prefix configuration
- * (M7). This function is the ONE place the "which field carries the
- * prefixes, and what shape is it" decision lives; every route literal
+ * Tolerant reader for a controller record's order-number prefix rules
+ * (M7b). This function is the ONE place the "which field carries the
+ * rules, and what shape are they" decision lives; every route literal
  * calls this rather than reproducing the coercion inline. Four copies
  * of the same coercion would be the same drift hazard the parity
  * tests exist to catch.
  *
  * Shape precedence:
- *   1. `stripOrderNumberPrefixes: string[]` (M7 field) — use if present.
- *   2. `stripOrderNumberPrefix: string`     (legacy field, v1.12.2+) —
- *      wrapped in a single-element array. Kept on the record when
- *      writing the new field so a downgrade to v1.12.2 code still sees
- *      the value.
- *   3. Neither → `[]`.
+ *   1. `orderNumberPrefixRules: Array<{from, to}>` (M7b field, new
+ *      pair shape) — use if present. `to` missing / non-string is
+ *      treated as `''` (pure strip).
+ *   2. `stripOrderNumberPrefixes: string[]` (M7 field) — each string
+ *      becomes `{from: s, to: ''}`. Pure strip is byte-identical to
+ *      today.
+ *   3. `stripOrderNumberPrefix: string` (legacy field, v1.13.0) —
+ *      wrapped as a single `{from: s, to: ''}`.
+ *   4. None of the above → `[]`.
  *
- * Empty strings and non-strings in the array are filtered out — same
- * defensive posture as the multi-prefix helper.
+ * Empty strings, non-strings and malformed pairs are filtered out —
+ * same defensive posture as the multi-rule helper. The reader ALWAYS
+ * returns pair-array shape so callers never handle the legacy shapes
+ * directly; every non-UI call site is downstream of this function.
  *
  * @param {object} controller
- * @returns {string[]}
+ * @returns {Array<{from: string, to: string}>}
  */
-function readStripPrefixes(controller) {
+function readOrderNumberPrefixRules(controller) {
   if (!controller || typeof controller !== 'object') return [];
+  const pairs = controller.orderNumberPrefixRules;
+  if (Array.isArray(pairs)) {
+    return pairs
+      .filter(r => r && typeof r === 'object' && typeof r.from === 'string' && r.from.length > 0)
+      .map(r => ({ from: r.from, to: typeof r.to === 'string' ? r.to : '' }));
+  }
   const arr = controller.stripOrderNumberPrefixes;
   if (Array.isArray(arr)) {
-    return arr.filter(p => typeof p === 'string' && p.length > 0);
+    return arr
+      .filter(p => typeof p === 'string' && p.length > 0)
+      .map(p => ({ from: p, to: '' }));
   }
   const legacy = controller.stripOrderNumberPrefix;
   if (typeof legacy === 'string' && legacy.length > 0) {
-    return [legacy];
+    return [{ from: legacy, to: '' }];
   }
   return [];
 }
@@ -391,7 +426,7 @@ module.exports = {
   parseFolderName,
   extractSurname,
   stripOrderNumberPrefix,
-  stripOrderNumberPrefixMulti,
-  readStripPrefixes,
+  applyOrderNumberPrefixRules,
+  readOrderNumberPrefixRules,
   UNSAFE_CHARS,
 };

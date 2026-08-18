@@ -102,7 +102,7 @@ test('preview runs the REAL M2 planner on the FULL image list — equality with 
   const allImages = SYNTHETIC_IMAGES.map(i => ({ ...i }));
   const direct    = buildCopyFilenames(allImages, SYNTHETIC_JOB, {
     template,
-    stripPrefix: '',
+    prefixRules: [],
   });
 
   // Displayed filenames == first MAX_PREVIEW_SAMPLES of the planner's
@@ -119,21 +119,37 @@ test('preview runs the REAL M2 planner on the FULL image list — equality with 
     'preview stats must be identical to the planner stats for the FULL image list');
 });
 
-test('preview equality holds under strip prefixes — full-list run reaches the planner unchanged', async () => {
+test('preview equality holds under prefix rules — full-list run reaches the planner unchanged', async () => {
   const template = '{orderNumber}-{index}';
-  const stripPrefixes = ['PXDEMO-'];
+  const prefixRules = [{ from: 'PXDEMO-', to: '' }];
   const preview = await buildFolderCopyPreview(
-    { filenameTemplate: template, destinationLayout: 'job', outputPath: '/x', stripOrderNumberPrefixes: stripPrefixes },
+    { filenameTemplate: template, destinationLayout: 'job', outputPath: '/x', orderNumberPrefixRules: prefixRules },
     NO_JOBS_DEPS,
   );
   const allImages = SYNTHETIC_IMAGES.map(i => ({ ...i }));
-  const direct    = buildCopyFilenames(allImages, SYNTHETIC_JOB, { template, stripPrefixes });
+  const direct    = buildCopyFilenames(allImages, SYNTHETIC_JOB, { template, prefixRules });
   assert.deepEqual(
     preview.files.map(f => f.destFilename),
     direct.files.slice(0, MAX_PREVIEW_SAMPLES).map(f => f.destFilename),
-    'stripPrefix must reach the planner through the preview call unchanged',
+    'prefix rules must reach the planner through the preview call unchanged',
   );
   assert.deepEqual(preview.stats, direct.stats);
+});
+
+test('M7b preview: REPLACEMENT rule surfaces in filenames and destFolder', async () => {
+  const template    = '{orderNumber}-{index}';
+  const prefixRules = [{ from: 'PXDEMO-', to: 'PX-' }];
+  const preview = await buildFolderCopyPreview(
+    { filenameTemplate: template, destinationLayout: 'job', outputPath: '/x',
+      orderNumberPrefixRules: prefixRules },
+    NO_JOBS_DEPS,
+  );
+  // SYNTHETIC_JOB.order_number = 'PXDEMO-SAMPLE' → 'PX-SAMPLE' via replacement.
+  assert.equal(preview.destFolder, path.join('/x', 'PX-SAMPLE_999999'));
+  for (const f of preview.files) {
+    assert.match(f.destFilename, /^PX-SAMPLE-\d+/,
+      'replacement propagates into filenames via resolveTemplate');
+  }
 });
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -276,16 +292,16 @@ test('warnings: none when the template distinguishes every sample', async () => 
 });
 
 // ═════════════════════════════════════════════════════════════════════════
-// Destination path — full path, layout-aware, honors stripPrefix
+// Destination path — full path, layout-aware, honors prefix rules
 // ═════════════════════════════════════════════════════════════════════════
 
 test('destPath is the FULL path (§7 — path length is half the point)', async () => {
   const out = await buildFolderCopyPreview(
     {
-      outputPath:               '/hot/wf',
-      filenameTemplate:         '{jobId}-{index}',
-      destinationLayout:        'job',
-      stripOrderNumberPrefixes: ['PXDEMO-'],
+      outputPath:             '/hot/wf',
+      filenameTemplate:       '{jobId}-{index}',
+      destinationLayout:      'job',
+      orderNumberPrefixRules: [{ from: 'PXDEMO-', to: '' }],
     },
     NO_JOBS_DEPS,
   );
@@ -307,25 +323,45 @@ test('destPath under root layout: files land in outputPath itself', async () => 
   }
 });
 
-test('M7 preview: multi-prefix reaches both destFolder AND resolved filenames (parity via buildDestFolder + planner)', async () => {
-  // One prefix in the list matches the sample order_number
+test('M7b preview: multi-rule reaches both destFolder AND resolved filenames (parity via buildDestFolder + planner)', async () => {
+  // One rule in the list matches the sample order_number
   // ('PXDEMO-SAMPLE' → 'SAMPLE' after PXDEMO- strips). Same list also
-  // strips {orderNumber} inside the template. This is the M5a payoff:
+  // transforms {orderNumber} inside the template. This is the M5a payoff:
   // one signature change in buildDestFolder + resolveTemplate flows to
   // BOTH sides through the shared preview helper.
+  const out = await buildFolderCopyPreview(
+    {
+      outputPath:             '/hot/wf',
+      filenameTemplate:       '{orderNumber}-{index}',
+      destinationLayout:      'job',
+      orderNumberPrefixRules: [
+        { from: 'ORD',    to: '' },
+        { from: 'PXDEMO', to: '' },
+        { from: 'POS',    to: '' },
+      ],
+    },
+    NO_JOBS_DEPS,
+  );
+  // destFolder uses transformed order → 'SAMPLE_999999'.
+  assert.equal(out.destFolder, path.join('/hot/wf', 'SAMPLE_999999'));
+  // Filenames use transformed {orderNumber} too — 'SAMPLE-1.jpg' etc.
+  assert.equal(out.files[0].destFilename, 'SAMPLE-1.jpg');
+});
+
+test('M7b preview: legacy M7 string[] on the input is accepted via the tolerant reader', async () => {
+  // The renderer will send the new pair-array shape, but if a modal
+  // buffer still has the old M7 shape from an older codepath, the
+  // preview must still work — the reader is the ONE coercion place.
   const out = await buildFolderCopyPreview(
     {
       outputPath:               '/hot/wf',
       filenameTemplate:         '{orderNumber}-{index}',
       destinationLayout:        'job',
-      stripOrderNumberPrefixes: ['ORD', 'PXDEMO', 'POS'],   // longest-first sort inside the helper
+      stripOrderNumberPrefixes: ['PXDEMO-'],   // M7 shape
     },
     NO_JOBS_DEPS,
   );
-  // destFolder uses stripped order → 'SAMPLE_999999'.
   assert.equal(out.destFolder, path.join('/hot/wf', 'SAMPLE_999999'));
-  // Filenames use stripped {orderNumber} too — 'SAMPLE-1.jpg' etc.
-  assert.equal(out.files[0].destFilename, 'SAMPLE-1.jpg');
 });
 
 test('destPath handles blank outputPath gracefully (new-controller mid-edit)', async () => {
@@ -342,13 +378,13 @@ test('destPath handles blank outputPath gracefully (new-controller mid-edit)', a
 // Input trim + coercion (mirrors renderer + IPC boundary)
 // ═════════════════════════════════════════════════════════════════════════
 
-test('input hygiene: filenameTemplate is trimmed, stripPrefixes entries trimmed, layout coerced', async () => {
+test('input hygiene: filenameTemplate is trimmed, prefixRules entries trimmed, layout coerced', async () => {
   const out = await buildFolderCopyPreview(
     {
-      outputPath:               '/o',
-      filenameTemplate:         '  {jobId}-{index}  ',
-      destinationLayout:        'garbage',   // → coerced to 'job'
-      stripOrderNumberPrefixes: ['  PXDEMO-  '],
+      outputPath:             '/o',
+      filenameTemplate:       '  {jobId}-{index}  ',
+      destinationLayout:      'garbage',   // → coerced to 'job'
+      orderNumberPrefixRules: [{ from: '  PXDEMO-  ', to: '  ' }],
     },
     NO_JOBS_DEPS,
   );
@@ -357,7 +393,7 @@ test('input hygiene: filenameTemplate is trimmed, stripPrefixes entries trimmed,
   // whitespace-only template would resolve to blank on every image and
   // hit the fallback path. Same {jobId}-{index} → '999999-1' etc.
   assert.equal(out.files[0].destFilename, '999999-1.jpg');
-  // stripPrefix trimmed and applied — SAMPLE, not PXDEMO-SAMPLE, in destFolder.
+  // Rule from + to both trimmed and applied — SAMPLE, not PXDEMO-SAMPLE.
   assert.ok(out.destFolder.endsWith('SAMPLE_999999'));
 });
 
@@ -404,7 +440,7 @@ test('real manifest: preview filenames come from the REAL planner run on ALL ima
     quantity:         img.quantity,
     originalFilename: img.originalFilename,
   }));
-  const direct = buildCopyFilenames(allImages, JOB_RECENT, { template, stripPrefix: '' });
+  const direct = buildCopyFilenames(allImages, JOB_RECENT, { template, prefixRules: [] });
   // Displayed filenames = first 3 of the full-run output.
   assert.deepEqual(
     out.files.map(f => f.destFilename),
@@ -545,7 +581,7 @@ test('M5a: 40-image full-run equality — preview.stats == buildCopyFilenames.st
     quantity:         img.quantity,
     originalFilename: img.originalFilename,
   }));
-  const direct = buildCopyFilenames(allImages, JOB_RECENT, { template, stripPrefix: '' });
+  const direct = buildCopyFilenames(allImages, JOB_RECENT, { template, prefixRules: [] });
   assert.deepEqual(out.stats, direct.stats,
     'preview stats must equal buildCopyFilenames stats for the FULL 40-image list');
 });

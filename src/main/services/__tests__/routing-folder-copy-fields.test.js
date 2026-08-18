@@ -3,9 +3,10 @@
  * resolved route (M3 of docs/folder-copy-filename-templates-brief.md):
  *   - filenameTemplate:       string, default ''
  *   - destinationLayout:      'job' | 'root', default 'job'
- *   - stripOrderNumberPrefixes: string[], default [] (M7; legacy
- *     stripOrderNumberPrefix single-string still readable via the
- *     tolerant reader in printUtils.readStripPrefixes)
+ *   - orderNumberPrefixRules: Array<{from,to}>, default [] (M7b; legacy
+ *     stripOrderNumberPrefixes string[] and 1.13.0 stripOrderNumberPrefix
+ *     single-string still readable via the tolerant reader in
+ *     printUtils.readOrderNumberPrefixRules)
  *
  * The critical tripwire (§11 #2 of the brief) is that both folder_copy
  * route literals — resolveRoute (~routing-service.js:410) and
@@ -99,9 +100,9 @@ const JOB = { id: 7, product_code: 'CANVAS8X10', process: 'Wide Format', options
 
 test('folder_copy route parity: resolveRoute and resolveRouteForController produce the same keys', () => {
   seedFolderCopy({
-    filenameTemplate:         '{orderNumber}_{product}_{indexPadded}',
-    destinationLayout:        'root',
-    stripOrderNumberPrefixes: ['PXDEMO-'],
+    filenameTemplate:       '{orderNumber}_{product}_{indexPadded}',
+    destinationLayout:      'root',
+    orderNumberPrefixRules: [{ from: 'PXDEMO-', to: 'PX-' }],
   });
   const viaJob  = resolveRoute(JOB);
   const viaCtrl = resolveRouteForController(JOB, FC_ID);
@@ -114,28 +115,28 @@ test('folder_copy route parity: resolveRoute and resolveRouteForController produ
 
 test('folder_copy route parity: BOTH literals carry the three M3 fields', () => {
   seedFolderCopy({
-    filenameTemplate:         'x',
-    destinationLayout:        'job',
-    stripOrderNumberPrefixes: ['A-'],
+    filenameTemplate:       'x',
+    destinationLayout:      'job',
+    orderNumberPrefixRules: [{ from: 'A-', to: '' }],
   });
   for (const route of [resolveRoute(JOB), resolveRouteForController(JOB, FC_ID)]) {
     assert.equal(typeof route.filenameTemplate,          'string');
     assert.equal(typeof route.destinationLayout,         'string');
-    assert.ok(Array.isArray(route.stripOrderNumberPrefixes));
+    assert.ok(Array.isArray(route.orderNumberPrefixRules));
   }
 });
 
 test('folder_copy route parity: identical values in both literals for the same controller', () => {
   seedFolderCopy({
-    filenameTemplate:         '{jobId}_{index}',
-    destinationLayout:        'root',
-    stripOrderNumberPrefixes: ['PXDEMO-'],
+    filenameTemplate:       '{jobId}_{index}',
+    destinationLayout:      'root',
+    orderNumberPrefixRules: [{ from: 'PXDEMO-', to: 'PX-' }],
   });
   const viaJob  = resolveRoute(JOB);
   const viaCtrl = resolveRouteForController(JOB, FC_ID);
   assert.equal(viaJob.filenameTemplate,       viaCtrl.filenameTemplate);
   assert.equal(viaJob.destinationLayout,      viaCtrl.destinationLayout);
-  assert.deepEqual(viaJob.stripOrderNumberPrefixes, viaCtrl.stripOrderNumberPrefixes);
+  assert.deepEqual(viaJob.orderNumberPrefixRules, viaCtrl.orderNumberPrefixRules);
   assert.equal(viaJob.outputPath,             viaCtrl.outputPath);
 });
 
@@ -149,9 +150,9 @@ test('folder_copy defaults: controller with none of the three fields → "" / "j
   // via BOTH literals (parity again — the tripwire also fires here).
   seedFolderCopy();
   for (const route of [resolveRoute(JOB), resolveRouteForController(JOB, FC_ID)]) {
-    assert.equal(route.filenameTemplate,               '');
-    assert.equal(route.destinationLayout,              'job');
-    assert.deepEqual(route.stripOrderNumberPrefixes,   []);
+    assert.equal(route.filenameTemplate,                 '');
+    assert.equal(route.destinationLayout,                'job');
+    assert.deepEqual(route.orderNumberPrefixRules,       []);
   }
 });
 
@@ -162,30 +163,64 @@ test('folder_copy defaults: non-string filenameTemplate falls back to blank', ()
   }
 });
 
-test('folder_copy defaults: non-array stripOrderNumberPrefixes falls back to []', () => {
-  seedFolderCopy({ stripOrderNumberPrefixes: true });
+test('folder_copy defaults: non-array orderNumberPrefixRules falls back to []', () => {
+  seedFolderCopy({ orderNumberPrefixRules: true });
   for (const route of [resolveRoute(JOB), resolveRouteForController(JOB, FC_ID)]) {
-    assert.deepEqual(route.stripOrderNumberPrefixes, []);
+    assert.deepEqual(route.orderNumberPrefixRules, []);
   }
 });
 
-test('M7 folder_copy: legacy single-string stripOrderNumberPrefix wrapped as [oldValue]', () => {
-  // Downgrade-friendly: an existing (pre-M7) controller record stores
-  // a single string. The tolerant reader wraps it as a single-element
-  // array — both literals must surface it identically.
+// ═════════════════════════════════════════════════════════════════════════
+// M7b tolerant reader — three input shapes, one output shape
+// ═════════════════════════════════════════════════════════════════════════
+//
+// The route literal ALWAYS surfaces orderNumberPrefixRules as
+// Array<{from,to}>. The reader promotes the two legacy shapes
+// (stripOrderNumberPrefixes: string[] from M7; stripOrderNumberPrefix:
+// string from 1.13.0) into the pair-array shape with to:'' so downstream
+// callers never have to handle the legacy shapes directly. Verifies via
+// BOTH route literals.
+
+test('M7b folder_copy: legacy M7 string[] stripOrderNumberPrefixes promoted to pair array with to:""', () => {
+  seedFolderCopy({ stripOrderNumberPrefixes: ['PXDEMO-', 'ORD-'] });
+  for (const route of [resolveRoute(JOB), resolveRouteForController(JOB, FC_ID)]) {
+    assert.deepEqual(route.orderNumberPrefixRules,
+      [{ from: 'PXDEMO-', to: '' }, { from: 'ORD-', to: '' }]);
+  }
+});
+
+test('M7b folder_copy: legacy 1.13.0 single-string stripOrderNumberPrefix wrapped as single pair with to:""', () => {
   seedFolderCopy({ stripOrderNumberPrefix: 'PXDEMO-' });
   for (const route of [resolveRoute(JOB), resolveRouteForController(JOB, FC_ID)]) {
-    assert.deepEqual(route.stripOrderNumberPrefixes, ['PXDEMO-']);
+    assert.deepEqual(route.orderNumberPrefixRules, [{ from: 'PXDEMO-', to: '' }]);
   }
 });
 
-test('M7 folder_copy: new array wins even when legacy string is also present', () => {
+test('M7b folder_copy: new pair-array field wins when M7 string[] AND legacy string are also present', () => {
   seedFolderCopy({
-    stripOrderNumberPrefixes: ['ORD', 'POS'],
-    stripOrderNumberPrefix:   'PXDEMO-',   // stale — must be ignored
+    orderNumberPrefixRules:   [{ from: 'PXDEMO-', to: 'PX-' }],
+    stripOrderNumberPrefixes: ['ORD', 'POS'],       // stale — must be ignored
+    stripOrderNumberPrefix:   'LEGACY-',            // stale — must be ignored
   });
   for (const route of [resolveRoute(JOB), resolveRouteForController(JOB, FC_ID)]) {
-    assert.deepEqual(route.stripOrderNumberPrefixes, ['ORD', 'POS']);
+    assert.deepEqual(route.orderNumberPrefixRules, [{ from: 'PXDEMO-', to: 'PX-' }]);
+  }
+});
+
+test('M7b folder_copy: replacement rule surfaces the operator-typed `to` verbatim on both literals', () => {
+  seedFolderCopy({
+    orderNumberPrefixRules: [
+      { from: 'PXDEMO-',  to: 'PX-' },
+      { from: 'PXDEMO2-', to: 'PX-' },
+      { from: 'ORD-',     to: '' },
+    ],
+  });
+  for (const route of [resolveRoute(JOB), resolveRouteForController(JOB, FC_ID)]) {
+    assert.deepEqual(route.orderNumberPrefixRules, [
+      { from: 'PXDEMO-',  to: 'PX-' },
+      { from: 'PXDEMO2-', to: 'PX-' },
+      { from: 'ORD-',     to: '' },
+    ]);
   }
 });
 
@@ -223,9 +258,9 @@ test('non-folder_copy controllers do NOT carry the three M3 fields on their rout
     name:       'Darkroom Pro',
     type:       'darkroompro',
     outputPath: 'C:\\dr\\hot',
-    filenameTemplate:         'should-not-leak',
-    destinationLayout:        'root',
-    stripOrderNumberPrefixes: ['X-'],
+    filenameTemplate:       'should-not-leak',
+    destinationLayout:      'root',
+    orderNumberPrefixRules: [{ from: 'X-', to: '' }],
   };
   __seed({
     processControllerMappings: [{ process: 'Wide Format', controllerId: 'ctrl-dr' }],
@@ -241,5 +276,5 @@ test('non-folder_copy controllers do NOT carry the three M3 fields on their rout
   assert.equal(route.controllerType, 'darkroompro');
   assert.equal(route.filenameTemplate,          undefined);
   assert.equal(route.destinationLayout,         undefined);
-  assert.equal(route.stripOrderNumberPrefixes,  undefined);
+  assert.equal(route.orderNumberPrefixRules,    undefined);
 });

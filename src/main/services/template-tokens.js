@@ -1,6 +1,6 @@
 'use strict';
 
-const { stripOrderNumberPrefixMulti } = require('../../shared/printUtils');
+const { applyOrderNumberPrefixRules } = require('../../shared/printUtils');
 
 /**
  * template-tokens
@@ -41,13 +41,15 @@ const { stripOrderNumberPrefixMulti } = require('../../shared/printUtils');
  *   {lastName}         Everything after the first space (or empty)
  *   {jobId}            OrderHub job ID (numeric)
  *   {orderNumber}      Order number (e.g. "PXDEMO-091YEC")
- *                      — with opts.stripPrefixes set to an array of prefix
- *                      strings, matching leading prefix is removed via
- *                      printUtils.stripOrderNumberPrefixMulti (longest-first,
- *                      case-insensitive, drops one trailing '-'/'_' separator,
- *                      never strips to empty per candidate)
+ *                      — with opts.prefixRules set to an array of
+ *                      {from, to} pairs, matching leading `from` is
+ *                      replaced with `to` via
+ *                      printUtils.applyOrderNumberPrefixRules
+ *                      (longest-first, case-insensitive, consumes one
+ *                      trailing '-'/'_' separator, never produces
+ *                      empty per rule). Blank `to` = pure strip.
  *   {jobName}          Job name (e.g. "PXDEMO-091YEC-1") — falls back to
- *                      orderNumber; same stripPrefixes rule as above
+ *                      orderNumber; same prefixRules rule as above
  *   {product}          Product display name (e.g. '4x6" Photo Print')
  *   {productCode}      Product code (e.g. '0406-cut-print')
  *   {category}         job.category
@@ -180,10 +182,12 @@ function _padIndex(index, imageCount) {
  * @param {object} [ctx]  — per-image context (filename, originalFilename,
  *   quantity, index, imageCount).
  * @param {object} [opts] — dispatch-level options.
- * @param {string[]} [opts.stripPrefixes] — array of leading prefixes; the
- *   longest match against {orderNumber} / {jobName} is stripped, dropping
- *   one following '-' or '_'. Empty array / absent = no stripping. See
- *   printUtils.stripOrderNumberPrefixMulti for the exact rules.
+ * @param {Array<{from:string,to:string}>} [opts.prefixRules] — array of
+ *   {from, to} pairs; the longest matching `from` against {orderNumber}
+ *   / {jobName} is replaced with `to`, consuming one following '-' or
+ *   '_'. Blank `to` = pure strip. Empty array / absent = no rules
+ *   applied. See printUtils.applyOrderNumberPrefixRules for the full
+ *   semantics (separator required, never-empty guard, etc.).
  * @param {Date}   [opts.now] — injected clock for {date}. Absent = real
  *   clock. Tests MUST inject.
  * @returns {string}
@@ -200,14 +204,15 @@ function resolveTemplate(template, job = {}, ctx = {}, opts = {}) {
   if (!template) return '';
 
   const { firstName, lastName } = _splitName(job.customer_name);
-  // opts.stripPrefixes: array of prefixes; anything else (missing, wrong
-  // type, non-array) is treated as no-strip. Non-string / empty entries
-  // are filtered by stripOrderNumberPrefixMulti so we don't have to.
-  const stripPrefixes = (opts && Array.isArray(opts.stripPrefixes)) ? opts.stripPrefixes : [];
+  // opts.prefixRules: array of {from, to} pairs; anything else
+  // (missing, wrong type, non-array) is treated as no-rules-applied.
+  // Malformed entries are filtered by applyOrderNumberPrefixRules so
+  // we don't have to.
+  const prefixRules = (opts && Array.isArray(opts.prefixRules)) ? opts.prefixRules : [];
   const rawOrderNumber = job.order_number || '';
   const rawJobName     = job.job_name || job.order_number || '';
-  const orderNumber = stripPrefixes.length > 0 ? stripOrderNumberPrefixMulti(rawOrderNumber, stripPrefixes) : rawOrderNumber;
-  const jobName     = stripPrefixes.length > 0 ? stripOrderNumberPrefixMulti(rawJobName,     stripPrefixes) : rawJobName;
+  const orderNumber = prefixRules.length > 0 ? applyOrderNumberPrefixRules(rawOrderNumber, prefixRules) : rawOrderNumber;
+  const jobName     = prefixRules.length > 0 ? applyOrderNumberPrefixRules(rawJobName,     prefixRules) : rawJobName;
 
   // opts.now: null/undefined = real clock; anything else must be a valid
   // Date. A test that meant to be deterministic and passed a timestamp

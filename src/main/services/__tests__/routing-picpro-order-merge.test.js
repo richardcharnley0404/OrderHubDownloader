@@ -233,71 +233,86 @@ test('_channelMappingOverride fujipicpro branch defaults match the main branch d
   assert.equal(route.orderMergeWaitMinutes,   30);
 });
 
-// ── stripOrderNumberPrefixes (v1.12.2 → M7) — array, both branches ──────────
+// ── orderNumberPrefixRules (v1.12.2 → M7 → M7b) — pair array, both branches
 //
-// M7 renamed the field from stripOrderNumberPrefix: string to
-// stripOrderNumberPrefixes: string[]. The tolerant reader in
-// printUtils.readStripPrefixes accepts either shape on the controller
-// record; the route literal always surfaces an array. Both fujipicpro
-// literals (main branch + _channelMappingOverride branch) must agree —
-// see the fujipicpro parity test near the bottom of this section.
+// M7b renamed the field from stripOrderNumberPrefixes: string[] to
+// orderNumberPrefixRules: Array<{from,to}>. The tolerant reader in
+// printUtils.readOrderNumberPrefixRules accepts three shapes on the
+// controller record (M7b pair array, M7 string[], 1.13.0 single
+// string); the route literal ALWAYS surfaces the pair-array shape.
+// Both fujipicpro literals (main branch + _channelMappingOverride
+// branch) must agree — see the fujipicpro parity test near the bottom
+// of this section.
 
-test('fujipicpro route: stripOrderNumberPrefixes persists to the route', () => {
-  seedPicPro({ stripOrderNumberPrefixes: ['PXDEMO-'] });
+test('fujipicpro route: orderNumberPrefixRules persists to the route', () => {
+  seedPicPro({ orderNumberPrefixRules: [{ from: 'PXDEMO-', to: 'PX-' }] });
   const route = resolveRoute(JOB);
-  assert.deepEqual(route.stripOrderNumberPrefixes, ['PXDEMO-']);
+  assert.deepEqual(route.orderNumberPrefixRules, [{ from: 'PXDEMO-', to: 'PX-' }]);
 });
 
-test('fujipicpro route: absent stripOrderNumberPrefixes defaults to [] (no strip)', () => {
+test('fujipicpro route: absent orderNumberPrefixRules defaults to [] (no rules applied)', () => {
   seedPicPro();
   const route = resolveRoute(JOB);
-  assert.deepEqual(route.stripOrderNumberPrefixes, [],
+  assert.deepEqual(route.orderNumberPrefixRules, [],
     'default is empty — the feature is opt-in per controller');
 });
 
-test('fujipicpro route: non-array stripOrderNumberPrefixes defaults to [] (no strip)', () => {
+test('fujipicpro route: non-array orderNumberPrefixRules defaults to [] (no rules applied)', () => {
   // A malformed value from a bad IPC payload or a stale JSON edit must
-  // fail closed to "no strip" rather than throwing at dispatch.
+  // fail closed to "no rules" rather than throwing at dispatch.
   for (const bad of [null, undefined, 42, true, {}]) {
-    seedPicPro({ stripOrderNumberPrefixes: bad });
+    seedPicPro({ orderNumberPrefixRules: bad });
     const route = resolveRoute(JOB);
-    assert.deepEqual(route.stripOrderNumberPrefixes, [], `bad value ${JSON.stringify(bad)} defaults to []`);
+    assert.deepEqual(route.orderNumberPrefixRules, [], `bad value ${JSON.stringify(bad)} defaults to []`);
   }
 });
 
-test('M7 fujipicpro route: legacy single-string stripOrderNumberPrefix wrapped as single-element array', () => {
-  // Tolerant read: a pre-M7 controller record with the string field
-  // surfaces on the route as [oldValue]. Downgrade-friendly.
+test('M7b fujipicpro route: legacy M7 string[] stripOrderNumberPrefixes promoted to pair array with to:""', () => {
+  seedPicPro({ stripOrderNumberPrefixes: ['PXDEMO-', 'ORD-'] });
+  const route = resolveRoute(JOB);
+  assert.deepEqual(route.orderNumberPrefixRules,
+    [{ from: 'PXDEMO-', to: '' }, { from: 'ORD-', to: '' }]);
+});
+
+test('M7b fujipicpro route: legacy 1.13.0 single-string stripOrderNumberPrefix wrapped as single pair with to:""', () => {
   seedPicPro({ stripOrderNumberPrefix: 'PXDEMO-' });
   const route = resolveRoute(JOB);
-  assert.deepEqual(route.stripOrderNumberPrefixes, ['PXDEMO-']);
+  assert.deepEqual(route.orderNumberPrefixRules, [{ from: 'PXDEMO-', to: '' }]);
 });
 
-test('M7 fujipicpro route: multiple prefixes surface in array order', () => {
-  seedPicPro({ stripOrderNumberPrefixes: ['ORD', 'PXDEMO', 'POS'] });
+test('M7b fujipicpro route: multiple pair rules surface in configured order (helper does the sort at dispatch)', () => {
+  seedPicPro({ orderNumberPrefixRules: [
+    { from: 'ORD-',     to: '' },
+    { from: 'PXDEMO-',  to: 'PX-' },
+    { from: 'PXDEMO2-', to: 'PX-' },
+  ] });
   const route = resolveRoute(JOB);
-  assert.deepEqual(route.stripOrderNumberPrefixes, ['ORD', 'PXDEMO', 'POS']);
+  assert.deepEqual(route.orderNumberPrefixRules, [
+    { from: 'ORD-',     to: '' },
+    { from: 'PXDEMO-',  to: 'PX-' },
+    { from: 'PXDEMO2-', to: 'PX-' },
+  ]);
 });
 
-test('M7 _channelMappingOverride fujipicpro branch carries stripOrderNumberPrefixes in parity with the main branch', () => {
+test('M7b _channelMappingOverride fujipicpro branch carries orderNumberPrefixRules in parity with the main branch', () => {
   // Same drift-prevention posture as mergeOrderJobs above.
-  seedPicPro({ stripOrderNumberPrefixes: ['DIVPRINTS-'] });
+  seedPicPro({ orderNumberPrefixRules: [{ from: 'DIVPRINTS-', to: '' }] });
   const overrideJob = { ...JOB, _channelMappingOverride: 'cm-pp-1' };
   const route = resolveRoute(overrideJob);
-  assert.deepEqual(route.stripOrderNumberPrefixes, ['DIVPRINTS-'],
-    'override branch must surface stripOrderNumberPrefixes so reassigned jobs strip identically to the main path');
+  assert.deepEqual(route.orderNumberPrefixRules, [{ from: 'DIVPRINTS-', to: '' }],
+    'override branch must surface orderNumberPrefixRules so reassigned jobs are transformed identically to the main path');
 });
 
-test('M7 fujipicpro parity: main and override branches produce the SAME key set', () => {
+test('M7b fujipicpro parity: main and override branches produce the SAME key set', () => {
   // The load-bearing parity test. Both fujipicpro literals in
   // routing-service.js are hand-written; if any future field is added
   // to one and not the other, THIS test catches it (the darkroompro
   // fix's original class of bug). Analogous to the folder_copy parity
   // test in routing-folder-copy-fields.test.js.
   seedPicPro({
-    mergeOrderJobs:           true,
-    orderMergeWaitMinutes:    45,
-    stripOrderNumberPrefixes: ['PXDEMO-', 'POS'],
+    mergeOrderJobs:         true,
+    orderMergeWaitMinutes:  45,
+    orderNumberPrefixRules: [{ from: 'PXDEMO-', to: 'PX-' }, { from: 'POS-', to: '' }],
   });
   const mainRoute     = resolveRoute(JOB);
   const overrideRoute = resolveRoute({ ...JOB, _channelMappingOverride: 'cm-pp-1' });
@@ -307,14 +322,14 @@ test('M7 fujipicpro parity: main and override branches produce the SAME key set'
   assert.deepEqual(keysOverride, keysMain,
     'the two fujipicpro literals must expose the same key set — see the NOTE at both call sites');
 
-  // Also confirm the specific M7 field values match — key-set parity
+  // Also confirm the specific M7b field values match — key-set parity
   // alone doesn't lock the VALUE. This is the drift-prevention pair.
-  assert.deepEqual(mainRoute.stripOrderNumberPrefixes, overrideRoute.stripOrderNumberPrefixes);
+  assert.deepEqual(mainRoute.orderNumberPrefixRules, overrideRoute.orderNumberPrefixRules);
   assert.equal(mainRoute.mergeOrderJobs,        overrideRoute.mergeOrderJobs);
   assert.equal(mainRoute.orderMergeWaitMinutes, overrideRoute.orderMergeWaitMinutes);
 });
 
-test('darkroompro route: stripOrderNumberPrefixes is NOT on the route (fujipicpro/folder_copy-scoped)', () => {
+test('darkroompro route: orderNumberPrefixRules is NOT on the route (fujipicpro/folder_copy-scoped)', () => {
   const controller = {
     id:         'ctrl-dr',
     name:       'Darkroom Pro',
@@ -322,7 +337,7 @@ test('darkroompro route: stripOrderNumberPrefixes is NOT on the route (fujipicpr
     outputPath: 'C:\\dr\\hot',
     // Even if this field somehow ends up on a darkroompro record (stale
     // UI, hand-edited JSON), it must not leak onto the route.
-    stripOrderNumberPrefixes: ['PXDEMO-'],
+    orderNumberPrefixRules: [{ from: 'PXDEMO-', to: '' }],
   };
   __seed({
     processControllerMappings: [{ process: 'Lab', controllerId: 'ctrl-dr' }],
@@ -331,8 +346,8 @@ test('darkroompro route: stripOrderNumberPrefixes is NOT on the route (fujipicpr
   });
   const route = resolveRoute({ ...JOB });
   assert.equal(route.controllerType, 'darkroompro');
-  assert.equal('stripOrderNumberPrefixes' in route, false,
-    'darkroompro routes must not carry stripOrderNumberPrefixes — the field is fujipicpro/folder_copy-scoped');
+  assert.equal('orderNumberPrefixRules' in route, false,
+    'darkroompro routes must not carry orderNumberPrefixRules — the field is fujipicpro/folder_copy-scoped');
 });
 
 // ── Read-time coercion warn (M1 follow-up) ──────────────────────────────────

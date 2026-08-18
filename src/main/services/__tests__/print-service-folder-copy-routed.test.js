@@ -218,7 +218,7 @@ test('template applied: 3 images produce exact filenames + folder name on disk',
       controllerName:         'FC-Template',
       filenameTemplate:       '{jobId}_x{quantity}_{indexPadded}',
       destinationLayout:      'job',
-      stripOrderNumberPrefixes: [],
+      orderNumberPrefixRules: [],
     },
   );
   assert.equal(result.success, true, `unexpected failure: ${result.error}`);
@@ -262,7 +262,7 @@ test('root layout: files land in route.outputPath itself, no subfolder created',
       controllerName:         'FC-Root',
       filenameTemplate:       '{jobId}_{index}',
       destinationLayout:      'root',
-      stripOrderNumberPrefixes: [],
+      orderNumberPrefixRules: [],
     },
   );
   assert.equal(result.success, true);
@@ -315,7 +315,7 @@ test('strip prefix: destination folder stripped, source folder read from UN-stri
       controllerName:         'FC-Strip',
       filenameTemplate:       '',                  // blank keeps original filename
       destinationLayout:      'job',
-      stripOrderNumberPrefixes: ['PXDEMO-'],
+      orderNumberPrefixRules: [{ from: 'PXDEMO-', to: '' }],
     },
   );
 
@@ -361,7 +361,7 @@ test('per-image {quantity} reaches the resolver (not blank because caller forgot
       controllerName:         'FC-Q',
       filenameTemplate:       'img-x{quantity}',
       destinationLayout:      'job',
-      stripOrderNumberPrefixes: [],
+      orderNumberPrefixRules: [],
     },
   );
   assert.equal(result.success, true);
@@ -427,7 +427,7 @@ test('dispatch same job twice with a template: identical filenames both times, n
       controllerName:         'FC-Retry',
       filenameTemplate:       '{jobId}-{index}',
       destinationLayout:      'job',
-      stripOrderNumberPrefixes: [],
+      orderNumberPrefixRules: [],
     },
   );
 
@@ -464,7 +464,7 @@ test('result.sourcePath is the un-stripped source folder (name discipline lock)'
     {
       outputPath:             outputRoot,
       controllerName:         'FC-src',
-      stripOrderNumberPrefixes: ['PXDEMO-'],
+      orderNumberPrefixRules: [{ from: 'PXDEMO-', to: '' }],
     },
   );
   assert.equal(result.success, true);

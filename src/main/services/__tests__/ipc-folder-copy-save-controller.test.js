@@ -262,15 +262,43 @@ test('IPC rejects: filenameTemplate that is not a string', async () => {
   assert.match(result.error, /filenameTemplate must be a string/);
 });
 
-test('IPC rejects: stripOrderNumberPrefixes that is not an array (M7)', async () => {
+test('M7b IPC rejects: orderNumberPrefixRules that is not an array', async () => {
+  resetState();
+  const ctrl = makeFolderCopyCtrl({ orderNumberPrefixRules: 'PXDEMO-' });
+  const result = await saveController(null, ctrl);
+  assert.equal(result.success, false);
+  assert.match(result.error, /orderNumberPrefixRules must be an array of \{from, to\} pairs/);
+});
+
+test('M7b IPC rejects: orderNumberPrefixRules entry without a string `from`', async () => {
+  resetState();
+  const ctrl = makeFolderCopyCtrl({
+    orderNumberPrefixRules: [{ from: 'PXDEMO-', to: '' }, { to: 'PX-' }],
+  });
+  const result = await saveController(null, ctrl);
+  assert.equal(result.success, false);
+  assert.match(result.error, /orderNumberPrefixRules entries must be objects/);
+});
+
+test('M7b IPC rejects: orderNumberPrefixRules entry with non-string `to`', async () => {
+  resetState();
+  const ctrl = makeFolderCopyCtrl({
+    orderNumberPrefixRules: [{ from: 'PXDEMO-', to: 42 }],
+  });
+  const result = await saveController(null, ctrl);
+  assert.equal(result.success, false);
+  assert.match(result.error, /orderNumberPrefixRules entries must be objects/);
+});
+
+test('M7 IPC rejects: legacy stripOrderNumberPrefixes that is not an array', async () => {
   resetState();
   const ctrl = makeFolderCopyCtrl({ stripOrderNumberPrefixes: 'PXDEMO-' });
   const result = await saveController(null, ctrl);
   assert.equal(result.success, false);
-  assert.match(result.error, /stripOrderNumberPrefixes must be an array of strings/);
+  assert.match(result.error, /legacy field.*must be an array of strings/);
 });
 
-test('M7 IPC rejects: stripOrderNumberPrefixes with a non-string entry', async () => {
+test('M7 IPC rejects: legacy stripOrderNumberPrefixes with a non-string entry', async () => {
   resetState();
   const ctrl = makeFolderCopyCtrl({ stripOrderNumberPrefixes: ['PXDEMO-', 42] });
   const result = await saveController(null, ctrl);
@@ -278,7 +306,7 @@ test('M7 IPC rejects: stripOrderNumberPrefixes with a non-string entry', async (
   assert.match(result.error, /array of strings/);
 });
 
-test('M7 IPC rejects: legacy stripOrderNumberPrefix (string field) with wrong type', async () => {
+test('legacy 1.13.0 IPC rejects: stripOrderNumberPrefix (string field) with wrong type', async () => {
   // Legacy field still valid when present-and-string; wrong type rejected.
   resetState();
   const ctrl = makeFolderCopyCtrl({ stripOrderNumberPrefix: true });
@@ -343,9 +371,9 @@ test('IPC accepts: "root" layout + template with EACH allowed distinguishing tok
 test('round-trip: save all three fields via IPC → read back via getControllers, all three persist', async () => {
   resetState();
   const ctrl = makeFolderCopyCtrl({
-    filenameTemplate:         '{orderNumber}_{product}_{indexPadded}',
-    destinationLayout:        'root',
-    stripOrderNumberPrefixes: ['PXDEMO-'],
+    filenameTemplate:       '{orderNumber}_{product}_{indexPadded}',
+    destinationLayout:      'root',
+    orderNumberPrefixRules: [{ from: 'PXDEMO-', to: 'PX-' }],
   });
   const result = await saveController(null, ctrl);
   assert.equal(result.success, true);
@@ -355,37 +383,53 @@ test('round-trip: save all three fields via IPC → read back via getControllers
   // refactor (the 1.12.0 shape), it would be silently missing here.
   const persisted = __controllers.find(c => c.id === 'ctrl-fc-1');
   assert.ok(persisted, 'controller must persist');
-  assert.equal(persisted.filenameTemplate,       '{orderNumber}_{product}_{indexPadded}');
-  assert.equal(persisted.destinationLayout,      'root');
-  assert.deepEqual(persisted.stripOrderNumberPrefixes, ['PXDEMO-']);
+  assert.equal(persisted.filenameTemplate,   '{orderNumber}_{product}_{indexPadded}');
+  assert.equal(persisted.destinationLayout,  'root');
+  assert.deepEqual(persisted.orderNumberPrefixRules, [{ from: 'PXDEMO-', to: 'PX-' }]);
 });
 
-test('M7 IPC round-trip: multi-prefix array persists as an array', async () => {
+test('M7b IPC round-trip: multi-rule pair array persists as an array of pairs', async () => {
   resetState();
   const ctrl = makeFolderCopyCtrl({
-    filenameTemplate:         '{orderNumber}_{index}',
-    destinationLayout:        'root',
-    stripOrderNumberPrefixes: ['ORD', 'PXDEMO', 'POS'],
+    filenameTemplate:       '{orderNumber}_{index}',
+    destinationLayout:      'root',
+    orderNumberPrefixRules: [
+      { from: 'ORD',    to: '' },
+      { from: 'PXDEMO', to: 'PX' },
+      { from: 'POS',    to: '' },
+    ],
   });
   const result = await saveController(null, ctrl);
   assert.equal(result.success, true);
   const persisted = __controllers.find(c => c.id === 'ctrl-fc-1');
-  assert.deepEqual(persisted.stripOrderNumberPrefixes, ['ORD', 'PXDEMO', 'POS']);
+  assert.deepEqual(persisted.orderNumberPrefixRules, [
+    { from: 'ORD',    to: '' },
+    { from: 'PXDEMO', to: 'PX' },
+    { from: 'POS',    to: '' },
+  ]);
 });
 
-test('M7 IPC normalises: whitespace trimmed on each entry, empties dropped, case-insens dedupe', async () => {
+test('M7b IPC normalises: from/to trimmed, empty-from dropped, case-insens dedupe on from', async () => {
   resetState();
   const ctrl = makeFolderCopyCtrl({
-    filenameTemplate:         '{orderNumber}_{index}',
-    destinationLayout:        'root',
-    stripOrderNumberPrefixes: ['  PXDEMO-  ', '', 'ORD', 'pxdemo-', 'ORD'],
+    filenameTemplate:       '{orderNumber}_{index}',
+    destinationLayout:      'root',
+    orderNumberPrefixRules: [
+      { from: '  PXDEMO-  ', to: '  PX-  ' },  // both trimmed
+      { from: '',            to: 'X' },        // empty from → dropped
+      { from: 'ORD',         to: '' },
+      { from: 'pxdemo-',     to: 'IGNORED' },  // duplicate on from (case-insens) → dropped
+      { from: 'ORD',         to: 'STALE' },    // duplicate on from → dropped
+    ],
   });
   const result = await saveController(null, ctrl);
   assert.equal(result.success, true);
   const persisted = __controllers.find(c => c.id === 'ctrl-fc-1');
-  // First 'PXDEMO-' wins (trimmed, deduped case-insens against 'pxdemo-'
-  // which arrives later). ORD appears once. Empty is dropped.
-  assert.deepEqual(persisted.stripOrderNumberPrefixes, ['PXDEMO-', 'ORD']);
+  // First 'PXDEMO-' wins with to:'PX-'. ORD appears once with to:''.
+  assert.deepEqual(persisted.orderNumberPrefixRules, [
+    { from: 'PXDEMO-', to: 'PX-' },
+    { from: 'ORD',     to: '' },
+  ]);
 });
 
 test('M3a: whitespace-only filenameTemplate under "job" layout is stored as "" (trim at store time)', async () => {
@@ -438,20 +482,20 @@ test('round-trip: update-then-read preserves the three fields (no silent drop on
   resetState();
   // First save — the "add" path.
   await saveController(null, makeFolderCopyCtrl({
-    filenameTemplate:         '{orderNumber}',
-    destinationLayout:        'root',
-    stripOrderNumberPrefixes: [],
+    filenameTemplate:       '{orderNumber}',
+    destinationLayout:      'root',
+    orderNumberPrefixRules: [],
   }));
   // Second save — the "edit" path. Different template, same id.
   const edited = makeFolderCopyCtrl({
-    filenameTemplate:         '{jobName}_{indexPadded}',
-    destinationLayout:        'job',
-    stripOrderNumberPrefixes: ['PXDEMO-'],
+    filenameTemplate:       '{jobName}_{indexPadded}',
+    destinationLayout:      'job',
+    orderNumberPrefixRules: [{ from: 'PXDEMO-', to: 'PX-' }],
   });
   const result = await saveController(null, edited);
   assert.equal(result.success, true);
   const persisted = __controllers.find(c => c.id === 'ctrl-fc-1');
-  assert.equal(persisted.filenameTemplate,       '{jobName}_{indexPadded}');
-  assert.equal(persisted.destinationLayout,      'job');
-  assert.deepEqual(persisted.stripOrderNumberPrefixes, ['PXDEMO-']);
+  assert.equal(persisted.filenameTemplate,   '{jobName}_{indexPadded}');
+  assert.equal(persisted.destinationLayout,  'job');
+  assert.deepEqual(persisted.orderNumberPrefixRules, [{ from: 'PXDEMO-', to: 'PX-' }]);
 });
