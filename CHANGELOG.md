@@ -150,6 +150,49 @@ DIFFERENT jobs whose prefixes happen to strip to the same base.
 
 ---
 
+**Fixed: Fuji PIC Pro no longer ships a blank duplicate order when
+Image Staging Root is on a different drive to DIGIN Path.** A customer
+reported every order arriving twice — once correct, once blank and
+suffixed `.ohdtmp` in the DIGIN folder. Cause: an EXDEV cross-volume
+delivery fallback that copied the staged folder into
+`{diginPath}/{orderId}.ohdtmp` and then renamed it into place. PIC Pro's
+DIGIN watcher ingested the `.ohdtmp` folder while it was still being
+copied (that became the blank order), then ingested the renamed folder
+(the correct order). The comment above that code asserted "Frontier's
+DIGIN watch ignores it until the rename lands" — that was an
+assumption about a third-party product written as fact, and this
+customer disproved it.
+
+**What changed.** The cross-volume fallback has been removed. Fuji PIC
+Pro delivery now REQUIRES `Image Staging Root` and `DIGIN Path` on the
+same volume (same drive letter, or same UNC share). Save-time
+validation in Settings → Routing → Order Controllers now rejects the
+save with an actionable message if the two paths are cross-volume, so
+new and edited controllers can't land in the broken configuration. On
+dispatch, a controller that somehow reaches the cross-volume state
+throws a specific error naming both configured paths and the fix,
+rather than silently duplicating.
+
+**If your lab has seen this.** Duplicate orders where one copy is
+blank and its folder name ends `.ohdtmp` (or `.ohdtmp` folders
+appearing briefly in DIGIN) are exactly this misconfiguration. The
+blank folders never had any images copied into them and are safe to
+delete once you've confirmed the correct order printed. The fix at
+your end is to re-locate `Image Staging Root` onto the same volume
+as `DIGIN Path` in Settings, then Save — validation will confirm
+the co-location is correct. Save is blocked until it is.
+
+Co-location was already the guidance in `docs/fuji-pic-pro-lab-test-pack.md`;
+this release makes it a requirement instead. Co-location is also the
+better configuration on its merits: if DIGIN is a UNC share on the
+Fuji host, co-located means one network copy into staging on the
+share plus a local atomic rename, and cross-volume means a local
+stage plus the same network copy plus a non-atomic window during
+which the partial folder is visible to PIC Pro's watcher. Same
+bytes, strictly worse delivery.
+
+---
+
 **Changed: `{date}` on Fuji back-print templates now resolves to the
 dispatch date.** A Fuji controller (JobMaker or PIC Pro) with **Back
 Print Mode = Text** and a template containing `{date}` has, until now,

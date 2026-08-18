@@ -143,6 +143,30 @@ local test data is all Pixfizz. Needs a manual-source job to confirm.
 
 ## Decisions parked
 
+**Tmp-in-watched-folder writers: audit and move out of the watched directory.**
+Two writers still create a tmp artefact inside a folder a third-party product
+watches. Both share the shape of the M7b DIGIN bug — the DIGIN case is confirmed
+in production so the class is real, not theoretical, and each of these is a
+latent version of it waiting for a customer to trip.
+
+- `fuji-pic-pro-file-writer.js:170` — `writeOrderFile` creates `{orderId}.txt.tmp`
+  inside `orderDataPath` before renaming to `{orderId}.txt`. OrderGateway watches
+  that folder. The PIC Pro spec (p.359) says filename is irrelevant to
+  OrderGateway but doesn't state extension filtering; we don't know whether
+  OrderGateway ingests `.tmp` files. The fix would be to write the tmp file
+  to a same-volume sibling of `orderDataPath` and rename in.
+- `fuji-jobmaker-file-writer.js:92` — same shape: `{surface}.txt.tmp` inside
+  the JobMaker hot folder, then rename to `{surface}.txt`. Frontier's JobMaker
+  watch is presumed to filter by `.txt`. Presumed, not confirmed.
+
+Neither has a customer report today. Fix pattern is the same for both: introduce
+a save-time co-location check (same shape as M7b's `probeSameVolume`) between
+the tmp-write location and the watched folder, and stop dropping tmp artefacts
+in the watched folder. Do them together as a single "harden all
+tmp-in-watched-folder writers" milestone rather than one-off, so the class is
+closed rather than whacked case-by-case. Not release-blocking — the DIGIN one
+that DID burn a customer is fixed in M7b.
+
 **Auto-update is wired but dormant.** `src/main/updater.js` polls a feed whose URL comes
 back from OrderHub's `/checkin`, but no `latest.yml` has ever been published, so it has
 never found anything. Releases are manual: exe to S3, link in OrderHub. Turning auto-update

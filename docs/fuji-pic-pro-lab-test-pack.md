@@ -63,7 +63,7 @@ Settings → Routing → **Add Controller**. Set **Type** to **Fuji PIC Pro**, t
 | Field | What to put |
 |---|---|
 | **Name** | Anything you'll recognise, e.g. "PIC Pro" |
-| **Image Staging Root** | A **new empty folder** you create for this — OHD's own workspace. Put it on the **same drive as DIGIN**. It must not be inside Order Data, DIGIN or Merge Data. |
+| **Image Staging Root** | A **new empty folder** you create for this — OHD's own workspace. **MUST be on the same volume as DIGIN Path** — Save is rejected otherwise, because cross-volume delivery is not supported (see the M7b note at the bottom of `CHANGELOG.md`). It must not be inside Order Data, DIGIN or Merge Data. |
 | **Order Data Path** | Your Order Data folder from above |
 | **DIGIN Path** | Your DIGIN folder |
 | **Merge Data Path** | Optional — leave blank for the first test |

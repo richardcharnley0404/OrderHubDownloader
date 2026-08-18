@@ -33,7 +33,6 @@ const nodeFsPromises = require('node:fs/promises');
 
 const CMD_FILENAME_PREFIX = 'ohd_';
 const ORDER_FILE_TMP_SUFFIX = '.tmp';
-const DIGIN_COPY_TMP_SUFFIX = '.ohdtmp';
 
 // ── stageImages ─────────────────────────────────────────────────────────────
 
@@ -186,11 +185,18 @@ async function writeOrderFile({
 
 /**
  * Move the staged image folder into DIGIN as a single unit so DIGIN
- * never sees a half-copied folder. On a same-volume move this is a
- * cheap atomic rename. Across volumes (network shares landing on a
- * different disk), rename returns EXDEV — we then recursively copy
- * into a `.ohdtmp` sibling, rename that to the final name, and log a
- * warning so the operator can co-locate the paths for future orders.
+ * never sees a half-copied folder. This is always a same-volume
+ * atomic rename — cross-volume delivery is not supported (see the
+ * EXDEV branch below for the customer incident that removed it).
+ *
+ * Co-location of `imageStagingRoot` and `diginPath` is enforced at
+ * save time by `probeSameVolume` (below) via the IPC save-controller
+ * handler. If we ever reach here at dispatch time with cross-volume
+ * paths, it's because a pre-M7b controller was never re-saved after
+ * the fix landed — throw with a specific message naming both paths
+ * and the fix so the operator sees exactly what to change, rather
+ * than falling back to a slow-path that could recreate the deleted
+ * bug.
  *
  * DIGIN Path MUST exist — same reasoning as writeOrderFile.
  *
@@ -216,7 +222,7 @@ async function writeOrderFile({
  * @param {string} args.diginPath
  * @param {string} args.orderId
  * @param {object} [args.deps]
- * @returns {Promise<{ destFolder: string, method: 'rename' | 'copy' | 'already-delivered' }>}
+ * @returns {Promise<{ destFolder: string, method: 'rename' | 'already-delivered' }>}
  */
 async function deliverToDigin({
   stagingFolder,
@@ -258,64 +264,42 @@ async function deliverToDigin({
     throw new Error(`Fuji PIC Pro writer: stagingFolder does not exist: ${stagingFolder}`);
   }
 
-  // Fast path — same-volume rename.
+  // Same-volume atomic rename — the only supported delivery path.
+  //
+  // Before M7b (2026-08-18), an EXDEV fallback copied the staged
+  // folder into `{diginPath}/{orderId}.ohdtmp` and then renamed it in
+  // place. A comment on that code asserted "Frontier's DIGIN watch
+  // ignores it until the rename lands" — that was an assumption about
+  // a third-party product written as fact. A customer disproved it:
+  // PIC Pro ingested the `.ohdtmp` folder while it was still being
+  // copied (producing a blank order) and then ingested the renamed
+  // folder (the correct order), duplicating every order.
+  //
+  // The slow path was removed. Co-location of imageStagingRoot and
+  // diginPath is now enforced at save time by probeSameVolume(). A
+  // pre-M7b controller that was never re-saved would trip here at
+  // dispatch time; we throw with the operator-actionable fix.
   try {
     await fsPromises.rename(stagingFolder, destFolder);
     return { destFolder, method: 'rename' };
   } catch (err) {
-    if (!err || err.code !== 'EXDEV') {
-      throw err;
+    if (err && err.code === 'EXDEV') {
+      const msg =
+        'Fuji PIC Pro delivery failed: Image Staging Root and DIGIN Path must be on the same volume. ' +
+        'The previous cross-volume delivery fallback was removed after PIC Pro was observed ingesting ' +
+        'the partial .ohdtmp sibling, producing a blank duplicate order per real order. ' +
+        `Configured Image Staging Root: ${stagingFolder}. Configured DIGIN Path: ${diginPath}. ` +
+        'Fix: in Settings → Routing → Order Controllers → Edit this controller, move Image Staging Root ' +
+        'onto the same volume as DIGIN Path, then Save. Save-time validation now enforces this on new ' +
+        'and edited controllers.';
+      (log.logError || log.error || (() => {})).call(log,
+        '[fuji-pic-pro] deliverToDigin: cross-volume paths — refusing the deprecated slow path',
+        { stagingFolder, diginPath, orderId },
+      );
+      throw new Error(msg);
     }
-    // Cross-volume: fall through to the copy path.
-    (log.logWarning || log.warn || (() => {})).call(log,
-      '[fuji-pic-pro] staging and DIGIN are on different volumes — falling back to recursive copy. Co-locate for a faster (atomic) rename.',
-      { stagingFolder, diginPath, orderId },
-    );
+    throw err;
   }
-
-  // Slow path — copy into `.ohdtmp`, rename in place, then remove
-  // the staging folder. The `.ohdtmp` name means Frontier's DIGIN
-  // watch ignores it until the rename lands (Frontier only picks up
-  // folders whose names look like OrderIds, not our tmp sibling).
-  const tmpDest = destFolder + DIGIN_COPY_TMP_SUFFIX;
-
-  // Fuji PIC Pro review fix 10. Wipe any leftover `.ohdtmp` from a
-  // prior interrupted copy BEFORE starting this one. Without this,
-  // `_copyDirRecursive` merges into the partial folder — copyFile
-  // overwrites matching filenames but files that only appeared in
-  // the previous attempt (e.g. a 10-image order that got
-  // interrupted at 7, then re-submitted as an 8-image order) stay
-  // and get delivered to DIGIN alongside the current order's
-  // files.
-  try {
-    await fsPromises.rm(tmpDest, { recursive: true, force: true });
-  } catch (_) { /* nothing there / not-permitted / etc. — copy will surface any real issue */ }
-
-  // Wrap the copy + rename so a failure during either step cleans
-  // up the partial `.ohdtmp` — otherwise the next attempt (which
-  // now has the fix-10 pre-copy wipe) does the cleanup, but
-  // there's no reason to leave the leftover between retries.
-  try {
-    await _copyDirRecursive(stagingFolder, tmpDest, fsPromises);
-    await fsPromises.rename(tmpDest, destFolder);
-  } catch (copyErr) {
-    try {
-      await fsPromises.rm(tmpDest, { recursive: true, force: true });
-    } catch (_) { /* best-effort */ }
-    throw copyErr;
-  }
-  // Best-effort cleanup of the now-empty staging folder. If it can't
-  // be removed (rare — network glitch), the folder just lingers; the
-  // dispatched order is already safely in DIGIN.
-  try {
-    await fsPromises.rm(stagingFolder, { recursive: true, force: true });
-  } catch (cleanupErr) {
-    (log.logWarning || log.warn || (() => {})).call(log,
-      '[fuji-pic-pro] failed to clean up staging folder after cross-volume delivery',
-      { stagingFolder, error: cleanupErr && cleanupErr.message },
-    );
-  }
-  return { destFolder, method: 'copy' };
 }
 
 // ── writeCommandFile ──────────────────────────────────────────────────────
@@ -376,28 +360,81 @@ function _padNegNumber(n) {
 }
 
 /**
- * Minimal recursive copy — we use it only for the EXDEV fallback in
- * deliverToDigin. `fs.cp` (Node 16+) would do this in one call, but
- * it's still marked experimental in some Electron builds and the
- * behaviour under symlinks / special files is version-dependent.
- * Explicit recursion keeps the semantics obvious: directories become
- * directories, regular files get copied byte-for-byte, everything
- * else (symlinks, device nodes) is ignored — which is fine because
- * a PIC Pro staging folder only ever contains our own copyFile'd
- * JPEGs.
+ * Save-time co-location probe (M7b). Confirms `pathA` and `pathB` are
+ * on the SAME volume by attempting a rename between them — Windows
+ * returns EXDEV across volumes, which is the exact operation
+ * deliverToDigin's rename does at dispatch. Using the real rename
+ * (rather than `fs.statSync().dev`) matches what actually matters:
+ * `dev` is unreliable across Windows network shares (SMB reports
+ * device numbers that don't map cleanly to volumes, especially for
+ * mounted DFS/reparse points).
+ *
+ * Cleans up the probe file on EVERY exit path — success, cross-volume
+ * refusal, unrelated fs error. Never leaves state behind.
+ *
+ * Never throws for expected outcomes (returns a `{ok, code, error}`
+ * shape). Reserving throws for programmer bugs (bad args) keeps the
+ * IPC-handler caller's flow simple: one branch on `ok`.
+ *
+ * @param {string} pathA
+ * @param {string} pathB
+ * @param {object} [deps]
+ * @returns {Promise<{ ok: true } | { ok: false, code: string, error?: string }>}
  */
-async function _copyDirRecursive(src, dst, fsPromises) {
-  await fsPromises.mkdir(dst, { recursive: true });
-  const entries = await fsPromises.readdir(src, { withFileTypes: true });
-  for (const entry of entries) {
-    const srcPath = path.join(src, entry.name);
-    const dstPath = path.join(dst, entry.name);
-    if (entry.isDirectory()) {
-      await _copyDirRecursive(srcPath, dstPath, fsPromises);
-    } else if (entry.isFile()) {
-      await fsPromises.copyFile(srcPath, dstPath);
+async function probeSameVolume(pathA, pathB, deps = {}) {
+  const fsPromises = deps.fsPromises || nodeFsPromises;
+  if (typeof pathA !== 'string' || pathA.length === 0) {
+    throw new Error('probeSameVolume: pathA must be a non-empty string');
+  }
+  if (typeof pathB !== 'string' || pathB.length === 0) {
+    throw new Error('probeSameVolume: pathB must be a non-empty string');
+  }
+
+  // Uniquify per call so two concurrent probes can't interfere and a
+  // leftover from a prior aborted run can't be mistaken for ours.
+  const stamp     = `${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+  const probeName = `.ohd-volume-probe-${stamp}`;
+  const probeA    = path.join(pathA, probeName);
+  const probeB    = path.join(pathB, probeName);
+
+  // Best-effort cleanup helper — called from finally. Swallows every
+  // error so the primary result is the one the caller sees. Nothing to
+  // report either way: probe files are always safe to remove.
+  async function _cleanup() {
+    for (const p of [probeA, probeB]) {
+      try { await fsPromises.unlink(p); } catch (_) { /* ignore */ }
     }
-    // symlinks, sockets, etc. skipped by design.
+  }
+
+  try {
+    // Write the probe in A. If this fails, A is missing / not writable
+    // — surface that as its own code rather than as "cross-volume".
+    try {
+      await fsPromises.writeFile(probeA, '');
+    } catch (err) {
+      return { ok: false, code: 'pathA-not-writable', error: (err && err.message) || String(err) };
+    }
+    // Rename A→B. Same volume → succeeds. Cross-volume → EXDEV. Other
+    // codes (ENOENT if B is missing, EACCES if B is read-only) surface
+    // as their own class so the operator gets a useful message.
+    try {
+      await fsPromises.rename(probeA, probeB);
+    } catch (err) {
+      if (err && err.code === 'EXDEV') {
+        return { ok: false, code: 'cross-volume' };
+      }
+      return { ok: false, code: 'pathB-not-writable', error: (err && err.message) || String(err) };
+    }
+    // Rename B→A. Same-volume by definition (we just went the other
+    // way successfully) — if this fails, the FS is in an unusual state
+    // (someone else moved the file?) but we can still report success
+    // for the volume question. Errors here are swallowed by _cleanup.
+    try {
+      await fsPromises.rename(probeB, probeA);
+    } catch (_) { /* handled by _cleanup */ }
+    return { ok: true };
+  } finally {
+    await _cleanup();
   }
 }
 
@@ -406,11 +443,10 @@ module.exports = {
   writeOrderFile,
   deliverToDigin,
   writeCommandFile,
+  probeSameVolume,
   _internals: {
     _padNegNumber,
-    _copyDirRecursive,
     CMD_FILENAME_PREFIX,
     ORDER_FILE_TMP_SUFFIX,
-    DIGIN_COPY_TMP_SUFFIX,
   },
 };

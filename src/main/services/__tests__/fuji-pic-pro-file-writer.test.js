@@ -50,6 +50,7 @@ const {
   writeOrderFile,
   deliverToDigin,
   writeCommandFile,
+  probeSameVolume,
   _internals,
 } = require('../fuji-pic-pro-file-writer');
 
@@ -369,62 +370,100 @@ test('deliverToDigin: same-volume rename → destFolder exists, staging gone, me
   assert.equal(bytes, 'bytes-1');
 });
 
-test('deliverToDigin: EXDEV → copy fallback, warns, staging gone, no .ohdtmp sibling left in DIGIN', async (t) => {
+test('M7b deliverToDigin: EXDEV throws the co-location error AND nothing is written inside DIGIN before the rename', async (t) => {
+  // Pre-M7b, an EXDEV cross-volume rename triggered the "slow path":
+  // copy the staged folder into `{diginPath}/{orderId}.ohdtmp`, rename
+  // that in place, remove staging. A customer disproved the "Frontier
+  // ignores .ohdtmp" assumption written into that code (2026-08-18):
+  // PIC Pro ingested the .ohdtmp folder mid-copy as a blank order and
+  // then re-ingested the renamed folder as the correct order. Slow
+  // path deleted. Now: rename attempts (fast path), EXDEV throws with
+  // an actionable message naming both configured paths and the fix.
+  //
+  // This test locks TWO invariants:
+  //   1. EXDEV throws the named error — never falls back to a
+  //      copy-into-DIGIN slow path that could reintroduce the bug.
+  //   2. DIGIN is untouched — no file, no folder, no `.ohdtmp`
+  //      sibling appears there. Save-time validation (probeSameVolume)
+  //      is the primary defence; this dispatch-time throw is the
+  //      belt-and-braces for a pre-M7b controller that was never
+  //      re-saved after the fix landed.
   const dir = await makeTempDir();
   t.after(() => fsp.rm(dir, { recursive: true, force: true }));
 
-  const stagingRoot = path.join(dir, 'staging'); await fsp.mkdir(stagingRoot);
+  const stagingRoot   = path.join(dir, 'staging'); await fsp.mkdir(stagingRoot);
   const stagingFolder = path.join(stagingRoot, 'ORD-2'); await fsp.mkdir(stagingFolder);
   await writeJpeg(path.join(stagingFolder, '0001.jpg'), 'exdev-1');
   await writeJpeg(path.join(stagingFolder, '0002.jpg'), 'exdev-2');
 
   const diginPath = path.join(dir, 'digin'); await fsp.mkdir(diginPath);
 
-  // Inject an fsPromises whose FIRST rename call throws EXDEV; the
-  // subsequent rename (tmpDest → destFolder) uses the REAL fs.rename
-  // so the atomic-in-DIGIN half of the fallback still runs on the
-  // same volume.
-  let renameCalls = 0;
   const injected = {
     ...fsp,
-    rename: async (...args) => {
-      renameCalls++;
-      if (renameCalls === 1) {
-        const err = new Error('EXDEV cross-device link not permitted');
-        err.code = 'EXDEV';
-        throw err;
-      }
-      return fsp.rename(...args);
+    rename: async () => {
+      const err = new Error('EXDEV cross-device link not permitted');
+      err.code = 'EXDEV';
+      throw err;
     },
   };
-  const warnings = [];
-  const logger = {
-    ...silentLogger,
-    logWarning: (msg, meta) => warnings.push({ msg, meta }),
-    warn:       (msg, meta) => warnings.push({ msg, meta }),
+
+  await assert.rejects(
+    deliverToDigin({
+      stagingFolder, diginPath, orderId: 'ORD-2',
+      deps: { fsPromises: injected, logger: silentLogger },
+    }),
+    /same volume/,
+    'EXDEV must throw the co-location error, never silently fall through to a slow path',
+  );
+
+  // Load-bearing: DIGIN must be untouched. No `.ohdtmp` sibling, no
+  // partial folder, no anything. Locks that a future maintainer
+  // doesn't reintroduce a slow-path fallback that lands even one
+  // byte inside diginPath before the (never-reached) rename.
+  const dirents = await fsp.readdir(diginPath);
+  assert.deepEqual(dirents, [],
+    'nothing may be written inside diginPath when the rename fails');
+
+  // Staging is untouched too — the slow path used to clean it up,
+  // but with no slow path there's nothing to clean up. The staged
+  // folder stays where it was so the operator can inspect it after
+  // fixing the config and retrying.
+  assert.ok(fs.existsSync(stagingFolder),
+    'staging folder is left in place when delivery fails');
+});
+
+test('M7b deliverToDigin: EXDEV error text names both configured paths and the fix', async (t) => {
+  // Named the paths + the fix in the error so the operator sees
+  // exactly what to change without having to read the log. Locking
+  // the wording so a future refactor can't quietly weaken it.
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const stagingRoot   = path.join(dir, 'staging'); await fsp.mkdir(stagingRoot);
+  const stagingFolder = path.join(stagingRoot, 'ORD-3'); await fsp.mkdir(stagingFolder);
+  await writeJpeg(path.join(stagingFolder, '0001.jpg'), 'x');
+  const diginPath = path.join(dir, 'digin'); await fsp.mkdir(diginPath);
+
+  const injected = {
+    ...fsp,
+    rename: async () => { const e = new Error('EXDEV'); e.code = 'EXDEV'; throw e; },
   };
 
-  const result = await deliverToDigin({
-    stagingFolder, diginPath, orderId: 'ORD-2',
-    deps: { fsPromises: injected, logger },
-  });
-
-  assert.equal(result.method, 'copy', 'EXDEV must trigger the copy fallback');
-  assert.ok(fs.existsSync(result.destFolder), 'destFolder must exist after fallback');
-  assert.equal(fs.existsSync(stagingFolder), false, 'staging folder must be cleaned up after copy');
-  const dirents = await fsp.readdir(diginPath);
-  assert.deepEqual(dirents.sort(), ['ORD-2'],
-    'no .ohdtmp sibling may be left behind in DIGIN');
-
-  const bytes1 = await fsp.readFile(path.join(result.destFolder, '0001.jpg'), 'utf-8');
-  const bytes2 = await fsp.readFile(path.join(result.destFolder, '0002.jpg'), 'utf-8');
-  assert.equal(bytes1, 'exdev-1');
-  assert.equal(bytes2, 'exdev-2');
-
-  assert.ok(
-    warnings.some(w => /different volumes/.test(w.msg)),
-    'a warning must be logged so the operator can co-locate staging + DIGIN',
-  );
+  let caught;
+  try {
+    await deliverToDigin({
+      stagingFolder, diginPath, orderId: 'ORD-3',
+      deps: { fsPromises: injected, logger: silentLogger },
+    });
+  } catch (err) { caught = err; }
+  assert.ok(caught, 'must throw');
+  assert.match(caught.message, /Image Staging Root and DIGIN Path must be on the same volume/);
+  assert.match(caught.message, new RegExp(stagingFolder.replace(/[\\/]/g, '\\$&')),
+    'error must name the configured Image Staging Root so the operator sees exactly which path is wrong');
+  assert.match(caught.message, new RegExp(diginPath.replace(/[\\/]/g, '\\$&')),
+    'error must name the configured DIGIN Path');
+  assert.match(caught.message, /Save-time validation now enforces this/,
+    'error must reference the save-time enforcement so the operator knows the retry gate exists');
 });
 
 test('deliverToDigin: non-EXDEV rename error propagates untouched', async (t) => {
@@ -550,100 +589,15 @@ test('fix 7: destFolder AND staging both exist → refuse to merge (throws)', as
   assert.equal(destBytes,    'from-earlier');
 });
 
-test('fix 10: stale .ohdtmp from a prior interrupted copy is wiped before the fresh copy runs', async (t) => {
-  const dir = await makeTempDir();
-  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
-
-  const stagingRoot = path.join(dir, 'staging'); await fsp.mkdir(stagingRoot);
-  const stagingFolder = path.join(stagingRoot, 'ORD-TMP'); await fsp.mkdir(stagingFolder);
-  await fsp.writeFile(path.join(stagingFolder, '0001.jpg'), 'current-run-1');
-  await fsp.writeFile(path.join(stagingFolder, '0002.jpg'), 'current-run-2');
-  const diginPath = path.join(dir, 'digin'); await fsp.mkdir(diginPath);
-  // Pre-populate the leftover .ohdtmp with files from a prior
-  // 3-image interrupted attempt.
-  const tmpDest = path.join(diginPath, 'ORD-TMP' + _internals.DIGIN_COPY_TMP_SUFFIX);
-  await fsp.mkdir(tmpDest);
-  await fsp.writeFile(path.join(tmpDest, '0001.jpg'), 'STALE-run-1');
-  await fsp.writeFile(path.join(tmpDest, '0002.jpg'), 'STALE-run-2');
-  await fsp.writeFile(path.join(tmpDest, '0003.jpg'), 'STALE-orphan-from-larger-prior-batch');
-
-  // Force the EXDEV fallback: inject fsPromises whose first
-  // `rename` (staging → dest) throws EXDEV, subsequent `rename`
-  // calls (tmpDest → dest) pass through to real fs.
-  let renameCalls = 0;
-  const injectedFs = {
-    ...fsp,
-    rename: async (...args) => {
-      renameCalls++;
-      if (renameCalls === 1) {
-        const err = new Error('EXDEV cross-device'); err.code = 'EXDEV';
-        throw err;
-      }
-      return fsp.rename(...args);
-    },
-  };
-
-  const result = await deliverToDigin({
-    stagingFolder, diginPath, orderId: 'ORD-TMP',
-    deps: { fsPromises: injectedFs, logger: silentLogger },
-  });
-  assert.equal(result.method, 'copy');
-
-  // destFolder must contain ONLY the current run's two files —
-  // no `0003.jpg` orphan from the interrupted prior attempt.
-  const destContents = (await fsp.readdir(result.destFolder)).sort();
-  assert.deepEqual(destContents, ['0001.jpg', '0002.jpg'],
-    'destFolder must reflect ONLY the current run — pre-fix the leftover 0003.jpg would have been merged in');
-  const bytes1 = await fsp.readFile(path.join(result.destFolder, '0001.jpg'), 'utf-8');
-  assert.equal(bytes1, 'current-run-1', 'current run bytes win over the pre-populated stale bytes');
-});
-
-test('fix 10: EXDEV copy failure cleans up its own partial .ohdtmp', async (t) => {
-  const dir = await makeTempDir();
-  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
-
-  const stagingRoot = path.join(dir, 'staging'); await fsp.mkdir(stagingRoot);
-  const stagingFolder = path.join(stagingRoot, 'ORD-BOOM'); await fsp.mkdir(stagingFolder);
-  await fsp.writeFile(path.join(stagingFolder, '0001.jpg'), 'x');
-  const diginPath = path.join(dir, 'digin'); await fsp.mkdir(diginPath);
-
-  // First rename throws EXDEV; copyFile deep inside _copyDirRecursive
-  // throws EACCES on the first file, aborting the copy mid-flight.
-  let renameCalls = 0;
-  let copyCalls   = 0;
-  const injectedFs = {
-    ...fsp,
-    rename: async (...args) => {
-      renameCalls++;
-      if (renameCalls === 1) {
-        const err = new Error('EXDEV cross-device'); err.code = 'EXDEV';
-        throw err;
-      }
-      return fsp.rename(...args);
-    },
-    copyFile: async (...args) => {
-      copyCalls++;
-      // First copyFile creates a partial .ohdtmp, second explodes.
-      if (copyCalls === 1) return fsp.copyFile(...args);
-      const err = new Error('EACCES simulated mid-copy failure'); err.code = 'EACCES';
-      throw err;
-    },
-  };
-  // Add a second file so the copy has something to explode on.
-  await fsp.writeFile(path.join(stagingFolder, '0002.jpg'), 'y');
-
-  await assert.rejects(
-    deliverToDigin({
-      stagingFolder, diginPath, orderId: 'ORD-BOOM',
-      deps: { fsPromises: injectedFs, logger: silentLogger },
-    }),
-    /EACCES/,
-  );
-
-  const dirents = await fsp.readdir(diginPath);
-  assert.deepEqual(dirents, [],
-    'the partial .ohdtmp from the failed copy must be removed — otherwise the next retry would merge into it');
-});
+// M7b (2026-08-18): the two "fix 10" tests that lived here — one for
+// stale `.ohdtmp` cleanup before a fresh copy, one for partial-copy
+// cleanup after an EXDEV copy failure — were removed together with
+// the EXDEV slow path they guarded. The bug they were originally
+// added to prevent (stale files merging into a live delivery) can no
+// longer occur: there is no `.ohdtmp` code path to leave anything
+// behind. Save-time co-location enforcement (probeSameVolume) plus
+// the dispatch-time EXDEV throw above replace both. See M7b commit
+// for the customer incident that removed the slow path.
 
 test('fix 7: happy path still returns method:"rename" (idempotency check does not paper over normal flow)', async (t) => {
   const dir = await makeTempDir();
@@ -741,4 +695,120 @@ test('_padNegNumber pads to 4 digits and preserves longer strings', () => {
   assert.equal(_internals._padNegNumber(1234), '1234');
   assert.equal(_internals._padNegNumber(12345), '12345',
     'numbers past 4 digits pass through — never hit in practice; matches String.padStart semantics');
+});
+
+// ═════════════════════════════════════════════════════════════════════════
+// M7b — probeSameVolume (save-time co-location check)
+// ═════════════════════════════════════════════════════════════════════════
+//
+// The rename-probe is the RIGHT check because statSync().dev is unreliable
+// across Windows network shares (SMB reports device numbers that don't map
+// cleanly to volumes, especially through DFS / mounted reparse points).
+// The probe tests the exact operation deliverToDigin will run at dispatch.
+
+test('M7b probeSameVolume: same-volume returns {ok:true} and leaves no probe file behind', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const staging = path.join(dir, 'staging'); await fsp.mkdir(staging);
+  const digin   = path.join(dir, 'digin');   await fsp.mkdir(digin);
+
+  const result = await probeSameVolume(staging, digin);
+  assert.deepEqual(result, { ok: true });
+
+  // Cleanup discipline: no `.ohd-volume-probe-*` file in either folder.
+  const stagingEntries = await fsp.readdir(staging);
+  const diginEntries   = await fsp.readdir(digin);
+  assert.equal(stagingEntries.filter(e => e.startsWith('.ohd-volume-probe-')).length, 0,
+    'probe file must not linger in the source folder');
+  assert.equal(diginEntries.filter(e => e.startsWith('.ohd-volume-probe-')).length, 0,
+    'probe file must not linger in the destination folder');
+});
+
+test('M7b probeSameVolume: cross-volume (injected EXDEV on rename) returns {ok:false, code:"cross-volume"}', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const staging = path.join(dir, 'staging'); await fsp.mkdir(staging);
+  const digin   = path.join(dir, 'digin');   await fsp.mkdir(digin);
+
+  const injected = {
+    ...fsp,
+    rename: async () => { const err = new Error('EXDEV cross-device link'); err.code = 'EXDEV'; throw err; },
+  };
+  const result = await probeSameVolume(staging, digin, { fsPromises: injected });
+  assert.deepEqual(result, { ok: false, code: 'cross-volume' });
+
+  // Cleanup discipline: even on the cross-volume path, no probe file
+  // survives — the probe was written (writeFile succeeded) then never
+  // moved (EXDEV). unlink in the finally block must catch it.
+  const stagingEntries = await fsp.readdir(staging);
+  assert.equal(stagingEntries.filter(e => e.startsWith('.ohd-volume-probe-')).length, 0,
+    'probe file must not linger in source folder even when rename failed with EXDEV');
+});
+
+test('M7b probeSameVolume: source folder missing → pathA-not-writable', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const staging = path.join(dir, 'no-such-staging'); // deliberately absent
+  const digin   = path.join(dir, 'digin');           await fsp.mkdir(digin);
+
+  const result = await probeSameVolume(staging, digin);
+  assert.equal(result.ok,   false);
+  assert.equal(result.code, 'pathA-not-writable');
+  assert.match(result.error, /ENOENT/);
+});
+
+test('M7b probeSameVolume: destination folder missing → pathB-not-writable', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const staging = path.join(dir, 'staging'); await fsp.mkdir(staging);
+  const digin   = path.join(dir, 'no-such-digin'); // deliberately absent
+
+  const result = await probeSameVolume(staging, digin);
+  assert.equal(result.ok,   false);
+  assert.equal(result.code, 'pathB-not-writable');
+  assert.match(result.error, /ENOENT/);
+});
+
+test('M7b probeSameVolume: non-EXDEV rename error → pathB-not-writable, error preserved', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const staging = path.join(dir, 'staging'); await fsp.mkdir(staging);
+  const digin   = path.join(dir, 'digin');   await fsp.mkdir(digin);
+
+  const injected = {
+    ...fsp,
+    rename: async () => { const err = new Error('EACCES permission denied'); err.code = 'EACCES'; throw err; },
+  };
+  const result = await probeSameVolume(staging, digin, { fsPromises: injected });
+  assert.equal(result.ok,   false);
+  assert.equal(result.code, 'pathB-not-writable');
+  assert.match(result.error, /EACCES/);
+});
+
+test('M7b probeSameVolume: throws on missing/blank arguments (programmer bug, not runtime)', async () => {
+  await assert.rejects(() => probeSameVolume('',        '/x'), /pathA must be a non-empty string/);
+  await assert.rejects(() => probeSameVolume(undefined, '/x'), /pathA must be a non-empty string/);
+  await assert.rejects(() => probeSameVolume('/x',      ''),   /pathB must be a non-empty string/);
+  await assert.rejects(() => probeSameVolume('/x',      null), /pathB must be a non-empty string/);
+});
+
+test('M7b probeSameVolume: concurrent probes do not collide (unique probe name per call)', async (t) => {
+  // The probe filename must include enough entropy that two concurrent
+  // calls don't step on each other. Runs two probes concurrently
+  // against the same folders; both must succeed and both must clean
+  // up cleanly.
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const staging = path.join(dir, 'staging'); await fsp.mkdir(staging);
+  const digin   = path.join(dir, 'digin');   await fsp.mkdir(digin);
+
+  const [r1, r2] = await Promise.all([
+    probeSameVolume(staging, digin),
+    probeSameVolume(staging, digin),
+  ]);
+  assert.deepEqual(r1, { ok: true });
+  assert.deepEqual(r2, { ok: true });
+  const stagingEntries = await fsp.readdir(staging);
+  assert.equal(stagingEntries.filter(e => e.startsWith('.ohd-volume-probe-')).length, 0,
+    'no probe file may survive either of the two concurrent calls');
 });
