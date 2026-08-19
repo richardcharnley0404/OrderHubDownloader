@@ -210,6 +210,73 @@ test('Empty PaymentStatus tag → paid:false', () => {
 });
 
 // ---------------------------------------------------------------------------
+// ShippingMethod (2026-08-19)
+// ---------------------------------------------------------------------------
+//
+// ROES <ShippingMethod> is a label — OrderHub matches it against the lab's
+// defined Shipping Methods and supplies the cost when the XML states none
+// (which ROES always does today: no <ShippingTotal>). Mirrors PhotoFinale
+// exactly. The parser passes the tag straight through with setIfPresent, so
+// the omit-and-blank cases are handled by the shared setIfPresent contract
+// (length check on the string field).
+
+test('ShippingMethod populated → shipping_method is sent verbatim', () => {
+  const xml = makeRoesXml({
+    shipToAddress: '123 Main St',   // populate ShipTo so this is a shipping order
+    shipToCity:    'louisville',
+    shippingMethod: 'USPS Ground Advantage',
+  });
+  const { request } = parser.parse(xml, HOT_FOLDER);
+  assert.equal(request.order.shipping_method, 'USPS Ground Advantage');
+});
+
+test('ShippingMethod tag absent → shipping_method is OMITTED from the payload (not sent as "")', () => {
+  const xml = makeRoesXml({
+    shipToAddress: '123 Main St',
+    shipToCity:    'louisville',
+    // shippingMethod not supplied → tag omitted
+  });
+  const { request } = parser.parse(xml, HOT_FOLDER);
+  assert.equal('shipping_method' in request.order, false,
+    'absent tag must not surface as an empty-string key — matches setIfPresent contract used everywhere else');
+});
+
+test('ShippingMethod tag present but empty or whitespace-only → shipping_method is OMITTED', () => {
+  for (const value of ['', '   ', '\t', '\n  ']) {
+    const xml = makeRoesXml({
+      shipToAddress: '123 Main St',
+      shipToCity:    'louisville',
+      shippingMethod: value,
+    });
+    const { request } = parser.parse(xml, HOT_FOLDER);
+    assert.equal('shipping_method' in request.order, false,
+      `whitespace-only ShippingMethod ${JSON.stringify(value)} must be treated the same as absent`);
+  }
+});
+
+test('ShippingMethod on a PICKUP order is STILL sent — mirrors PhotoFinale; the setIfPresent lives OUTSIDE the pickup/shipping branch by design', () => {
+  // The one someone will later "fix" by moving shipping_method inside the
+  // `else` (shipping-only) branch. Don't. The method name is a label
+  // regardless of pickup or ship — OrderHub gates the COST on the pickup
+  // location at its end, and lab UIs show "Pickup" verbatim on the pickup
+  // path. Parity with photo-finale.js:426 is deliberate.
+  const xml = makeRoesXml({
+    // No ShipTo* fields at all → pickup detected → the `if (isPickup)`
+    // branch runs. shipping_method must survive because it's assigned
+    // ABOVE that branch.
+    shippingMethod: 'Pickup',
+  });
+  const { request } = parser.parse(xml, HOT_FOLDER);
+  assert.equal(request.order.shipping_method, 'Pickup',
+    'pickup order MUST still carry the label; this is the outside-the-branch invariant');
+  // And confirm this genuinely is the pickup branch — shipping_street
+  // must be absent, pickup_location_id must be present.
+  assert.equal('shipping_street'   in request.order, false, 'sanity: pickup path elides shipping_street');
+  assert.equal(request.order.pickup_location_id, HOT_FOLDER.pickupLocationId,
+    'sanity: pickup path sets pickup_location_id');
+});
+
+// ---------------------------------------------------------------------------
 // total_amount edge cases
 // ---------------------------------------------------------------------------
 
@@ -463,6 +530,9 @@ function makeRoesXml({
   shipToLastName  = null,
   shipToAddress   = null,
   shipToCity      = null,
+  // ShippingMethod (2026-08-19). Same convention as the ShipTo fields:
+  // pass a string to emit the tag with that value; pass null to omit.
+  shippingMethod  = null,
 } = {}) {
   const unitPriceLine = unitPrice === null ? '' : `<UnitPrice>${unitPrice}</UnitPrice>`;
   const psLine = omitPaymentStatus
@@ -474,6 +544,7 @@ function makeRoesXml({
   const stLast   = shipToLastName  === null ? '' : `<ShipToLastName>${shipToLastName}</ShipToLastName>`;
   const stStreet = shipToAddress   === null ? '' : `<ShipToAddress>${shipToAddress}</ShipToAddress>`;
   const stCity   = shipToCity      === null ? '' : `<ShipToCity>${shipToCity}</ShipToCity>`;
+  const smLine   = shippingMethod  === null ? '' : `<ShippingMethod>${shippingMethod}</ShippingMethod>`;
   return `<OrderDataSet xmlns="http://www.trevoli.com/OrderDataSet.xsd">
     <OrderLineItem>
       <idOrderLineItem>1.0</idOrderLineItem>
@@ -490,6 +561,7 @@ function makeRoesXml({
       ${stLast}
       ${stStreet}
       ${stCity}
+      ${smLine}
     </Order>
   </OrderDataSet>`;
 }

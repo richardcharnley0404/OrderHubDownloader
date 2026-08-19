@@ -1,3 +1,29 @@
+## Unreleased
+
+**Changed: ROES XML imports now carry the shipping method through to
+OrderHub, matching PhotoFinale.** ROES files placed a `<ShippingMethod>`
+tag inside `<Order>` — same name and position as PhotoFinale — but the
+ROES parser had been ignoring it since the format was added. It now
+reads the tag and forwards it as `shipping_method` on the submission,
+verbatim, regardless of pickup or ship (parity with PhotoFinale — the
+method name is informational either way; OrderHub gates the shipping
+cost on the pickup location at its end). OrderHub matches the
+inbound string against the lab's defined **Shipping Methods** and
+supplies the cost when the XML states none — which ROES files always
+do today, because they carry no shipping amount. `<ShippingTotal>`
+is deliberately still not read; the moment it is, the XML's amount
+wins and the matched method becomes a label only. Separate decision,
+separate change.
+
+Behaviour when the tag is absent, empty, or whitespace-only is
+unchanged from every other optional string field: the key is omitted
+from the payload entirely (not sent as an empty string).
+
+Full write-up: `docs/xml-shipping-method-investigation.md` §2 and
+§4.2. Field-mapping table in `docs/order-xml-hotfolder.md` updated.
+
+---
+
 ## v1.15.1 - 2026-08-18
 
 **Fixed: Fuji PIC Pro save-time volume check now warns instead of

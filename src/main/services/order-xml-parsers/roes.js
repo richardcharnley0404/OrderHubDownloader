@@ -13,8 +13,9 @@
  *   - <BillTo*> + <ShipTo*> address blocks (ShipTo is often empty)
  *
  * Notably absent: ExternalId, ProductSummary, Total/Tax/Shipping/Discount,
- * ShippingMethod, OrderPayment, deleted-product markers, Status. The mapping
- * therefore boils down to identity + line items + addresses.
+ * OrderPayment, deleted-product markers, Status. The mapping therefore
+ * boils down to identity + line items + addresses + a shipping method
+ * label (see the ShippingMethod comment below the `order` literal).
  *
  * The parser is *pure* (same contract as photo-finale.js — see that file's
  * docstring for conventions). Errors carry the same shape so the watcher
@@ -296,6 +297,15 @@ function parse(xmlString, hotFolderConfig = {}) {
   setIfPresent(order, 'customer_phone',   strField(orderRaw.BillToPhone));
   setIfPresent(order, 'notes',            strField(orderRaw.SpecialInstructions));
   setIfPresent(order, 'external_order_id', idOrder);
+
+  // ShippingMethod (2026-08-19) — informational regardless of pickup/ship,
+  // same as photo-finale.js:426. Place OUTSIDE the pickup/shipping branch
+  // below so a pickup order still carries the label (which OrderHub can
+  // display as "Pickup" or a courier name verbatim). OrderHub gates the
+  // shipping COST on the pickup location at its end, so sending the label
+  // on a pickup order is correct and deliberate — the two parsers must
+  // stay identical here.
+  setIfPresent(order, 'shipping_method',   strField(orderRaw.ShippingMethod));
 
   // Shipping vs pickup detection (pickup wiring added 2026-05-23).
   //
