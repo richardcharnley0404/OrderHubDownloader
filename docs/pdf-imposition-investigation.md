@@ -229,10 +229,11 @@ setup, not per-controller routing.
 
 ## 7. Decisions needed before building
 
-> **Update 2026-08-19:** Richard has decided items 1, 2, 4, 5, 6, 7.
-> Item 3 remains OPEN pending a real-world answer on how multi-PDF jobs
-> actually arrive. Individual decisions are logged inline below; §4 has
-> been rewritten to match the new item-4 posture.
+> **Update 2026-08-19:** Richard has decided all seven items — 1, 2, 4, 5,
+> 6, 7 in the earlier pass; 3 in a later same-day pass. Individual
+> decisions are logged inline below; §4 has been rewritten to match the
+> new item-4 posture; §7.5 has an added paragraph covering the
+> multi-design case unlocked by the item-3 decision.
 
 1. **Ganging.** v1 = one job per sheet run (step-and-repeat of a single
    job's artwork). Ganging multiple jobs onto shared sheets is a different
@@ -258,14 +259,16 @@ setup, not per-controller routing.
    independently into one output? Sequentially? Reject? Needs a real-world
    answer from how grad-card jobs actually arrive.
 
-   **Status (2026-08-19):** still OPEN. Richard has been asked two
-   questions before v1 locks a behaviour: (a) do the products this feature
-   targets (grad cards, duplex greetings cards, etc.) actually arrive with
-   multiple PDFs per job in practice, or is that a theoretical case; and
-   (b) if they do, is "impose each design sequentially" the right rule —
-   i.e. design A step-and-repeated to its own quantity, then design B
-   step-and-repeated to its own quantity, all concatenated into one
-   multi-page output PDF. Awaiting his answer.
+   **Decision (2026-08-19):** each design imposed SEPARATELY, sequentially
+   in the one output PDF, NEVER mixed on a sheet. So design A is
+   step-and-repeated to its own quantity across as many sheets as it
+   needs; design B is step-and-repeated to its own quantity across as
+   many sheets as it needs; both design runs concatenate into one
+   multi-page output PDF handed to the press hot folder. Ganging designs
+   onto a shared sheet is the excluded case (§7.1 keeps that out of
+   scope for v1); this decision covers the case where a job's manifest
+   has multiple `pdf_copy` artwork files. See §7.5 for the multi-design
+   filename rule this decision unlocks.
 
 4. **No-template-found behaviour** on an imposition-enabled controller: fail
    loudly (recommended) or pass through?
@@ -301,6 +304,22 @@ setup, not per-controller routing.
      dispatch already uses, so operators recognise the filename family;
      the `QTY / IMPQTY` suffix makes the workload visible at a glance in
      the hot folder.
+
+   **Multi-design case (2026-08-19, unlocked by decision 3):** a job
+   with multiple `pdf_copy` designs still produces ONE output file per
+   §7.5. Naming rule:
+   - `QTY` = TOTAL copies across all designs (sum of the per-design
+     manifest quantities). It is the number the press operator is
+     paying to produce.
+   - `IMPQTY` = TOTAL sheets in the file. It is the run length the
+     operator sets on the press — designs may need different sheets-per-
+     design counts because designs may have different quantities, but
+     the operator only cares about the total run length. The per-design
+     split is visible when the PDF is opened.
+   - The filename shape is identical to the single-design case:
+     `{orderNumber}_{jobId}_QTY{qty}_IMPQTY{sheets}.pdf`. Two designs
+     of 40 copies each at 4-up = one file `..._QTY80_IMPQTY20.pdf`
+     containing 10 sheets of design A then 10 sheets of design B.
 
 6. **Artwork preview rendering** in the template editor (showing the actual
    card PDF in the grid, not just rectangles) needs PDF rasterising in the
