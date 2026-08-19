@@ -8853,3 +8853,503 @@ async function handleBackupRelaunchNow() {
   }, _refreshIntervalMs);
   if (refreshTimer && typeof refreshTimer.unref === 'function') refreshTimer.unref();
 })();
+
+// ═════════════════════════════════════════════════════════════════════════
+// Imposition (M4 of docs/pdf-imposition-investigation.md)
+//
+// Thin renderer over the ohd:imposition:* IPC surface. Everything with real
+// logic — validation, fit checks, layout math — lives in main. This block
+// handles: list rendering, modal open/populate/save, unit conversion for
+// display, and rendering the preview SVG from the response returned by the
+// preview IPC. renderer.js is untested, so anything that could shift
+// silently belongs behind an IPC test.
+// ═════════════════════════════════════════════════════════════════════════
+
+(function initImpositionSettings() {
+  // ─── Unit conversion (M1 helpers via IPC would round-trip; the constants
+  // are two lines and let the modal round-trip locally without a chatty
+  // preview call per keystroke) ──────────────────────────────────────────
+  const POINTS_PER_INCH = 72;
+  const POINTS_PER_MM   = 72 / 25.4;
+
+  function unitToPoints(v, unit) {
+    if (!Number.isFinite(v)) return NaN;
+    return unit === 'mm' ? v * POINTS_PER_MM : v * POINTS_PER_INCH;
+  }
+  function pointsToUnit(pts, unit) {
+    if (!Number.isFinite(pts)) return '';
+    const v = unit === 'mm' ? pts / POINTS_PER_MM : pts / POINTS_PER_INCH;
+    // Trim trailing zeros — a 5 in field should read "5", not "5.00".
+    return Number(v.toFixed(4)).toString();
+  }
+
+  // ─── Local state ─────────────────────────────────────────────────────
+  let _paperSizes = [];
+  let _templates  = [];
+  let _editingTemplateId  = null;
+  let _editingPaperSizeId = null;
+  let _previewTimer = null;
+
+  const impositionPanel = document.getElementById('subtab-imposition');
+  if (!impositionPanel) return;   // panel absent — safe no-op
+
+  // ─── Loaders ────────────────────────────────────────────────────────
+  async function loadImposition() {
+    try {
+      const [sizes, templates] = await Promise.all([
+        window.electronAPI.impositionListPaperSizes(),
+        window.electronAPI.impositionListTemplates(),
+      ]);
+      _paperSizes = Array.isArray(sizes)    ? sizes    : [];
+      _templates  = Array.isArray(templates) ? templates : [];
+      renderPaperSizes();
+      renderTemplates();
+    } catch (err) {
+      console.error('Error loading imposition data:', err);
+    }
+  }
+
+  function paperSizeById(id) {
+    return _paperSizes.find(p => p.id === id) || null;
+  }
+
+  // ─── Paper Sizes list ───────────────────────────────────────────────
+  function renderPaperSizes() {
+    const list = document.getElementById('paperSizesList');
+    if (!list) return;
+    list.innerHTML = '';
+    if (_paperSizes.length === 0) {
+      list.innerHTML = '<p class="routing-empty">No paper sizes configured yet.</p>';
+      return;
+    }
+    for (const ps of _paperSizes) {
+      list.appendChild(buildPaperSizeCard(ps));
+    }
+  }
+
+  function buildPaperSizeCard(ps) {
+    const card = document.createElement('div');
+    card.className = 'routing-card';
+    const wDisplay = pointsToUnit(ps.width,  ps.unit);
+    const hDisplay = pointsToUnit(ps.height, ps.unit);
+    card.innerHTML = `
+      <div class="routing-card-header">
+        <span class="routing-card-name">${escapeHtml(ps.name)}</span>
+        <span class="routing-card-badge">${escapeHtml(wDisplay)} × ${escapeHtml(hDisplay)} ${escapeHtml(ps.unit)}</span>
+        <div class="routing-card-actions">
+          <button type="button" class="btn-secondary btn-sm" data-role="edit">Edit</button>
+          <button type="button" class="btn-secondary btn-sm btn-danger-text" data-role="delete">Delete</button>
+        </div>
+      </div>
+    `;
+    card.querySelector('[data-role="edit"]').addEventListener('click', () => openPaperSizeModal(ps));
+    card.querySelector('[data-role="delete"]').addEventListener('click', () => deletePaperSize(ps));
+    return card;
+  }
+
+  async function deletePaperSize(ps) {
+    if (!confirm(`Delete paper size "${ps.name}"?`)) return;
+    const res = await window.electronAPI.impositionDeletePaperSize(ps.id);
+    if (res && res.success === false) {
+      // Surface the service's exact rejection text — it names the
+      // templates that block the delete so the operator knows exactly
+      // what to fix first.
+      alert(res.error || 'Could not delete paper size.');
+      return;
+    }
+    await loadImposition();
+  }
+
+  // ─── Paper Size modal ───────────────────────────────────────────────
+  function openPaperSizeModal(ps) {
+    _editingPaperSizeId = ps ? ps.id : null;
+    document.getElementById('psModalTitle').textContent = ps ? 'Edit Paper Size' : 'Add Paper Size';
+    const nameEl   = document.getElementById('psName');
+    const widthEl  = document.getElementById('psWidth');
+    const heightEl = document.getElementById('psHeight');
+    const unitEl   = document.getElementById('psUnit');
+    const errEl    = document.getElementById('psSaveError');
+    if (ps) {
+      unitEl.value   = ps.unit || 'in';
+      nameEl.value   = ps.name || '';
+      widthEl.value  = pointsToUnit(ps.width,  unitEl.value);
+      heightEl.value = pointsToUnit(ps.height, unitEl.value);
+    } else {
+      unitEl.value   = 'in';
+      nameEl.value   = '';
+      widthEl.value  = '';
+      heightEl.value = '';
+    }
+    errEl.classList.add('hidden');
+    errEl.textContent = '';
+    document.getElementById('paperSizeModal').classList.remove('hidden');
+    nameEl.focus();
+  }
+
+  function closePaperSizeModal() {
+    document.getElementById('paperSizeModal').classList.add('hidden');
+    _editingPaperSizeId = null;
+  }
+
+  async function savePaperSizeFromModal() {
+    const errEl = document.getElementById('psSaveError');
+    errEl.classList.add('hidden');
+    errEl.textContent = '';
+
+    const unit   = document.getElementById('psUnit').value;
+    const wRaw   = parseFloat(document.getElementById('psWidth').value);
+    const hRaw   = parseFloat(document.getElementById('psHeight').value);
+    const input = {
+      id:     _editingPaperSizeId || undefined,
+      name:   document.getElementById('psName').value,
+      width:  unitToPoints(wRaw, unit),
+      height: unitToPoints(hRaw, unit),
+      unit,
+    };
+    const res = await window.electronAPI.impositionSavePaperSize(input);
+    if (!res || res.success === false) {
+      errEl.textContent = (res && res.error) || 'Save failed.';
+      errEl.classList.remove('hidden');
+      return;
+    }
+    closePaperSizeModal();
+    await loadImposition();
+  }
+
+  // ─── Templates list ─────────────────────────────────────────────────
+  function renderTemplates() {
+    const list = document.getElementById('impositionTemplatesList');
+    if (!list) return;
+    list.innerHTML = '';
+    if (_templates.length === 0) {
+      list.innerHTML = '<p class="routing-empty">No imposition templates configured yet.</p>';
+      return;
+    }
+    for (const t of _templates) {
+      list.appendChild(buildTemplateCard(t));
+    }
+  }
+
+  function buildTemplateCard(t) {
+    const card = document.createElement('div');
+    card.className = 'routing-card';
+    const ps = paperSizeById(t.paperSizeId);
+    const paperLabel = ps ? `${ps.name}` : '(paper size missing)';
+    const modeLabel  = t.mode === 'duplex'
+      ? `duplex, ${t.duplexFlipEdge || '?'}-edge flip`
+      : 'simplex';
+    const codeLabel = (Array.isArray(t.productCodes) && t.productCodes.length > 0)
+      ? t.productCodes.join(', ')
+      : '(no product codes assigned)';
+    // N-up summary is derived from the template's own expectedArtwork by
+    // asking the preview IPC — kept off the card to avoid a chatty per-
+    // template IPC round-trip at list render. Operators see the full N-up
+    // in the editor's live preview.
+    card.innerHTML = `
+      <div class="routing-card-header">
+        <span class="routing-card-name">${escapeHtml(t.name)}</span>
+        <span class="routing-card-badge">${escapeHtml(paperLabel)}</span>
+        <span class="routing-card-badge">${escapeHtml(modeLabel)}</span>
+        <div class="routing-card-actions">
+          <button type="button" class="btn-secondary btn-sm" data-role="edit">Edit</button>
+          <button type="button" class="btn-secondary btn-sm btn-danger-text" data-role="delete">Delete</button>
+        </div>
+      </div>
+      <div class="routing-card-body">
+        <div><span class="routing-card-meta">Product codes:</span> ${escapeHtml(codeLabel)}</div>
+        ${t.outputSubfolder ? `<div><span class="routing-card-meta">Output subfolder:</span> ${escapeHtml(t.outputSubfolder)}</div>` : ''}
+      </div>
+    `;
+    card.querySelector('[data-role="edit"]').addEventListener('click', () => openTemplateModal(t));
+    card.querySelector('[data-role="delete"]').addEventListener('click', () => deleteTemplate(t));
+    return card;
+  }
+
+  async function deleteTemplate(t) {
+    if (!confirm(`Delete template "${t.name}"?`)) return;
+    const res = await window.electronAPI.impositionDeleteTemplate(t.id);
+    if (res && res.success === false) {
+      alert(res.error || 'Could not delete template.');
+      return;
+    }
+    await loadImposition();
+  }
+
+  // ─── Template modal ─────────────────────────────────────────────────
+  function currentTemplateUnit() {
+    const ps = paperSizeById(document.getElementById('itPaperSizeId').value);
+    return ps ? (ps.unit || 'in') : 'in';
+  }
+
+  function populatePaperSizeSelect(selectedId) {
+    const sel = document.getElementById('itPaperSizeId');
+    sel.innerHTML = '<option value="">Select paper size…</option>';
+    for (const ps of _paperSizes) {
+      const opt = document.createElement('option');
+      opt.value = ps.id;
+      opt.textContent = ps.name;
+      if (selectedId && ps.id === selectedId) opt.selected = true;
+      sel.appendChild(opt);
+    }
+  }
+
+  function renderProductCodes(codes) {
+    const list = document.getElementById('itProductCodesList');
+    list.innerHTML = '';
+    (codes || []).forEach((code) => list.appendChild(buildProductCodeRow(code)));
+  }
+
+  function buildProductCodeRow(value) {
+    const row = document.createElement('div');
+    row.className = 'it-code-row';
+    row.innerHTML = `
+      <input type="text" placeholder="e.g. GRAD5X7" value="${escapeHtml(value || '')}">
+      <button type="button" class="btn-secondary btn-code-remove">×</button>
+    `;
+    row.querySelector('.btn-code-remove').addEventListener('click', () => row.remove());
+    return row;
+  }
+
+  function collectProductCodes() {
+    const inputs = document.getElementById('itProductCodesList').querySelectorAll('input');
+    const out = [];
+    inputs.forEach((el) => {
+      const v = (el.value || '').trim();
+      if (v) out.push(v);
+    });
+    return out;
+  }
+
+  function openTemplateModal(t) {
+    _editingTemplateId = t ? t.id : null;
+    document.getElementById('itModalTitle').textContent = t ? 'Edit Imposition Template' : 'Add Imposition Template';
+    populatePaperSizeSelect(t ? t.paperSizeId : null);
+
+    const unit = t ? (paperSizeById(t.paperSizeId)?.unit || 'in') : 'in';
+
+    document.getElementById('itName').value          = t ? (t.name || '')         : '';
+    document.getElementById('itArtworkW').value      = t && t.expectedArtwork ? pointsToUnit(t.expectedArtwork.width,  unit) : '';
+    document.getElementById('itArtworkH').value      = t && t.expectedArtwork ? pointsToUnit(t.expectedArtwork.height, unit) : '';
+    document.getElementById('itMarginTop').value     = t && t.margins ? pointsToUnit(t.margins.top,    unit) : '0';
+    document.getElementById('itMarginRight').value   = t && t.margins ? pointsToUnit(t.margins.right,  unit) : '0';
+    document.getElementById('itMarginBottom').value  = t && t.margins ? pointsToUnit(t.margins.bottom, unit) : '0';
+    document.getElementById('itMarginLeft').value    = t && t.margins ? pointsToUnit(t.margins.left,   unit) : '0';
+    document.getElementById('itGutter').value        = t ? pointsToUnit(t.gutter || 0,        unit) : '0';
+    document.getElementById('itArtworkBleed').value  = t ? pointsToUnit(t.artworkBleed || 0,  unit) : '0';
+    document.getElementById('itAutoRotate').checked  = t ? !!t.autoRotate : false;
+    document.getElementById('itCropMarks').checked   = t ? !!t.cropMarks  : false;
+    document.getElementById('itMode').value          = t ? (t.mode || 'simplex') : 'simplex';
+    document.getElementById('itDuplexFlipEdge').value = t ? (t.duplexFlipEdge || 'long') : 'long';
+    document.getElementById('itOutputSubfolder').value = t ? (t.outputSubfolder || '') : '';
+    updateFlipEdgeVisibility();
+    renderProductCodes(t ? t.productCodes : []);
+
+    const errEl = document.getElementById('itSaveError');
+    errEl.classList.add('hidden');
+    errEl.textContent = '';
+    document.getElementById('itPreviewSvg').innerHTML =
+      '<div class="it-preview-placeholder">Pick a paper size and enter an expected artwork size to preview the layout.</div>';
+    document.getElementById('itPreviewCaption').textContent = '';
+    document.getElementById('itPreviewError').classList.add('hidden');
+
+    document.getElementById('impositionTemplateModal').classList.remove('hidden');
+    document.getElementById('itName').focus();
+    requestPreview();
+  }
+
+  function closeTemplateModal() {
+    document.getElementById('impositionTemplateModal').classList.add('hidden');
+    _editingTemplateId = null;
+  }
+
+  function updateFlipEdgeVisibility() {
+    const mode = document.getElementById('itMode').value;
+    document.getElementById('itFlipEdgeGroup').style.display = mode === 'duplex' ? '' : 'none';
+  }
+
+  function readTemplateFromModal() {
+    const unit = currentTemplateUnit();
+    const num = (id) => {
+      const v = parseFloat(document.getElementById(id).value);
+      return Number.isFinite(v) ? unitToPoints(v, unit) : 0;
+    };
+    return {
+      id:          _editingTemplateId || undefined,
+      name:        document.getElementById('itName').value,
+      paperSizeId: document.getElementById('itPaperSizeId').value,
+      gutter:      num('itGutter'),
+      margins: {
+        top:    num('itMarginTop'),
+        right:  num('itMarginRight'),
+        bottom: num('itMarginBottom'),
+        left:   num('itMarginLeft'),
+      },
+      expectedArtwork: {
+        width:  num('itArtworkW'),
+        height: num('itArtworkH'),
+      },
+      autoRotate:      document.getElementById('itAutoRotate').checked,
+      artworkBleed:    num('itArtworkBleed'),
+      cropMarks:       document.getElementById('itCropMarks').checked,
+      mode:            document.getElementById('itMode').value,
+      duplexFlipEdge:  document.getElementById('itDuplexFlipEdge').value,
+      productCodes:    collectProductCodes(),
+      outputSubfolder: document.getElementById('itOutputSubfolder').value,
+    };
+  }
+
+  // ─── Preview (debounced, calls the REAL M1 engine via IPC) ────────
+  function requestPreview() {
+    if (_previewTimer) { clearTimeout(_previewTimer); _previewTimer = null; }
+    _previewTimer = setTimeout(async () => {
+      _previewTimer = null;
+      const t = readTemplateFromModal();
+      const ps = paperSizeById(t.paperSizeId);
+      // The preview module handles "pick a paper size" too, but calling it
+      // with no paper size makes an unnecessary round-trip — skip.
+      if (!ps) {
+        document.getElementById('itPreviewSvg').innerHTML =
+          '<div class="it-preview-placeholder">Pick a paper size and enter an expected artwork size to preview the layout.</div>';
+        document.getElementById('itPreviewCaption').textContent = '';
+        document.getElementById('itPreviewError').classList.add('hidden');
+        return;
+      }
+      const res = await window.electronAPI.impositionPreviewLayout({
+        paperSize:       { width: ps.width, height: ps.height },
+        margins:         t.margins,
+        gutter:          t.gutter,
+        expectedArtwork: t.expectedArtwork,
+        autoRotate:      t.autoRotate,
+        mode:            t.mode,
+        duplexFlipEdge:  t.duplexFlipEdge,
+      });
+      renderPreview(res);
+    }, 180);
+  }
+
+  function renderPreview(res) {
+    const svgHost   = document.getElementById('itPreviewSvg');
+    const captionEl = document.getElementById('itPreviewCaption');
+    const errorEl   = document.getElementById('itPreviewError');
+    if (!res || res.ok === false) {
+      svgHost.innerHTML = '<div class="it-preview-placeholder">Fix the error below to see the layout.</div>';
+      captionEl.textContent = '';
+      errorEl.textContent = (res && res.error) || 'Preview failed.';
+      errorEl.classList.remove('hidden');
+      return;
+    }
+    errorEl.classList.add('hidden');
+    svgHost.innerHTML = buildPreviewSvg(res);
+    captionEl.innerHTML = buildPreviewCaption(res);
+  }
+
+  // XSS note: every value below is a NUMBER returned by the main-process
+  // M1 engine (computeLayout) — sheetWidth/Height, margins, cellW/cellH,
+  // and per-cell x/y coords. Numbers cannot inject markup. The renderer
+  // does not stringify anything user-typed into the SVG body. If a future
+  // change adds a text label (e.g. cell numbering), route it through
+  // escapeHtml() or use a text-node DOM API rather than innerHTML.
+  function buildPreviewSvg(res) {
+    const { sheetWidth, sheetHeight, margins, layout } = res;
+    // ViewBox uses the sheet in pt directly; CSS scales it to the panel.
+    const usableX  = margins.left;
+    const usableY  = margins.bottom;
+    const usableW  = sheetWidth  - margins.left - margins.right;
+    const usableH  = sheetHeight - margins.top  - margins.bottom;
+    const cells = (layout.front || []).map((c) => (
+      `<rect x="${c.x}" y="${sheetHeight - c.y - layout.cellH}" width="${layout.cellW}" height="${layout.cellH}" ` +
+      `fill="rgba(60, 120, 200, 0.20)" stroke="rgba(60, 120, 200, 0.8)" stroke-width="1.5"></rect>`
+    )).join('');
+    // Y-axis flip: SVG y grows downward; the layout uses PDF coords
+    // (y grows upward). Everything below is written in the flipped
+    // frame so we don't need a transform on the group.
+    return (
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${sheetWidth} ${sheetHeight}" preserveAspectRatio="xMidYMid meet">` +
+      `<rect x="0" y="0" width="${sheetWidth}" height="${sheetHeight}" fill="#fff" stroke="#333" stroke-width="2"></rect>` +
+      `<rect x="${usableX}" y="${sheetHeight - usableY - usableH}" width="${usableW}" height="${usableH}" fill="rgba(0,0,0,0.04)" stroke="rgba(0,0,0,0.15)" stroke-dasharray="4 4" stroke-width="1"></rect>` +
+      cells +
+      `</svg>`
+    );
+  }
+
+  function buildPreviewCaption(res) {
+    const { layout, mode, duplexFlipEdge } = res;
+    // orientation, perSheet, cols, rows are engine-produced (safe).
+    // mode and duplexFlipEdge originate from renderer <select>s and
+    // round-trip through IPC — main validates them to a fixed set, but
+    // escapeHtml here as defense-in-depth so no future refactor that
+    // widens the allowed values quietly introduces an injection vector.
+    const orientation = layout.rotated ? 'rotated' : 'unrotated';
+    const parts = [`<strong>${layout.perSheet}</strong> per sheet — ${orientation} (${layout.cols}×${layout.rows})`];
+    if (mode === 'duplex') {
+      parts.push(`<em>backs mirror across the ${escapeHtml(duplexFlipEdge || '')}-edge (front shown)</em>`);
+    }
+    return parts.join('<br>');
+  }
+
+  async function saveTemplateFromModal() {
+    const errEl = document.getElementById('itSaveError');
+    errEl.classList.add('hidden');
+    errEl.textContent = '';
+    const t = readTemplateFromModal();
+    const res = await window.electronAPI.impositionSaveTemplate(t);
+    if (!res || res.success === false) {
+      errEl.textContent = (res && res.error) || 'Save failed.';
+      errEl.classList.remove('hidden');
+      return;
+    }
+    closeTemplateModal();
+    await loadImposition();
+  }
+
+  // ─── Wire up ───────────────────────────────────────────────────────
+  document.getElementById('addPaperSizeBtn')?.addEventListener('click',  () => openPaperSizeModal(null));
+  document.getElementById('psCancelBtn')?.addEventListener('click',      closePaperSizeModal);
+  document.getElementById('psSaveBtn')?.addEventListener('click',        savePaperSizeFromModal);
+  document.getElementById('psUnit')?.addEventListener('change', (e) => {
+    // Reinterpret the current numeric values in the new unit so a user
+    // switching in→mm doesn't accidentally shrink their paper 25×.
+    const prevUnitAttr = e.target.dataset.prevUnit || 'in';
+    const newUnit = e.target.value;
+    if (prevUnitAttr !== newUnit) {
+      const wEl = document.getElementById('psWidth');
+      const hEl = document.getElementById('psHeight');
+      const wRaw = parseFloat(wEl.value);
+      const hRaw = parseFloat(hEl.value);
+      if (Number.isFinite(wRaw)) wEl.value = pointsToUnit(unitToPoints(wRaw, prevUnitAttr), newUnit);
+      if (Number.isFinite(hRaw)) hEl.value = pointsToUnit(unitToPoints(hRaw, prevUnitAttr), newUnit);
+    }
+    e.target.dataset.prevUnit = newUnit;
+  });
+
+  document.getElementById('addImpositionTemplateBtn')?.addEventListener('click', () => openTemplateModal(null));
+  document.getElementById('itCancelBtn')?.addEventListener('click', closeTemplateModal);
+  document.getElementById('itSaveBtn')?.addEventListener('click',   saveTemplateFromModal);
+  document.getElementById('itMode')?.addEventListener('change',     () => { updateFlipEdgeVisibility(); requestPreview(); });
+  document.getElementById('itDuplexFlipEdge')?.addEventListener('change', requestPreview);
+  document.getElementById('itPaperSizeId')?.addEventListener('change', () => {
+    // Unit hint changes with paper size; also re-preview.
+    const unit = currentTemplateUnit();
+    const hint = document.getElementById('itUnitHint');
+    if (hint) hint.textContent = `Widths, heights, margins, gutter and bleed are entered in ${unit} (this paper size's unit).`;
+    requestPreview();
+  });
+  ['itArtworkW','itArtworkH','itMarginTop','itMarginRight','itMarginBottom','itMarginLeft','itGutter','itArtworkBleed','itAutoRotate'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('input',  requestPreview);
+    el.addEventListener('change', requestPreview);
+  });
+  document.getElementById('itAddProductCodeBtn')?.addEventListener('click', () => {
+    document.getElementById('itProductCodesList').appendChild(buildProductCodeRow(''));
+  });
+
+  // Load on Settings → Imposition open (lazy — no fetch until visible).
+  const impositionTab = document.querySelector('.settings-subtab[data-subtab="imposition"]');
+  if (impositionTab) {
+    impositionTab.addEventListener('click', loadImposition);
+  }
+  // Also load if the panel is somehow the active one on first paint (e.g.
+  // deep-link from a future URL scheme). Cheap.
+  if (impositionPanel.classList.contains('active')) loadImposition();
+})();

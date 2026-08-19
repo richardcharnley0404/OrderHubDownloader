@@ -109,6 +109,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   impositionListTemplates:   ()     => ipcRenderer.invoke('ohd:imposition:list-templates'),
   impositionSaveTemplate:    (tpl)  => ipcRenderer.invoke('ohd:imposition:save-template',     tpl),
   impositionDeleteTemplate:  (id)   => ipcRenderer.invoke('ohd:imposition:delete-template',   { id }),
+  // M4: live layout preview. Returns { ok: true, layout, sheetWidth,
+  // sheetHeight, margins, gutter, mode, duplexFlipEdge } or
+  // { ok: false, error } — the renderer draws the SVG and shows the
+  // error message inline.
+  impositionPreviewLayout:   (input) => ipcRenderer.invoke('ohd:imposition:preview-layout', input),
 
   // ohd-api v1.4.0 — server-advertised polling cadence + feature flags.
   // Returned shape: { pollIntervalSeconds, statusPollIntervalSeconds,

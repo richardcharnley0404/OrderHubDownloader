@@ -209,6 +209,7 @@
             <button type="button" class="settings-subtab" data-subtab="general">General</button>
             <!-- Print Controllers (legacy) tab hidden — code retained for Darkroom Pro integration reference -->
             <button type="button" class="settings-subtab" data-subtab="routing">Routing</button>
+            <button type="button" class="settings-subtab" data-subtab="imposition">Imposition</button>
             <button type="button" class="settings-subtab" data-subtab="aienhancement">AI Enhancement</button>
             <button type="button" class="settings-subtab" data-subtab="backup">Backup</button>
           </div>
@@ -835,6 +836,31 @@
               </div>
 
               <button type="button" id="addExceptionBtn" class="btn-secondary btn-add-mapping">+ Add Exception</button>
+            </fieldset>
+
+          </div>
+
+          <!-- Sub-tab: Imposition (M4 of docs/pdf-imposition-investigation.md) -->
+          <div class="settings-subtab-panel" id="subtab-imposition">
+
+            <!-- Section 1: Paper Sizes -->
+            <fieldset class="panel-section">
+              <legend>Paper Sizes</legend>
+              <p class="section-desc">Press-sheet sizes used by imposition templates. Widths and heights are entered in the unit you pick (in / mm) and stored internally in PDF points.</p>
+              <div id="paperSizesList">
+                <!-- Rendered by renderer.js -->
+              </div>
+              <button type="button" id="addPaperSizeBtn" class="btn-secondary btn-add-mapping">+ Add Paper Size</button>
+            </fieldset>
+
+            <!-- Section 2: Imposition Templates -->
+            <fieldset class="panel-section">
+              <legend>Imposition Templates</legend>
+              <p class="section-desc">A template defines the layout used to step-and-repeat artwork onto a paper size at dispatch. Each template is bound to a paper size and one or more product codes.</p>
+              <div id="impositionTemplatesList">
+                <!-- Rendered by renderer.js -->
+              </div>
+              <button type="button" id="addImpositionTemplateBtn" class="btn-secondary btn-add-mapping">+ Add Template</button>
             </fieldset>
 
           </div>
@@ -1530,6 +1556,180 @@
       <div class="pm-modal-footer">
         <button type="button" id="ocCancelBtn" class="btn-secondary">Cancel</button>
         <button type="button" id="ocSaveBtn" class="btn-primary">Save Controller</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ Paper Size Modal (M4 imposition) ═══ -->
+  <div id="paperSizeModal" class="pm-modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="psModalTitle">
+    <div class="pm-modal">
+      <button type="button" class="pm-modal-close" aria-label="Close">×</button>
+      <h3 id="psModalTitle">Add Paper Size</h3>
+
+      <div class="form-group">
+        <label for="psName">Name</label>
+        <input type="text" id="psName" placeholder="e.g. 12×18 in">
+      </div>
+
+      <div class="form-row">
+        <div class="form-group form-group-grow">
+          <label for="psWidth">Width</label>
+          <input type="number" id="psWidth" step="0.01" min="0" placeholder="12">
+        </div>
+        <div class="form-group form-group-grow">
+          <label for="psHeight">Height</label>
+          <input type="number" id="psHeight" step="0.01" min="0" placeholder="18">
+        </div>
+        <div class="form-group form-group-fixed">
+          <label for="psUnit">Unit</label>
+          <select id="psUnit">
+            <option value="in">in</option>
+            <option value="mm">mm</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="psSaveError" class="modal-save-error hidden"></div>
+
+      <div class="pm-modal-footer">
+        <button type="button" id="psCancelBtn" class="btn-secondary">Cancel</button>
+        <button type="button" id="psSaveBtn" class="btn-primary">Save Paper Size</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ Imposition Template Modal (M4) ═══ -->
+  <div id="impositionTemplateModal" class="pm-modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="itModalTitle">
+    <div class="pm-modal pm-modal-wide">
+      <button type="button" class="pm-modal-close" aria-label="Close">×</button>
+      <h3 id="itModalTitle">Add Imposition Template</h3>
+
+      <div class="it-modal-body">
+        <!-- Left: fields -->
+        <div class="it-form">
+          <div class="form-group">
+            <label for="itName">Name</label>
+            <input type="text" id="itName" placeholder="e.g. Grad card 5×7">
+          </div>
+
+          <div class="form-group">
+            <label for="itPaperSizeId">Paper Size</label>
+            <select id="itPaperSizeId">
+              <option value="">Select paper size…</option>
+            </select>
+            <small class="field-hint" id="itUnitHint">Widths, heights, margins, gutter and bleed are entered in the paper size's unit.</small>
+          </div>
+
+          <fieldset class="it-fieldset">
+            <legend>Expected Artwork</legend>
+            <div class="form-row">
+              <div class="form-group form-group-grow">
+                <label for="itArtworkW">Width</label>
+                <input type="number" id="itArtworkW" step="0.01" min="0">
+              </div>
+              <div class="form-group form-group-grow">
+                <label for="itArtworkH">Height</label>
+                <input type="number" id="itArtworkH" step="0.01" min="0">
+              </div>
+            </div>
+            <small class="field-hint">Design-time cell size. Dispatch always uses the real artwork trim; this value is what save-time fit validation and the preview grid are computed against (§5.1).</small>
+          </fieldset>
+
+          <fieldset class="it-fieldset">
+            <legend>Margins</legend>
+            <div class="form-row">
+              <div class="form-group form-group-grow">
+                <label for="itMarginTop">Top</label>
+                <input type="number" id="itMarginTop" step="0.01" min="0" value="0">
+              </div>
+              <div class="form-group form-group-grow">
+                <label for="itMarginRight">Right</label>
+                <input type="number" id="itMarginRight" step="0.01" min="0" value="0">
+              </div>
+              <div class="form-group form-group-grow">
+                <label for="itMarginBottom">Bottom</label>
+                <input type="number" id="itMarginBottom" step="0.01" min="0" value="0">
+              </div>
+              <div class="form-group form-group-grow">
+                <label for="itMarginLeft">Left</label>
+                <input type="number" id="itMarginLeft" step="0.01" min="0" value="0">
+              </div>
+            </div>
+          </fieldset>
+
+          <div class="form-row">
+            <div class="form-group form-group-grow">
+              <label for="itGutter">Gutter</label>
+              <input type="number" id="itGutter" step="0.01" min="0" value="0">
+            </div>
+            <div class="form-group form-group-grow">
+              <label for="itArtworkBleed">Artwork Bleed</label>
+              <input type="number" id="itArtworkBleed" step="0.01" min="0" value="0">
+              <small class="field-hint">0 = trust the artwork's TrimBox. Gutter must be ≥ 2× bleed.</small>
+            </div>
+          </div>
+
+          <div class="form-group checkbox-group">
+            <label>
+              <input type="checkbox" id="itAutoRotate">
+              <span>Auto-rotate to best fit</span>
+            </label>
+          </div>
+
+          <div class="form-group checkbox-group">
+            <label>
+              <input type="checkbox" id="itCropMarks">
+              <span>Draw crop marks</span>
+            </label>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group form-group-grow">
+              <label for="itMode">Mode</label>
+              <select id="itMode">
+                <option value="simplex">Simplex (one-sided)</option>
+                <option value="duplex">Duplex (two-sided)</option>
+              </select>
+            </div>
+            <div class="form-group form-group-grow" id="itFlipEdgeGroup" style="display:none;">
+              <label for="itDuplexFlipEdge">Duplex Flip Edge</label>
+              <select id="itDuplexFlipEdge">
+                <option value="long">Long edge</option>
+                <option value="short">Short edge</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>Product Codes</label>
+            <div id="itProductCodesList"></div>
+            <button type="button" id="itAddProductCodeBtn" class="btn-secondary btn-sm">+ Add Product Code</button>
+            <small class="field-hint">A product code may belong to only one template.</small>
+          </div>
+
+          <div class="form-group">
+            <label for="itOutputSubfolder">Output Subfolder <span class="field-hint-inline">(optional)</span></label>
+            <input type="text" id="itOutputSubfolder" placeholder="e.g. imposed">
+            <small class="field-hint">Single folder name, not a path. When set, imposed output for this template lands in <code>{controller.outputPath}/{subfolder}/</code> so imposed sheets don't share a directory with pass-through singletons (§7.4).</small>
+          </div>
+
+          <div id="itSaveError" class="modal-save-error hidden"></div>
+        </div>
+
+        <!-- Right: live preview -->
+        <div class="it-preview">
+          <div class="it-preview-header">Live Preview</div>
+          <div class="it-preview-svg" id="itPreviewSvg">
+            <div class="it-preview-placeholder">Pick a paper size and enter an expected artwork size to preview the layout.</div>
+          </div>
+          <div class="it-preview-caption" id="itPreviewCaption"></div>
+          <div class="it-preview-error hidden" id="itPreviewError"></div>
+        </div>
+      </div>
+
+      <div class="pm-modal-footer">
+        <button type="button" id="itCancelBtn" class="btn-secondary">Cancel</button>
+        <button type="button" id="itSaveBtn" class="btn-primary">Save Template</button>
       </div>
     </div>
   </div>

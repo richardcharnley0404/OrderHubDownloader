@@ -10,6 +10,7 @@ const { runTest: runPrintControllerTest } = require('./services/test-print-contr
 const { printControllerStore } = require('./services/print-controller-store');
 const routingService = require('./services/routing-service');
 const impositionService = require('./services/imposition-service');
+const impositionPreview = require('./services/imposition-preview');
 const { buildFolderCopyPreview } = require('./services/folder-copy-preview');
 const processFolderService = require('./services/process-folder-service');
 const fujiJobMakerConfig = require('./services/fuji-jobmaker-config');
@@ -2349,6 +2350,15 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
       });
       return { success: false, error: error.message };
     }
+  });
+
+  // Live layout preview for the M4 template editor. Thin wrapper — the
+  // whole point is that the preview runs the REAL M1 engine so it can
+  // never disagree with save-time validation or dispatch (§6.2 "never
+  // a parallel implementation"; same rule as folder-copy-preview and
+  // buildDestFolder). Returns { ok, layout, ... } or { ok: false, error }.
+  ipcMain.handle('ohd:imposition:preview-layout', async (event, input) => {
+    return impositionPreview.previewLayout(input);
   });
 
   // ── Shell ──

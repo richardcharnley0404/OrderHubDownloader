@@ -3362,3 +3362,138 @@ button {
   color: var(--text-muted, #666);
   font-style: italic;
 }
+
+/* ═════════════════════════════════════════════════════════════════════════
+   Imposition (M4)
+   ═════════════════════════════════════════════════════════════════════════ */
+
+/* Wide modal — the template editor's field column + live preview panel
+   don't fit the default 420 px width. Same scoping pattern as the channel
+   mapping modal above. */
+.pm-modal-wide {
+  width: 900px;
+  max-width: 95vw;
+}
+
+/* Save-error strip inside a modal (below the fields, above the footer).
+   Same visual weight as .health-banner but scoped inside a .pm-modal so
+   it never leaks visually into the parent Settings panel. */
+.modal-save-error {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  background: rgba(200, 40, 40, 0.08);
+  border: 1px solid rgba(200, 40, 40, 0.35);
+  border-radius: 4px;
+  color: #b02020;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.field-hint-inline {
+  color: var(--text-muted, #666);
+  font-weight: normal;
+  font-size: 11px;
+}
+
+/* Template-editor layout: two columns, form left / preview right. */
+.it-modal-body {
+  display: grid;
+  grid-template-columns: 1fr 380px;
+  gap: 18px;
+  align-items: start;
+}
+
+.it-form {
+  min-width: 0;   /* let inputs shrink inside the grid */
+}
+
+.it-fieldset {
+  border: 1px solid var(--app-border, #ddd);
+  border-radius: 4px;
+  padding: 8px 12px 4px;
+  margin: 0 0 12px;
+}
+.it-fieldset legend {
+  padding: 0 4px;
+  font-size: 11px;
+  color: var(--text-muted, #666);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.it-preview {
+  position: sticky;
+  top: 0;
+  background: var(--app-surface-muted, #f7f7f8);
+  border: 1px solid var(--app-border, #ddd);
+  border-radius: 4px;
+  padding: 12px;
+}
+.it-preview-header {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted, #666);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin-bottom: 8px;
+}
+.it-preview-svg {
+  width: 100%;
+  min-height: 260px;
+  max-height: 420px;
+  background: var(--app-bg, #fff);
+  border: 1px solid var(--app-border-subtle, #eaeaea);
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.it-preview-svg svg {
+  max-width: 100%;
+  max-height: 100%;
+  display: block;
+}
+.it-preview-placeholder {
+  color: var(--text-muted, #999);
+  font-size: 12px;
+  text-align: center;
+  padding: 24px 16px;
+}
+.it-preview-caption {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--app-ink);
+  line-height: 1.4;
+}
+.it-preview-caption em {
+  color: var(--text-muted, #666);
+  font-style: normal;
+}
+.it-preview-error {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: rgba(200, 40, 40, 0.08);
+  border: 1px solid rgba(200, 40, 40, 0.35);
+  border-radius: 4px;
+  color: #b02020;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* Product-code repeating row (matches the routing .mapping-row look). */
+.it-code-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 4px;
+  align-items: center;
+}
+.it-code-row input {
+  flex: 1;
+  min-width: 0;
+}
+.it-code-row .btn-code-remove {
+  padding: 2px 8px;
+  font-size: 12px;
+}
