@@ -1,3 +1,117 @@
+## Unreleased
+
+**Added: PDF Copy controllers can impose artwork onto press sheets at
+dispatch — one imposition template replaces the "one hot folder per
+product-and-orientation" workaround.** Until now a lab running a
+commercial digital printer through a PDF Copy hot folder needed a
+separate hot folder for every product **and** every orientation — a
+Portrait 5×7 folder, a Landscape 5×7 folder, a Portrait 5×7 with a
+different stock, and so on. The lab now defines **paper sizes** (12×18 in,
+12×24 in, 13×26 in, whatever the press takes), builds **imposition
+templates** on those sheets (margins, gutter, auto-rotate, simplex or
+duplex, crop marks), and assigns one or more product codes to each
+template. Auto-rotate is what collapses the orientation split: a
+Portrait 5×7 code and a Landscape 5×7 code map to the SAME template
+because the engine picks whichever fit — 5×7 unrotated or 7×5 rotated —
+gives more per sheet.
+
+Setup path in Settings, in the order a lab meets them:
+
+1. **Settings → Imposition → Paper Sizes.** Add each press-sheet size
+   (name, width, height, unit — inches or mm). Values are entered in
+   your chosen unit and stored internally in PDF points, so a template
+   built on a 12×18 in sheet and one built on a 305×457 mm sheet
+   compute the same layout.
+2. **Settings → Imposition → Imposition Templates.** Pick the paper
+   size, enter the expected artwork size (design-time; dispatch uses
+   the real TrimBox at print time), set margins / gutter / bleed,
+   tick **Auto-rotate to best fit** when orientation shouldn't be
+   pinned, pick simplex or duplex, and assign the product codes this
+   template should claim. The editor's **live preview panel** runs the
+   REAL layout engine and shows the exact grid the press will run — if
+   the preview shows 4 per sheet, dispatch will produce 4 per sheet;
+   if the preview shows a red zero-fit error, Save will refuse with
+   the same message. A template pending on the operator ("what will
+   this actually do?") is what the preview is for.
+3. **Settings → Routing → your PDF Copy controller → tick Apply
+   impositions from Settings → Imposition.** Nothing changes on the
+   controller until this is ticked. See "off by default" below.
+
+What comes out of the hot folder: **one press-ready PDF per job**,
+named `{orderNumber}_{jobId}_QTY{copies}_IMPQTY{sheets}.pdf`. The two
+numbers matter to the operator:
+
+- `QTY` is the total copies across every design in the job (the
+  number the customer is paying for).
+- `IMPQTY` is the **SHEET count** the operator sets on the press —
+  the run length. **Duplex PDFs have `2 × IMPQTY` pages** (front,
+  back, front, back, one pair per sheet) but IMPQTY still counts
+  sheets because the operator loads sheets, not pages. So a duplex
+  job with `IMPQTY10` is a 20-page PDF and a 10-sheet press run.
+
+A job with multiple PDFs (e.g. a grad-card order with two designs)
+produces one output file, designs sequential inside it — never mixed
+on a sheet. The filename totals sum across designs: two designs of
+40 copies each at 4-up land as `..._QTY80_IMPQTY20.pdf`.
+
+**Duplex — the flip edge must match the press's duplex configuration.**
+Every imposition template picks Long-edge or Short-edge flip. Get this
+wrong and the press will duplex correctly against the sheet but print
+every card's back on the wrong front — a Christmas card whose inside
+message ends up mirrored across the fold, a business card whose back
+lands on the neighbour's front, no imposed run is recoverable without
+a reprint. The setting is on the template because it must match the
+physical press's duplex configuration, not the job. Check it once
+against a known good duplex sheet from the same press before running
+a lab through this feature.
+
+**Trim / bleed.** The engine honours each artwork PDF's TrimBox when
+present — the trim is what lands on the layout cell and the bleed
+extends into the gutter. For designs that carry bleed but no explicit
+TrimBox (common with hobbyist-generated files), set the template's
+**Artwork Bleed** field to the bleed in points; the engine will inset
+the MediaBox by that value and use the result as the trim. The
+save-time check enforces `gutter ≥ 2 × bleed` — otherwise neighbouring
+cards' bleeds would overlap on the sheet and the finished cards would
+carry pieces of the neighbour's ink at the trim edge.
+
+**Pass-through — jobs whose product code doesn't match any template.**
+The PDF Copy controller carries a **Product with no matching template**
+setting for exactly this case:
+
+- **Write un-imposed to the controller's output folder (today's
+  behaviour)** — the PDF lands in `{outputPath}/{orderNumber}_{jobId}/`
+  exactly as pre-imposition PDF Copy did. Use this if the lab is
+  adopting imposition gradually and wants uncovered product codes to
+  keep flowing to the same hot folder.
+- **Write un-imposed to a product-code subfolder** — the PDF lands at
+  `{outputPath}/{product_code}/{orderNumber}_{jobId}/`. Use this if
+  the lab imposes uncovered products by hand and wants each one to
+  arrive labelled with its product code so the operator knows which
+  press to impose it on.
+
+Either way, a pass-through PDF sitting in the root **cannot be
+mistaken for a press-ready imposed sheet** — location tells you it
+wasn't imposed. That's why pass-through is the default posture rather
+than fail-loudly: a wrongly-imposed PDF that lands next to imposed
+sheets is dangerous; an unimposed PDF that lands next to imposed
+sheets isn't (its filename shape and cell size are visibly different).
+
+**Off by default — every existing PDF Copy controller is byte-identical
+to today's output until Apply impositions is ticked.** No template
+lookup runs, no layout engine loads, no filename shape changes. The
+integration suite locks this behaviour with a byte-comparison test
+that runs FIRST so a regression to the imposition path can't hide as
+"works on my machine."
+
+Full operator walkthrough with the 12×18 / 5×7 grad-card worked
+example, filename decoder, duplex flip-edge check against the press,
+and a troubleshooting table: `docs/imposition-operator-guide.md`.
+Design-doc — decisions, out-of-scope list, build record — in
+`docs/pdf-imposition-investigation.md`.
+
+---
+
 ## v1.15.2 - 2026-08-19
 
 **Changed: ROES XML imports now carry the shipping method through to

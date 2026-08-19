@@ -194,6 +194,35 @@ Possible side effect worth checking when the lab's logs arrive: if `/checkin` re
 was the stopgap before the typed controller existed. Delete it once the lab confirms the
 real one works.
 
+**Imposition v2 candidates (2026-08-19).** v1 shipped code-complete
+(see [`pdf-imposition-investigation.md`](pdf-imposition-investigation.md)
+§10 for the build record). The five items below were deliberately kept
+out of scope during the v1 build (§8 of that doc) and are the natural
+follow-ons if the feature earns real lab demand — recorded here so
+they're chosen next time, not missed:
+
+- **Ganging / nesting multiple jobs per sheet.** v1 is one job per
+  sheet run. Ganging is a different feature (batching windows, cut
+  planning, per-sheet job tracking). Revisit only on real lab demand
+  — the order-merge work showed how much complexity "combine jobs"
+  hides.
+- **Artwork rendered in the live preview** — the template editor
+  currently shows the grid as labelled rectangles. Rendering the actual
+  card PDF inside each cell would need PDF rasterising in the renderer
+  (pdf.js or similar), a new dependency. The v1 preview is enough to
+  validate geometry; adding artwork is polish.
+- **Fill-last-sheet quantity rounding.** A job of 19 copies on 4-up
+  currently produces 5 sheets with the last showing 3 cards + one
+  empty slot. A toggle to bump the qty to 20 (nearest fill) is
+  natural to add.
+- **Per-sheet barcode / slug lines** for cut tracking. The existing
+  order-identifier pipeline step already draws text; extending it to
+  stamp a per-sheet marker outside the cells is small once a lab wants
+  it.
+- **Imposing raster (JPEG) artwork.** PDF Copy is PDF-only today; the
+  imposition engine consumes PDF pages. Adding raster support would
+  need a JPEG-to-page wrapper in composeImposition.
+
 **Filename templates deliberately don't apply to reprints (M4, 2026-08-17).**
 `_sendReprintViaFolderCopy` (`src/main/services/print-service.js`) keeps the
 original filenames into its `…_{id}-r{n}` folder — the M3 template on the

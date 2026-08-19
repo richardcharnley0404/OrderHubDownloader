@@ -1,8 +1,15 @@
 # PDF Copy — imposition templates & paper sizes
 
-**Status:** investigation, 2026-08-19. Nothing built. Work in progress —
-this is the largest single feature proposed for OHD to date and it will take
-several releases to land well.
+**Status:** code-complete, unreleased (2026-08-19). All six milestones
+landed as separate reviewed commits over one session; the feature is
+off by default on every existing pdf_copy controller and awaits
+Richard's manual pass on real lab hardware before a release. See §10
+for the build record.
+
+**Operator-facing doc:** [`imposition-operator-guide.md`](imposition-operator-guide.md)
+— setup path with the 12×18 / 5×7 grad-card worked example, filename
+decoder, duplex flip-edge check, troubleshooting table. Written for
+lab managers; the file you're reading is for developers.
 
 **Ask:** commercial digital printer hot folders impose artwork inflexibly — a
 lab ends up with one hot folder per product-and-orientation (Portrait 5x7
@@ -413,6 +420,31 @@ setup, not per-controller routing.
 
 M1 and M2 are pure and fully testable before any UI exists — same shape as
 the folder-copy build, which worked.
+
+## 10. Build record (2026-08-19)
+
+All six milestones landed on `main` as separate reviewed commits over
+one session. §8's out-of-scope list has been reconfirmed as still
+accurate — nothing landed that expanded scope, and nothing in v1
+required an §8 item.
+
+| Milestone | Commit    | What landed                                                                |
+|-----------|-----------|----------------------------------------------------------------------------|
+| M1        | `230589a` | Pure layout engine (`src/pdf-pipeline/imposition-layout.js`); 39 tests    |
+| M1a       | `0bc004e` | Asymmetric-margin mirror tests — catch usable-area-mirror regression      |
+| M2        | `9d06440` | pdf-lib composition (`imposition-compose.js`) — deriveTrim, planPlacements, composeImposition; 33 tests |
+| M3        | `26a7e37` | Org-level stores + IPC + save-time validation (`imposition-service.js`); 38 tests |
+| M4        | `fee4c90` | Settings screens + live preview IPC (`imposition-preview.js`); 11 tests   |
+| M5        | `7beaf67` | Dispatch wiring in `_sendViaPdfCopyRouted` + pdf_copy controller fields; 17 tests |
+| M6        | (this commit) | CHANGELOG entry, operator guide, this build record, landmines, BACKLOG entry |
+
+Also in the sequence: `4b2b595` fixed the known `perfectlyClientClient.test.js`
+stability-polling flake that had been noise-swamping M3's preflight
+runs (RESOLVED in `docs/BACKLOG.md`).
+
+Suite growth: 2246 tests before M1 → 2347 after M5 (M6 adds no tests).
+No CHANGELOG entry until M6 — every prior milestone deliberately shipped
+code with no operator-visible change until dispatch wired up.
 
 ## Sources
 

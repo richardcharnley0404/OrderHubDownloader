@@ -143,6 +143,31 @@ with no visible change, check `git diff --ignore-cr-at-eol` before believing it.
   `folder-copy-filename.test.js` (`M2-fix audit: exactly one path.extname
   call is on img.sourcePath`) which reads the module source and counts
   the calls — do NOT delete that test as noise; it is the tripwire.
+- **Duplex back positions mirror about the SHEET centreline, never the
+  usable-area centre.** The two formulas produce identical positions when
+  margins are symmetric, so a regression from `sheetW - front.x - cellW`
+  to `2 * usableCentre - front.x - cellW` sails through every symmetric-
+  margin test and prints every back on the wrong front at any lab with
+  a grip-edge (asymmetric) margin. The tripwire is the M1a
+  asymmetric-margin mirror tests in `src/pdf-pipeline/__tests__/imposition-layout.test.js`
+  (`M1a: mirror invariant, long-edge, asymmetric horizontal margins` and
+  its short-edge sibling) — do NOT delete them as duplicates of the
+  symmetric-margin tests above; the symmetric ones cannot catch this
+  class. Sign errors here need reprints, not repairs.
+- **`deriveTrim` exists ONCE in `imposition-compose.js` and the Settings
+  live preview runs the real M1 engine over IPC (`imposition-preview.js`).**
+  Both are the same class of tripwire as `buildDestFolder`: a preview or
+  save-time check that computes a different grid than dispatch is worse
+  than no preview — it lulls the operator into believing a template is
+  right exactly when it isn't. The equality-with-engine test in
+  `imposition-preview.test.js` (`preview.layout` deep-equals `computeLayout()`
+  for the same inputs) makes the discipline mechanical: a lookalike
+  reimplementation of trim derivation or layout computation in the
+  renderer, in a helper "for clarity," or as a copy-paste at a new
+  caller fails that test before the operator sees a preview grid that
+  disagrees with dispatch. If you need to touch the trim rule or the
+  layout math, change the ONE implementation. This is the M5a class of
+  bug the folder-copy `buildDestFolder` landmine also names.
 
 ## Misnamed / dead code — don't be misled
 
