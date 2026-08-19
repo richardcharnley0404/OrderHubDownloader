@@ -45,16 +45,23 @@ delivered. Surfaced rather than silent, so it's safe — but closeable: on rehyd
 `txtCommitted` is false *and* the `.txt` is still on disk, the write clearly succeeded and
 the flag can be set.
 
-**Flaky test.** `perfectlyClearClient.test.js` — "stability polling" and "hard wall-clock
-deadline" fail intermittently under full-suite load. A ~30 ms write race, pre-existing,
-untouched by 1.8.0. Re-run before believing a red suite. **Escalating (2026-08-13):**
-the same 1-ms deadline race at `:482` / `:487` now needs ~4 full-suite reruns to land
-green (was 1-2 previously), each rerun costs ~40 s so a green suite currently takes
-several minutes. Two operational concerns follow: (a) release preflights get slower and
-easier to short-cut, (b) a genuine regression that happens to land in an unrelated
-file would be masked as "just the flake" and re-run through until it accidentally
-green'd. Worth tightening the deadline logic or increasing the base timeout before
-the noise-to-signal ratio drops further.
+**Flaky test — RESOLVED 2026-08-19.** `perfectlyClearClient.test.js`
+"stability polling" (`:482` / `:487`) was a scheduling race: the test's
+25 ms poll interval + 30 ms rewrite delay put the rewrite ~5 ms AFTER
+the expected poll-2 firing time, so any jitter that ran poll-2 first
+made the client see v1 twice and consume it instead of v2-longer. By
+2026-08-13 this needed ~4 reruns to land green; by 2026-08-19 ~6.
+Fix: widened this ONE test's timing to `STABILITY_POLL_MS = 120 ms` and
+`REWRITE_DELAY_MS = 60 ms`, chosen so that poll-2 (≥ 120 ms after
+poll-1) is ALWAYS after the rewrite (60 ms after write) — the race is
+impossible. Clock injection was rejected because the stability check
+consults `fs.stat`'s mtime/size, not any clock; injecting a clock
+would leave the race untouched. Other tests keep the fast 25 ms
+`TEST_POLL_MS`. Test invariant unchanged: consumer must not consume a
+file whose signature differed at the previous poll. See the fix
+commit's diff comment for the full derivation. Three consecutive
+first-attempt-green full-suite runs confirmed the fix on the
+originally-flaking Windows dev box.
 
 **`resolveRoute`'s `_channelMappingOverride` block duplicates the route shape per
 controller type.** There is a hand-written literal per known type (`fujijobmaker`,

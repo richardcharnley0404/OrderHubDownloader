@@ -446,6 +446,42 @@ test('stability polling: consumer waits until a file is stable across 2 polls', 
 
   // We bypass the FakeQuickServer helper and manually write the output
   // file so we can control the exact write pattern.
+  //
+  // ── Why THIS test uses widened timing (2026-08-19 flake fix) ────────
+  // The original test ran at pollIntervalMs = TEST_POLL_MS (25 ms) with
+  // a 30 ms rewrite delay. That put the rewrite ~5 ms AFTER the second
+  // poll's expected firing time, so ANY scheduler jitter that ran
+  // poll-2 before the rewrite left the client seeing v1 twice in a row
+  // — stable — and consuming v1 instead of v2-longer. The failure
+  // reproduced ~1-in-4 by 2026-08-13 and ~1-in-6 by 2026-08-19 (see
+  // docs/BACKLOG.md :48).
+  //
+  // The invariant this test proves has NOT changed: the client must not
+  // consume a file whose signature was different at the previous poll.
+  // What changed is the timing so that the intended sequence
+  //   poll N   : sees v1        (records size=2, mtime=t1)
+  //   poll N+1 : sees v2-longer (differs — records size=9, mtime=t2)
+  //   poll N+2 : sees v2-longer (matches — CONSUME v2-longer)
+  // is race-free.
+  //
+  // Guarantee: with STABILITY_POLL_MS = 120 ms and REWRITE_DELAY_MS =
+  // 60 ms, ANY poll-1 at time p1 has poll-2 at ≥ p1 + 120 ms, so if
+  // poll-1 saw v1 (before the rewrite at t_write + 60), poll-2 fires
+  // at ≥ t_write + 60 + 60 = t_write + 120 and therefore AFTER the
+  // rewrite — it observes v2-longer, the signatures differ, no
+  // consumption. If poll-1 fires AFTER the rewrite (poll-1 at t >
+  // t_write + 60), it observes v2-longer directly and the test still
+  // passes trivially (final content = v2-longer).
+  //
+  // Clock injection was considered per the fix brief. The stability
+  // check does not consult a clock — it compares fs.stat's mtime/size
+  // across two poll cycles — so injecting a clock would leave this
+  // race untouched. A scheduler injection would work but is a much
+  // larger API change to production code for a test-only benefit;
+  // widening the timing meets the same bar cheaper.
+  const STABILITY_POLL_MS  = 120;
+  const REWRITE_DELAY_MS   = 60;
+
   try {
     const src = await makeSourceFile('slow.jpg', 'slow');
     const dst = path.join(destDir, 'slow.jpg');
@@ -455,7 +491,7 @@ test('stability polling: consumer waits until a file is stable across 2 polls', 
       config:         ch.config,
       files:          [{ sourcePath: src, destPath: dst }],
       timeoutMs:      5000,
-      pollIntervalMs: TEST_POLL_MS,
+      pollIntervalMs: STABILITY_POLL_MS,
     });
 
     // Find the batch subfolder that the client created under input, and
@@ -473,12 +509,12 @@ test('stability polling: consumer waits until a file is stable across 2 polls', 
     await fsp.mkdir(outSubDir, { recursive: true });
     const outPath = path.join(outSubDir, 'slow.jpg');
 
-    // Write once, then rewrite with different content 30 ms later. The
-    // second write changes size+mtime, so the first stat is invalidated
-    // and the file needs another poll to stabilise. Total: 3+ polls
-    // before consumption.
+    // Write once, then rewrite with different content after
+    // REWRITE_DELAY_MS. The second write changes size+mtime, so the
+    // first stat is invalidated and the file needs another poll to
+    // stabilise. Total: 3+ polls before consumption.
     await fsp.writeFile(outPath, 'v1');
-    await new Promise(r => setTimeout(r, 30));
+    await new Promise(r => setTimeout(r, REWRITE_DELAY_MS));
     await fsp.writeFile(outPath, 'v2-longer');
 
     const [result] = await running;
