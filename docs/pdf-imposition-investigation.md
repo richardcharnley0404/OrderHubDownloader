@@ -182,27 +182,72 @@ actually apply — location disambiguates instead.
 ## 5. Data model (org-level, electron-store, same pattern as controllers)
 
 ```
-paperSizes:        [{ id, name, width, height, unit }]
+paperSizes:        [{ id, name, width, height, unit: 'in'|'mm' }]
+                                   // width/height stored in POINTS,
+                                   // converted from the operator's unit
+                                   // via M1's inchesToPoints / mmToPoints
+                                   // at IPC boundary. Store speaks points
+                                   // so downstream never guesses.
+
 impositionTemplates: [{
   id, name, paperSizeId,
-  gutter, margins { top, bottom, left, right, gripEdge? },
+  gutter, margins { top, bottom, left, right, gripEdge? },  // points
+  expectedArtwork { width, height },                        // points
   autoRotate: bool,
-  artworkBleed: number,          // 0 = trust TrimBox
+  artworkBleed: number,          // points; 0 = trust TrimBox
   cropMarks: bool,
   mode: 'simplex' | 'duplex',
   duplexFlipEdge: 'long' | 'short',
-  productCodes: string[]         // the assignment
+  productCodes: string[],        // the assignment
+  outputSubfolder: string        // §7.4 — optional; empty = write to
+                                 // outputPath root
 }]
 ```
 
-Validation at save (renderer + IPC mirror, the established pattern):
+### 5.1 expectedArtwork — required at save time (M3 decision, 2026-08-19)
+
+Every template carries a REQUIRED `expectedArtwork { width, height }` in
+points (entered in the paper size's unit). Rationale:
+
+- **Fit validation needs a cell size.** The real cell dimensions used at
+  dispatch come from the artwork's TrimBox (per §3.1) — unknown until
+  dispatch. Without a declared expected size, the template has nothing to
+  validate against at save time, so an operator could persist a template
+  whose configured cell doesn't fit its paper AT ALL, and only find out
+  when the first job runs and fails loudly at dispatch.
+- **The M4 preview needs a grid to draw.** A live layout preview
+  (§6.2 — the "highest-value control") is empty without an expected cell
+  size. Speculative sizes chosen by the preview code would drift from the
+  real engine's answer — same failure mode as duplicated buildDestFolder.
+- **M5 can warn on artwork/template divergence.** With expectedArtwork
+  declared, dispatch can compare the real artwork trim to the template's
+  design assumption and log a WARN when they differ (a template designed
+  for 5×7 receiving 5.1×7 artwork still runs, but the operator should
+  know something drifted upstream).
+
+`expectedArtwork` is **design-time only**. Dispatch always uses the
+REAL artwork trim (per §3.1 rules). If the two diverge, dispatch does
+NOT reject — the template's fit was validated at save time on the
+declared size; the drift is a signal, not a failure.
+
+### 5.2 Validation at save (renderer + IPC mirror, the established pattern)
+
 - a product code may belong to **one** template (the same
   one-inbound-name-one-target rule as shipping methods);
-- cell must fit the sheet at all (a 13x19 product on a 12x18 sheet is a
-  save-time error, not a dispatch surprise);
-- gutter ≥ 2× artworkBleed when bleed is stated;
-- deleting a paper size in use by a template is blocked (or cascades with a
-  confirm — decide in build).
+- cell must fit the sheet at all — the save-time check runs the REAL
+  M1 `computeLayout` on `expectedArtwork` (see §5.1). ONE engine, no
+  reimplementation, same rule as `buildDestFolder`. A 13×19 product on a
+  12×18 sheet is a save-time error, not a dispatch surprise;
+- gutter ≥ 2× artworkBleed when bleed is stated (neighbouring bleeds
+  would overlap otherwise);
+- deleting a paper size in use by a template is BLOCKED — the error names
+  the templates so the operator knows what to fix first (M3 chose block
+  over cascade: a paper size deletion cascading through templates would
+  destroy hours of setup work and is not a common operation);
+- `outputSubfolder` is a SINGLE FOLDER NAME, never a path — path
+  separators are rejected at save time and unsafe characters are
+  stripped via `printUtils.UNSAFE_CHARS` (the shared safety net that
+  folder naming and the filename planner both use).
 
 ## 6. Screens
 

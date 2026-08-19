@@ -98,6 +98,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   deleteException:       (id)      => ipcRenderer.invoke('ohd:routing:delete-exception',      { id }),
   getProcessValues:      ()        => ipcRenderer.invoke('ohd:routing:get-process-values'),
 
+  // Imposition (M3 of docs/pdf-imposition-investigation.md).
+  // list/save/delete for paper sizes and templates. Save returns
+  // { success: true, paperSize|template } or { success: false, error }
+  // — same shape as the routing handlers so the renderer's existing
+  // error-toast wrapper handles both.
+  impositionListPaperSizes:  ()     => ipcRenderer.invoke('ohd:imposition:list-paper-sizes'),
+  impositionSavePaperSize:   (ps)   => ipcRenderer.invoke('ohd:imposition:save-paper-size',   ps),
+  impositionDeletePaperSize: (id)   => ipcRenderer.invoke('ohd:imposition:delete-paper-size', { id }),
+  impositionListTemplates:   ()     => ipcRenderer.invoke('ohd:imposition:list-templates'),
+  impositionSaveTemplate:    (tpl)  => ipcRenderer.invoke('ohd:imposition:save-template',     tpl),
+  impositionDeleteTemplate:  (id)   => ipcRenderer.invoke('ohd:imposition:delete-template',   { id }),
+
   // ohd-api v1.4.0 — server-advertised polling cadence + feature flags.
   // Returned shape: { pollIntervalSeconds, statusPollIntervalSeconds,
   // features: { status_batch, pending_etag, presign_expiry, status_batch_max },

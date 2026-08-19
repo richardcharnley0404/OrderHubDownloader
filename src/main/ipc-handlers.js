@@ -9,6 +9,7 @@ const { awaitingReArmUpdates } = require('./services/awaiting-manifest');
 const { runTest: runPrintControllerTest } = require('./services/test-print-controller');
 const { printControllerStore } = require('./services/print-controller-store');
 const routingService = require('./services/routing-service');
+const impositionService = require('./services/imposition-service');
 const { buildFolderCopyPreview } = require('./services/folder-copy-preview');
 const processFolderService = require('./services/process-folder-service');
 const fujiJobMakerConfig = require('./services/fuji-jobmaker-config');
@@ -2278,6 +2279,75 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
       return [...new Set([...jobProcesses, ...mappingProcesses])].sort();
     } catch (error) {
       return [];
+    }
+  });
+
+  // ── Imposition (M3 of docs/pdf-imposition-investigation.md) ──
+  //
+  // Org-level electron-store CRUD + save-time validation for paper sizes
+  // and imposition templates. Renderer-side validation arrives in M4;
+  // until then, the IPC boundary is the ONLY guard against a template
+  // that would fail at dispatch (zero-fit) or steal another template's
+  // product code. Both branches surface the service's exact-message
+  // errors verbatim so the renderer can show them without translation.
+
+  ipcMain.handle('ohd:imposition:list-paper-sizes', async () => {
+    return impositionService.listPaperSizes();
+  });
+
+  ipcMain.handle('ohd:imposition:save-paper-size', async (event, paperSize) => {
+    try {
+      const saved = impositionService.savePaperSize(paperSize);
+      return { success: true, paperSize: saved };
+    } catch (error) {
+      logger.logWarning('[imposition] save-paper-size rejected', {
+        name:  paperSize && paperSize.name,
+        id:    paperSize && paperSize.id,
+        error: error.message,
+      });
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('ohd:imposition:delete-paper-size', async (event, { id }) => {
+    try {
+      impositionService.deletePaperSize(id);
+      return { success: true };
+    } catch (error) {
+      logger.logWarning('[imposition] delete-paper-size rejected', {
+        id, error: error.message,
+      });
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('ohd:imposition:list-templates', async () => {
+    return impositionService.listTemplates();
+  });
+
+  ipcMain.handle('ohd:imposition:save-template', async (event, template) => {
+    try {
+      const saved = impositionService.saveTemplate(template);
+      return { success: true, template: saved };
+    } catch (error) {
+      logger.logWarning('[imposition] save-template rejected', {
+        name:  template && template.name,
+        id:    template && template.id,
+        error: error.message,
+      });
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('ohd:imposition:delete-template', async (event, { id }) => {
+    try {
+      impositionService.deleteTemplate(id);
+      return { success: true };
+    } catch (error) {
+      logger.logWarning('[imposition] delete-template rejected', {
+        id, error: error.message,
+      });
+      return { success: false, error: error.message };
     }
   });
 
