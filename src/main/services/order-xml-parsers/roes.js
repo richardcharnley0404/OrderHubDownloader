@@ -12,10 +12,11 @@
  *   - <SpecialInstructions>
  *   - <BillTo*> + <ShipTo*> address blocks (ShipTo is often empty)
  *
- * Notably absent: ExternalId, ProductSummary, Total/Tax/Shipping/Discount,
+ * Notably absent: ExternalId, ProductSummary, Total/Tax/Discount,
  * OrderPayment, deleted-product markers, Status. The mapping therefore
  * boils down to identity + line items + addresses + a shipping method
- * label (see the ShippingMethod comment below the `order` literal).
+ * label + an optional shipping amount (see the ShippingMethod and
+ * ShippingTotal comments below the `order` literal).
  *
  * The parser is *pure* (same contract as photo-finale.js — see that file's
  * docstring for conventions). Errors carry the same shape so the watcher
@@ -307,6 +308,26 @@ function parse(xmlString, hotFolderConfig = {}) {
   // stay identical here.
   setIfPresent(order, 'shipping_method',   strField(orderRaw.ShippingMethod));
 
+  // ShippingTotal (2026-08-19) — the ROES-stated shipping cost, if any.
+  // Uses numField + setIfPresent (NOT `Number(x) || 0`) because the
+  // blank-vs-zero distinction is load-bearing:
+  //
+  //   <ShippingTotal></ShippingTotal>  → numField null → key OMITTED
+  //                                      → OrderHub applies the matched
+  //                                        Shipping Method's price
+  //   <ShippingTotal>0</ShippingTotal>  → 0 → total_shipping: 0
+  //                                      → free shipping, method price
+  //                                        NOT used
+  //   <ShippingTotal>5</ShippingTotal>  → 5 → total_shipping: 5
+  //
+  // Same pairing photo-finale.js:418 uses for the same reason. A
+  // hand-rolled `Number(x) || 0` here would collapse blank and zero,
+  // silently defeating the rule for ROES while PhotoFinale kept
+  // behaving correctly — the hardest kind of inconsistency to find.
+  // See docs/xml-shipping-method-investigation.md §4.2.1 for the
+  // absence-vs-falsy trap on the server side.
+  setIfPresent(order, 'total_shipping',    numField(orderRaw.ShippingTotal));
+
   // Shipping vs pickup detection (pickup wiring added 2026-05-23).
   //
   // Per Richard's 2026-05-13 decision: shipping_* fields are only sent when
@@ -410,6 +431,26 @@ function strField(v) {
   if (v === undefined || v === null) return '';
   if (typeof v === 'object') return '';
   return String(v).trim();
+}
+
+/**
+ * Coerce a raw XML value to a finite number, or return `null` for anything
+ * that isn't. Byte-identical to photo-finale.js#numField — the two parsers
+ * must agree on blank-vs-zero-vs-value coercion because setIfPresent's
+ * "finite number wins, `null` skips" contract is what preserves the
+ * distinction OrderHub uses to decide whether to apply the matched
+ * Shipping Method's cost. Do NOT swap for `Number(x) || 0`: that collapses
+ * blank ("") into 0 and turns "no shipping stated" into "free shipping".
+ * See docs/xml-shipping-method-investigation.md §4.2.
+ *
+ * Returns `null` (not `0`) so callers can distinguish "field absent" from
+ * "field present and zero".
+ */
+function numField(v) {
+  if (v === undefined || v === null || v === '') return null;
+  if (typeof v === 'object') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
 }
 
 function setIfPresent(obj, key, value) {

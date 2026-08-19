@@ -35,19 +35,42 @@ neither of these looks like `USPS Ground Advantage` — see §4.1.
 ~~`roes.js:16` lists `ShippingMethod` under **"Notably absent"** from ROES files,
 alongside Total/Tax/Shipping/Discount. The parser never looks for the element.~~
 
-**Built 2026-08-19.** The tag name and its position (`<ShippingMethod>`
-inside `<Order>`, same as PhotoFinale) were specified by Richard — the lab
-defines the ROES schema. No sample-first requirement in the end: the ROES
-parser now calls `setIfPresent(order, 'shipping_method',
-strField(orderRaw.ShippingMethod))` OUTSIDE the pickup/shipping branch,
-mirroring `photo-finale.js:426` exactly. Docstring updated to remove
-`ShippingMethod` from the "notably absent" list. Tests cover the four
-cases (populated, absent, whitespace-only, and — the one someone will
-later try to "fix" by moving inside the else — pickup order still
-carrying the label). `<ShippingTotal>` was deliberately NOT added; ROES
-stating no shipping amount is what lets the matched Shipping Method
-supply the cost (see §4.2), and adding a total silently defeats that.
-Separate decision, separate change.
+**Both built 2026-08-19.** The tag names and their positions
+(`<ShippingMethod>` and `<ShippingTotal>` inside `<Order>`, same as
+PhotoFinale) were specified by Richard — the lab defines the ROES
+schema. No sample-first requirement in the end: the ROES parser now
+calls
+
+```js
+setIfPresent(order, 'shipping_method',   strField(orderRaw.ShippingMethod));
+setIfPresent(order, 'total_shipping',    numField(orderRaw.ShippingTotal));
+```
+
+OUTSIDE the pickup/shipping branch, mirroring `photo-finale.js:426`
+and `photo-finale.js:418` exactly. Docstring updated to remove both
+fields from the "notably absent" list. Tests cover the full matrix for
+each (populated, absent, whitespace-only, non-numeric-for-total, and —
+the one someone will later try to "fix" by moving inside the else —
+pickup order still carrying the label). The `<ShippingTotal>` addition
+was deferred from the earlier ShippingMethod change because it
+interacts with §4.2 (cost precedence) and needed Richard's confirmation
+that ROES should be able to state its own shipping cost. That
+confirmation came 2026-08-19 after the real-world verification of
+XML-ROES068883: `<ShippingTotal>5</ShippingTotal>` in the XML,
+`shipping_amount 12` on the OrderHub side because the tag was never
+read and OrderHub correctly fell back to the matched method's price.
+The gap was ours; this closes it.
+
+**Load-bearing implementation detail.** ROES now uses the same
+`numField` helper PhotoFinale does — byte-identical to
+`photo-finale.js#numField`, copied into `roes.js`. The blank-vs-zero
+distinction (§4.2) is preserved by the pairing of numField's
+`v === '' → null` guard with setIfPresent's "finite number wins,
+null skips" contract. A hand-rolled `Number(x) || 0` here would
+collapse blank into 0 and silently defeat the rule for ROES only —
+the hardest kind of inconsistency to find, because PhotoFinale would
+keep behaving correctly. Docstring on ROES's `numField` calls this
+out.
 
 ## 3. Where `shipping_amount` comes from today
 
@@ -58,10 +81,14 @@ PhotoFinale sends `total_shipping` from `<ShippingTotal>`
 `shipping_amount: 5.95`, matching `<ShippingTotal>5.9500</ShippingTotal>` in
 the XML.
 
-ROES sends neither a method nor a shipping total — its files carry no
-shipping money fields at all.
+ROES sends both as of 2026-08-19 — see §2. `<ShippingTotal>` is read
+via `numField` + `setIfPresent`, so blank / absent → key omitted (let
+OrderHub apply the method price), `0` → sent as `0`
+(free-shipping, method price NOT used), positive → sent verbatim.
+Same rule as PhotoFinale.
 
-So today: **PhotoFinale supplies the cost; ROES supplies nothing.**
+So today: **both parsers supply the cost when the XML has one, and let
+OrderHub apply the matched method's price when it doesn't.**
 
 ## 4. The design questions
 
@@ -150,14 +177,16 @@ if (order.total_shipping === undefined) { applyMethodCost(); }
 This will pass every test written with a non-zero amount and fail on the first
 free-shipping order, which is the worst possible place to find it.
 
-### 4.2.2 ROES work item that follows from this
+### 4.2.2 ROES work item that followed from this — DONE 2026-08-19
 
-ROES currently parses no shipping money fields at all. If the lab adds
-`<ShippingTotal>` to the ROES schema, `roes.js` must read it **using the same
-`numField` + `setIfPresent` pair**, so blank-vs-zero survives the same way. A
-hand-rolled `Number(x) || 0` in the ROES parser would collapse the two and
-silently defeat the rule for ROES only — the hardest kind of inconsistency to
-spot, because PhotoFinale would keep behaving correctly.
+~~ROES currently parses no shipping money fields at all.~~ ROES now
+reads `<ShippingTotal>` via the same `numField` + `setIfPresent` pair
+PhotoFinale uses (both parsers hold byte-identical copies of the
+helper — see §2). Blank-vs-zero survives. The `Number(x) || 0` trap
+this section warned about was avoided by copying PhotoFinale's helper
+verbatim rather than hand-rolling; docstring on `roes.js#numField`
+calls out the "do NOT swap for Number(x) || 0" rule so a later reader
+sees the reasoning before touching it.
 
 ### 4.3 No-match behaviour
 

@@ -277,6 +277,110 @@ test('ShippingMethod on a PICKUP order is STILL sent — mirrors PhotoFinale; th
 });
 
 // ---------------------------------------------------------------------------
+// ShippingTotal (2026-08-19)
+// ---------------------------------------------------------------------------
+//
+// Load-bearing blank-vs-zero distinction. OrderHub decides whether to apply
+// the matched Shipping Method's price from the ABSENCE of total_shipping on
+// the submission — so numField + setIfPresent must preserve blank ("") →
+// key omitted and 0 → key present with value 0 as distinct outcomes. A
+// hand-rolled `Number(x) || 0` here would collapse them and turn "no
+// shipping stated → use method price" into "free shipping → override the
+// method price with zero". Byte-identical to photo-finale.js:418.
+
+test('ShippingTotal blank → total_shipping key OMITTED (so OrderHub applies the matched Shipping Method price)', () => {
+  // The blank-and-zero-must-not-collapse invariant, half 1: blank
+  // means "no cost stated by ROES; OrderHub, decide". If numField were
+  // replaced with `Number(x) || 0` this test flips — and PhotoFinale's
+  // matching test would still pass, which is the whole reason both
+  // parsers use the same helpers.
+  const xml = makeRoesXml({
+    shipToAddress:  '123 Main St',   // populate ShipTo so this is a shipping order
+    shipToCity:     'louisville',
+    shippingMethod: 'UPS Ground',
+    shippingTotal:  '',              // <ShippingTotal></ShippingTotal>
+  });
+  const { request } = parser.parse(xml, HOT_FOLDER);
+  assert.equal('total_shipping' in request.order, false,
+    'blank ShippingTotal MUST omit the key entirely — do NOT collapse to 0');
+});
+
+test('ShippingTotal 0 → total_shipping PRESENT with value 0 (free shipping is a statement, not an absence)', () => {
+  // The blank-and-zero-must-not-collapse invariant, half 2: an
+  // explicit 0 means "the customer paid nothing for shipping" and
+  // OrderHub must respect that rather than override with the method's
+  // price. The pairing of `if (v === '') return null;` in numField
+  // with `if (Number.isFinite(value)) obj[key] = value;` in
+  // setIfPresent — including 0 — is what preserves this.
+  const xml = makeRoesXml({
+    shipToAddress:  '123 Main St',
+    shipToCity:     'louisville',
+    shippingMethod: 'UPS Ground',
+    shippingTotal:  '0',             // <ShippingTotal>0</ShippingTotal>
+  });
+  const { request } = parser.parse(xml, HOT_FOLDER);
+  assert.equal('total_shipping' in request.order, true,
+    'explicit 0 MUST be sent — do NOT collapse to blank');
+  assert.equal(request.order.total_shipping, 0);
+});
+
+test('ShippingTotal populated with a positive value → total_shipping sent verbatim', () => {
+  const xml = makeRoesXml({
+    shipToAddress:  '123 Main St',
+    shipToCity:     'louisville',
+    shippingMethod: 'UPS Ground',
+    shippingTotal:  '5.95',
+  });
+  const { request } = parser.parse(xml, HOT_FOLDER);
+  assert.equal(request.order.total_shipping, 5.95);
+});
+
+test('ShippingTotal tag absent → total_shipping key OMITTED entirely', () => {
+  const xml = makeRoesXml({
+    shipToAddress:  '123 Main St',
+    shipToCity:     'louisville',
+    shippingMethod: 'UPS Ground',
+    // shippingTotal not supplied → tag omitted
+  });
+  const { request } = parser.parse(xml, HOT_FOLDER);
+  assert.equal('total_shipping' in request.order, false,
+    'absent tag must never surface — matches numField+setIfPresent contract');
+});
+
+test('ShippingTotal whitespace-only → total_shipping key OMITTED (XMLParser trimValues:true then numField "" → null)', () => {
+  // Whitespace between tags is stripped by fast-xml-parser's
+  // trimValues:true (roes.js:78 / photo-finale.js:66), so by the time
+  // numField sees the value it's already ''. numField's `v === ''`
+  // guard then returns null. If someone ever drops trimValues:true
+  // from the XMLParser config, this test flips — Number('   ') is 0
+  // and total_shipping would surface as 0, silently overriding the
+  // method's price on a whitespace-only tag.
+  for (const value of ['   ', '\t', '\n  ']) {
+    const xml = makeRoesXml({
+      shipToAddress:  '123 Main St',
+      shipToCity:     'louisville',
+      shippingMethod: 'UPS Ground',
+      shippingTotal:  value,
+    });
+    const { request } = parser.parse(xml, HOT_FOLDER);
+    assert.equal('total_shipping' in request.order, false,
+      `whitespace-only ShippingTotal ${JSON.stringify(value)} must be treated as absent, not 0`);
+  }
+});
+
+test('ShippingTotal non-numeric ("abc") → total_shipping key OMITTED (Number → NaN, numField returns null)', () => {
+  const xml = makeRoesXml({
+    shipToAddress:  '123 Main St',
+    shipToCity:     'louisville',
+    shippingMethod: 'UPS Ground',
+    shippingTotal:  'abc',
+  });
+  const { request } = parser.parse(xml, HOT_FOLDER);
+  assert.equal('total_shipping' in request.order, false,
+    'non-numeric ShippingTotal must NOT surface as 0 (numField guards Number.isFinite)');
+});
+
+// ---------------------------------------------------------------------------
 // total_amount edge cases
 // ---------------------------------------------------------------------------
 
@@ -533,6 +637,11 @@ function makeRoesXml({
   // ShippingMethod (2026-08-19). Same convention as the ShipTo fields:
   // pass a string to emit the tag with that value; pass null to omit.
   shippingMethod  = null,
+  // ShippingTotal (2026-08-19). Same convention — string to emit, null
+  // to omit. Passed as a string so tests can control the raw XML text
+  // (blank, "0", "5.95", "abc") without JS number coercion getting in
+  // the way — the parser's numField is what should coerce.
+  shippingTotal   = null,
 } = {}) {
   const unitPriceLine = unitPrice === null ? '' : `<UnitPrice>${unitPrice}</UnitPrice>`;
   const psLine = omitPaymentStatus
@@ -545,6 +654,7 @@ function makeRoesXml({
   const stStreet = shipToAddress   === null ? '' : `<ShipToAddress>${shipToAddress}</ShipToAddress>`;
   const stCity   = shipToCity      === null ? '' : `<ShipToCity>${shipToCity}</ShipToCity>`;
   const smLine   = shippingMethod  === null ? '' : `<ShippingMethod>${shippingMethod}</ShippingMethod>`;
+  const stTotal  = shippingTotal   === null ? '' : `<ShippingTotal>${shippingTotal}</ShippingTotal>`;
   return `<OrderDataSet xmlns="http://www.trevoli.com/OrderDataSet.xsd">
     <OrderLineItem>
       <idOrderLineItem>1.0</idOrderLineItem>
@@ -562,6 +672,7 @@ function makeRoesXml({
       ${stStreet}
       ${stCity}
       ${smLine}
+      ${stTotal}
     </Order>
   </OrderDataSet>`;
 }

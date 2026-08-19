@@ -9,15 +9,36 @@ verbatim, regardless of pickup or ship (parity with PhotoFinale — the
 method name is informational either way; OrderHub gates the shipping
 cost on the pickup location at its end). OrderHub matches the
 inbound string against the lab's defined **Shipping Methods** and
-supplies the cost when the XML states none — which ROES files always
-do today, because they carry no shipping amount. `<ShippingTotal>`
-is deliberately still not read; the moment it is, the XML's amount
-wins and the matched method becomes a label only. Separate decision,
-separate change.
+sets `shipping_method_id` on the order.
 
 Behaviour when the tag is absent, empty, or whitespace-only is
 unchanged from every other optional string field: the key is omitted
 from the payload entirely (not sent as an empty string).
+
+**Changed: ROES XML imports can now state their own shipping cost.**
+`<ShippingTotal>` inside `<Order>` (same name and position as
+PhotoFinale's) is now read and forwarded as `total_shipping`. Leave
+the tag blank or out entirely to have OrderHub apply the cost from
+the matched Shipping Method; put a value in it — including `0` — to
+override that with the XML's own figure.
+
+The blank-vs-zero distinction is deliberate and load-bearing:
+
+- `<ShippingTotal></ShippingTotal>` (blank) → `total_shipping` omitted
+  from the payload → OrderHub applies the matched Shipping Method's
+  configured price.
+- `<ShippingTotal>0</ShippingTotal>` → `total_shipping: 0` sent → the
+  order carries **free shipping**; the matched method's price is NOT
+  used.
+- `<ShippingTotal>5</ShippingTotal>` → `total_shipping: 5` sent → the
+  order carries 5 as the shipping cost; the matched method's price is
+  NOT used.
+
+Confirmed against `XML-ROES068883` — before this change the XML's
+`<ShippingTotal>5</ShippingTotal>` was silently dropped and the order
+imported with `shipping_amount 12` (the matched method's price)
+because `total_shipping` never reached the payload. After this change
+the XML's `5` reaches OrderHub and wins.
 
 Full write-up: `docs/xml-shipping-method-investigation.md` §2 and
 §4.2. Field-mapping table in `docs/order-xml-hotfolder.md` updated.

@@ -159,6 +159,7 @@ or live in `BillTo*`. See
 | `total_amount`          | computed sum of (`Quantity` × `UnitPrice`) across all line items, rounded to 2 dp. Omitted entirely when no line item carries `UnitPrice` |
 | `notes`                 | `Order/SpecialInstructions` (omitted if empty)               |
 | `shipping_method`       | `Order/ShippingMethod` — sent verbatim regardless of pickup or ship (OrderHub matches it against the lab's defined Shipping Methods and supplies the cost; a pickup order still carries the label — parity with PhotoFinale, 2026-08-19) |
+| `total_shipping`        | `Order/ShippingTotal` — coerced via `numField`. Blank / absent / whitespace-only / non-numeric → key OMITTED (OrderHub then applies the matched Shipping Method's price); `0` → sent as `0` (free shipping — the matched Shipping Method's price is NOT used); a positive value → sent verbatim. See §4.2 of `docs/xml-shipping-method-investigation.md` for the blank-vs-zero rule (2026-08-19). |
 | `shipping_*`            | `Order/ShipTo*` — only emitted if at least one ShipTo field is non-empty. Does NOT fall back to BillTo (per Richard 2026-05-13). |
 | `website_code`          | per-hot-folder setting                                       |
 
@@ -174,14 +175,9 @@ Per `OrderLineItem`:
 | `artwork_on_file`       | `true`                                                       |
 
 Notably *not* sent (because ROES doesn't have them): `total_tax`,
-`total_shipping`, `total_discount`, `payment_gateway`, `payment_reference`.
-(`PaymentMethod` from the XML is intentionally **not** forwarded as
-`payment_gateway` — same decision as PhotoFinale 2026-05-08.)
-
-`total_shipping` is a particular case worth calling out: ROES stating no
-shipping amount is what lets OrderHub's matched Shipping Method supply the
-cost. If ROES ever ships a `<ShippingTotal>` and OHD forwards it, that
-value always wins and the method name becomes a label only.
+`total_discount`, `payment_gateway`, `payment_reference`. (`PaymentMethod`
+from the XML is intentionally **not** forwarded as `payment_gateway` —
+same decision as PhotoFinale 2026-05-08.)
 
 ### Deliberately omitted
 
