@@ -7,19 +7,6 @@ through to OrderHub, so the Shipping Methods you define there will match
 what arrives. There's also one change carried forward from 1.15.1 that
 matters if you use Fuji PIC Pro — read that section too.
 
-## Installing
-
-Windows will warn you that the publisher is unknown. That's expected — our
-installer isn't code-signed.
-
-1. **"Windows protected your PC"** → click **More info** → **Run anyway**
-2. **"Do you want to allow this app…"** → click **Yes**
-
-Close OrderHub Desktop before installing. Your settings, controllers and
-channel mappings are all preserved.
-
----
-
 ## New — Shipping Methods match XML-imported orders
 
 If you use PhotoFinale or ROES XML hot folders, and you use Shipping
@@ -117,6 +104,19 @@ with the live preview and option chips, the **destination-layout**
 choice, and **order-number prefix rules** (a list, with optional
 replacement, on both PIC Pro and Folder Copy). See
 `docs/RELEASE-NOTES-1.15.0-operator.md` for the full write-up.
+
+---
+
+## Installing
+
+Windows will warn you that the publisher is unknown. That's expected — our
+installer isn't code-signed.
+
+1. **"Windows protected your PC"** → click **More info** → **Run anyway**
+2. **"Do you want to allow this app…"** → click **Yes**
+
+Close OrderHub Desktop before installing. Your settings, controllers and
+channel mappings are all preserved.
 
 ## Anything looks wrong?
 
