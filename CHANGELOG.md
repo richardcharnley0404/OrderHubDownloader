@@ -1,4 +1,4 @@
-## Unreleased
+## v1.15.2 - 2026-08-19
 
 **Changed: ROES XML imports now carry the shipping method through to
 OrderHub, matching PhotoFinale.** ROES files placed a `<ShippingMethod>`
