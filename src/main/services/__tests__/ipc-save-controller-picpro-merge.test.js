@@ -110,17 +110,16 @@ function FakeStore() {
   };
 }
 
-// M7b/M7c: fuji-pic-pro-file-writer is required by the save-controller
-// handler for isSameVolume (the co-location check). Stubbed here with
-// a mutable result so the existing merge-validation tests don't fail
-// on the fake C:\pp\... paths, and the co-location tests can flip it
-// per-case. Default: ok:true (co-located). Sync — mirrors the real
-// isSameVolume, which is a pure string compare (M7c). See the
-// isSameVolume docstring for the "no fs I/O" invariant.
-let __probeResult = { ok: true };
-function __setProbeResult(r) { __probeResult = r; }
+// fuji-pic-pro-file-writer is required by the save-controller handler
+// for isSameVolume (advisory volume check, v1.15.1 three-state).
+// Stubbed here with a mutable result so the existing merge-validation
+// tests don't fail on the fake C:\pp\... paths, and the co-location
+// tests can flip it per-case. Default: certain-same (co-located, no
+// warning). Sync — mirrors the real isSameVolume shape.
+let __volumeResult = { verdict: 'certain-same' };
+function __setVolumeResult(r) { __volumeResult = r; }
 const fakePicProWriter = {
-  isSameVolume:    () => __probeResult,
+  isSameVolume:    () => __volumeResult,
   // Other exports are unused by this test file; give the shape so the
   // IPC handler's require doesn't fault on missing methods if anything
   // touches them.
@@ -291,81 +290,153 @@ test('fujipicpro controller with a valid maxPrintsPerJob-shaped value is NOT rej
 });
 
 // ═════════════════════════════════════════════════════════════════════════
-// M7b/M7c — co-location check on Fuji PIC Pro save
+// PIC Pro volume check — ADVISORY only (v1.15.1)
 // ═════════════════════════════════════════════════════════════════════════
 //
-// deliverToDigin's atomic rename requires imageStagingRoot and diginPath
-// to be on the same volume. The previous EXDEV fallback (`.ohdtmp` inside
-// DIGIN) was ingested by PIC Pro's watcher as a blank duplicate order
-// (customer report, 2026-08-18); the fallback was removed. Save-time
-// isSameVolume() enforces the requirement so operators see the fix at
-// edit time rather than a dispatch-time failure.
+// v1.15.0 shipped this as a hard reject keyed on isSameVolume's
+// boolean-ish return, and a real lab was blocked from saving a valid
+// controller — two UNC paths on the same server (`\\labserver1\Pixfizz
+// Digin Staging` alongside `\\labserver1\Digin`), very likely the same
+// physical volume, but the string compare called them cross-volume and
+// refused the save. Their DIGIN path is a share ROOT so there is no
+// other folder on that share to stage into — no workaround.
 //
-// M7c note: only `cross-volume` is a rejection now — the M7b probe's
-// pathA/pathB-not-writable diagnostics are gone with the probe itself.
-// The isSameVolume check is a pure string compare that CAN'T fail with
-// an fs error, and its "unknown shape" case biases to accept (defers to
-// the dispatch-time EXDEV throw). So this suite has one rejection test
-// and one ordering test — no path-not-writable test, because that
-// failure mode no longer exists.
+// v1.15.1 rule: EVERY verdict SAVES. `certain-same` saves silently;
+// every other verdict (certain-different AND indeterminate) saves and
+// surfaces a warning naming both paths. The dispatch-time EXDEV throw
+// in deliverToDigin is now the ONLY authoritative check. Tests below
+// lock the contract: no volume verdict rejects a save.
 
-test('M7b/M7c: cross-volume PIC Pro save is rejected with the exact fix text', async () => {
+test('v1.15.1: certain-different does NOT reject; save succeeds with a warning', async () => {
   resetState();
-  __setProbeResult({ ok: false, code: 'cross-volume' });
+  __setVolumeResult({ verdict: 'certain-different', code: 'different-drives' });
   try {
     const result = await saveController(null, makePicPro({
       imageStagingRoot: 'C:\\pp\\stage',
-      diginPath:        'D:\\pp\\digin',   // different drive letter — the shape that fails
+      diginPath:        'D:\\pp\\digin',
     }));
-    assert.equal(result.success, false, 'cross-volume save must be rejected');
-    // Error text names the fix, not the rule — same posture as the
-    // folder-copy root-layout guards.
-    assert.match(result.error, /same volume/);
-    assert.match(result.error, /blank duplicate order/,
-      'error must name the operator-visible failure mode (blank duplicate) so the incident-report → fix path is obvious');
-    assert.match(result.error, /C:\\pp\\stage/,
-      'error must name the configured Image Staging Root');
-    assert.match(result.error, /D:\\pp\\digin/,
-      'error must name the configured DIGIN Path');
-    assert.match(result.error, /Move Image Staging Root/,
-      'error must name the specific fix so the operator knows what to change');
-    assert.equal(__controllers.length, 0,
-      'controller must NOT persist when the check rejects — the current state on disk stays whatever it was');
-
-    const warn = __warns.find(w => /PIC Pro co-location check failed/.test(w.msg));
-    assert.ok(warn, 'rejection must log at warn level with controller context');
-    assert.equal(warn.meta.code,             'cross-volume');
-    assert.equal(warn.meta.imageStagingRoot, 'C:\\pp\\stage');
-    assert.equal(warn.meta.diginPath,        'D:\\pp\\digin');
+    assert.equal(result.success, true, 'certain-different MUST NOT block the save (v1.15.1)');
+    assert.equal(__controllers.length, 1, 'controller MUST persist');
+    assert.ok(Array.isArray(result.warnings) && result.warnings.length >= 1,
+      'result MUST carry a warnings array with the co-location advisory');
+    const w = result.warnings.find(x => x.kind === 'picpro-volume-uncertain');
+    assert.ok(w, 'warning kind must be picpro-volume-uncertain');
+    assert.match(w.text, /may be on different volumes/);
+    assert.match(w.text, /dispatch will stop with an error/,
+      'warning must point operators at the dispatch-time behaviour');
+    assert.match(w.text, /C:\\pp\\stage/, 'warning must name Image Staging Root');
+    assert.match(w.text, /D:\\pp\\digin/, 'warning must name DIGIN Path');
+    // Warn-level log for the Activity Log, with the verdict + code
+    // metadata for diagnostics.
+    const logged = __warns.find(x => /volume verdict is not certain-same/.test(x.msg));
+    assert.ok(logged, 'must log advisory at warn level');
+    assert.equal(logged.meta.verdict, 'certain-different');
+    assert.equal(logged.meta.code,    'different-drives');
   } finally {
-    // Reset for downstream tests.
-    __setProbeResult({ ok: true });
+    __setVolumeResult({ verdict: 'certain-same' });
   }
 });
 
-test('M7b/M7c: co-location check runs AFTER the sync validator — save-time-only, always after normalisation', async () => {
-  // The check runs INSIDE the fujipicpro branch AFTER
-  // validateControllerConfig has confirmed both fields are present and
-  // Object.assign'd the normalised shape back. This test locks that
-  // ordering by giving a controller with a MISSING diginPath —
-  // validateControllerConfig should reject with its own message BEFORE
-  // the co-location check runs. If the order were reversed we'd get
-  // the "same volume" message instead of the operator-friendly
-  // "diginPath is required".
+test('v1.15.1: indeterminate (same-server-different-share) does NOT reject; save succeeds with a warning', async () => {
+  // The exact 1.15.0 hard-block regression: a real lab configured
+  // \\labserver1\Pixfizz Digin Staging and \\labserver1\Digin — two
+  // shares on the same server. The 1.15.0 string check called that
+  // cross-volume and refused the save. Under v1.15.1 the verdict is
+  // indeterminate (could be same physical volume, could not — you
+  // can't tell from names) and the save proceeds with a warning.
   resetState();
-  // Even though the co-location stub is set to reject, the sync
-  // validator should reject first because diginPath is missing.
-  __setProbeResult({ ok: false, code: 'cross-volume' });
+  __setVolumeResult({ verdict: 'indeterminate', code: 'same-server-different-share' });
+  try {
+    const result = await saveController(null, makePicPro({
+      imageStagingRoot: '\\\\labserver1\\Pixfizz Digin Staging',
+      diginPath:        '\\\\labserver1\\Digin',
+    }));
+    assert.equal(result.success, true, 'indeterminate (same-server-different-share) MUST NOT block the save');
+    assert.equal(__controllers.length, 1, 'the exact 1.15.0 hard-block config MUST now persist');
+    assert.ok(result.warnings && result.warnings.length >= 1);
+    const logged = __warns.find(x => /volume verdict is not certain-same/.test(x.msg));
+    assert.equal(logged.meta.verdict, 'indeterminate');
+    assert.equal(logged.meta.code,    'same-server-different-share');
+  } finally {
+    __setVolumeResult({ verdict: 'certain-same' });
+  }
+});
+
+test('v1.15.1: certain-same saves silently — no warning', async () => {
+  resetState();
+  // Default fake result is already certain-same; be explicit.
+  __setVolumeResult({ verdict: 'certain-same' });
+  const result = await saveController(null, makePicPro({
+    imageStagingRoot: 'C:\\pp\\stage',
+    diginPath:        'C:\\pp\\digin',
+  }));
+  assert.equal(result.success, true);
+  assert.equal(__controllers.length, 1);
+  assert.ok(Array.isArray(result.warnings), 'warnings MUST always be an array (even when empty) — renderer branches on length');
+  const volumeWarning = (result.warnings || []).find(x => x.kind === 'picpro-volume-uncertain');
+  assert.equal(volumeWarning, undefined, 'certain-same MUST NOT produce a volume warning');
+  const logged = __warns.find(x => /volume verdict/.test(x.msg));
+  assert.equal(logged, undefined, 'certain-same MUST NOT log the advisory');
+});
+
+test('v1.15.1: no volume verdict can ever cause a save rejection (contract lock)', async () => {
+  // Property test — every verdict the helper can emit must produce a
+  // successful save from the handler. Locks the "advisory only"
+  // contract so a future maintainer who re-adds boolean rejection has
+  // to break this too.
+  const verdicts = [
+    { verdict: 'certain-same' },
+    { verdict: 'certain-different', code: 'different-drives' },
+    { verdict: 'certain-different', code: 'different-servers' },
+    { verdict: 'indeterminate',     code: 'same-server-different-share' },
+    { verdict: 'indeterminate',     code: 'local-vs-unc' },
+    { verdict: 'indeterminate',     code: 'unparseable-a' },
+    { verdict: 'indeterminate',     code: 'unparseable-b' },
+  ];
+  for (const v of verdicts) {
+    resetState();
+    __setVolumeResult(v);
+    try {
+      const result = await saveController(null, makePicPro());
+      assert.equal(result.success, true,
+        `verdict ${JSON.stringify(v)} MUST NOT reject the save — advisory-only contract`);
+    } finally {
+      __setVolumeResult({ verdict: 'certain-same' });
+    }
+  }
+});
+
+test('v1.15.1: containment checks (staging inside DIGIN etc.) STILL reject — only the volume verdict is advisory', async () => {
+  // The sync validator (validateControllerConfig) rejects overlapping
+  // paths — that's string-certain and knowable, so it stays a hard
+  // reject. Locks that the v1.15.1 change scoped only to the volume
+  // verdict and did not soften the containment guardrail.
+  resetState();
+  __setVolumeResult({ verdict: 'certain-same' }); // volume ok — isolate the containment path
+  const overlap = makePicPro({
+    imageStagingRoot: 'C:\\pp\\digin\\stage',  // nested inside diginPath
+    diginPath:        'C:\\pp\\digin',
+  });
+  const result = await saveController(null, overlap);
+  assert.equal(result.success, false, 'containment overlap MUST still reject the save');
+  assert.equal(__controllers.length, 0);
+});
+
+test('v1.15.1: sync validator still runs BEFORE the volume check — a missing diginPath rejects with its own error, not with the volume advisory', async () => {
+  resetState();
+  // Volume check would produce a warning if it ran — the sync validator
+  // must reject FIRST, before the volume check gets a chance.
+  __setVolumeResult({ verdict: 'certain-different', code: 'different-servers' });
   try {
     const bad = makePicPro();
     delete bad.diginPath;
     const result = await saveController(null, bad);
     assert.equal(result.success, false);
     assert.match(result.error, /diginPath is required/,
-      'sync validator must catch the missing field BEFORE the co-location check runs');
-    assert.doesNotMatch(result.error, /same volume/,
-      'the co-location message must not appear when the sync validator already rejected');
+      'sync validator must catch the missing field BEFORE the volume check runs');
+    assert.doesNotMatch(result.error, /may be on different volumes/,
+      'the volume advisory must not appear in the sync-validator rejection');
   } finally {
-    __setProbeResult({ ok: true });
+    __setVolumeResult({ verdict: 'certain-same' });
   }
 });

@@ -1233,6 +1233,15 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
 
   ipcMain.handle('ohd:routing:save-controller', async (event, controller) => {
     try {
+      // Advisory warnings accumulated across the handler and returned
+      // alongside `success: true` when the save proceeds. Distinct from
+      // the `error` return, which signals rejection. Only ADD to this;
+      // never let a warning short-circuit the save (v1.15.1 made the
+      // Fuji PIC Pro volume check advisory after 1.15.0 hard-blocked a
+      // real lab from saving a valid controller — see the isSameVolume
+      // block below).
+      const warnings = [];
+
       // Defence-in-depth mirror of the renderer-side guard in
       // src/renderer/renderer.js (ocSaveBtn handler). A Darkroom Pro
       // controller with mediaTranslations defined but mediaOptionKey empty
@@ -1374,44 +1383,48 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
         }
         Object.assign(controller, normalized);
 
-        // M7b/M7c (2026-08-18) — co-location gate. Image Staging Root
-        // and DIGIN Path MUST be on the same volume, otherwise the
-        // atomic rename in deliverToDigin returns EXDEV and (pre-M7b)
-        // the slow-path fallback wrote `.ohdtmp` inside the DIGIN
-        // folder — Fuji PIC Pro's watcher ingested that partial folder
-        // as a blank duplicate order (customer report, 2026-08-18).
-        // The fallback was removed; co-location is now the enforced
-        // requirement.
+        // Fuji PIC Pro co-location — ADVISORY only (v1.15.1).
         //
-        // M7b tried a rename-probe here and hit the SAME class of bug
-        // it was meant to prevent — the probe file `.ohd-volume-probe-*`
-        // landed inside DIGIN on every save of a correctly-configured
-        // controller. M7c replaces that with a pure string compare of
-        // volume roots (see fuji-pic-pro-file-writer.js#isSameVolume).
-        // Sync — no fs I/O. The dispatch-time EXDEV throw in
-        // deliverToDigin is the authoritative second line of defence
-        // for exotic setups (subst, DFS, reparse points) that the
-        // string compare can't reason about.
-        const coLoc = fujiPicProFileWriter.isSameVolume(
+        // Original requirement (M7b, 2026-08-18): Image Staging Root
+        // and DIGIN Path must be on the same volume, otherwise the
+        // atomic rename in deliverToDigin returns EXDEV. Pre-M7b's
+        // slow-path fallback wrote `.ohdtmp` into DIGIN and PIC Pro
+        // ingested it as a blank duplicate — the slow path is gone,
+        // dispatch throws EXDEV loudly at run time with an actionable
+        // message. That dispatch-time throw remains the authoritative
+        // check.
+        //
+        // 1.15.0 shipped this as a save-time HARD REJECT keyed on
+        // isSameVolume's boolean-ish return. Real lab hit it: two UNC
+        // paths on the same server (`\\labserver1\Pixfizz Digin
+        // Staging` + `\\labserver1\Digin`), very likely the same
+        // physical volume, string check called cross-volume — save
+        // blocked with no workaround (their DIGIN path is a share
+        // root so there's no other folder on that share to stage
+        // into). v1.15.1 makes the check advisory: `certain-same`
+        // saves silently; every other verdict (`certain-different`
+        // AND `indeterminate`) saves and surfaces a warning. Dispatch
+        // decides.
+        const volume = fujiPicProFileWriter.isSameVolume(
           controller.imageStagingRoot,
           controller.diginPath,
         );
-        if (!coLoc.ok) {
-          const msg =
-            'Image Staging Root and DIGIN Path must be on the same volume. ' +
-            'PIC Pro\'s DIGIN watcher would otherwise pick up the partial folder mid-write ' +
-            'and ship a blank duplicate order alongside the real one. ' +
+        if (volume.verdict !== 'certain-same') {
+          const text =
+            'Image Staging Root and DIGIN Path may be on different volumes. ' +
+            'If they are, dispatch will stop with an error — OHD can\'t tell ' +
+            'for certain from network paths alone. ' +
             `Image Staging Root: ${controller.imageStagingRoot}. ` +
-            `DIGIN Path: ${controller.diginPath}. ` +
-            'Move Image Staging Root onto the same volume as DIGIN and try Save again.';
-          logger.logWarning('[routing] save-controller rejected — PIC Pro co-location check failed', {
+            `DIGIN Path: ${controller.diginPath}.`;
+          warnings.push({ kind: 'picpro-volume-uncertain', text });
+          logger.logWarning('[routing] save-controller — PIC Pro volume verdict is not certain-same (advisory)', {
             controllerId:     controller.id,
             name:             controller.name,
             imageStagingRoot: controller.imageStagingRoot,
             diginPath:        controller.diginPath,
-            code:             coLoc.code,
+            verdict:          volume.verdict,
+            code:             volume.code,
           });
-          return { success: false, error: msg };
         }
       }
 
@@ -1637,7 +1650,10 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
       }
 
       pollingService.restartFolderMonitors();
-      return { success: true };
+      // `warnings` is always an array; empty on the silent-success path.
+      // Renderer decides whether to render the modal warnings panel
+      // based on `warnings.length > 0`.
+      return { success: true, warnings };
     } catch (error) {
       logger.logError('ohd:routing:save-controller error', error);
       return { success: false, error: error.message };

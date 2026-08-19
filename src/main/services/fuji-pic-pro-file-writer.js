@@ -360,70 +360,100 @@ function _padNegNumber(n) {
 }
 
 /**
- * Save-time co-location check (M7c). Compares the two paths' volume
- * roots as PURE STRINGS — no fs I/O, no artefacts written anywhere.
+ * Save-time volume-relationship check (M7c → v1.15.1). Compares the
+ * two paths' parsed volume identifiers as PURE STRINGS — no fs I/O, no
+ * artefacts written anywhere. Returns a THREE-STATE verdict:
+ *
+ *   - `certain-same`      — same drive letter, or same UNC host+share.
+ *                           A rename between the two paths is guaranteed
+ *                           to succeed (barring permissions).
+ *   - `certain-different` — different drive letters, or different UNC
+ *                           servers. A rename would EXDEV.
+ *   - `indeterminate`     — string-alone cannot tell. Includes
+ *                           same-server-different-share (two shares on
+ *                           `\\labserver1\` might be one physical
+ *                           volume or two — you can't tell from names),
+ *                           local-vs-UNC (a mapped drive letter can
+ *                           point at any share), and unparseable
+ *                           strings.
+ *
+ * ── Why the check is ADVISORY, not authoritative (v1.15.1) ────────────
+ *
+ * A false "certain-different" verdict on a lab whose two UNC paths are
+ * two shares on the same physical volume BLOCKS them from saving a
+ * valid controller with no workaround (their DIGIN path is a share
+ * root — there is no other folder on that share to stage into). That
+ * happened in production. M7c's argument that "a wrong verdict
+ * degrades gracefully into the dispatch-time EXDEV guard" was true for
+ * a wrong `certain-same`; a wrong `certain-different` isn't graceful,
+ * it's a hard block. So the check no longer decides save/no-save.
+ *
+ * The caller (IPC save-controller) SAVES on every verdict and surfaces
+ * a warning when the verdict isn't `certain-same`. The authoritative
+ * check is deliverToDigin's dispatch-time EXDEV throw — it already
+ * names both paths and the fix, and it runs against the actual
+ * filesystem where OHD can't be wrong about what a rename does.
  *
  * ── Why this is a string compare and NOT a filesystem probe ───────────
  *
  * The M7b (2026-08-18) version of this check used a rename-probe: write
  * a probe file in staging, rename it INTO diginPath, rename it back,
  * unlink. Same-day M7c review caught that this is the exact class of
- * bug M7b existed to remove — the probe file `.ohd-volume-probe-*`
- * appeared INSIDE `diginPath` on every save of a correctly-configured
- * controller, and "brief" and "doesn't look like an order" are exactly
- * the two arguments the deleted `.ohdtmp` comment made before
- * production disproved them. Ironically the misconfigured (cross-
- * volume) case was SAFE from the probe — the rename threw EXDEV and
- * nothing landed in DIGIN. It was the correctly-configured labs whose
- * watched folder got the probe. The probe is gone.
- *
- * This check does NOT have to be authoritative — that's the whole
- * point. If it wrongly says "same volume" for an exotic setup
- * (`subst`, DFS junction, reparse point), deliverToDigin's dispatch-
- * time EXDEV throw catches it and names the fix. Two lines of
- * defence, neither of which touches DIGIN.
- *
- * DO NOT replace this with a filesystem probe of any kind. If the
- * string compare needs to become smarter about some new path shape
+ * bug M7b existed to remove — the probe file appeared INSIDE `diginPath`
+ * on every save of a correctly-configured controller. The probe is
+ * gone. DO NOT replace this with a filesystem probe of any kind. If
+ * the string compare needs to become smarter about some new path shape
  * (a mount-point convention we haven't seen, say), extend the string
  * parsing — never introduce a write into diginPath.
  *
- * ── Rules ─────────────────────────────────────────────────────────────
+ * ── Verdict rules ─────────────────────────────────────────────────────
  *
- *   - Local Windows paths: volume root is the drive designator, e.g.
- *     `C:` from `C:\Fuji\DIGIN`. Case-insensitive.
- *   - UNC paths: volume root is `\\server\share`, e.g. `\\host\digin`
- *     from `\\host\digin\ORD-1`. Case-insensitive on both parts.
- *     A bare `\\server\share` with no subpath IS a valid volume root.
- *   - Trailing slashes and forward slashes are normalised before
- *     extraction so `C:\` / `C:` / `C:/` behave the same, and
- *     `\\host/share/DIGIN` matches `\\host\share\DIGIN`.
- *   - Mismatched shapes (one local, one UNC) are definitively
- *     different volumes.
- *   - An unrecognisable STRING (empty, a POSIX-looking `/etc/foo`,
- *     a bare `\\server` without a share segment, `.`, `relative\path`)
- *     returns `{ ok: true, code: 'indeterminate' }`. The caller
- *     treats that as a pass at save time — the dispatch-time EXDEV
- *     guard is authoritative for any shape the string compare can't
- *     reason about, so blocking a save on "shape I don't recognise"
- *     would be worse than passing it through. The distinct
- *     `code: 'indeterminate'` (versus a bare `{ ok: true }`) means a
- *     future caller that wants to be strict — a diagnostic tool, an
- *     integration test — can branch on it without re-parsing the
- *     paths. A check that answers "yes, definitely" when it cannot
- *     know is a trap for the next caller.
- *   - Non-string input (`null`, `undefined`, numbers, objects) THROWS.
- *     That's a programmer error, not a runtime configuration state —
- *     matches the rest of this module's posture on bad arg types.
+ *   Local paths      | drive letter (`C:` from `C:\Fuji\DIGIN`).
+ *                    | Case-insensitive.
+ *   UNC paths        | `\\host\share`. Case-insensitive on both parts.
+ *                    | A bare `\\server\share` with no subpath is a
+ *                    | valid volume identifier.
+ *   Trailing / mixed | `C:\` / `C:` / `C:/` behave the same;
+ *                    | `\\host/share/DIGIN` matches `\\host\share\DIGIN`.
  *
- * Uses `path.win32` explicitly so the parsing works identically when
- * this runs on a Linux CI host — the PIC Pro delivery it guards is
- * Windows-only, so Windows path semantics are the right ones
+ *   certain-same          | Same drive letter, OR same UNC host+share.
+ *   certain-different     | Different drive letters (different physical
+ *                         | drives on the same box — EXDEV certain).
+ *                         | OR different UNC servers (different physical
+ *                         | boxes — EXDEV certain).
+ *   indeterminate         | Same UNC server, different shares — the two
+ *   (same-server-         |   shares COULD be different exports of the
+ *   different-share)      |   same physical volume (rename succeeds) or
+ *                         |   different volumes (EXDEV). You cannot
+ *                         |   tell from the paths alone, and the shipped
+ *                         |   1.15.0 verdict was wrong here in the field
+ *                         |   for a real lab configuring
+ *                         |   `\\labserver1\Pixfizz Digin Staging`
+ *                         |   alongside `\\labserver1\Digin`. Save;
+ *                         |   dispatch decides.
+ *   indeterminate         | Local vs UNC — a Windows mapped drive letter
+ *   (local-vs-unc)        |   can point at any UNC share, so `Z:\x` and
+ *                         |   `\\host\share\y` could be the same
+ *                         |   physical volume. Save; dispatch decides.
+ *   indeterminate         | Unparseable strings (empty, `/etc/foo`, a
+ *   (unparseable-a|b)     |   bare `\\server` with no share, `.`,
+ *                         |   `relative\path`). Bias to accept — save;
+ *                         |   dispatch decides.
+ *
+ * Non-string input (`null`, `undefined`, numbers, objects) THROWS.
+ * Programmer error, not a runtime configuration state — matches the
+ * rest of this module's posture on bad arg types.
+ *
+ * Uses win32 semantics explicitly so the parsing works identically
+ * when this runs on a Linux CI host — the PIC Pro delivery it guards
+ * is Windows-only, so Windows path semantics are the right ones
  * regardless of where the check itself is executed.
  *
  * @param {string} pathA
  * @param {string} pathB
- * @returns {{ ok: true } | { ok: true, code: 'indeterminate' } | { ok: false, code: 'cross-volume' }}
+ * @returns {{ verdict: 'certain-same' }
+ *          | { verdict: 'certain-different', code: 'different-drives' | 'different-servers' }
+ *          | { verdict: 'indeterminate',     code: 'same-server-different-share' | 'local-vs-unc' | 'unparseable-a' | 'unparseable-b' }}
  */
 function isSameVolume(pathA, pathB) {
   if (typeof pathA !== 'string') {
@@ -432,24 +462,47 @@ function isSameVolume(pathA, pathB) {
   if (typeof pathB !== 'string') {
     throw new Error('isSameVolume: pathB must be a string');
   }
-  const a = _volumeRoot(pathA);
-  const b = _volumeRoot(pathB);
-  // Indeterminate: string given, but not a shape we can extract a
-  // volume root from. Pass at save time; the dispatch-time EXDEV
-  // throw is the authoritative check. See docstring rule 5.
-  if (a === null || b === null) return { ok: true, code: 'indeterminate' };
-  if (a === b) return { ok: true };
-  return { ok: false, code: 'cross-volume' };
+  const a = _parseVolume(pathA);
+  const b = _parseVolume(pathB);
+
+  if (a === null) return { verdict: 'indeterminate', code: 'unparseable-a' };
+  if (b === null) return { verdict: 'indeterminate', code: 'unparseable-b' };
+
+  // Mixed shape: a mapped drive letter can point at any UNC share, so
+  // we can't tell without hitting the filesystem. Bias to accept.
+  if (a.kind !== b.kind) {
+    return { verdict: 'indeterminate', code: 'local-vs-unc' };
+  }
+
+  if (a.kind === 'local') {
+    return a.drive === b.drive
+      ? { verdict: 'certain-same' }
+      : { verdict: 'certain-different', code: 'different-drives' };
+  }
+
+  // Both UNC. Different servers = different physical boxes = certain.
+  if (a.host !== b.host) {
+    return { verdict: 'certain-different', code: 'different-servers' };
+  }
+  // Same server, same share = certain-same. Same server, different
+  // shares = INDETERMINATE (the shipped 1.15.0 bug was calling this
+  // certain-different and hard-rejecting the save).
+  return a.share === b.share
+    ? { verdict: 'certain-same' }
+    : { verdict: 'indeterminate', code: 'same-server-different-share' };
 }
 
 /**
- * Extract the case-insensitive volume root from a Windows-style path
- * as a lowercased string. Returns `null` for shapes this helper
- * doesn't recognise (POSIX paths, bare `\\server` without a share
- * segment, empty / non-string input). Callers treat null as
- * "unknown — accept and defer to dispatch".
+ * Parse a Windows-style path into its volume identifier. Returns:
+ *   - `{ kind: 'local', drive: 'c:' }`             — drive-letter path
+ *   - `{ kind: 'unc', host: 'lab', share: 'x' }`  — UNC path
+ *   - `null`                                       — unparseable
+ *
+ * Lowercases host / share / drive so the returned shape is directly
+ * comparable with `===`. Callers treat null as "unknown — accept and
+ * defer to dispatch".
  */
-function _volumeRoot(p) {
+function _parseVolume(p) {
   if (typeof p !== 'string' || p.length === 0) return null;
   // Normalise: '/' → '\', then strip any trailing separators so
   // `C:\` / `C:` and `\\host\share\` / `\\host\share` behave the same.
@@ -467,12 +520,12 @@ function _volumeRoot(p) {
     const shareEnd   = afterHost.indexOf('\\');
     const share      = shareEnd === -1 ? afterHost : afterHost.slice(0, shareEnd);
     if (share.length === 0) return null;
-    return `\\\\${host}\\${share}`.toLowerCase();
+    return { kind: 'unc', host: host.toLowerCase(), share: share.toLowerCase() };
   }
 
   // Local: `X:` optionally followed by more. Drive letter is [A-Za-z].
   if (/^[A-Za-z]:/.test(norm)) {
-    return norm.slice(0, 2).toLowerCase();
+    return { kind: 'local', drive: norm.slice(0, 2).toLowerCase() };
   }
 
   // Anything else — POSIX path, bare `.`, relative path, gibberish —
@@ -488,7 +541,7 @@ module.exports = {
   isSameVolume,
   _internals: {
     _padNegNumber,
-    _volumeRoot,
+    _parseVolume,
     CMD_FILENAME_PREFIX,
     ORDER_FILE_TMP_SUFFIX,
   },

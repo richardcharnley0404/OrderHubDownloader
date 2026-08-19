@@ -10,18 +10,31 @@ PhotoFinale orders appear in OrderHub — all three are covered first.
 
 If you use a **Fuji PIC Pro** printer, check this now, not after upgrading.
 
-**From 1.15.0, Image Staging Root and DIGIN Path MUST be on the same volume.**
-Same drive letter (both on `D:`), or the same UNC share (both on
+**From 1.15.0, Image Staging Root and DIGIN Path need to be on the same
+volume** — same drive letter (both on `D:`), or the same UNC share (both on
 `\\labserver\digin`). If they're on different volumes, dispatch to that
-controller **stops** after upgrading, with an error naming both paths.
+controller **stops** at run time with an error naming both paths.
 
-**Where to check:** Settings → Routing → Order Controllers → Edit your Fuji
-PIC Pro controller. Look at **Image Staging Root** and **DIGIN Path**. If
-they're on the same drive or the same `\\server\share`, you're fine and
-there's nothing to do. If they aren't, move Image Staging Root onto the same
-volume as DIGIN Path before you install.
+At save time OHD flags this when it can tell — a warning that says the two
+paths may be on different volumes, and to fix them if so. The save still
+succeeds: OHD can't always tell for certain from network paths alone (two
+shares on the same server can be one physical volume or two), and dispatch
+is what actually enforces the rule. So the flow is:
 
-**Why this is now required (and why it's actually a good change).** Some labs
+1. **Save-time warning** — a heads-up if OHD suspects a mismatch, so you
+   can fix it before any order is dispatched.
+2. **Run-time enforcement** — if the two paths really are on different
+   volumes, dispatch stops with an error and the order stays in Awaiting
+   Processing until you fix the paths.
+
+**Where to check now:** Settings → Routing → Order Controllers → Edit your
+Fuji PIC Pro controller. Look at **Image Staging Root** and **DIGIN Path**.
+Ideally they're on the same drive or the same `\\server\share`. If they
+aren't, and you don't want to see the run-time error on your next order,
+move Image Staging Root onto the same volume as DIGIN Path before you
+install.
+
+**Why the rule at all (and why it's actually a good change).** Some labs
 have been seeing every order arrive twice — once correct, once blank, and
 the blank one's folder name ends in `.ohdtmp`. Cause: when the two paths were
 on different volumes, OHD had to copy into a temp folder inside DIGIN and
@@ -36,10 +49,8 @@ If you've been seeing the `.ohdtmp` duplicates, this is the fix. The blank
 folders never had any images and are safe to delete once you've confirmed
 the correct order printed.
 
-Save is blocked until the two paths are co-located, so you can't accidentally
-re-create the broken configuration.
-
-Once both paths sit on the same volume, jump to **## Installing** below.
+Once both paths sit on the same volume — or you've decided to leave them and
+let dispatch confirm — jump to **## Installing** below.
 
 ---
 

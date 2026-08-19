@@ -6668,6 +6668,20 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
       showToast('Error saving controller: ' + (result.error || 'Save failed'), 'error', 8000);
       return;
     }
+    // v1.15.1 — the handler now returns advisory `warnings` on successful
+    // saves. The Fuji PIC Pro volume check is the only current source: a
+    // heads-up when OHD can't confirm both paths are on the same volume
+    // (it's advisory because a wrong verdict blocked a real lab from
+    // saving a valid controller in 1.15.0 — see the IPC-handler comment).
+    // Alert-per-warning rather than a toast: the operator MUST acknowledge
+    // before the modal closes, because a toast fades and the message is
+    // load-bearing (the difference between "will work" and "dispatch will
+    // stop with an error").
+    if (result && Array.isArray(result.warnings) && result.warnings.length > 0) {
+      for (const w of result.warnings) {
+        alert(w.text || String(w));
+      }
+    }
     modal.classList.add('hidden');
     await loadRoutingSection();
     // Editing a controller's translations (or the Paper Type Option Key)

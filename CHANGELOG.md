@@ -1,3 +1,53 @@
+## v1.15.1 - 2026-08-18
+
+**Fixed: Fuji PIC Pro save-time volume check now warns instead of
+rejecting — 1.15.0 hard-blocked a real lab from saving a valid
+controller.** The 1.15.0 rule ("Image Staging Root and DIGIN Path
+must be on the same volume, save is rejected otherwise") assumed a
+string check on network paths could always tell same-volume from
+cross-volume. It can't: two shares on the same server look different
+to a string check even when they're one physical volume. A lab whose
+paths were `\\labserver1\Pixfizz Digin Staging` alongside
+`\\labserver1\Digin` — same server, almost certainly the same
+underlying storage — was blocked from saving the controller at all.
+Their DIGIN path is a share ROOT so there was no other folder on
+that share to stage into either. No workaround.
+
+**What changed.** The save-time check is now ADVISORY and returns a
+three-state verdict:
+
+- **Certain same volume** (same drive letter, or same UNC host+share) —
+  save succeeds silently, as before.
+- **Certain different volume** (different drive letters, or different
+  UNC servers) — save succeeds and a warning names both paths.
+- **Indeterminate** (same server, different shares; local vs UNC; any
+  path OHD can't parse) — save succeeds and the same warning fires.
+  This case is why the check had to become advisory: OHD genuinely
+  cannot tell from network paths alone.
+
+**Dispatch-time enforcement is unchanged.** If the two paths really
+are on different volumes, `deliverToDigin` stops with the same
+actionable error naming both paths and the fix — a run-time check
+against the actual filesystem, which is the only thing that can be
+right about what a rename does. So the flow is: save-time OHD warns
+when it suspects a mismatch (a heads-up), and dispatch is the
+authoritative check.
+
+The advisory warning is shown as a modal dialog after the save
+succeeds — the operator must acknowledge it before the controller
+modal closes. Sample text:
+
+> Image Staging Root and DIGIN Path may be on different volumes.
+> If they are, dispatch will stop with an error — OHD can't tell for
+> certain from network paths alone.
+
+**Nothing else in this release.** Full CHANGELOG entry for 1.15.0
+below (the co-location section there describes the 1.15.0
+save-time-rejection behaviour, which is what this patch reverses;
+everything else in 1.15.0 is unchanged).
+
+---
+
 ## v1.15.0 - 2026-08-18
 
 **Changed: PhotoFinale XML orders now arrive UNPAID and need marking

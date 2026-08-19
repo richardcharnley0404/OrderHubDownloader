@@ -384,12 +384,13 @@ test('M7b deliverToDigin: EXDEV throws the co-location error AND nothing is writ
   //   1. EXDEV throws the named error — never falls back to a
   //      copy-into-DIGIN slow path that could reintroduce the bug.
   //   2. DIGIN is untouched — no file, no folder, no `.ohdtmp`
-  //      sibling appears there. Save-time validation (isSameVolume,
-  //      M7c) is the primary defence; this dispatch-time throw is the
-  //      belt-and-braces for a pre-M7b controller that was never
-  //      re-saved after the fix landed, and for exotic setups (subst,
-  //      DFS, reparse points) that a string-only check can't reason
-  //      about.
+  //      sibling appears there. Since v1.15.1 the save-time
+  //      isSameVolume check is ADVISORY (three-state; only
+  //      certain-same suppresses a warning, and it never rejects a
+  //      save), so THIS dispatch-time throw is the AUTHORITATIVE
+  //      cross-volume check. Do not weaken it — the string check
+  //      cannot tell same-server-different-share apart from a real
+  //      cross-volume misconfiguration, so the filesystem has to.
   const dir = await makeTempDir();
   t.after(() => fsp.rm(dir, { recursive: true, force: true }));
 
@@ -597,9 +598,9 @@ test('fix 7: destFolder AND staging both exist → refuse to merge (throws)', as
 // the EXDEV slow path they guarded. The bug they were originally
 // added to prevent (stale files merging into a live delivery) can no
 // longer occur: there is no `.ohdtmp` code path to leave anything
-// behind. Save-time co-location enforcement (isSameVolume, M7c) plus
-// the dispatch-time EXDEV throw above replace both. See M7b commit
-// for the customer incident that removed the slow path.
+// behind. The advisory save-time isSameVolume check (v1.15.1 three-
+// state) plus the dispatch-time EXDEV throw above replace both. See
+// M7b commit for the customer incident that removed the slow path.
 
 test('fix 7: happy path still returns method:"rename" (idempotency check does not paper over normal flow)', async (t) => {
   const dir = await makeTempDir();
@@ -700,125 +701,139 @@ test('_padNegNumber pads to 4 digits and preserves longer strings', () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════
-// M7c — isSameVolume (save-time co-location check, string compare only)
+// isSameVolume — three-state verdict (M7c → v1.15.1)
 // ═════════════════════════════════════════════════════════════════════════
 //
-// M7c replaced M7b's rename-probe with a pure string comparison of volume
-// roots. The probe was the exact class of bug M7b existed to remove: it
-// wrote `.ohd-volume-probe-*` INSIDE diginPath on every save of a
-// correctly-configured controller. See the docstring on isSameVolume for
-// the full rationale. Tests below cover the string-comparison rules the
-// docstring specifies. NO fs I/O — that's the invariant these tests exist
-// to protect.
+// v1.15.1 turned the check three-state after 1.15.0 hard-blocked a real
+// lab from saving a valid controller: their two UNC paths were on the
+// same server but different shares (`\\labserver1\Pixfizz Digin Staging`
+// alongside `\\labserver1\Digin`) — very possibly the same physical
+// volume, but the 1.15.0 helper called it cross-volume and refused the
+// save. The verdict is now:
 //
-// The dispatch-side EXDEV throw in deliverToDigin (see the M7b test near
-// line 380) is the second line of defence for exotic setups the string
-// compare can't reason about (subst, DFS, junctions). It stays unchanged.
+//   certain-same      — same drive letter, or same UNC host+share
+//   certain-different — different drive letters, or different UNC servers
+//   indeterminate     — everything else (same-server-different-share,
+//                       local-vs-UNC, unparseable strings)
+//
+// The IPC caller SAVES on every verdict and warns when the verdict
+// isn't certain-same. The dispatch-side EXDEV throw in deliverToDigin
+// (see the M7b test near line 380) is the authoritative check — it
+// stays unchanged. Tests here cover the string-compare rules the
+// docstring specifies. NO fs I/O — invariant these tests protect.
 
-test('M7c isSameVolume: same drive letter (different subpaths) is ok', () => {
-  assert.deepEqual(isSameVolume('C:\\Fuji\\staging', 'C:\\Fuji\\DIGIN'), { ok: true });
+test('isSameVolume: same drive letter (different subpaths) → certain-same', () => {
+  assert.deepEqual(isSameVolume('C:\\Fuji\\staging', 'C:\\Fuji\\DIGIN'),
+    { verdict: 'certain-same' });
 });
 
-test('M7c isSameVolume: different drive letters is cross-volume', () => {
+test('isSameVolume: different drive letters → certain-different (different-drives)', () => {
+  // Two physical drives on one Windows box — rename would EXDEV.
   assert.deepEqual(
     isSameVolume('C:\\Fuji\\staging', 'D:\\Fuji\\DIGIN'),
-    { ok: false, code: 'cross-volume' },
+    { verdict: 'certain-different', code: 'different-drives' },
   );
 });
 
-test('M7c isSameVolume: same UNC share (different subpaths) is ok', () => {
+test('isSameVolume: same UNC share (different subpaths) → certain-same', () => {
   assert.deepEqual(
     isSameVolume('\\\\labserver\\digin\\staging', '\\\\labserver\\digin\\ORD-1'),
-    { ok: true },
+    { verdict: 'certain-same' },
   );
 });
 
-test('M7c isSameVolume: same server but different share is cross-volume', () => {
+test('isSameVolume (v1.15.1 regression): same UNC server, different shares → INDETERMINATE (not cross-volume)', () => {
+  // The exact shape that shipped as a hard block in 1.15.0 and stopped
+  // a real lab from saving. Two shares on the same UNC server could be
+  // one physical volume (rename succeeds) or two (rename EXDEVs) — you
+  // cannot tell from the paths alone. Must be indeterminate; the IPC
+  // caller must save; the dispatch-time EXDEV throw is the authority.
+  assert.deepEqual(
+    isSameVolume('\\\\labserver1\\Pixfizz Digin Staging', '\\\\labserver1\\Digin'),
+    { verdict: 'indeterminate', code: 'same-server-different-share' },
+    'THE 1.15.0 REGRESSION — must NOT be certain-different',
+  );
+  // Synonym: same-server-different-share regardless of subpaths.
   assert.deepEqual(
     isSameVolume('\\\\labserver\\staging\\x', '\\\\labserver\\digin\\y'),
-    { ok: false, code: 'cross-volume' },
+    { verdict: 'indeterminate', code: 'same-server-different-share' },
   );
 });
 
-test('M7c isSameVolume: different servers with the same share name is cross-volume', () => {
-  // Two hosts happening to expose a share called `digin` are still two
-  // separate volumes — the host is part of the volume identity.
+test('isSameVolume: different UNC servers → certain-different (different-servers)', () => {
+  // Two different physical boxes — rename EXDEVs, no ambiguity even
+  // if both happen to export a share of the same name.
   assert.deepEqual(
     isSameVolume('\\\\hostA\\digin\\x', '\\\\hostB\\digin\\y'),
-    { ok: false, code: 'cross-volume' },
+    { verdict: 'certain-different', code: 'different-servers' },
   );
 });
 
-test('M7c isSameVolume: local vs UNC is cross-volume (mismatched shapes)', () => {
+test('isSameVolume: local vs UNC → INDETERMINATE (mapped drive can point at any share)', () => {
+  // A Windows mapped drive letter (Z: → \\host\share) makes local-vs-UNC
+  // ambiguous. Cannot tell from paths alone; must be indeterminate.
   assert.deepEqual(
     isSameVolume('C:\\Fuji\\staging', '\\\\labserver\\digin\\ORD-1'),
-    { ok: false, code: 'cross-volume' },
+    { verdict: 'indeterminate', code: 'local-vs-unc' },
   );
   assert.deepEqual(
     isSameVolume('\\\\labserver\\digin\\ORD-1', 'C:\\Fuji\\staging'),
-    { ok: false, code: 'cross-volume' },
+    { verdict: 'indeterminate', code: 'local-vs-unc' },
   );
 });
 
-test('M7c isSameVolume: trailing slashes and mixed separators are normalised', () => {
+test('isSameVolume: trailing slashes and mixed separators are normalised', () => {
   // Local: trailing backslash, trailing forward slash, and no trailing
-  // separator all resolve to the same drive root.
-  assert.deepEqual(isSameVolume('C:\\Fuji\\', 'C:/Fuji'),      { ok: true });
-  assert.deepEqual(isSameVolume('C:',        'C:\\'),          { ok: true });
+  // separator all resolve to the same drive.
+  assert.deepEqual(isSameVolume('C:\\Fuji\\', 'C:/Fuji'), { verdict: 'certain-same' });
+  assert.deepEqual(isSameVolume('C:',        'C:\\'),     { verdict: 'certain-same' });
   // UNC: forward slashes and trailing slashes must not perturb the
   // `\\host\share` extraction.
   assert.deepEqual(
     isSameVolume('\\\\labserver\\digin\\', '//labserver/digin/ORD-1'),
-    { ok: true },
+    { verdict: 'certain-same' },
   );
 });
 
-test('M7c isSameVolume: case differences do not matter (Windows semantics)', () => {
-  assert.deepEqual(isSameVolume('c:\\fuji', 'C:\\FUJI'), { ok: true });
+test('isSameVolume: case differences do not matter (Windows semantics)', () => {
+  assert.deepEqual(isSameVolume('c:\\fuji', 'C:\\FUJI'), { verdict: 'certain-same' });
   assert.deepEqual(
     isSameVolume('\\\\LabServer\\DiGiN', '\\\\labserver\\digin\\sub'),
-    { ok: true },
+    { verdict: 'certain-same' },
   );
 });
 
-test('M7c isSameVolume: bare `\\\\server\\share` with no subpath is a valid volume root', () => {
-  // Docstring rule: `\\server\share` on its own IS the volume root.
+test('isSameVolume: bare `\\\\server\\share` with no subpath is a valid volume identifier', () => {
   assert.deepEqual(
     isSameVolume('\\\\labserver\\digin', '\\\\labserver\\digin\\ORD-1'),
-    { ok: true },
+    { verdict: 'certain-same' },
   );
   assert.deepEqual(
     isSameVolume('\\\\labserver\\digin\\', '\\\\labserver\\digin'),
-    { ok: true },
+    { verdict: 'certain-same' },
   );
 });
 
-test('M7c isSameVolume: unparseable STRING returns {ok:true, code:"indeterminate"}', () => {
+test('isSameVolume: unparseable STRING → INDETERMINATE (unparseable-a / unparseable-b)', () => {
   // Bias-to-accept: a shape the string compare can't parse must NOT
-  // reject the save — the dispatch-time EXDEV throw is the authority
-  // for exotic paths. But the return distinguishes indeterminate from
-  // a confident "yes, same volume" so a future caller (diagnostic
-  // tool, stricter integration) can branch on it without re-parsing.
-  // A check that answers "yes" when it cannot know is a trap for the
-  // next caller.
+  // cause a save rejection — the dispatch-time EXDEV throw is the
+  // authority for exotic paths. The code distinguishes WHICH side
+  // failed to parse so a diagnostic tool can point at it.
   assert.deepEqual(isSameVolume('\\\\lonely-host', 'C:\\Fuji'),
-    { ok: true, code: 'indeterminate' }, 'bare `\\\\host` with no share is indeterminate');
+    { verdict: 'indeterminate', code: 'unparseable-a' }, 'bare `\\\\host` with no share is unparseable');
   assert.deepEqual(isSameVolume('', 'C:\\Fuji'),
-    { ok: true, code: 'indeterminate' }, 'empty string on either side is indeterminate');
+    { verdict: 'indeterminate', code: 'unparseable-a' });
   assert.deepEqual(isSameVolume('C:\\Fuji', ''),
-    { ok: true, code: 'indeterminate' }, 'empty on side B is indeterminate too');
+    { verdict: 'indeterminate', code: 'unparseable-b' });
   assert.deepEqual(isSameVolume('relative\\path', 'C:\\Fuji'),
-    { ok: true, code: 'indeterminate' }, 'relative path has no volume root');
+    { verdict: 'indeterminate', code: 'unparseable-a' });
   assert.deepEqual(isSameVolume('/etc/foo', 'C:\\Fuji'),
-    { ok: true, code: 'indeterminate' }, 'POSIX path is not a Windows volume root');
+    { verdict: 'indeterminate', code: 'unparseable-a' }, 'POSIX path is not a Windows volume identifier');
 });
 
-test('M7c isSameVolume: non-string input throws (programmer error, not runtime state)', () => {
-  // Matches the module's posture on other bad-arg-type errors: throw
-  // for the class of mistakes that can only be a bug at the call
-  // site. Non-string here means null, undefined, number, object,
-  // boolean — all disallowed. A string that can't be parsed is
-  // separately handled as indeterminate.
+test('isSameVolume: non-string input throws (programmer error, not runtime state)', () => {
+  // Non-string is a caller bug. A malformed string is a runtime state
+  // and is separately handled as indeterminate.
   assert.throws(() => isSameVolume(null,       'C:\\Fuji'), /pathA must be a string/);
   assert.throws(() => isSameVolume(undefined,  'C:\\Fuji'), /pathA must be a string/);
   assert.throws(() => isSameVolume(42,         'C:\\Fuji'), /pathA must be a string/);
@@ -828,36 +843,68 @@ test('M7c isSameVolume: non-string input throws (programmer error, not runtime s
   assert.throws(() => isSameVolume('C:\\Fuji', 42),         /pathB must be a string/);
 });
 
-test('M7c isSameVolume: does not touch the filesystem (paths need not exist)', () => {
-  // Pointing at paths that definitely do not exist must still return a
-  // synchronous result without throwing — proves the check is a pure
-  // string compare, not an fs probe. This is the invariant that M7c
-  // exists to protect; if this test ever fails because someone added
-  // an fs call, that is the regression to catch.
+test('isSameVolume: does not touch the filesystem (paths need not exist)', () => {
+  // Synchronous, no throw — proves the check is a pure string compare,
+  // not an fs probe. Invariant M7c introduced; v1.15.1 keeps it.
   const result = isSameVolume(
     'C:\\definitely-not-a-real-path-1234',
     'C:\\also-not-real-5678\\deeper',
   );
-  assert.deepEqual(result, { ok: true });
+  assert.deepEqual(result, { verdict: 'certain-same' });
 });
 
-test('M7c _volumeRoot: extracts drive letter, lowercased, no trailing sep', () => {
-  assert.equal(_internals._volumeRoot('C:\\Fuji\\DIGIN'), 'c:');
-  assert.equal(_internals._volumeRoot('D:'),               'd:');
-  assert.equal(_internals._volumeRoot('E:/x/y/'),          'e:');
+test('isSameVolume: no verdict can ever cause a rejection (advisory-only lock)', () => {
+  // The v1.15.1 contract with the IPC caller: EVERY return value has a
+  // `verdict` that is one of the three known strings. The caller keys
+  // ONLY on `verdict === 'certain-same'` to suppress a warning; it
+  // never uses the verdict to reject a save. This test locks the
+  // return shape so a future maintainer who wants to reintroduce
+  // rejection has to also break this assertion.
+  const inputs = [
+    ['C:\\a', 'C:\\b'],
+    ['C:\\a', 'D:\\a'],
+    ['\\\\host\\share\\a', '\\\\host\\share\\b'],
+    ['\\\\host\\share1',   '\\\\host\\share2'],
+    ['\\\\hostA\\x',       '\\\\hostB\\x'],
+    ['C:\\a',              '\\\\host\\share\\a'],
+    ['',                   'C:\\a'],
+    ['/etc/foo',           'C:\\a'],
+  ];
+  const valid = new Set(['certain-same', 'certain-different', 'indeterminate']);
+  for (const [a, b] of inputs) {
+    const r = isSameVolume(a, b);
+    assert.ok(valid.has(r.verdict), `verdict must be one of the three known strings; got ${JSON.stringify(r)}`);
+    // No `ok`, `success` or similar boolean-reject field exists on the
+    // return. If a future change reintroduces one, this fails loudly.
+    assert.equal('ok'     in r, false, 'no `ok` field — do not reintroduce boolean rejection');
+    assert.equal('success' in r, false);
+  }
 });
 
-test('M7c _volumeRoot: extracts UNC \\\\host\\share, lowercased', () => {
-  assert.equal(_internals._volumeRoot('\\\\LabServer\\DIGIN\\sub'), '\\\\labserver\\digin');
-  assert.equal(_internals._volumeRoot('\\\\host\\share'),           '\\\\host\\share');
-  assert.equal(_internals._volumeRoot('//host/share/sub'),          '\\\\host\\share');
+test('_parseVolume: extracts drive letter, lowercased, no trailing sep', () => {
+  assert.deepEqual(_internals._parseVolume('C:\\Fuji\\DIGIN'), { kind: 'local', drive: 'c:' });
+  assert.deepEqual(_internals._parseVolume('D:'),               { kind: 'local', drive: 'd:' });
+  assert.deepEqual(_internals._parseVolume('E:/x/y/'),          { kind: 'local', drive: 'e:' });
 });
 
-test('M7c _volumeRoot: returns null for shapes it does not confidently recognise', () => {
-  assert.equal(_internals._volumeRoot(''),                null);
-  assert.equal(_internals._volumeRoot(null),              null);
-  assert.equal(_internals._volumeRoot(undefined),         null);
-  assert.equal(_internals._volumeRoot('\\\\lonely-host'), null, 'bare host with no share is not a volume root');
-  assert.equal(_internals._volumeRoot('relative\\path'),  null);
-  assert.equal(_internals._volumeRoot('/etc/foo'),        null, 'POSIX path is not a Windows volume root');
+test('_parseVolume: extracts UNC host + share separately, lowercased', () => {
+  // Splitting host and share is what v1.15.1 needs to tell
+  // different-servers (certain) from different-shares-same-server
+  // (indeterminate). Before v1.15.1 the return was a single joined
+  // string `\\host\share` which couldn't distinguish the two.
+  assert.deepEqual(_internals._parseVolume('\\\\LabServer\\DIGIN\\sub'),
+    { kind: 'unc', host: 'labserver', share: 'digin' });
+  assert.deepEqual(_internals._parseVolume('\\\\host\\share'),
+    { kind: 'unc', host: 'host', share: 'share' });
+  assert.deepEqual(_internals._parseVolume('//host/share/sub'),
+    { kind: 'unc', host: 'host', share: 'share' });
+});
+
+test('_parseVolume: returns null for shapes it does not confidently recognise', () => {
+  assert.equal(_internals._parseVolume(''),                null);
+  assert.equal(_internals._parseVolume(null),              null);
+  assert.equal(_internals._parseVolume(undefined),         null);
+  assert.equal(_internals._parseVolume('\\\\lonely-host'), null, 'bare host with no share is not a volume identifier');
+  assert.equal(_internals._parseVolume('relative\\path'),  null);
+  assert.equal(_internals._parseVolume('/etc/foo'),        null, 'POSIX path is not a Windows volume identifier');
 });

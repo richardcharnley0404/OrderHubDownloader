@@ -1221,7 +1221,7 @@
           <input type="text" id="ocImageStagingRoot" placeholder="e.g. \\MASTER\Pixfizz\Artwork\" readonly>
           <button type="button" id="ocImageStagingRootBrowseBtn" class="btn-browse">Browse...</button>
         </div>
-        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Scratch space where OHD assembles each order's per-order subfolder (sequence-renamed <code>0001.jpg</code>, <code>0002.jpg</code>…). Once OrderGateway consumes the <code>.txt</code>, OHD moves that subfolder into DIGIN. Nothing external ever reads from here. Two constraints: put it on the same volume as DIGIN Path (a cross-volume move degrades to a slow recursive copy), and it must not sit inside any of the other three paths (rejected at save time).</small>
+        <small style="color:var(--text-muted,#888);display:block;margin-top:4px">Scratch space where OHD assembles each order's per-order subfolder (sequence-renamed <code>0001.jpg</code>, <code>0002.jpg</code>…). Once OrderGateway consumes the <code>.txt</code>, OHD moves that subfolder into DIGIN. Nothing external ever reads from here. Two constraints: it must not sit inside any of the other three paths (rejected at save time — string-certain and knowable), and it should be on the same volume as DIGIN Path so the final move is a single atomic rename. OHD warns at save time when it can't confirm same-volume from network paths alone (two shares on the same server look different even when they aren't); the check is advisory, and dispatch is what enforces it — a cross-volume dispatch stops with an actionable error rather than silently duplicating.</small>
       </div>
 
       <div class="form-group" id="ocPrinterNameGroup" style="display:none">
