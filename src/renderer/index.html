@@ -1553,6 +1553,24 @@
         <div id="ocPageSimulator" class="page-simulator" style="display:none"></div>
       </div>
 
+      <!-- pdf_copy — apply impositions from Settings → Imposition (M5). -->
+      <div class="form-group checkbox-group" id="ocApplyImpositionsGroup" style="display:none">
+        <label>
+          <input type="checkbox" id="ocApplyImpositions">
+          <span>Apply impositions from Settings → Imposition</span>
+        </label>
+        <small class="field-hint">When on, jobs whose product code matches an imposition template are stepped-and-repeated onto the paper size defined by the template. See <em>Settings → Imposition</em> for the templates.</small>
+      </div>
+
+      <div class="form-group" id="ocUnmatchedBehaviourGroup" style="display:none">
+        <label for="ocUnmatchedBehaviour">Product with no matching template</label>
+        <select id="ocUnmatchedBehaviour">
+          <option value="root">Write un-imposed to the controller's output folder (today's behaviour)</option>
+          <option value="productCodeSubfolder">Write un-imposed to a product-code subfolder</option>
+        </select>
+        <small class="field-hint">Location disambiguates: an un-imposed PDF in the root cannot be mistaken for a press-ready sheet. Use a product-code subfolder if the lab imposes those products by hand.</small>
+      </div>
+
       <div class="pm-modal-footer">
         <button type="button" id="ocCancelBtn" class="btn-secondary">Cancel</button>
         <button type="button" id="ocSaveBtn" class="btn-primary">Save Controller</button>

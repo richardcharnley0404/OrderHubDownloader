@@ -356,6 +356,32 @@ function listTemplates() {
   return store.get(KEY_TEMPLATES, []);
 }
 
+/**
+ * Find the imposition template whose productCodes claims the given job
+ * product code. Case-insensitive, trim-tolerant — same normalisation the
+ * cross-template collision check uses, so a code that dispatch matches
+ * against a template is the SAME code save-time validation would have
+ * rejected as colliding with another template. Returns null when no
+ * template claims the code.
+ *
+ * Kept in this module so M5 dispatch and any future preview / lookup
+ * flow all go through the ONE rule (§5.2 one-code-one-template).
+ */
+function findTemplateForProductCode(productCode) {
+  if (typeof productCode !== 'string') return null;
+  const target = productCode.trim().toLowerCase();
+  if (!target) return null;
+  const templates = listTemplates();
+  for (const t of templates) {
+    if (!Array.isArray(t.productCodes)) continue;
+    for (const c of t.productCodes) {
+      if (typeof c !== 'string') continue;
+      if (c.trim().toLowerCase() === target) return t;
+    }
+  }
+  return null;
+}
+
 function saveTemplate(input) {
   const existing   = listTemplates();
   const paperSizes = listPaperSizes();
@@ -391,6 +417,7 @@ module.exports = {
   listTemplates,
   saveTemplate,
   deleteTemplate,
+  findTemplateForProductCode,
   // Validators (exported for M4 renderer previews + tests)
   validatePaperSize,
   validateTemplate,

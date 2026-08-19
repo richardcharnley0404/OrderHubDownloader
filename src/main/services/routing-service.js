@@ -396,6 +396,12 @@ function resolveRoute(job) {
   }
 
   // ── PDF-copy controllers skip Layer 3 (no channel mapping needed) ────────
+  //
+  // NOTE: This literal is DUPLICATED in resolveRouteForController below.
+  // Both must produce the same shape for the same controller — the parity
+  // test at __tests__/routing-pdf-copy-fields.test.js locks that (same
+  // tripwire class as the folder_copy parity test). When adding a field
+  // to one, add it to the other in the same commit.
   if (controller.type === 'pdf_copy') {
     return {
       type:           'controller',
@@ -408,6 +414,13 @@ function resolveRoute(job) {
       bannerSheet:      controller.bannerSheet || false,
       pdfPipeline:      controller.pdfPipeline || null,
       checkOrderStatus: controller.checkOrderStatus !== false,
+      // M5 imposition fields — read-time defaults so a pdf_copy record
+      // that predates M5 behaves exactly like today (applyImpositions
+      // off = _sendViaPdfCopyRouted's byte-identical no-change branch).
+      applyImpositions:   !!controller.applyImpositions,
+      unmatchedBehaviour: controller.unmatchedBehaviour === 'productCodeSubfolder'
+        ? 'productCodeSubfolder'
+        : 'root',
     };
   }
 
@@ -783,6 +796,10 @@ function resolveRouteForController(job, controllerId) {
   }
 
   // Folder-style controllers don't carry channel mappings.
+  //
+  // NOTE: mirror of the pdf_copy literal in resolveRoute above. Same
+  // shape, same defaults, same order — parity test locks it. When adding
+  // a field to one, add it to the other in the same commit.
   if (controller.type === 'pdf_copy') {
     return {
       type:             'controller',
@@ -795,6 +812,10 @@ function resolveRouteForController(job, controllerId) {
       bannerSheet:      controller.bannerSheet || false,
       pdfPipeline:      controller.pdfPipeline || null,
       checkOrderStatus: controller.checkOrderStatus !== false,
+      applyImpositions:   !!controller.applyImpositions,
+      unmatchedBehaviour: controller.unmatchedBehaviour === 'productCodeSubfolder'
+        ? 'productCodeSubfolder'
+        : 'root',
     };
   }
   if (controller.type === 'folder_copy') {

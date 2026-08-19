@@ -1351,6 +1351,36 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
         }
       }
 
+      // M5 imposition — pdf_copy controller fields. Renderer already validates
+      // the fields but the IPC mirror stops a malformed payload (future
+      // renderer bug, external caller, hand-edited JSON) from persisting a
+      // value the dispatch code cannot cope with. Same posture as the
+      // autoSendBatches / orderMergeWaitMinutes / maxPrintsPerJob guards
+      // above: absent / undefined values are legal (pdf_copy controllers
+      // that predate M5 pass through untouched); wrong-type / wrong-value
+      // rejects loudly. Scoped to pdf_copy so a stray field on another
+      // type is ignored the same way the route literal ignores it.
+      if (controller && controller.type === 'pdf_copy') {
+        if (controller.applyImpositions !== undefined && typeof controller.applyImpositions !== 'boolean') {
+          const msg = 'applyImpositions must be a boolean.';
+          logger.logWarning('[routing] save-controller rejected — invalid applyImpositions', {
+            controllerId: controller.id, name: controller.name,
+            applyImpositions: controller.applyImpositions,
+          });
+          return { success: false, error: msg };
+        }
+        if (controller.unmatchedBehaviour !== undefined
+            && controller.unmatchedBehaviour !== 'root'
+            && controller.unmatchedBehaviour !== 'productCodeSubfolder') {
+          const msg = `unmatchedBehaviour must be 'root' or 'productCodeSubfolder' (got ${JSON.stringify(controller.unmatchedBehaviour)}).`;
+          logger.logWarning('[routing] save-controller rejected — invalid unmatchedBehaviour', {
+            controllerId: controller.id, name: controller.name,
+            unmatchedBehaviour: controller.unmatchedBehaviour,
+          });
+          return { success: false, error: msg };
+        }
+      }
+
       // Fuji JobMaker — single source of truth for required-field rules and
       // defaults lives in fuji-jobmaker-config.js. Run it at the save boundary
       // so a malformed payload (from a future renderer bug, an external IPC

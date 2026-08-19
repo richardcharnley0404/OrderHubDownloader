@@ -34,7 +34,7 @@ const { ManifestNotFoundError } = require('./awaiting-manifest');
 const { resolveManifestPath } = require('./manifest-path');
 const { resolveDispatchImageSource } = require('./dispatch-image-source');
 const logger = require('./logger');
-const { buildFolderName, applyOrderNumberPrefixRules } = require('../../shared/printUtils');
+const { buildFolderName, applyOrderNumberPrefixRules, UNSAFE_CHARS } = require('../../shared/printUtils');
 const { buildCopyFilenames, buildDestFolder } = require('./folder-copy-filename');
 
 // Manifest filename is {orderNumber}.json (e.g. PXDEMO-K9MYDG.json)
@@ -3827,10 +3827,40 @@ class PrintService {
   /**
    * PDF-copy pipeline for "pdf_copy" controllers.
    *
-   * Locates PDF files in the job manifest and copies them to
-   * {outputPath}/{orderNumber}_{jobId}/{filename}.
-   * If route.bannerSheet is true, prepends a QR-code banner page using pdf-lib.
-   * Banner failures are swallowed so a banner error never blocks the job.
+   * Three code paths — the dispatch fork on route.applyImpositions:
+   *
+   *   1. applyImpositions off (the DEFAULT for every pre-M5 controller)
+   *      → today's behaviour BYTE-IDENTICAL: locate PDFs, copy or
+   *        pipeline-transform them to {outputPath}/{orderNumber}_{jobId}/
+   *        {filename}. If route.bannerSheet is true, prepends a QR-code
+   *        banner page. This branch is the no-change lock for every
+   *        existing pdf_copy lab and is asserted first in
+   *        print-service-pdf-copy-routed.test.js.
+   *
+   *   2. applyImpositions on, product code matches no template
+   *      → pass-through per route.unmatchedBehaviour (§7.4 decision):
+   *        'root' → today's behaviour byte-identical (destFolder is the
+   *          same as branch 1);
+   *        'productCodeSubfolder' → same output nested one level deeper
+   *          under a UNSAFE_CHARS-sanitised product-code folder so the
+   *          lab knows which press to impose it on by hand.
+   *
+   *   3. applyImpositions on, product code matches a template
+   *      → step-and-repeat via composeImposition (M2). Each PDF in the
+   *        manifest is imposed sequentially at its per-image quantity
+   *        (§3.4 — job.quantity is a trap; use the manifest per-image
+   *        qty). The results are concatenated into ONE output PDF, the
+   *        configured pdfPipeline runs on the imposed bytes (§4 — banner
+   *        sheet AFTER imposition, not before), and the file lands at
+   *        {outputPath}/[{template.outputSubfolder}/]{jobFolderName}/
+   *        {orderNumber}_{jobId}_QTY{totalCopies}_IMPQTY{totalSheets}.pdf.
+   *
+   *        Compose / layout failures (zero-fit, >2-page duplex, etc.)
+   *        FAIL the job with the engine's message — a compose failure
+   *        must NEVER fall back to writing the raw PDF (§7.4 rationale:
+   *        pass-through is only for NO-TEMPLATE where the operator chose
+   *        it; a wrongly-imposed dispatch is what the whole feature
+   *        exists to prevent).
    */
   async _sendViaPdfCopyRouted(job, route) {
     const downloadDirectory = configService.get('downloadDirectory');
@@ -3854,6 +3884,10 @@ class PrintService {
       throw new Error(`Job ${job.id} not found in order manifest.`);
     }
 
+    // Per-image manifest quantity carried through — used both by the
+    // imposition path (§3.4) and available to pipeline steps in the
+    // pass-through path via jobContext.qty (unchanged — jobContext.qty
+    // still comes from job.qty for byte-identical parity there).
     const pdfFiles = jobManifest.images
       .filter(img => path.extname(img.filename).toLowerCase() === '.pdf')
       .map(img => {
@@ -3861,6 +3895,7 @@ class PrintService {
         return {
           sourcePath: resolveDispatchImageSource({ rootPath: path.join(orderFolderPath, img.filename), jobFolderPath, basename }),
           filename:   basename,
+          quantity:   img.quantity || 1,
         };
       });
 
@@ -3868,7 +3903,46 @@ class PrintService {
       throw new Error(`No PDF files found in job ${job.id} manifest.`);
     }
 
+    // ── Imposition dispatch fork ────────────────────────────────────
+    if (route.applyImpositions) {
+      // Lazy require so the imposition modules only load when a lab has
+      // actually opted in — matches the pdf-pipeline lazy require below.
+      const impositionService = require('./imposition-service');
+      const template = impositionService.findTemplateForProductCode(job.product_code);
+
+      if (template) {
+        return this._sendViaPdfCopyImposition(
+          job, route, template, pdfFiles, jobFolderName, jobFolderPath,
+        );
+      }
+
+      // No template → pass-through per unmatchedBehaviour.
+      if (route.unmatchedBehaviour === 'productCodeSubfolder') {
+        const rawCode  = String(job.product_code || '').trim();
+        // UNSAFE_CHARS covers Win32 reserved chars incl. path separators;
+        // the sanitised segment can never smuggle a `..` traversal
+        // because the check is applied AFTER split by path.join.
+        const safeCode = rawCode.replace(UNSAFE_CHARS, '').trim() || '_no_product_code';
+        const destFolder = path.join(route.outputPath, safeCode, jobFolderName);
+        return this._pdfCopyPassthroughWrite(job, route, pdfFiles, destFolder, jobFolderPath);
+      }
+      // 'root' (default) falls through to today's byte-identical write.
+    }
+
+    // ── Today's behaviour (no-change lock) ──────────────────────────
     const destFolder = path.join(route.outputPath, jobFolderName);
+    return this._pdfCopyPassthroughWrite(job, route, pdfFiles, destFolder, jobFolderPath);
+  }
+
+  /**
+   * The pass-through writer — today's per-PDF loop, extracted so both
+   * the applyImpositions-off branch and the no-template branch share
+   * ONE implementation. The output for a given (job, route,
+   * destFolder=path.join(route.outputPath, jobFolderName)) is
+   * byte-identical to pre-M5. Kept private (leading underscore) and
+   * called only from _sendViaPdfCopyRouted.
+   */
+  async _pdfCopyPassthroughWrite(job, route, pdfFiles, destFolder, jobFolderPath) {
     try {
       fs.mkdirSync(destFolder, { recursive: true });
       for (const pdfFile of pdfFiles) {
@@ -3925,6 +3999,202 @@ class PrintService {
       method:     'pdf_copy',
       sourcePath: jobFolderPath,
       destPath:   destFolder,
+    };
+  }
+
+  /**
+   * The imposition path — called when route.applyImpositions is on AND
+   * a template claims job.product_code. Every design in the manifest is
+   * imposed sequentially at its per-image quantity and the results are
+   * concatenated into ONE output PDF. See the fork docblock on
+   * _sendViaPdfCopyRouted for the design rules; this is the pipeline
+   * implementation.
+   *
+   * Failures fail the job (never a silent fallback to raw PDF — the
+   * whole feature exists to prevent wrongly-imposed dispatch).
+   */
+  async _sendViaPdfCopyImposition(job, route, template, pdfFiles, jobFolderName, jobFolderPath) {
+    // Lazy requires — matches the pdf-pipeline lazy require above. Also
+    // means a lab that hasn't wired imposition never pulls pdf-lib for
+    // pdf_copy dispatch.
+    const { PDFDocument } = require('pdf-lib');
+    const { computeLayout } = require('../../pdf-pipeline/imposition-layout');
+    const { deriveTrim, composeImposition } = require('../../pdf-pipeline/imposition-compose');
+    const { applyPdfPipeline } = require('../../pdf-pipeline/pipeline');
+    const impositionService = require('./imposition-service');
+
+    // Resolve the paper size. A template stored with a paperSizeId that
+    // no longer exists is a save-time impossibility (M3 rejects it), but
+    // could arise from a hand-edited JSON or a deleted paper size
+    // sneaking past. Fail loudly rather than pick a default.
+    const paperSize = impositionService.listPaperSizes().find(p => p.id === template.paperSizeId);
+    if (!paperSize) {
+      const msg =
+        `Imposition template '${template.name}' references unknown paperSizeId ` +
+        `'${template.paperSizeId}' — paper size deleted? Fix in Settings → Imposition.`;
+      logger.logError('[imposition] paper size missing — job errored', new Error(msg), {
+        jobId: job.id, template: template.name,
+      });
+      jobService.updateJobLocally(job.id, { _status: 'error', _errorMessage: msg });
+      return { success: false, error: msg };
+    }
+
+    const artworkBleed = Number.isFinite(template.artworkBleed) ? template.artworkBleed : 0;
+
+    const finalDoc     = await PDFDocument.create();
+    const perDesign    = [];
+    let totalCopies    = 0;
+    let totalSheets    = 0;
+    let anyDivergence  = false;
+
+    try {
+      for (const pdfFile of pdfFiles) {
+        if (!fs.existsSync(pdfFile.sourcePath)) {
+          throw new Error(`PDF not found: ${pdfFile.sourcePath}`);
+        }
+        const bytes    = await fs.promises.readFile(pdfFile.sourcePath);
+        const srcDoc   = await PDFDocument.load(bytes);
+        const firstPage = srcDoc.getPages()[0];
+        // SHARED trim derivation from M2 — do NOT reimplement here (same
+        // discipline as buildDestFolder). If it drifts, the layout below
+        // and the compose validation would silently mis-place cells.
+        const trim = deriveTrim(firstPage, artworkBleed);
+
+        // expectedArtwork divergence (§5.1 decision): layout uses the
+        // REAL trim regardless — the WARN is a signal to the lab that
+        // their design assumption drifted, not a dispatch failure.
+        const eaW = template.expectedArtwork && Number.isFinite(template.expectedArtwork.width)  ? template.expectedArtwork.width  : null;
+        const eaH = template.expectedArtwork && Number.isFinite(template.expectedArtwork.height) ? template.expectedArtwork.height : null;
+        const divergence =
+          eaW !== null && eaH !== null &&
+          (Math.abs(trim.width  - eaW) > 0.5 || Math.abs(trim.height - eaH) > 0.5);
+        if (divergence) {
+          anyDivergence = true;
+          logger.logWarning(
+            `[imposition] artwork trim ${trim.width.toFixed(2)} × ${trim.height.toFixed(2)} pt ` +
+            `differs from template '${template.name}' expectedArtwork ${eaW} × ${eaH} pt ` +
+            `by > 0.5 pt — layout used the real trim; template design assumption may need updating`,
+            { jobId: job.id, pdf: pdfFile.filename }
+          );
+        }
+
+        // Real trim IS the cell — this is where the runtime layout
+        // decision happens (autoRotate/perSheet all derive from it).
+        const layout = computeLayout({
+          sheetWidth:     paperSize.width,
+          sheetHeight:    paperSize.height,
+          margins:        template.margins || {},
+          gutter:         template.gutter || 0,
+          cellWidth:      trim.width,
+          cellHeight:     trim.height,
+          autoRotate:     !!template.autoRotate,
+          mode:           template.mode,
+          duplexFlipEdge: template.duplexFlipEdge,
+        });
+
+        const composed = await composeImposition({
+          artworkBytes: bytes,
+          quantity:     pdfFile.quantity,
+          layout,
+          sheetWidth:   paperSize.width,
+          sheetHeight:  paperSize.height,
+          mode:         template.mode,
+          cropMarks:    !!template.cropMarks,
+          artworkBleed,
+          logger,
+        });
+
+        // Concatenate this design's imposed pages into the final doc.
+        // Multi-design jobs never mix designs on one sheet (§7.3 decision);
+        // each design's sheets appear as a contiguous block.
+        const composedDoc = await PDFDocument.load(composed.pdfBytes);
+        const copiedPages = await finalDoc.copyPages(composedDoc, composedDoc.getPageIndices());
+        for (const p of copiedPages) finalDoc.addPage(p);
+
+        totalCopies += pdfFile.quantity;
+        totalSheets += composed.sheets;
+        perDesign.push({
+          filename: pdfFile.filename,
+          qty:      pdfFile.quantity,
+          sheets:   composed.sheets,
+          rotated:  !!layout.rotated,
+        });
+      }
+    } catch (composeErr) {
+      // FAIL the job. A compose failure never falls back to writing the
+      // raw PDF — pass-through is only for the NO-TEMPLATE branch where
+      // the operator explicitly chose it. Silent fallback here would be
+      // exactly the wrong-output-into-a-sheets-hot-folder failure this
+      // whole feature exists to prevent.
+      const msg = `Imposition failed for job ${job.id}: ${composeErr.message}`;
+      logger.logError('[imposition] compose failure — job errored', composeErr, {
+        jobId: job.id, template: template.name,
+      });
+      jobService.updateJobLocally(job.id, { _status: 'error', _errorMessage: msg });
+      return { success: false, error: msg };
+    }
+
+    // Apply the existing pdfPipeline to the IMPOSED bytes (§4 — banner
+    // sheet, order identifier, etc. after imposition; those steps still
+    // make sense on the front of an imposed run).
+    let imposedBytes = await finalDoc.save();
+    if (route.pdfPipeline && Array.isArray(route.pdfPipeline.steps) && route.pdfPipeline.steps.length > 0) {
+      const jobContext = {
+        jobNumber:    job.job_name || job.order_number || String(job.id),
+        orderId:      String(job.order_id || job.id),
+        qty:          totalCopies,
+        customerName: job.customer_name || '',
+      };
+      const transformed = await applyPdfPipeline(new Uint8Array(imposedBytes), route.pdfPipeline, jobContext);
+      imposedBytes = Buffer.from(transformed);
+    } else {
+      imposedBytes = Buffer.from(imposedBytes);
+    }
+
+    // Destination: {outputPath}/[{template.outputSubfolder}/]{jobFolderName}/
+    //              {orderNumber}_{jobId}_QTY{totalCopies}_IMPQTY{totalSheets}.pdf
+    // IMPQTY is the SHEET count (§7.5); for duplex the PDF has 2×sheets
+    // pages but IMPQTY still counts sheets because the operator loads
+    // sheets, not pages.
+    const wrapperSegments = template.outputSubfolder ? [template.outputSubfolder] : [];
+    const destFolder = path.join(route.outputPath, ...wrapperSegments, jobFolderName);
+    const destFilename =
+      `${job.order_number}_${job.id}_QTY${totalCopies}_IMPQTY${totalSheets}.pdf`;
+    const destPath = path.join(destFolder, destFilename);
+
+    try {
+      fs.mkdirSync(destFolder, { recursive: true });
+      await fs.promises.writeFile(destPath, imposedBytes);
+    } catch (writeErr) {
+      logger.logError('[imposition] write failed', writeErr, { jobId: job.id, destFolder });
+      return { success: false, error: writeErr.message };
+    }
+
+    logger.info('Job sent to print via PDF copy (imposition)', {
+      jobId:              job.id,
+      controller:         route.controllerName,
+      template:           template.name,
+      designs:            perDesign.length,
+      perDesign,
+      totalCopies,
+      totalSheets,
+      expectedArtworkWarn: anyDivergence,
+      destFolder,
+      destFile:           destFilename,
+    });
+
+    await this._markCompleted(job.id);
+
+    return {
+      success:     true,
+      method:      'pdf_copy_imposition',
+      sourcePath:  jobFolderPath,
+      destPath,
+      template:    template.name,
+      designs:     perDesign.length,
+      totalCopies,
+      totalSheets,
+      expectedArtworkWarn: anyDivergence,
     };
   }
 

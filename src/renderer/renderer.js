@@ -5737,6 +5737,8 @@ function updateOcTypeFields() {
   document.getElementById('ocMediaTranslationsGroup').style.display    = type === 'darkroompro' ? '' : 'none';
   document.getElementById('ocBannerSheetGroup').style.display        = (type === 'noritsu' || type === 'epson' || type === 'dpof' || type === 'pdf_copy') ? '' : 'none';
   document.getElementById('ocPipelineGroup').style.display           = type === 'pdf_copy'     ? '' : 'none';
+  document.getElementById('ocApplyImpositionsGroup').style.display   = type === 'pdf_copy'     ? '' : 'none';
+  document.getElementById('ocUnmatchedBehaviourGroup').style.display = type === 'pdf_copy'     ? '' : 'none';
   document.getElementById('ocCheckOrderStatusGroup').style.display   = (type === 'noritsu' || type === 'epson' || type === 'dpof' || type === 'darkroompro') ? '' : 'none';
   document.getElementById('ocIncludeCustomerNameGroup').style.display = (type === 'noritsu' || type === 'epson' || type === 'dpof') ? '' : 'none';
   // Batch-splitting cap + auto-send tick — shown for darkroompro
@@ -5858,6 +5860,15 @@ function openOrderControllerModal(ctrl = null) {
   document.getElementById('ocBuildTimeoutMin').value   = Math.round(buildMs / 60000);
   document.getElementById('ocAutoPrint').checked        = ctrl ? !!ctrl.autoprint                      : false;
   document.getElementById('ocBannerSheet').checked      = ctrl ? !!ctrl.bannerSheet                    : false;
+  // M5 imposition — pdf_copy only. Strict === true so a truthy non-
+  // boolean from a hand-edited config still renders as unchecked.
+  const isPdfCopyCtrl = ctrl && ctrl.type === 'pdf_copy';
+  document.getElementById('ocApplyImpositions').checked =
+    isPdfCopyCtrl && ctrl.applyImpositions === true;
+  document.getElementById('ocUnmatchedBehaviour').value =
+    isPdfCopyCtrl && ctrl.unmatchedBehaviour === 'productCodeSubfolder'
+      ? 'productCodeSubfolder'
+      : 'root';
   document.getElementById('ocCheckOrderStatus').checked = ctrl ? (ctrl.checkOrderStatus === true)      : false;
   // Default ON for new controllers and for legacy controllers missing the field.
   document.getElementById('ocIncludeCustomerName').checked = ctrl ? (ctrl.includeCustomerInFolder !== false) : true;
@@ -6431,6 +6442,14 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
   }
   if (type === 'pdf_copy' && pipelineSteps.length > 0) {
     controller.pdfPipeline = { steps: JSON.parse(JSON.stringify(pipelineSteps)) };
+  }
+  // M5 imposition — pdf_copy only. Assigned in pdf_copy's OWN type
+  // block (the 1.12.0 discipline: assign in the block that matches the
+  // owning type so the field never silently persists on the wrong type
+  // via a stale UI value).
+  if (type === 'pdf_copy') {
+    controller.applyImpositions   = document.getElementById('ocApplyImpositions').checked;
+    controller.unmatchedBehaviour = document.getElementById('ocUnmatchedBehaviour').value;
   }
   if (type === 'darkroompro') {
     controller.processedFolderName  = document.getElementById('ocProcessedFolderName').value.trim();
