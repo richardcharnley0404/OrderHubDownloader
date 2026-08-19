@@ -423,6 +423,137 @@ test('physical alignment, short-edge: dist(front[i], top) === dist(back[i], bott
   }
 });
 
+// ─── M1a: asymmetric-margin mirror tests ─────────────────────────────────
+//
+// The mirror-invariant tests above use symmetric margins (0.25 in all
+// round). With symmetric margins, "mirror about the sheet centreline"
+// (correct — what the physical duplex flip does) and "mirror about the
+// usable-area centre" (a plausible wrong implementation) produce
+// IDENTICAL positions, so the suite cannot distinguish them. These two
+// tests use asymmetric margins to break that coincidence: they PASS with
+// the sheet-centreline mirror and FAIL with the usable-area mirror.
+// The current implementation is correct; these tests exist to catch a
+// silent regression to the wrong formula.
+
+/*
+Test A: long-edge, asymmetric horizontal margins {left:1.0, others:0.25}.
+
+Sheet 864 × 1296. Margins l=72, r=18, t=18, b=18. Gutter 18. Cell 5×7 (360×504).
+usableW = 864 − 72 − 18 = 774
+usableH = 1296 − 36        = 1260
+
+Unrotated (360×504):
+  cols = floor((774+18)/(360+18)) = floor(792/378) = 2
+  rows = floor((1260+18)/(504+18)) = 2
+  perSheet = 4    (unrotated wins over rotated's 3)
+
+gridW = 738, gridH = 1026
+leftOffset   = 72 + (774 − 738)/2  = 90     (NOT 63 — that was the symmetric case)
+bottomOffset = 18 + (1260 − 1026)/2 = 135
+
+Front positions:
+  (90, 657), (468, 657), (90, 135), (468, 135)
+
+Sheet-mirror back (correct — mirrors about sheet centreline x=432):
+  back.x = 864 − front.x − 360
+    → (414, 657), (36, 657), (414, 135), (36, 135)
+
+Usable-mirror back (WRONG — mirrors about usable centreline x=(72+846)/2=459):
+  back.x = 2·459 − front.x − 360 = 918 − front.x − 360
+    → (468, 657), (90, 657), (468, 135), (90, 135)
+
+The sheet-mirror and usable-mirror values differ by exactly (m.left − m.right)
+= 72 − 18 = 54 pt per position. That divergence is what this test relies on.
+*/
+
+test('M1a: mirror invariant, long-edge, asymmetric horizontal margins — sheet-centreline mirror (not usable-area)', () => {
+  const sheetWidth  = inchesToPoints(12);
+  const sheetHeight = inchesToPoints(18);
+  const out = computeLayout({
+    sheetWidth, sheetHeight,
+    margins: {
+      top:    inchesToPoints(0.25),
+      right:  inchesToPoints(0.25),
+      bottom: inchesToPoints(0.25),
+      left:   inchesToPoints(1.0),
+    },
+    gutter:         inchesToPoints(0.25),
+    cellWidth:      inchesToPoints(5),
+    cellHeight:     inchesToPoints(7),
+    autoRotate:     true,
+    mode:           'duplex',
+    duplexFlipEdge: 'long',
+  });
+  // Sanity-check the front geometry — the asymmetric leftOffset is what
+  // makes the sheet-vs-usable mirror difference detectable at all.
+  assert.equal(out.front[0].x, 90);
+  for (let i = 0; i < out.front.length; i++) {
+    const f = out.front[i];
+    const b = out.back[i];
+    assert.equal(b.x, sheetWidth - f.x - out.cellW, `back[${i}].x sheet-mirror`);
+    assert.equal(b.y, f.y,                          `back[${i}].y unchanged`);
+  }
+});
+
+/*
+Test B: short-edge, asymmetric vertical margins {top:1.0, others:0.25}.
+
+Sheet 864 × 1296. Margins t=72, r=18, b=18, l=18. Gutter 18. Cell 5×7.
+usableW = 828
+usableH = 1296 − 72 − 18 = 1206
+
+Unrotated (360×504):
+  cols = floor(846/378) = 2
+  rows = floor((1206+18)/(504+18)) = floor(1224/522) = 2
+  perSheet = 4    (unrotated wins over rotated's 3)
+
+gridW = 738, gridH = 1026
+leftOffset   = 63
+bottomOffset = 18 + (1206 − 1026)/2 = 108   (NOT 135 — asymmetric case)
+
+Front positions:
+  (63, 630), (441, 630), (63, 108), (441, 108)
+
+Sheet-mirror back (correct — mirrors about sheet centreline y=648):
+  back.y = 1296 − front.y − 504
+    → (63, 162), (441, 162), (63, 684), (441, 684)
+
+Usable-mirror back (WRONG — mirrors about usable centreline y=(18+1224)/2=621):
+  back.y = 2·621 − front.y − 504 = 1242 − front.y − 504
+    → (63, 108), (441, 108), (63, 630), (441, 630)
+
+Sheet-mirror and usable-mirror values differ by (m.top − m.bottom) = 54 pt.
+*/
+
+test('M1a: mirror invariant, short-edge, asymmetric vertical margins — sheet-centreline mirror (not usable-area)', () => {
+  const sheetWidth  = inchesToPoints(12);
+  const sheetHeight = inchesToPoints(18);
+  const out = computeLayout({
+    sheetWidth, sheetHeight,
+    margins: {
+      top:    inchesToPoints(1.0),
+      right:  inchesToPoints(0.25),
+      bottom: inchesToPoints(0.25),
+      left:   inchesToPoints(0.25),
+    },
+    gutter:         inchesToPoints(0.25),
+    cellWidth:      inchesToPoints(5),
+    cellHeight:     inchesToPoints(7),
+    autoRotate:     true,
+    mode:           'duplex',
+    duplexFlipEdge: 'short',
+  });
+  // Sanity-check the front geometry — the asymmetric bottomOffset is what
+  // makes the sheet-vs-usable mirror difference detectable at all.
+  assert.equal(out.front[0].y, 630);
+  for (let i = 0; i < out.front.length; i++) {
+    const f = out.front[i];
+    const b = out.back[i];
+    assert.equal(b.x, f.x,                           `back[${i}].x unchanged`);
+    assert.equal(b.y, sheetHeight - f.y - out.cellH, `back[${i}].y sheet-mirror`);
+  }
+});
+
 test('simplex layout returns back === null (never an empty array)', () => {
   const out = computeLayout({
     sheetWidth:  inchesToPoints(12),
