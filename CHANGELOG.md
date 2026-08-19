@@ -40,6 +40,36 @@ imported with `shipping_amount 12` (the matched method's price)
 because `total_shipping` never reached the payload. After this change
 the XML's `5` reaches OrderHub and wins.
 
+**Changed: ROES order total now includes stated shipping.** Until now
+`total_amount` on a ROES import was the sum of line items only, so an
+order with `<ShippingTotal>5</ShippingTotal>` on top of 11.90 of
+prints landed in OrderHub as `total_amount 11.90` alongside
+`shipping_amount 5` — two numbers, one order, and the totals column
+in OrderHub read short by the shipping figure. `total_amount` now
+adds `<ShippingTotal>` to the line-item sum when the tag carries a
+number: 11.90 of prints plus a stated `5` shipping now imports as
+`total_amount 16.90`. Blank / absent / non-numeric ShippingTotal
+contributes nothing to the total, matching the field-omission rule
+above — in that case OrderHub applies its Shipping Method's cost and
+adds it to the total at its end. The existing rule stays: a ROES
+file with no `UnitPrice` on any line item still emits no
+`total_amount`, even when shipping is stated.
+
+Confirmed against `XML-ROES068884` — imported before this change
+with `total_amount 11.90` alongside `shipping_amount 5`; will now
+import as `total_amount 16.90`.
+
+**Deliberate divergence from PhotoFinale.** PhotoFinale's
+`total_amount` does NOT include `total_shipping` and shouldn't be
+"harmonised" to. PhotoFinale's total is a **wholesale rollup**
+(sum of `WholesaleCost × qty` — what the retailer owes the lab)
+while its `shipping_amount` is the **retail** shipping the
+cardholder paid; adding one to the other produces a meaningless
+number. ROES has no wholesale/retail split — line items and
+shipping both reflect what the customer paid — so summing them is
+the right rollup. Same-shape discipline as the paid/PaymentStatus
+divergence between the two parsers.
+
 Full write-up: `docs/xml-shipping-method-investigation.md` §2 and
 §4.2. Field-mapping table in `docs/order-xml-hotfolder.md` updated.
 

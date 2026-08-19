@@ -431,6 +431,86 @@ test('total_amount handles UnitPrice present on some lines but not others', () =
 });
 
 // ---------------------------------------------------------------------------
+// total_amount includes STATED shipping (2026-08-19)
+// ---------------------------------------------------------------------------
+//
+// ROES total_amount was line-items-only until 2026-08-19. Verified regression:
+// XML-ROES068884 imported with total_amount 11.90 (line items only) alongside
+// shipping_amount 5, which sums to 16.90 — the order-header total the customer
+// was actually charged. ROES total now includes stated shipping.
+//
+// Deliberately DIVERGES from PhotoFinale — do NOT harmonise. PhotoFinale's
+// total_amount is a wholesale rollup (WholesaleCost × qty, what the retailer
+// owes the lab) while its shipping_amount is the retail shipping the
+// cardholder paid; adding one to the other produces a meaningless number.
+// ROES has no wholesale/retail split, so summing IS the right rollup. Same-
+// shape discipline as the paid/PaymentStatus divergence.
+
+test('total_amount INCLUDES <ShippingTotal>: 2 × 5.95 + shipping 5 → 16.90 (XML-ROES068884 regression)', () => {
+  const xml = makeRoesXml({ quantity: 2, unitPrice: 5.95, shippingTotal: '5' });
+  const { request } = parser.parse(xml, HOT_FOLDER);
+  assert.equal(request.order.total_amount,   16.90, 'line items (11.90) + shipping (5) = 16.90');
+  assert.equal(request.order.total_shipping,  5,    'shipping surfaces on its own key too');
+});
+
+test('total_amount OMITS shipping when <ShippingTotal> is blank: 2 × 5.95 → 11.90 (line items only; OrderHub applies method price)', () => {
+  // The blank-vs-value distinction from the ShippingTotal tests carries
+  // through to the rollup: blank means "OHD doesn't know the cost",
+  // OrderHub will supply it from the matched Shipping Method and add it
+  // to the total at its end. OHD must NOT prematurely add zero here.
+  const xml = makeRoesXml({ quantity: 2, unitPrice: 5.95, shippingTotal: '' });
+  const { request } = parser.parse(xml, HOT_FOLDER);
+  assert.equal(request.order.total_amount, 11.90, 'blank shipping contributes nothing to total_amount');
+  assert.equal('total_shipping' in request.order, false, 'total_shipping key is still omitted');
+});
+
+test('total_amount OMITS shipping when <ShippingTotal> is non-numeric: 2 × 5.95 → 11.90', () => {
+  const xml = makeRoesXml({ quantity: 2, unitPrice: 5.95, shippingTotal: 'abc' });
+  const { request } = parser.parse(xml, HOT_FOLDER);
+  assert.equal(request.order.total_amount, 11.90,
+    'non-numeric shipping must NOT be coerced to 0 and added — numField guards against that');
+  assert.equal('total_shipping' in request.order, false);
+});
+
+test('total_amount INCLUDES explicit 0 shipping: 2 × 5.95 + 0 → 11.90 (free shipping is stated, added as 0)', () => {
+  // An explicit 0 IS a statement — the customer paid nothing for
+  // shipping. The addition is a no-op arithmetically, but total_shipping
+  // still surfaces (as 0) so OrderHub doesn't fall back to the matched
+  // method's price.
+  const xml = makeRoesXml({ quantity: 2, unitPrice: 5.95, shippingTotal: '0' });
+  const { request } = parser.parse(xml, HOT_FOLDER);
+  assert.equal(request.order.total_amount,   11.90);
+  assert.equal(request.order.total_shipping, 0);
+});
+
+test('total_amount OMITTED entirely when no UnitPrice anywhere, even with <ShippingTotal> stated', () => {
+  // The "only emit total_amount when a UnitPrice was seen" rule stays.
+  // A shipping-only total in OrderHub would mislead operators reading
+  // the order — an order with real prices but no items shouldn't be
+  // possible in the first place. Belt-and-braces.
+  const xml = makeRoesXml({ unitPrice: null, shippingTotal: '5' });
+  const { request } = parser.parse(xml, HOT_FOLDER);
+  assert.equal('total_amount' in request.order, false,
+    'no UnitPrice anywhere → total_amount must remain omitted, shipping notwithstanding');
+  // shipping still surfaces on its own key — that's a separate rule.
+  assert.equal(request.order.total_shipping, 5);
+});
+
+test('total_amount rounds AFTER adding shipping: 3 × 0.10 + 0.20 = 0.50 exactly (no 0.1+0.2 drift)', () => {
+  // 3 × 0.10 = 0.30000000000000004 in JS, + 0.20 = 0.5000000000000001.
+  // Rounding must happen AFTER the shipping addition so the drift from
+  // either input is captured. If rounding ran before the addition, the
+  // 3×0.10 sum would round to 0.3 first and 0.3 + 0.2 in JS is 0.5
+  // exactly — the test would pass under the wrong ordering too. Use
+  // inputs that BOTH produce drift so a rounds-before-shipping bug is
+  // visible: 3 × 0.10 (already 0.30000000000000004 pre-round), +
+  // shipping 0.1 (would leave 0.4000000000000001 without a final round).
+  const xml = makeRoesXml({ quantity: 3, unitPrice: 0.10, shippingTotal: '0.1' });
+  const { request } = parser.parse(xml, HOT_FOLDER);
+  assert.equal(request.order.total_amount, 0.40, '3 × 0.10 + 0.1 rounds to 0.40, no drift');
+});
+
+// ---------------------------------------------------------------------------
 // UNMAPPED_PRODUCTS (still applies to the new format)
 // ---------------------------------------------------------------------------
 

@@ -277,9 +277,46 @@ function parse(xmlString, hotFolderConfig = {}) {
     const qty = Number(li.Quantity); // already validated > 0 above
     computedTotal = (computedTotal || 0) + (qty * unitPrice);
   }
+  // Read ShippingTotal ONCE — reused for both total_shipping (below,
+  // in the `setIfPresent(order, 'total_shipping', ...)` call) and the
+  // total_amount rollup here. numField preserves blank-vs-zero: a
+  // blank tag returns null (OrderHub applies the matched method's
+  // price at its end), an explicit 0 returns 0 (free shipping stated).
+  // See the ShippingTotal comment near setIfPresent for the full rule.
+  const shippingValue = numField(orderRaw.ShippingTotal);
+
   if (anyUnitPriceSeen && computedTotal !== null) {
+    // Include STATED shipping in total_amount, then round to 2dp.
+    // When shippingValue is null (blank / absent / non-numeric) we add
+    // NOTHING — OHD does not know the cost in that case; OrderHub
+    // supplies it from the matched Shipping Method and adds it to the
+    // total at its end. When it is 0, the addition is a no-op but
+    // total_shipping still surfaces as 0 (free shipping stated).
+    //
+    // The "only emit total_amount when a UnitPrice was seen" rule is
+    // preserved: a ROES file with shipping but no unit prices still
+    // emits no total_amount (this whole block is skipped when
+    // anyUnitPriceSeen is false), because a shipping-only total would
+    // mislead operators reading the order in OrderHub.
+    //
+    // ── Deliberate divergence from photo-finale.js ────────────────
+    //
+    // photo-finale.js does NOT add total_shipping to total_amount and
+    // must not be "harmonised" to. PhotoFinale's total_amount is a
+    // WHOLESALE rollup (sum of WholesaleCost * qty — what the
+    // retailer owes the lab) while its shipping_amount is the RETAIL
+    // shipping the cardholder paid; summing them produces a
+    // meaningless number that is neither wholesale nor retail. ROES
+    // has no wholesale/retail split — its line prices and shipping
+    // both reflect what the customer paid — so summing IS the right
+    // rollup here. Same-shape discipline as the paid/PaymentStatus
+    // divergence between the two parsers.
+    if (typeof shippingValue === 'number' && Number.isFinite(shippingValue)) {
+      computedTotal += shippingValue;
+    }
     // Round to 2dp using the standard money-rounding pattern; avoids
-    // surprises like 15.499999999999998.
+    // surprises like 15.499999999999998. Applied AFTER the shipping
+    // addition so 0.1 + 0.2-shape drift on either input is captured.
     computedTotal = Math.round(computedTotal * 100) / 100;
   }
 
@@ -326,7 +363,11 @@ function parse(xmlString, hotFolderConfig = {}) {
   // behaving correctly — the hardest kind of inconsistency to find.
   // See docs/xml-shipping-method-investigation.md §4.2.1 for the
   // absence-vs-falsy trap on the server side.
-  setIfPresent(order, 'total_shipping',    numField(orderRaw.ShippingTotal));
+  //
+  // `shippingValue` was read above (single point of truth for both
+  // total_shipping AND the total_amount rollup) — reuse it here
+  // rather than parsing ShippingTotal twice.
+  setIfPresent(order, 'total_shipping',    shippingValue);
 
   // Shipping vs pickup detection (pickup wiring added 2026-05-23).
   //
