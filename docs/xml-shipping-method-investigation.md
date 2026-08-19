@@ -1,13 +1,71 @@
 # XML import — shipping methods
 
-**Status:** investigation, 2026-08-19. Nothing built.
+**Status:** shipped in **v1.15.2 (2026-08-19)** on both sides. This doc is
+kept as the investigation record — the reasoning behind each decision lives
+here, and everyone who reads the code will end up in this doc to understand
+*why* the two parsers deliberately diverge. Do not delete.
 **Ask:** recognise `<ShippingMethod>` on XML import, pass it to OrderHub, and
 have OrderHub apply the matching Shipping Method and its cost.
 
-**Verdict: the OHD half is nearly done already.** The work is almost entirely
-OrderHub-side, plus one small ROES parser change. The API probably needs
-nothing. There is one decision with money attached (§4.2) that should be made
-before anyone writes code.
+**Verdict: the OHD half was nearly done already.** Work was almost entirely
+OrderHub-side, plus one small ROES parser change (which grew during build
+to also read `<ShippingTotal>` and include stated shipping in ROES's
+`total_amount`).
+
+---
+
+## What actually shipped (2026-08-19)
+
+For a reader who wants the summary before the investigation body:
+
+**OrderHub side.**
+- Matches the inbound `shipping_method` string to a **Shipping Method
+  defined by the lab** and sets `shipping_method_id` on the order.
+- Applies the matched method's **cost** to the order — but only when the
+  XML did not supply one (see the cost-precedence rule below).
+- Anything the XML sends that doesn't match a defined method appears in
+  an **"Unrecognised shipping names"** card so the lab can see the list
+  and add a matching method for each.
+
+**OHD side.**
+- ROES parser now reads `<ShippingMethod>` and forwards it as
+  `shipping_method`, verbatim, regardless of pickup or ship — mirrors
+  PhotoFinale exactly. `roes.js:309`.
+- ROES parser now reads `<ShippingTotal>` and forwards it as
+  `total_shipping` via `numField` + `setIfPresent`, preserving the
+  blank-vs-zero distinction (see §4.2). `roes.js:329`.
+- ROES `total_amount` **includes** stated `<ShippingTotal>` — line items
+  + stated shipping, rounded to 2 dp. Blank / absent / non-numeric
+  shipping contributes nothing to the total (OrderHub adds its cost at
+  its end). See `roes.js` computed-total block for the divergence-from-
+  PhotoFinale comment.
+
+**PhotoFinale deliberately unchanged.** `photo-finale.js` was not touched
+in this release. Its `total_amount` is a wholesale rollup
+(`sum(WholesaleCost × qty)` — what the retailer owes the lab) while its
+shipping amount is retail (what the cardholder paid); adding one to the
+other would produce a meaningless number. Do not "harmonise" the two
+parsers.
+
+**Two decisions that changed during review** — worth recording explicitly
+because both are the kind of thing someone will otherwise "improve" back:
+
+- **No aliases.** §4.1 originally recommended alias support on each
+  Shipping Method (the lab defines the method once and lists inbound names
+  that mean it). That was rejected during review: the alias table is a
+  configuration surface labs won't reliably maintain, and shifting
+  matching to the lab-side "name your method the same as the XML says"
+  achieves the same result with zero configuration. The
+  "Unrecognised shipping names" card tells the lab what names to add.
+- **`total_amount` change is scoped to OrderHub-supplied cost only.**
+  OrderHub adds the derived shipping cost to `total_amount` **only when
+  it supplied that cost** (i.e. the payload arrived with `total_shipping`
+  absent). When the XML stated a value — including `0` for free shipping
+  — the XML wins and `total_amount` is left as the payload sent it.
+  OHD is responsible for including stated shipping in the ROES total
+  (that's the `roes.js` change above); OrderHub is responsible for
+  adding the matched method's price when the payload omits it. Neither
+  side double-adds.
 
 ---
 

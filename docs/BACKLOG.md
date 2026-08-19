@@ -245,6 +245,56 @@ general Settings save never round-trips `ftpSources`. But the
 underlying `save()` non-atomicity remains a footgun for any future
 sanitiser added inside it.
 
+**`<ShipOrder>` for the ROES schema — replace the pickup guess with
+an authoritative flag.** Both parsers currently INFER pickup:
+
+- PhotoFinale by comparing `ShipToAddress` to `RetailerStreet`
+  (`photo-finale.js:344`) — a match means pickup, mismatch means ship.
+- ROES from an all-empty `ShipTo` block (`roes.js:330-331`) — empty
+  means pickup.
+
+Both are guesses. PhotoFinale's guess breaks quietly if a retailer's
+address ever appears as a legitimate ship-to (unlikely, but not
+impossible). ROES's is safer because the lab defines the format, but
+it still can't distinguish "customer forgot to fill in the ship-to"
+from "customer selected in-store pickup" — both look identical.
+
+The lab defines the ROES XML, so an explicit `<ShipOrder>` flag could
+replace the guess: **present = authoritative** (`true` = ship,
+`false` = pickup), **absent = today's rule** (backwards-compatible
+with existing ROES files), and **`ShipOrder=true` with no address
+becomes a rejectable error** rather than a silent misfiling as pickup
+(which is what today's all-empty-ShipTo rule would do). No lab has
+reported a misclassification, so this stays parked. Revisit if one
+does — the fix would be one field-read in `roes.js`, one new branch
+in the pickup detection, and one rejection case for the missing-
+address-with-ShipOrder-true shape.
+
+**PhotoFinale Customers directory: the configured email is never
+validated against a real OrderHub customer.** Settings holds a
+per-retailer directory mapping `<RetailerDealerCode>` → Customer Name
++ Email; those replace the cardholder details on the submitted order
+(`photo-finale.js:220-231`). Two failure modes to distinguish:
+
+- **Unknown `RetailerDealerCode`** — already rejected outright by
+  `photo-finale.js:226`, order lands in `failed/`. A bad *code* can
+  never import wrong details.
+- **Typo'd *email*** — saves cleanly in Settings and only surfaces
+  later, either as a mismatched customer_id on the order or as a
+  customer created under the wrong address.
+
+Fixing the second requires a customer-lookup endpoint on the OrderHub
+API, which doesn't exist today (the API surface is
+`/api-webhook`, `/get-new-jobs`, `/update-job-status`,
+`/update-order-status`). Specced in
+`docs/orderhub-customer-endpoint-spec.md` §4.1 as
+`GET /customers/lookup?email=<email>`. Parked 2026-08-19 — Richard
+pushed back to the client rather than build it, on the grounds that
+the existing code-level rejection already prevents the *damaging*
+case (a bad code never imports; a bad email just misroutes to an
+addressable customer). Revisit if a lab reports mis-matched customer
+records tracing back to a Settings typo.
+
 ---
 
 Older items from before 1.8.0 — the working-set divergence Phase 2, the FTP 550 noise on
