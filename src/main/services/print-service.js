@@ -4159,15 +4159,41 @@ class PrintService {
       imposedBytes = Buffer.from(imposedBytes);
     }
 
-    // Destination: {outputPath}/[{template.outputSubfolder}/]{jobFolderName}/
-    //              {orderNumber}_{jobId}_QTY{totalCopies}_IMPQTY{totalSheets}.pdf
-    // IMPQTY is the SHEET count (§7.5); for duplex the PDF has 2×sheets
-    // pages but IMPQTY still counts sheets because the operator loads
-    // sheets, not pages.
-    const wrapperSegments = template.outputSubfolder ? [template.outputSubfolder] : [];
-    const destFolder = path.join(route.outputPath, ...wrapperSegments, jobFolderName);
-    const destFilename =
-      `${job.order_number}_${job.id}_QTY${totalCopies}_IMPQTY${totalSheets}.pdf`;
+    // ── M8 destination resolution — ONE place, this comment locks
+    // the rule so a maintainer never has to reconstruct it from the
+    // scattered field defaults ────────────────────────────────────
+    //
+    //   {template.outputPath || route.outputPath}
+    //     / {outputSubfolder?}          (template field, optional)
+    //     / {jobFolderName?}            (only when jobSubfolder true)
+    //     / {filename}.pdf
+    //
+    // - baseDest: template.outputPath (absolute, validated at save
+    //   time) OVERRIDES the controller's outputPath so press hot
+    //   folders can live anywhere. Blank/absent → controller default.
+    // - outputSubfolder: single folder name (validated), optional.
+    //   Composes with either base — same semantics as before M8.
+    // - jobFolderName: DEFAULT ABSENT (jobSubfolder=false) so the
+    //   PDF lands directly in the destination — press hot folders
+    //   typically don't scan subdirectories. Set jobSubfolder=true
+    //   for the pre-M8 shape. filenameTemplate's save-time
+    //   distinguishing-token rule (see imposition-service.
+    //   validateTemplate) prevents flat-folder overwrites.
+    // - filename: default convention (M7 shape) or the resolved
+    //   custom template — one implementation in imposition-
+    //   filename.resolveImpositionFilename. IMPQTY is the SHEET
+    //   count (§7.5); for duplex the PDF has 2×sheets pages but
+    //   IMPQTY still counts sheets.
+    const { resolveImpositionFilename } = require('./imposition-filename');
+    const baseDest = (typeof template.outputPath === 'string' && template.outputPath.trim())
+      ? template.outputPath.trim()
+      : route.outputPath;
+    const subfolderSegments = template.outputSubfolder ? [template.outputSubfolder] : [];
+    const jobSegments       = (template.jobSubfolder === true) ? [jobFolderName] : [];
+    const destFolder = path.join(baseDest, ...subfolderSegments, ...jobSegments);
+    const destFilename = resolveImpositionFilename({
+      template, job, totalCopies, totalSheets, logger,
+    });
     const destPath = path.join(destFolder, destFilename);
 
     try {

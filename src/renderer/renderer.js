@@ -9166,9 +9166,16 @@ async function handleBackupRelaunchNow() {
       t ? (t.fillLastSheet !== false) : true;
     document.getElementById('itMode').value          = t ? (t.mode || 'simplex') : 'simplex';
     document.getElementById('itDuplexFlipEdge').value = t ? (t.duplexFlipEdge || 'long') : 'long';
+    document.getElementById('itOutputPath').value      = t ? (t.outputPath      || '') : '';
     document.getElementById('itOutputSubfolder').value = t ? (t.outputSubfolder || '') : '';
+    // jobSubfolder defaults FALSE for a new template (M8 flat-output
+    // default — press hot folders don't scan subdirectories). Existing
+    // templates without the field default false too; nothing released.
+    document.getElementById('itJobSubfolder').checked  = t ? (t.jobSubfolder === true) : false;
+    document.getElementById('itFilenameTemplate').value = t ? (t.filenameTemplate || '') : '';
     updateFlipEdgeVisibility();
     updatePrintableArea();
+    renderImpositionFilenameTokens();
     renderProductCodes(t ? t.productCodes : []);
 
     const errEl = document.getElementById('itSaveError');
@@ -9222,8 +9229,88 @@ async function handleBackupRelaunchNow() {
       mode:            document.getElementById('itMode').value,
       duplexFlipEdge:  document.getElementById('itDuplexFlipEdge').value,
       productCodes:    collectProductCodes(),
-      outputSubfolder: document.getElementById('itOutputSubfolder').value,
+      outputPath:       document.getElementById('itOutputPath').value,
+      outputSubfolder:  document.getElementById('itOutputSubfolder').value,
+      jobSubfolder:     document.getElementById('itJobSubfolder').checked,
+      filenameTemplate: document.getElementById('itFilenameTemplate').value,
     };
+  }
+
+  // ─── Filename token panel (click-to-copy) ─────────────────────────
+  //
+  // ONLY the sensible set for imposition: job-level tokens plus the
+  // two imposition-specific placeholders. Per-image tokens (index,
+  // quantity, filename, indexPadded) would resolve to blank on the
+  // one-file-per-job pipeline and are deliberately excluded — same
+  // §5.2 discipline the folder-copy tokens follow.
+  //
+  // MANUAL-SYNC NOTE: this list mirrors imposition-filename.js's
+  // supported set plus template-tokens.js's job-level tokens. When
+  // a new job-level token lands in template-tokens.js AND you want
+  // operators to see it here, extend this array by hand — importing
+  // template-tokens.SUPPORTED_TOKENS would over-advertise per-image
+  // tokens that make no sense in this context.
+  const IMPOSITION_FILENAME_TOKENS = [
+    '{customerName}', '{firstName}', '{lastName}',
+    '{orderNumber}', '{jobName}', '{jobId}',
+    '{product}', '{productCode}', '{category}', '{process}',
+    '{dueDate}', '{date}',
+    '{options}',
+    '{qty}', '{impQty}',
+  ];
+
+  function renderImpositionFilenameTokens() {
+    const container = document.getElementById('itFilenameTokens');
+    if (!container) return;
+    // Idempotent — safe to call every modal open.
+    if (container.children.length > 0) return;
+    const chipCss = [
+      'font-family:ui-monospace,Menlo,Consolas,monospace',
+      'font-size:12px',
+      'padding:3px 8px',
+      'background:var(--surface,#fff)',
+      'border:1px solid var(--border,#ddd)',
+      'border-radius:3px',
+      'cursor:pointer',
+      'color:var(--text,#333)',
+      'margin:2px',
+    ].join(';');
+    for (const token of IMPOSITION_FILENAME_TOKENS) {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.textContent = token;
+      chip.title = `Click to copy ${token}`;
+      chip.style.cssText = chipCss;
+      chip.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(token);
+          showToast(`Copied ${token}`, 'success', 1500);
+        } catch (_) {
+          showToast('Could not copy — select and copy manually', 'error', 3000);
+        }
+      });
+      container.appendChild(chip);
+    }
+    // {option:NAME} placeholder — same treatment as the Folder Copy
+    // panel: shown as helper text below the chips so an operator can't
+    // paste the literal placeholder and get a blank slot at dispatch.
+    // DOM-nodes rather than innerHTML matches the folder-copy pattern
+    // and stays lint-clean against the innerHTML footgun class.
+    const helper = document.createElement('div');
+    helper.style.cssText = [
+      'flex-basis:100%',
+      'margin-top:6px',
+      'font-size:12px',
+      'color:var(--text-muted,#666)',
+    ].join(';');
+    const codeCss = 'font-family:ui-monospace,Menlo,Consolas,monospace';
+    const c1 = document.createElement('code'); c1.textContent = '{option:NAME}';           c1.style.cssText = codeCss;
+    const c2 = document.createElement('code'); c2.textContent = 'NAME';
+    const c3 = document.createElement('code'); c3.textContent = '{option:finish-options}'; c3.style.cssText = codeCss;
+    helper.append(
+      'Plus ', c1, ' — replace ', c2, ' with an option name, e.g. ', c3, '.',
+    );
+    container.appendChild(helper);
   }
 
   /**
@@ -9416,6 +9503,13 @@ async function handleBackupRelaunchNow() {
   // list deliberately.
   document.getElementById('itAddProductCodeBtn')?.addEventListener('click', () => {
     document.getElementById('itProductCodesList').appendChild(buildProductCodeRow(''));
+  });
+  // M8 output-path browse button — reuses the app-wide directory
+  // picker (same IPC every other browse button in the controller
+  // modal uses). No live preview refresh needed: outputPath doesn't
+  // affect the layout geometry.
+  document.getElementById('itOutputPathBrowseBtn')?.addEventListener('click', () => {
+    selectDirectoryFor('itOutputPath');
   });
 
   // Load on Settings → Imposition open (lazy — no fetch until visible).

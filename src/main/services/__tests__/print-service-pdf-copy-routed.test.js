@@ -369,13 +369,14 @@ test('matched simplex multi-design: qty 5 + qty 3 on 4-up → ONE PDF, 3 pages, 
   assert.equal(result.totalSheets, 3);
   assert.equal(result.designs, 2);
 
-  // ONE output file at {outputRoot}/{jobFolderName}/{orderNumber}_{jobId}_QTY8_IMPQTY3.pdf
-  const expectedFolder = path.join(outputRoot, jobFolderName);
-  const expectedFile   = path.join(expectedFolder, 'PXT-MD_701_QTY8_IMPQTY3.pdf');
+  // M8: flat default — jobSubfolder is FALSE unless explicitly true.
+  // ONE output file directly at {outputRoot}/{orderNumber}_{jobId}_QTY8_IMPQTY3.pdf.
+  const expectedFile = path.join(outputRoot, 'PXT-MD_701_QTY8_IMPQTY3.pdf');
   assert.ok(fs.existsSync(expectedFile), `imposed PDF must exist at ${expectedFile}`);
-  // No other files in the folder — the imposed output is the single
-  // press-ready sheet PDF (§7.5).
-  assert.deepEqual(fs.readdirSync(expectedFolder), ['PXT-MD_701_QTY8_IMPQTY3.pdf']);
+  // The imposed output is a single press-ready sheet PDF (§7.5); check
+  // no accidental job subfolder was created either.
+  assert.ok(!fs.existsSync(path.join(outputRoot, jobFolderName)),
+    'no per-job subfolder — flat default (M8)');
 
   // Reopen the imposed PDF and confirm the page count matches totalSheets
   // (simplex: pages = sheets). If the concatenation stage regresses and
@@ -418,8 +419,10 @@ test('matched duplex: qty 5 on 4-up → 2 sheets → 4 pages in the PDF; filenam
   assert.equal(result.success, true, `unexpected failure: ${result.error}`);
   assert.equal(result.totalSheets, 2);   // 5 on 4-up = 2 sheets
   assert.equal(result.totalCopies, 5);
-  const expectedFile = path.join(outputRoot, jobFolderName, 'PXT-DX_801_QTY5_IMPQTY2.pdf');
+  // M8 flat default — no per-job subfolder.
+  const expectedFile = path.join(outputRoot, 'PXT-DX_801_QTY5_IMPQTY2.pdf');
   assert.ok(fs.existsSync(expectedFile), `duplex imposed PDF must exist at ${expectedFile}`);
+  void jobFolderName;
 
   const reopened = await PDFDocument.load(fs.readFileSync(expectedFile));
   assert.equal(reopened.getPageCount(), 4,
@@ -461,8 +464,10 @@ test('quantity source: uses manifest per-image quantity, NOT job.quantity (§3.4
   assert.equal(result.success, true, `unexpected failure: ${result.error}`);
   assert.equal(result.totalCopies, 8);   // manifest qty
   assert.equal(result.totalSheets, 2);   // 8 on 4-up = 2 sheets
-  const expectedFile = path.join(outputRoot, jobFolderName, 'PXT-QT_901_QTY8_IMPQTY2.pdf');
+  // M8 flat default.
+  const expectedFile = path.join(outputRoot, 'PXT-QT_901_QTY8_IMPQTY2.pdf');
   assert.ok(fs.existsSync(expectedFile));
+  void jobFolderName;
 });
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -558,8 +563,10 @@ test('expectedArtwork divergence: real trim differs > 0.5 pt — logWarning fire
 
   assert.equal(result.success, true, `unexpected failure: ${result.error}`);
   assert.equal(result.expectedArtworkWarn, true, 'divergence flag must be set on the result');
-  const expectedFile = path.join(outputRoot, jobFolderName, 'PXT-DIV_1101_QTY4_IMPQTY1.pdf');
+  // M8 flat default.
+  const expectedFile = path.join(outputRoot, 'PXT-DIV_1101_QTY4_IMPQTY1.pdf');
   assert.ok(fs.existsSync(expectedFile), 'output must still be written — divergence is a WARN, not a FAIL');
+  void jobFolderName;
 
   // The captured warning must name both the real trim and the template's
   // expected size so the lab can see what drifted.
@@ -598,9 +605,11 @@ test('template.outputSubfolder: imposed output nests one level deeper', async (t
   );
 
   assert.equal(result.success, true, `unexpected failure: ${result.error}`);
-  // Nested one level deeper under 'imposed'.
-  const expectedFile = path.join(outputRoot, 'imposed', jobFolderName, 'PXT-OS_1201_QTY4_IMPQTY1.pdf');
+  // M8 flat default: nested one level deeper under 'imposed', but no
+  // per-job subfolder underneath.
+  const expectedFile = path.join(outputRoot, 'imposed', 'PXT-OS_1201_QTY4_IMPQTY1.pdf');
   assert.ok(fs.existsSync(expectedFile), `subfolder-wrapped file must exist at ${expectedFile}`);
+  void jobFolderName;
 });
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -639,8 +648,209 @@ test('M7 fillLastSheet on: qty 10 on 4-up → filename still _QTY10_IMPQTY3 (fil
   // blanks with overs, not sheets with sheets.
   assert.equal(result.totalCopies, 10);
   assert.equal(result.totalSheets, 3);
-  const expectedFile = path.join(outputRoot, jobFolderName, 'PXT-FLS_1301_QTY10_IMPQTY3.pdf');
+  // M8 flat default.
+  const expectedFile = path.join(outputRoot, 'PXT-FLS_1301_QTY10_IMPQTY3.pdf');
   assert.ok(fs.existsSync(expectedFile), `filename must NOT change with fill on: expected ${expectedFile}`);
   const reopened = await PDFDocument.load(fs.readFileSync(expectedFile));
   assert.equal(reopened.getPageCount(), 3, 'simplex sheet count unchanged by fill');
+  void jobFolderName;
+});
+
+// ═════════════════════════════════════════════════════════════════════════
+// M8: output destination + filename templates
+// ═════════════════════════════════════════════════════════════════════════
+
+test('M8 default-path lock: all M8 fields blank/false → destination is the CONTROLLER outputPath, flat (no job subfolder), M7 filename', async (t) => {
+  // The exact M8 default shape: baseDest = controller.outputPath (no
+  // template override); no outputSubfolder; jobSubfolder OFF (the new
+  // default); default M7 convention filename. This locks the "byte-
+  // identical to M7 EXCEPT no job subfolder" invariant Richard called.
+  resetGlobals();
+  seedWorked5x7Template();  // no M8 fields set on fixture
+  const pdfBytes = await makeArtwork({ mediaW: 360, mediaH: 504 });
+  const { downloadRoot, outputRoot, jobFolderName } = await makeFixture({
+    orderNumber: 'PXT-M8D',
+    orderId:     'ORD-M8D',
+    jobId:       1401,
+    images: [{ filename: 'card.pdf', body: pdfBytes, quantity: 4 }],
+  });
+  __downloadDirectory = downloadRoot;
+  cleanup(t, downloadRoot, outputRoot);
+
+  const result = await printService._sendViaPdfCopyRouted(
+    { id: 1401, order_number: 'PXT-M8D', order_id: 'ORD-M8D', product_code: 'GRAD5X7' },
+    { outputPath: outputRoot, controllerName: 'PC-M8D', applyImpositions: true, unmatchedBehaviour: 'root' },
+  );
+  assert.equal(result.success, true, `unexpected failure: ${result.error}`);
+  const expectedFile = path.join(outputRoot, 'PXT-M8D_1401_QTY4_IMPQTY1.pdf');
+  assert.ok(fs.existsSync(expectedFile), `flat default: file must exist at ${expectedFile}`);
+  // No per-job subfolder created — the flat default's whole point.
+  assert.ok(!fs.existsSync(path.join(outputRoot, jobFolderName)),
+    'no per-job subfolder in the M8 default shape');
+  // outputRoot contains ONLY the imposed file (plus nothing).
+  assert.deepEqual(fs.readdirSync(outputRoot), ['PXT-M8D_1401_QTY4_IMPQTY1.pdf']);
+});
+
+test('M8 jobSubfolder=true: opt-in restores the pre-M8 per-job subfolder shape', async (t) => {
+  resetGlobals();
+  seedWorked5x7Template({ jobSubfolder: true });
+  const pdfBytes = await makeArtwork({ mediaW: 360, mediaH: 504 });
+  const { downloadRoot, outputRoot, jobFolderName } = await makeFixture({
+    orderNumber: 'PXT-M8J',
+    orderId:     'ORD-M8J',
+    jobId:       1402,
+    images: [{ filename: 'card.pdf', body: pdfBytes, quantity: 4 }],
+  });
+  __downloadDirectory = downloadRoot;
+  cleanup(t, downloadRoot, outputRoot);
+
+  const result = await printService._sendViaPdfCopyRouted(
+    { id: 1402, order_number: 'PXT-M8J', order_id: 'ORD-M8J', product_code: 'GRAD5X7' },
+    { outputPath: outputRoot, controllerName: 'PC-M8J', applyImpositions: true, unmatchedBehaviour: 'root' },
+  );
+  assert.equal(result.success, true, `unexpected failure: ${result.error}`);
+  const expectedFile = path.join(outputRoot, jobFolderName, 'PXT-M8J_1402_QTY4_IMPQTY1.pdf');
+  assert.ok(fs.existsSync(expectedFile), `jobSubfolder true → nested under ${jobFolderName}`);
+});
+
+test('M8 template.outputPath override: absolute path replaces the controller outputPath', async (t) => {
+  resetGlobals();
+  // outputPath must be absolute — makeFixture returns an absolute tmp
+  // dir, so we can reuse it as the override target.
+  const overrideDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'ohd-pc-m8ov-'));
+  seedWorked5x7Template({ outputPath: overrideDir });
+  const pdfBytes = await makeArtwork({ mediaW: 360, mediaH: 504 });
+  const { downloadRoot, outputRoot } = await makeFixture({
+    orderNumber: 'PXT-M8O',
+    orderId:     'ORD-M8O',
+    jobId:       1403,
+    images: [{ filename: 'card.pdf', body: pdfBytes, quantity: 4 }],
+  });
+  __downloadDirectory = downloadRoot;
+  cleanup(t, downloadRoot, outputRoot, overrideDir);
+
+  const result = await printService._sendViaPdfCopyRouted(
+    { id: 1403, order_number: 'PXT-M8O', order_id: 'ORD-M8O', product_code: 'GRAD5X7' },
+    // controller outputPath deliberately different — the override wins.
+    { outputPath: outputRoot, controllerName: 'PC-M8O', applyImpositions: true, unmatchedBehaviour: 'root' },
+  );
+  assert.equal(result.success, true, `unexpected failure: ${result.error}`);
+  const expectedFile = path.join(overrideDir, 'PXT-M8O_1403_QTY4_IMPQTY1.pdf');
+  assert.ok(fs.existsSync(expectedFile), `template outputPath override: file at ${expectedFile}`);
+  // Controller outputPath must NOT have received the imposed file — the
+  // whole point of the override is that press hot folders can live
+  // anywhere, not under the controller root.
+  assert.equal(fs.readdirSync(outputRoot).length, 0,
+    'no imposed output under the controller outputPath when the template overrides it');
+});
+
+test('M8 custom filenameTemplate: tokens resolve, sanitised, .pdf appended once', async (t) => {
+  resetGlobals();
+  seedWorked5x7Template({ filenameTemplate: '{orderNumber}-{qty}of{impQty}' });
+  const pdfBytes = await makeArtwork({ mediaW: 360, mediaH: 504 });
+  const { downloadRoot, outputRoot } = await makeFixture({
+    orderNumber: 'PXT-M8F',
+    orderId:     'ORD-M8F',
+    jobId:       1404,
+    images: [{ filename: 'card.pdf', body: pdfBytes, quantity: 10 }],
+  });
+  __downloadDirectory = downloadRoot;
+  cleanup(t, downloadRoot, outputRoot);
+
+  const result = await printService._sendViaPdfCopyRouted(
+    { id: 1404, order_number: 'PXT-M8F', order_id: 'ORD-M8F', product_code: 'GRAD5X7' },
+    { outputPath: outputRoot, controllerName: 'PC-M8F', applyImpositions: true, unmatchedBehaviour: 'root' },
+  );
+  assert.equal(result.success, true, `unexpected failure: ${result.error}`);
+  // qty=10 on 4-up = 3 sheets → filename resolves to "PXT-M8F-10of3.pdf".
+  const expectedFile = path.join(outputRoot, 'PXT-M8F-10of3.pdf');
+  assert.ok(fs.existsSync(expectedFile), `custom filename: file at ${expectedFile}`);
+});
+
+test('M8 empty resolution at dispatch: filenameTemplate that resolves to empty falls back to the default convention + logWarning', async (t) => {
+  resetGlobals();
+  // {product} is present in the shared token set but blank on this job
+  // — dispatch below sends no product field. Sanitisation strips the
+  // hyphen-only remainder to empty; fallback kicks in with a WARN. The
+  // template still passes save-time validation (it contains
+  // {orderNumber}... wait, that would make sanitisation non-empty).
+  //
+  // For a test-controlled empty resolution we use {product} + {options}
+  // (both blank on the job) AND — since the save-time distinguishing-
+  // token rule would reject this template — we seed the template
+  // DIRECTLY into the store bypassing the validator. That's honest:
+  // this test covers the dispatch fallback behaviour for a template
+  // that somehow reached dispatch with no distinguishing content
+  // (hand-edited JSON, future refactor gap).
+  seedImposition({
+    paperSizes: [{ id: 'ps-12x18', name: '12x18', unit: 'in', width: IN(12), height: IN(18) }],
+    impositionTemplates: [{
+      id: 'tpl-empty',
+      name: 'Empty-resolve',
+      paperSizeId: 'ps-12x18',
+      gutter: IN(0.25),
+      margins: { top: IN(0.25), right: IN(0.25), bottom: IN(0.25), left: IN(0.25) },
+      expectedArtwork: { width: IN(5), height: IN(7) },
+      autoRotate: true, artworkBleed: 0, cropMarks: false,
+      fillLastSheet: true,
+      mode: 'simplex', duplexFlipEdge: null,
+      productCodes: ['EMPTY'],
+      // Contains {jobId} to bypass validator, but leading only-punctuation
+      // stripped by sanitisation. Actually: since we bypass validation,
+      // use a template that truly sanitises to empty — {product} alone
+      // on a job with no product field.
+      filenameTemplate: '{product}',
+      outputSubfolder: '',
+    }],
+  });
+  const pdfBytes = await makeArtwork({ mediaW: 360, mediaH: 504 });
+  const { downloadRoot, outputRoot } = await makeFixture({
+    orderNumber: 'PXT-M8E',
+    orderId:     'ORD-M8E',
+    jobId:       1405,
+    images: [{ filename: 'card.pdf', body: pdfBytes, quantity: 4 }],
+  });
+  __downloadDirectory = downloadRoot;
+  cleanup(t, downloadRoot, outputRoot);
+
+  const result = await printService._sendViaPdfCopyRouted(
+    // No product field on the job → {product} resolves to '' → empty.
+    { id: 1405, order_number: 'PXT-M8E', order_id: 'ORD-M8E', product_code: 'EMPTY' },
+    { outputPath: outputRoot, controllerName: 'PC-M8E', applyImpositions: true, unmatchedBehaviour: 'root' },
+  );
+  assert.equal(result.success, true, `unexpected failure: ${result.error}`);
+  // Fallback = M7 default convention.
+  const expectedFile = path.join(outputRoot, 'PXT-M8E_1405_QTY4_IMPQTY1.pdf');
+  assert.ok(fs.existsSync(expectedFile), `empty-resolution fallback: file at ${expectedFile}`);
+  // WARN fired naming the falling-back template.
+  const warn = __warnings.find(w =>
+    typeof w.message === 'string' && /resolved to empty/.test(w.message) && /\{product\}/.test(w.message));
+  assert.ok(warn, 'expected a logWarning about empty resolution');
+});
+
+test('M8 filenameTemplate {qty}/{impQty} — multi-design totals (cross-design sums per §7.5)', async (t) => {
+  resetGlobals();
+  seedWorked5x7Template({ filenameTemplate: '{orderNumber}-J{jobId}-total{qty}-sheets{impQty}' });
+  const pdfA = await makeArtwork({ mediaW: 360, mediaH: 504 });
+  const pdfB = await makeArtwork({ mediaW: 360, mediaH: 504 });
+  const { downloadRoot, outputRoot } = await makeFixture({
+    orderNumber: 'PXT-M8Q',
+    orderId:     'ORD-M8Q',
+    jobId:       1406,
+    images: [
+      { filename: 'design_A.pdf', body: pdfA, quantity: 5 },
+      { filename: 'design_B.pdf', body: pdfB, quantity: 3 },
+    ],
+  });
+  __downloadDirectory = downloadRoot;
+  cleanup(t, downloadRoot, outputRoot);
+
+  const result = await printService._sendViaPdfCopyRouted(
+    { id: 1406, order_number: 'PXT-M8Q', order_id: 'ORD-M8Q', product_code: 'GRAD5X7' },
+    { outputPath: outputRoot, controllerName: 'PC-M8Q', applyImpositions: true, unmatchedBehaviour: 'root' },
+  );
+  assert.equal(result.success, true, `unexpected failure: ${result.error}`);
+  // Cross-design totals: 5+3=8 copies; 2+1=3 sheets.
+  const expectedFile = path.join(outputRoot, 'PXT-M8Q-J1406-total8-sheets3.pdf');
+  assert.ok(fs.existsSync(expectedFile), `cross-design totals: file at ${expectedFile}`);
 });

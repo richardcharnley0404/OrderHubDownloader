@@ -1736,9 +1736,33 @@
           </div>
 
           <div class="form-group">
+            <label for="itOutputPath">Output Path <span class="field-hint-inline">(optional)</span></label>
+            <div class="input-with-button">
+              <input type="text" id="itOutputPath" placeholder="Leave blank to use the controller's output path">
+              <button type="button" id="itOutputPathBrowseBtn" class="btn-browse">Browse...</button>
+            </div>
+            <small class="field-hint">Leave blank to use the controller's output path. Press hot folders can be anywhere — this template's imposed output will land under whichever path you set here instead of under the controller root.</small>
+          </div>
+
+          <div class="form-group">
             <label for="itOutputSubfolder">Output Subfolder <span class="field-hint-inline">(optional)</span></label>
             <input type="text" id="itOutputSubfolder" placeholder="e.g. imposed">
-            <small class="field-hint">Single folder name, not a path. When set, imposed output for this template lands in <code>{controller.outputPath}/{subfolder}/</code> so imposed sheets don't share a directory with pass-through singletons (§7.4).</small>
+            <small class="field-hint">Single folder name, not a path. When set, imposed output for this template lands one level deeper under <code>{base}/{subfolder}/</code> where <code>{base}</code> is Output Path if set, otherwise the controller's output path.</small>
+          </div>
+
+          <div class="form-group checkbox-group">
+            <label>
+              <input type="checkbox" id="itJobSubfolder">
+              <span>Place in a job subfolder</span>
+            </label>
+            <small class="field-hint">Off by default — press hot folders usually don't scan subdirectories, so the imposed PDF lands directly in the destination. Tick to wrap each job's output in <code>{orderNumber}_{jobId}/</code> (the pre-M8 shape).</small>
+          </div>
+
+          <div class="form-group">
+            <label for="itFilenameTemplate">Filename Template <span class="field-hint-inline">(optional)</span></label>
+            <input type="text" id="itFilenameTemplate" placeholder="{orderNumber}_{jobId}_QTY{qty}_IMPQTY{impQty}">
+            <small class="field-hint">Blank uses the default shown above. Must contain at least one of <code>{orderNumber}</code>, <code>{jobName}</code>, or <code>{jobId}</code> when set — flat output means files from different jobs share one folder. Extension is always <code>.pdf</code> (appended automatically).</small>
+            <div id="itFilenameTokens" class="pipeline-tokens-panel" style="margin-top:6px;"></div>
           </div>
 
           <div id="itSaveError" class="modal-save-error hidden"></div>

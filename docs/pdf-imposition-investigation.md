@@ -1,7 +1,7 @@
 # PDF Copy — imposition templates & paper sizes
 
 **Status:** code-complete, unreleased (2026-08-20). Six build milestones
-plus one operator-feedback pass (M7) landed as separate reviewed
+plus two operator-feedback passes (M7, M8) landed as separate reviewed
 commits; the feature is off by default on every existing pdf_copy
 controller and awaits release. See §10 for the build record.
 
@@ -372,6 +372,48 @@ setup, not per-controller routing.
      of 40 copies each at 4-up = one file `..._QTY80_IMPQTY20.pdf`
      containing 10 sheets of design A then 10 sheets of design B.
 
+   **M8 amendment (2026-08-20, press-side feedback):** the OUTPUT
+   NAMING is unchanged; the OUTPUT LOCATION got three new
+   per-template fields.
+   - `outputPath` — optional absolute-path override for the base
+     destination. When set, replaces `route.outputPath` at dispatch;
+     press hot folders can live anywhere on the network, not just
+     under the controller root. Blank = today's behaviour (controller
+     outputPath). Save-time validation: `path.isAbsolute`; existence
+     NOT checked at save (a press share can be offline during setup
+     and dispatch already fails loudly on write).
+   - `jobSubfolder` — boolean, **DEFAULT FALSE** (changed from
+     always-on). Off: the imposed PDF lands directly in the
+     destination — press hot folders typically don't scan
+     subdirectories. On: wraps in `{orderNumber}_{jobId}/` (the
+     pre-M8 shape). §7.4's pass-through paths and §7.5's filename
+     shape are unchanged.
+   - `filenameTemplate` — optional; blank = the default convention
+     above, byte-identical. When set, resolves via the shared
+     `template-tokens.js` resolver (job-level tokens); the two
+     imposition-specific tokens `{qty}` and `{impQty}` are
+     substituted AFTER the shared resolver runs so they stay out
+     of back-print / photo-line / folder-copy callers. Save-time
+     rule: must contain at least one of `{orderNumber}`, `{jobName}`,
+     `{jobId}` — flat output means files from different jobs share
+     one folder, and `{qty}`/`{impQty}` alone are NOT sufficient
+     (two jobs with the same totals would collide). Sanitisation
+     borrows the folder-copy rules verbatim (`UNSAFE_CHARS`,
+     whitespace collapse, Win32 reserved-name guard, `.pdf`
+     appended once). Empty resolution at dispatch → default
+     convention fallback + `logWarning` (same posture folder-copy
+     uses for empty stems).
+
+   Full resolution order at dispatch, one place in the code, one
+   place here:
+
+   ```
+   {template.outputPath || route.outputPath}
+     / {outputSubfolder?}          (template field, optional)
+     / {jobFolderName?}            (only when jobSubfolder true)
+     / {filename}.pdf              (default convention or custom template)
+   ```
+
 6. **Artwork preview rendering** in the template editor (showing the actual
    card PDF in the grid, not just rectangles) needs PDF rasterising in the
    renderer — pdf.js or similar, a new dependency. v1 preview with labelled
@@ -443,17 +485,18 @@ required an §8 item.
 | M4        | `fee4c90` | Settings screens + live preview IPC (`imposition-preview.js`); 11 tests   |
 | M5        | `7beaf67` | Dispatch wiring in `_sendViaPdfCopyRouted` + pdf_copy controller fields; 17 tests |
 | M6        | `c12338c` | CHANGELOG entry, operator guide, this build record, landmines, BACKLOG entry |
-| M7        | (this commit) | Operator-feedback pass: template editor wording (Finished Size, help text refresh), live printable-area readout, fill-last-sheet (default TRUE — Richard's call reversing §8); 9 tests |
+| M7        | `dabce3e` | Operator-feedback pass: template editor wording (Finished Size, help text refresh), live printable-area readout, fill-last-sheet (default TRUE — Richard's call reversing §8); 9 tests |
+| M8        | (this commit) | Press-side feedback: per-template outputPath (absolute override), jobSubfolder toggle (DEFAULT FALSE — flat output), filenameTemplate ({token} + {qty}/{impQty} with distinguishing-token save rule); 16 new tests. Amends §7.5. |
 
 Also in the sequence: `4b2b595` fixed the known `perfectlyClientClient.test.js`
 stability-polling flake that had been noise-swamping M3's preflight
 runs (RESOLVED in `docs/BACKLOG.md`).
 
 Suite growth: 2246 tests before M1 → 2347 after M5 (M6 adds no tests) →
-2356 after M7. No CHANGELOG entry until M6 — every prior milestone
-deliberately shipped code with no operator-visible change until
-dispatch wired up. M7 amends the M6 entry rather than adding a new
-one; the feature is still unreleased.
+2356 after M7 → 2372 after M8. No CHANGELOG entry until M6 — every
+prior milestone deliberately shipped code with no operator-visible
+change until dispatch wired up. M7 and M8 amend the M6 entry rather
+than adding new ones; the feature is still unreleased.
 
 ## Sources
 

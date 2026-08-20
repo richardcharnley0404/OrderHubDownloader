@@ -37,9 +37,48 @@ Setup path in Settings, in the order a lab meets them:
    impositions from Settings → Imposition.** Nothing changes on the
    controller until this is ticked. See "off by default" below.
 
+**Where the PDF lands** is per-template. Three fields on the template
+control the destination, in order (all optional):
+
+- **Output Path** — absolute path override. Press hot folders can live
+  anywhere on the network — this field routes this template's imposed
+  output to that path instead of the controller's root. Leave blank
+  to use the controller's output path (today's default). Browse
+  button opens the same folder picker every other controller Browse
+  button uses. Path must be absolute; a relative value rejects at
+  Save (existence isn't checked — a press share can be offline
+  during setup and dispatch already fails loudly on write).
+- **Output Subfolder** — single folder name. Nests one level deeper
+  under whichever base (Output Path if set, otherwise controller
+  root) so imposed sheets and pass-through singletons never share
+  a directory, or so two templates on the same base can route to
+  different subfolders. Path separators reject at Save.
+- **Place in a job subfolder** — off by default (**changed from the
+  earlier design**). Off, the imposed PDF lands directly in the
+  destination — press hot folders typically don't scan
+  subdirectories. Tick to wrap each job in `{orderNumber}_{jobId}/`
+  (the pre-M8 shape).
+
 What comes out of the hot folder: **one press-ready PDF per job**,
-named `{orderNumber}_{jobId}_QTY{copies}_IMPQTY{sheets}.pdf`. The two
-numbers matter to the operator:
+named by default `{orderNumber}_{jobId}_QTY{copies}_IMPQTY{sheets}.pdf`.
+An optional **Filename Template** field on the template lets the lab
+change that convention using the same `{token}` system Folder Copy
+uses, plus two imposition-specific tokens:
+
+- `{qty}` — total copies across designs
+- `{impQty}` — total sheets
+
+A click-to-copy token panel below the field shows the sensible set
+(no per-image tokens — one file per job). **Save requires at least
+one of `{orderNumber}`, `{jobName}`, or `{jobId}`** — flat output
+means files from different jobs share one folder, and `{qty}` /
+`{impQty}` alone aren't sufficient (two jobs with the same totals
+would collide). Extension is always `.pdf`, appended automatically;
+any `.pdf` typed in the template is stripped and re-added once.
+Unsafe characters strip; empty resolution at dispatch falls back
+to the default convention with a WARN in the log.
+
+The two numbers in the default filename matter to the operator:
 
 - `QTY` is the total copies across every design in the job (the
   number the customer is paying for).

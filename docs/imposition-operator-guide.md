@@ -103,11 +103,37 @@ Fields, in the order that makes sense to fill:
 - **Product Codes** — one row per code. A product code may belong to
   only one template; save will reject a collision naming both
   templates so the operator can pick which one wins.
+- **Output Path** (optional) — the absolute folder the imposed PDF
+  should land in. Leave blank to use the controller's output path
+  (today's default). Press hot folders can be anywhere on the
+  network — this field is the escape hatch when the press folder
+  doesn't sit under the controller root. The Browse button opens the
+  same picker the controller Browse buttons use. Path must be
+  absolute; a relative value rejects at Save.
 - **Output Subfolder** (optional) — when set, imposed output for this
-  template lands in `{controller.outputPath}/{subfolder}/` instead of
-  the controller's root, so imposed sheets don't share a directory
-  with pass-through singletons (see Section 5). Single folder name;
-  path separators are rejected.
+  template lands one level deeper under `{base}/{subfolder}/`, where
+  `{base}` is the Output Path above if set, otherwise the controller's
+  output path. Use it so imposed sheets don't share a directory with
+  pass-through singletons (see Section 5) or to route two templates on
+  the same base to different destinations. Single folder name; path
+  separators reject at Save.
+- **Place in a job subfolder** (checkbox, **off by default**) — off,
+  the imposed PDF lands directly in the destination (flat — press hot
+  folders usually don't scan subdirectories). Tick to wrap each job in
+  `{orderNumber}_{jobId}/` (the pre-M8 shape). Combined with the
+  Filename Template rule below, flat output stays safe from collisions.
+- **Filename Template** (optional) — leave blank to use the default
+  `{orderNumber}_{jobId}_QTY{qty}_IMPQTY{impQty}.pdf` shape shown as
+  placeholder text. When set, the template resolves via the same
+  `{token}` system Folder Copy uses, plus two imposition-specific
+  tokens: `{qty}` for total copies across designs, `{impQty}` for
+  total sheets. Click any chip below the field to copy the token to
+  the clipboard. **Save requires at least one of `{orderNumber}`,
+  `{jobName}`, or `{jobId}`** — otherwise files from different jobs
+  would overwrite each other in the flat output folder; `{qty}` and
+  `{impQty}` alone are not sufficient (two jobs with the same totals
+  would collide). Extension is always `.pdf`, appended automatically;
+  any `.pdf` you type in the template is stripped and re-added once.
 
 Watch the preview as you fill fields:
 

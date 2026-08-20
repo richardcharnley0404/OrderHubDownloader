@@ -39,8 +39,10 @@
  */
 
 const Store  = require('electron-store');
+const path   = require('node:path');
 const { UNSAFE_CHARS } = require('../../shared/printUtils');
 const { computeLayout } = require('../../pdf-pipeline/imposition-layout');
+const { hasDistinguishingToken, DISTINGUISHING_TOKENS } = require('./imposition-filename');
 
 const store = new Store({ name: 'imposition' });
 
@@ -347,6 +349,79 @@ function validateTemplate(input, { existingTemplates = [], paperSizes = [] } = {
     outputSubfolder = raw.replace(UNSAFE_CHARS, '').trim();
   }
 
+  // M8 outputPath — optional ABSOLUTE path override. When set, replaces
+  // the controller's outputPath at dispatch (press hot folders live
+  // anywhere, not just under the controller root — §7.4 amendment).
+  // NOT required to exist at save time: a press share can be offline
+  // during setup, and dispatch already fails loudly if the write fails.
+  let outputPath = '';
+  if (input.outputPath !== undefined && input.outputPath !== null && input.outputPath !== '') {
+    if (typeof input.outputPath !== 'string') {
+      return { ok: false, error: `Template outputPath must be a string (got ${typeof input.outputPath}).` };
+    }
+    const trimmed = input.outputPath.trim();
+    if (trimmed) {
+      // path.isAbsolute is platform-aware — accepts `C:\...`, `\\server\share`,
+      // and POSIX `/foo` on Linux (tests). Rejects `./x`, `foo\bar`, etc.
+      if (!path.isAbsolute(trimmed)) {
+        return {
+          ok: false,
+          error:
+            `Template outputPath must be an absolute path when set (got ${JSON.stringify(trimmed)}). ` +
+            `Leave blank to use the controller's output path.`,
+        };
+      }
+      outputPath = trimmed;
+    }
+  }
+
+  // M8 jobSubfolder — DEFAULT FALSE (flat output; press hot folders
+  // don't scan subdirectories). Strict boolean when supplied; nothing
+  // is released so the changed default is free.
+  let jobSubfolder;
+  if (input.jobSubfolder === undefined) {
+    jobSubfolder = false;
+  } else if (typeof input.jobSubfolder !== 'boolean') {
+    return {
+      ok: false,
+      error: `Template jobSubfolder must be a boolean (got ${JSON.stringify(input.jobSubfolder)}).`,
+    };
+  } else {
+    jobSubfolder = input.jobSubfolder;
+  }
+
+  // M8 filenameTemplate — optional. Blank = the M7 default convention
+  // (see imposition-filename.defaultImpositionFilename); non-blank runs
+  // through resolveTemplate + post-substitute for {qty}/{impQty}. The
+  // save-time distinguishing-token rule: with flat output (jobSubfolder
+  // false — the new default), files from different jobs share ONE
+  // folder, and a template without a job-distinguishing token would
+  // overwrite silently. This mirrors the folder-copy root-layout rule
+  // (M3a: per-image-style tokens don't distinguish jobs). {qty}/{impQty}
+  // are NOT sufficient — two jobs with the same totals collide.
+  let filenameTemplate = '';
+  if (input.filenameTemplate !== undefined && input.filenameTemplate !== null) {
+    if (typeof input.filenameTemplate !== 'string') {
+      return {
+        ok: false,
+        error: `Template filenameTemplate must be a string (got ${typeof input.filenameTemplate}).`,
+      };
+    }
+    const trimmed = input.filenameTemplate.trim();
+    if (trimmed) {
+      if (!hasDistinguishingToken(trimmed)) {
+        return {
+          ok: false,
+          error:
+            `Template filenameTemplate must contain at least one of ${DISTINGUISHING_TOKENS.join(', ')} ` +
+            `so files from different jobs don't overwrite each other in a flat output folder. ` +
+            `{qty} and {impQty} are NOT sufficient — two jobs with the same totals would collide.`,
+        };
+      }
+      filenameTemplate = trimmed;
+    }
+  }
+
   return {
     ok: true,
     value: {
@@ -366,7 +441,10 @@ function validateTemplate(input, { existingTemplates = [], paperSizes = [] } = {
       mode:            input.mode,
       duplexFlipEdge:  input.mode === 'duplex' ? input.duplexFlipEdge : null,
       productCodes:    codes,
+      outputPath,
       outputSubfolder,
+      jobSubfolder,
+      filenameTemplate,
     },
   };
 }

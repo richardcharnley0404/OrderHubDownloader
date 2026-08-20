@@ -410,6 +410,126 @@ test('template validate: fillLastSheet non-boolean REJECTS with exact message (s
   assert.equal(v.error, 'Template fillLastSheet must be a boolean (got "yes").');
 });
 
+// ─── M8: outputPath, jobSubfolder, filenameTemplate ─────────────────
+
+test('template validate: outputPath BLANK is fine (falls back to controller outputPath at dispatch)', () => {
+  __resetStore();
+  _seedPaperSize();
+  const v = validateTemplate(_validTemplateInput({ outputPath: '' }), {
+    existingTemplates: [], paperSizes: listPaperSizes(),
+  });
+  assert.equal(v.ok, true);
+  assert.equal(v.value.outputPath, '');
+});
+
+test('template validate: outputPath ABSOLUTE (POSIX or Win32) accepted', () => {
+  __resetStore();
+  _seedPaperSize();
+  // Use a path that path.isAbsolute() accepts on both POSIX and Win32.
+  // On POSIX '/press/hot' is absolute; on Win32 an absolute path needs
+  // a drive letter or UNC. path.isAbsolute() is platform-aware, so
+  // pick the shape for the running platform.
+  const absPath = process.platform === 'win32' ? 'C:\\press\\hot' : '/press/hot';
+  const v = validateTemplate(_validTemplateInput({ outputPath: absPath }), {
+    existingTemplates: [], paperSizes: listPaperSizes(),
+  });
+  assert.equal(v.ok, true, `expected accept for ${absPath}: ${v.error}`);
+  assert.equal(v.value.outputPath, absPath);
+});
+
+test('template validate: outputPath RELATIVE rejects with a message pointing at the fix', () => {
+  __resetStore();
+  _seedPaperSize();
+  const v = validateTemplate(_validTemplateInput({ outputPath: 'press/hot' }), {
+    existingTemplates: [], paperSizes: listPaperSizes(),
+  });
+  assert.equal(v.ok, false);
+  assert.match(v.error, /must be an absolute path/);
+  assert.match(v.error, /Leave blank to use the controller's output path/);
+});
+
+test('template validate: jobSubfolder DEFAULTS TO FALSE when absent (M8 flat-output default)', () => {
+  __resetStore();
+  _seedPaperSize();
+  const v = validateTemplate(_validTemplateInput(), {
+    existingTemplates: [], paperSizes: listPaperSizes(),
+  });
+  assert.equal(v.ok, true);
+  assert.equal(v.value.jobSubfolder, false);
+});
+
+test('template validate: jobSubfolder explicit true accepted; non-boolean rejects with exact message', () => {
+  __resetStore();
+  _seedPaperSize();
+  const vOk = validateTemplate(_validTemplateInput({ jobSubfolder: true }), {
+    existingTemplates: [], paperSizes: listPaperSizes(),
+  });
+  assert.equal(vOk.ok, true);
+  assert.equal(vOk.value.jobSubfolder, true);
+
+  const vBad = validateTemplate(_validTemplateInput({ jobSubfolder: 'on' }), {
+    existingTemplates: [], paperSizes: listPaperSizes(),
+  });
+  assert.equal(vBad.ok, false);
+  assert.equal(vBad.error, 'Template jobSubfolder must be a boolean (got "on").');
+});
+
+test('template validate: filenameTemplate blank is fine → default convention at dispatch', () => {
+  __resetStore();
+  _seedPaperSize();
+  const v = validateTemplate(_validTemplateInput({ filenameTemplate: '' }), {
+    existingTemplates: [], paperSizes: listPaperSizes(),
+  });
+  assert.equal(v.ok, true);
+  assert.equal(v.value.filenameTemplate, '');
+});
+
+test('template validate: filenameTemplate with {orderNumber} accepted', () => {
+  __resetStore();
+  _seedPaperSize();
+  const v = validateTemplate(_validTemplateInput({ filenameTemplate: '{orderNumber}-{qty}of{impQty}' }), {
+    existingTemplates: [], paperSizes: listPaperSizes(),
+  });
+  assert.equal(v.ok, true);
+  assert.equal(v.value.filenameTemplate, '{orderNumber}-{qty}of{impQty}');
+});
+
+test('template validate: filenameTemplate with only {qty}/{impQty} REJECTS — those are NOT distinguishing tokens', () => {
+  // The flat-folder overwrite hazard: two jobs with the same totals
+  // would collide on the same filename. The three distinguishing
+  // tokens ({orderNumber}, {jobName}, {jobId}) are the only guards.
+  __resetStore();
+  _seedPaperSize();
+  const v = validateTemplate(_validTemplateInput({ filenameTemplate: 'run-{qty}of{impQty}' }), {
+    existingTemplates: [], paperSizes: listPaperSizes(),
+  });
+  assert.equal(v.ok, false);
+  assert.match(v.error, /must contain at least one of \{orderNumber\}, \{jobName\}, \{jobId\}/);
+  assert.match(v.error, /files from different jobs don't overwrite each other/);
+  assert.match(v.error, /\{qty\} and \{impQty\} are NOT sufficient/);
+});
+
+test('template validate: filenameTemplate without ANY distinguishing token REJECTS', () => {
+  __resetStore();
+  _seedPaperSize();
+  const v = validateTemplate(_validTemplateInput({ filenameTemplate: '{customerName}-{date}' }), {
+    existingTemplates: [], paperSizes: listPaperSizes(),
+  });
+  assert.equal(v.ok, false);
+  assert.match(v.error, /must contain at least one of \{orderNumber\}, \{jobName\}, \{jobId\}/);
+});
+
+test('template validate: each of {jobName} / {jobId} alone also satisfies the distinguishing-token rule', () => {
+  __resetStore();
+  _seedPaperSize();
+  for (const tpl of ['{jobName}-{qty}', 'job-{jobId}-{impQty}']) {
+    const v = validateTemplate(_validTemplateInput({ filenameTemplate: tpl }), {
+      existingTemplates: [], paperSizes: listPaperSizes(),
+    });
+    assert.equal(v.ok, true, `expected accept for ${tpl}: ${v.error}`);
+  }
+});
+
 // ═════════════════════════════════════════════════════════════════════════
 // Fit validation — driven through the REAL M1 engine.
 //
