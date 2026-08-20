@@ -854,3 +854,211 @@ test('M8 filenameTemplate {qty}/{impQty} — multi-design totals (cross-design s
   const expectedFile = path.join(outputRoot, 'PXT-M8Q-J1406-total8-sheets3.pdf');
   assert.ok(fs.existsSync(expectedFile), `cross-design totals: file at ${expectedFile}`);
 });
+
+// ═════════════════════════════════════════════════════════════════════════
+// M9: outputSheets 'all' vs 'master' — proof-then-multiply workflow
+// ═════════════════════════════════════════════════════════════════════════
+
+test('M9 outputSheets="all" (default) byte-identical to M8 — the lock', async (t) => {
+  // The pre-M9 shape: full document, page count = sheets, filename QTY/IMPQTY
+  // report the RUN totals. All existing dispatch tests above run without
+  // setting outputSheets and already prove this; this test locks it
+  // EXPLICITLY with outputSheets: 'all' set so a refactor that shifts
+  // the default away from 'all' fails here rather than in every M4-M8 test.
+  resetGlobals();
+  seedWorked5x7Template({ outputSheets: 'all' });
+  const pdfBytes = await makeArtwork({ mediaW: 360, mediaH: 504 });
+  const { downloadRoot, outputRoot } = await makeFixture({
+    orderNumber: 'PXT-M9A',
+    orderId:     'ORD-M9A',
+    jobId:       1501,
+    images: [{ filename: 'card.pdf', body: pdfBytes, quantity: 10 }],
+  });
+  __downloadDirectory = downloadRoot;
+  cleanup(t, downloadRoot, outputRoot);
+
+  const result = await printService._sendViaPdfCopyRouted(
+    { id: 1501, order_number: 'PXT-M9A', order_id: 'ORD-M9A', product_code: 'GRAD5X7' },
+    { outputPath: outputRoot, controllerName: 'PC-M9A', applyImpositions: true, unmatchedBehaviour: 'root' },
+  );
+  assert.equal(result.success, true, `unexpected failure: ${result.error}`);
+  assert.notEqual(result.outputSheets, 'master', 'all mode must NOT report master');
+  // Same filename shape as M7 default (default fillLastSheet=true → last
+  // sheet filled to 12, but IMPQTY still tracks ordered/perSheet=3).
+  const expectedFile = path.join(outputRoot, 'PXT-M9A_1501_QTY10_IMPQTY3.pdf');
+  assert.ok(fs.existsSync(expectedFile), `all-mode file at ${expectedFile}`);
+  const reopened = await PDFDocument.load(fs.readFileSync(expectedFile));
+  assert.equal(reopened.getPageCount(), 3, 'all mode: pages = sheets (simplex)');
+});
+
+test('M9 master simplex qty 10 on 4-up: ONE file, ONE page, filename _QTY10_IMPQTY3', async (t) => {
+  // Master mode: file contains ONE fully-filled sheet. IMPQTY=3 is
+  // the run length the operator sets on the press; QTY=10 is what
+  // the customer ordered.
+  resetGlobals();
+  seedWorked5x7Template({ outputSheets: 'master' });
+  const pdfBytes = await makeArtwork({ mediaW: 360, mediaH: 504 });
+  const { downloadRoot, outputRoot } = await makeFixture({
+    orderNumber: 'PXT-M9M',
+    orderId:     'ORD-M9M',
+    jobId:       1502,
+    images: [{ filename: 'card.pdf', body: pdfBytes, quantity: 10 }],
+  });
+  __downloadDirectory = downloadRoot;
+  cleanup(t, downloadRoot, outputRoot);
+
+  const result = await printService._sendViaPdfCopyRouted(
+    { id: 1502, order_number: 'PXT-M9M', order_id: 'ORD-M9M', product_code: 'GRAD5X7' },
+    { outputPath: outputRoot, controllerName: 'PC-M9M', applyImpositions: true, unmatchedBehaviour: 'root' },
+  );
+  assert.equal(result.success, true, `unexpected failure: ${result.error}`);
+  assert.equal(result.outputSheets, 'master');
+  // Single-design master gets NO _D suffix.
+  const expectedFile = path.join(outputRoot, 'PXT-M9M_1502_QTY10_IMPQTY3.pdf');
+  assert.ok(fs.existsSync(expectedFile), `master file at ${expectedFile}`);
+  const reopened = await PDFDocument.load(fs.readFileSync(expectedFile));
+  assert.equal(reopened.getPageCount(), 1,
+    'master simplex: ONE page (the master sheet). The press copy count multiplies it.');
+});
+
+test('M9 master duplex: TWO pages (that sheet\'s front + its mirrored back)', async (t) => {
+  // Duplex master = one physical sheet = 2 output pages. The mirror
+  // pairing is enforced by the shared layout+planPlacements+composer
+  // chain (locked by the M1a asymmetric-margin tests and the M2
+  // duplex mirror tests). Structural assertion here: 2 pages
+  // exactly, each with the sheet's MediaBox.
+  resetGlobals();
+  seedWorked5x7Template({ outputSheets: 'master', mode: 'duplex', duplexFlipEdge: 'long' });
+  const duplexArt = await makeArtwork({ mediaW: 360, mediaH: 504, pages: 2 });
+  const { downloadRoot, outputRoot } = await makeFixture({
+    orderNumber: 'PXT-M9D',
+    orderId:     'ORD-M9D',
+    jobId:       1503,
+    images: [{ filename: 'card.pdf', body: duplexArt, quantity: 10 }],
+  });
+  __downloadDirectory = downloadRoot;
+  cleanup(t, downloadRoot, outputRoot);
+
+  const result = await printService._sendViaPdfCopyRouted(
+    { id: 1503, order_number: 'PXT-M9D', order_id: 'ORD-M9D', product_code: 'GRAD5X7' },
+    { outputPath: outputRoot, controllerName: 'PC-M9D', applyImpositions: true, unmatchedBehaviour: 'root' },
+  );
+  assert.equal(result.success, true, `unexpected failure: ${result.error}`);
+  const expectedFile = path.join(outputRoot, 'PXT-M9D_1503_QTY10_IMPQTY3.pdf');
+  assert.ok(fs.existsSync(expectedFile), `duplex master at ${expectedFile}`);
+  const reopened = await PDFDocument.load(fs.readFileSync(expectedFile));
+  assert.equal(reopened.getPageCount(), 2, 'duplex master: 2 pages (front + mirrored back)');
+  // MediaBox on both pages equals the sheet size.
+  for (let i = 0; i < 2; i++) {
+    const media = reopened.getPage(i).getMediaBox();
+    assert.equal(media.width,  864);
+    assert.equal(media.height, 1296);
+  }
+});
+
+test('M9 master IGNORES fillLastSheet=false: the sheet is still fully placed', async (t) => {
+  // Master mode can't represent a partial sheet — the whole "run
+  // IMPQTY copies" workflow assumes each copy is identical to the
+  // proof. fillLastSheet=false on the template is deliberately
+  // ignored in master mode. Structural check: 1-page output that
+  // reopens cleanly (a partial-sheet regression would either drop
+  // pages or write garbage that fails to reopen).
+  resetGlobals();
+  seedWorked5x7Template({ outputSheets: 'master', fillLastSheet: false });
+  const pdfBytes = await makeArtwork({ mediaW: 360, mediaH: 504 });
+  const { downloadRoot, outputRoot } = await makeFixture({
+    orderNumber: 'PXT-M9F',
+    orderId:     'ORD-M9F',
+    jobId:       1504,
+    images: [{ filename: 'card.pdf', body: pdfBytes, quantity: 2 }],  // partial in 'all' mode
+  });
+  __downloadDirectory = downloadRoot;
+  cleanup(t, downloadRoot, outputRoot);
+
+  const result = await printService._sendViaPdfCopyRouted(
+    { id: 1504, order_number: 'PXT-M9F', order_id: 'ORD-M9F', product_code: 'GRAD5X7' },
+    { outputPath: outputRoot, controllerName: 'PC-M9F', applyImpositions: true, unmatchedBehaviour: 'root' },
+  );
+  assert.equal(result.success, true, `unexpected failure: ${result.error}`);
+  // qty=2 on 4-up: ceil(2/4)=1 sheet. Filename QTY2/IMPQTY1.
+  const expectedFile = path.join(outputRoot, 'PXT-M9F_1504_QTY2_IMPQTY1.pdf');
+  assert.ok(fs.existsSync(expectedFile), `master ignoring fill: file at ${expectedFile}`);
+  const reopened = await PDFDocument.load(fs.readFileSync(expectedFile));
+  assert.equal(reopened.getPageCount(), 1, 'master: still exactly 1 sheet');
+});
+
+test('M9 master multi-design (qty 5 + qty 3 on 4-up): TWO files with _D1 / _D2 suffixes, per-design QTY/IMPQTY', async (t) => {
+  // The multi-design payoff: one file per design, each with the
+  // design's own totals. Operator runs D1 sheet 2 times, D2 sheet 1
+  // time — that's proof-then-multiply per design.
+  resetGlobals();
+  seedWorked5x7Template({ outputSheets: 'master' });
+  const pdfA = await makeArtwork({ mediaW: 360, mediaH: 504 });
+  const pdfB = await makeArtwork({ mediaW: 360, mediaH: 504 });
+  const { downloadRoot, outputRoot } = await makeFixture({
+    orderNumber: 'PXT-M9X',
+    orderId:     'ORD-M9X',
+    jobId:       1505,
+    images: [
+      { filename: 'design_A.pdf', body: pdfA, quantity: 5 },
+      { filename: 'design_B.pdf', body: pdfB, quantity: 3 },
+    ],
+  });
+  __downloadDirectory = downloadRoot;
+  cleanup(t, downloadRoot, outputRoot);
+
+  const result = await printService._sendViaPdfCopyRouted(
+    { id: 1505, order_number: 'PXT-M9X', order_id: 'ORD-M9X', product_code: 'GRAD5X7' },
+    { outputPath: outputRoot, controllerName: 'PC-M9X', applyImpositions: true, unmatchedBehaviour: 'root' },
+  );
+  assert.equal(result.success, true, `unexpected failure: ${result.error}`);
+  const fileD1 = path.join(outputRoot, 'PXT-M9X_1505_QTY5_IMPQTY2_D1.pdf');
+  const fileD2 = path.join(outputRoot, 'PXT-M9X_1505_QTY3_IMPQTY1_D2.pdf');
+  assert.ok(fs.existsSync(fileD1), `design A master at ${fileD1}`);
+  assert.ok(fs.existsSync(fileD2), `design B master at ${fileD2}`);
+  // The dispatch result carries the full list.
+  assert.equal(result.destFiles.length, 2);
+  assert.equal(result.destFiles[0].filename, 'PXT-M9X_1505_QTY5_IMPQTY2_D1.pdf');
+  assert.equal(result.destFiles[1].filename, 'PXT-M9X_1505_QTY3_IMPQTY1_D2.pdf');
+  // Both are single-sheet simplex.
+  for (const f of [fileD1, fileD2]) {
+    const doc = await PDFDocument.load(fs.readFileSync(f));
+    assert.equal(doc.getPageCount(), 1, `${path.basename(f)}: one full sheet`);
+  }
+});
+
+test('M9 master custom filenameTemplate: {qty}/{impQty} are the PER-DESIGN totals', async (t) => {
+  // In master multi-design mode, {qty} and {impQty} in the custom
+  // template resolve to the per-design values, NOT the cross-design
+  // sums. The operator needs "5 copies on 2 sheets" per file, not
+  // "8 copies on 3 sheets" for D1.
+  resetGlobals();
+  seedWorked5x7Template({
+    outputSheets:     'master',
+    filenameTemplate: '{orderNumber}-J{jobId}-qty{qty}-runs{impQty}',
+  });
+  const pdfA = await makeArtwork({ mediaW: 360, mediaH: 504 });
+  const pdfB = await makeArtwork({ mediaW: 360, mediaH: 504 });
+  const { downloadRoot, outputRoot } = await makeFixture({
+    orderNumber: 'PXT-M9C',
+    orderId:     'ORD-M9C',
+    jobId:       1506,
+    images: [
+      { filename: 'design_A.pdf', body: pdfA, quantity: 5 },
+      { filename: 'design_B.pdf', body: pdfB, quantity: 3 },
+    ],
+  });
+  __downloadDirectory = downloadRoot;
+  cleanup(t, downloadRoot, outputRoot);
+
+  const result = await printService._sendViaPdfCopyRouted(
+    { id: 1506, order_number: 'PXT-M9C', order_id: 'ORD-M9C', product_code: 'GRAD5X7' },
+    { outputPath: outputRoot, controllerName: 'PC-M9C', applyImpositions: true, unmatchedBehaviour: 'root' },
+  );
+  assert.equal(result.success, true, `unexpected failure: ${result.error}`);
+  // D1: qty 5, runs 2. D2: qty 3, runs 1.
+  const fileD1 = path.join(outputRoot, 'PXT-M9C-J1506-qty5-runs2_D1.pdf');
+  const fileD2 = path.join(outputRoot, 'PXT-M9C-J1506-qty3-runs1_D2.pdf');
+  assert.ok(fs.existsSync(fileD1), `D1 custom filename at ${fileD1}`);
+  assert.ok(fs.existsSync(fileD2), `D2 custom filename at ${fileD2}`);
+});

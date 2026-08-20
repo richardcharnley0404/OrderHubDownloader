@@ -103,6 +103,22 @@ produces one output file, designs sequential inside it — never mixed
 on a sheet. The filename totals sum across designs: two designs of
 40 copies each at 4-up land as `..._QTY80_IMPQTY20.pdf`.
 
+**Master-sheet mode** — a per-template **Output sheets** setting
+opts a lab into a smaller file for proof-then-multiply workflows.
+Default is **All sheets**: the file contains every printed sheet
+and the press runs the file once (today's behaviour). **Single
+master sheet** puts one fully-imposed sheet in the file (1 page
+simplex, 2 pages duplex — that sheet's front + mirrored back) and
+the operator sets the press's own copy count to the IMPQTY in the
+filename. The filename maths stays the same: `..._QTY10_IMPQTY3.pdf`
+in master mode means "10 copies ordered, run 3 copies of this
+sheet at the press". Master mode always fills the sheet (Fill last
+sheet is ignored — a master can't represent a partial), and
+multi-design jobs get one file per design with `_D1`, `_D2`…
+suffixes. The all-sheets default exists because operators get the
+multiplication wrong; master mode is the opt-in for those who
+don't.
+
 **Duplex — the flip edge must match the press's duplex configuration.**
 Every imposition template picks Long-edge or Short-edge flip. Get this
 wrong and the press will duplex correctly against the sheet but print

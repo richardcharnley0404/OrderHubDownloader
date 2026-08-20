@@ -530,6 +530,42 @@ test('template validate: each of {jobName} / {jobId} alone also satisfies the di
   }
 });
 
+// ─── M9: outputSheets enum ──────────────────────────────────────────
+
+test('template validate: outputSheets DEFAULTS TO "all" when absent (M9 default matches every pre-M9 template)', () => {
+  __resetStore();
+  _seedPaperSize();
+  const input = _validTemplateInput();
+  assert.equal(input.outputSheets, undefined, 'fixture omits outputSheets (guards against test drift)');
+  const v = validateTemplate(input, { existingTemplates: [], paperSizes: listPaperSizes() });
+  assert.equal(v.ok, true);
+  assert.equal(v.value.outputSheets, 'all');
+});
+
+test('template validate: outputSheets "all" and "master" both accepted', () => {
+  __resetStore();
+  _seedPaperSize();
+  for (const val of ['all', 'master']) {
+    const v = validateTemplate(_validTemplateInput({ outputSheets: val }), {
+      existingTemplates: [], paperSizes: listPaperSizes(),
+    });
+    assert.equal(v.ok, true, `expected accept for ${val}: ${v.error}`);
+    assert.equal(v.value.outputSheets, val);
+  }
+});
+
+test('template validate: outputSheets unknown value REJECTS with exact enum message', () => {
+  // A hand-edited JSON with a typo shouldn't quietly pick "all" — the
+  // operator needs to see the invalid setting so they can fix it.
+  __resetStore();
+  _seedPaperSize();
+  const v = validateTemplate(_validTemplateInput({ outputSheets: 'master-sheet' }), {
+    existingTemplates: [], paperSizes: listPaperSizes(),
+  });
+  assert.equal(v.ok, false);
+  assert.equal(v.error, `Template outputSheets must be 'all' or 'master' (got "master-sheet").`);
+});
+
 // ═════════════════════════════════════════════════════════════════════════
 // Fit validation — driven through the REAL M1 engine.
 //

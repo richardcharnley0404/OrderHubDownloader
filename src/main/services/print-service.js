@@ -4040,7 +4040,35 @@ class PrintService {
     }
 
     const artworkBleed = Number.isFinite(template.artworkBleed) ? template.artworkBleed : 0;
+    // M9: 'all' | 'master'. 'master' produces one FULL sheet per
+    // design and multiplies at the press (proof 1, then IMPQTY
+    // copies). Default 'all' matches every pre-M9 template unchanged.
+    const outputSheets = template.outputSheets === 'master' ? 'master' : 'all';
 
+    // ── Master-mode dispatch (§7.5 M9 amendment) ────────────────────
+    //
+    // ONE file per design (multi-design jobs get a `_D{i}` suffix
+    // before .pdf when — and ONLY when — the job has more than one
+    // design). Each file is a single fully-filled sheet: simplex = 1
+    // page, duplex = 2 pages (that sheet's front + its mirrored
+    // back). The QTY/IMPQTY in the filename report the PER-DESIGN
+    // ordered qty and the REAL sheet count that WOULD have been
+    // produced — the operator sets the press copy count to IMPQTY and
+    // gets QTY copies (plus overs from the fill).
+    //
+    // Master mode IGNORES fillLastSheet on the template. A master
+    // cannot represent a partial sheet — overs are inherent to the
+    // "run IMPQTY copies of one sheet" workflow. Compose is called
+    // with `quantity: layout.perSheet` which forces one full sheet
+    // regardless of the fill flag; the flag is deliberately not
+    // threaded through.
+    if (outputSheets === 'master') {
+      return this._sendViaPdfCopyImpositionMaster({
+        job, route, template, paperSize, pdfFiles, jobFolderName, jobFolderPath, artworkBleed,
+        deriveTrim, computeLayout, composeImposition, applyPdfPipeline,
+      });
+    }
+    // ── 'all' mode (M8 shape, byte-identical to pre-M9 output) ──────
     const finalDoc     = await PDFDocument.create();
     const perDesign    = [];
     let totalCopies    = 0;
@@ -4224,6 +4252,194 @@ class PrintService {
       method:      'pdf_copy_imposition',
       sourcePath:  jobFolderPath,
       destPath,
+      template:    template.name,
+      designs:     perDesign.length,
+      totalCopies,
+      totalSheets,
+      expectedArtworkWarn: anyDivergence,
+    };
+  }
+
+  /**
+   * M9 master-mode imposition dispatch. See the fork comment in
+   * _sendViaPdfCopyImposition for the design rules; this is the
+   * implementation.
+   *
+   * Per design: derive trim → computeLayout → composeImposition with
+   * `quantity: layout.perSheet` (forces one full sheet regardless of
+   * template.fillLastSheet, which master mode deliberately ignores)
+   * → apply pdfPipeline per file (each master is a separate press
+   * artifact) → write to a per-design filename.
+   *
+   * The filename totals are the REAL per-design values (ordered qty
+   * and ceil(qty/perSheet) sheets), NOT the composed file's page
+   * count. That's the whole point of master mode: the filename
+   * reports the run length; the file itself is one sheet.
+   */
+  async _sendViaPdfCopyImpositionMaster({
+    job, route, template, paperSize, pdfFiles, jobFolderName, jobFolderPath, artworkBleed,
+    deriveTrim, computeLayout, composeImposition, applyPdfPipeline,
+  }) {
+    const { PDFDocument } = require('pdf-lib');
+    const { resolveImpositionFilename } = require('./imposition-filename');
+
+    // Multi-design (>1 file) → _D{i} suffix, 1-based. Single-design
+    // gets an empty suffix (M9 spec: single-design master files do
+    // NOT get a suffix — otherwise every existing single-design lab
+    // that flips to master gets a filename churn that isn't in scope).
+    const multiDesign = pdfFiles.length > 1;
+
+    const baseDest = (typeof template.outputPath === 'string' && template.outputPath.trim())
+      ? template.outputPath.trim()
+      : route.outputPath;
+    const subfolderSegments = template.outputSubfolder ? [template.outputSubfolder] : [];
+    const jobSegments       = (template.jobSubfolder === true) ? [jobFolderName] : [];
+    const destFolder = path.join(baseDest, ...subfolderSegments, ...jobSegments);
+
+    const perDesign = [];
+    const destFiles = [];
+    let totalCopies = 0;   // aggregate for the INFO log; not for the filename (that's per-design)
+    let totalSheets = 0;
+    let anyDivergence = false;
+
+    try {
+      fs.mkdirSync(destFolder, { recursive: true });
+      for (let i = 0; i < pdfFiles.length; i++) {
+        const pdfFile = pdfFiles[i];
+        if (!fs.existsSync(pdfFile.sourcePath)) {
+          throw new Error(`PDF not found: ${pdfFile.sourcePath}`);
+        }
+        const bytes    = await fs.promises.readFile(pdfFile.sourcePath);
+        const srcDoc   = await PDFDocument.load(bytes);
+        const firstPage = srcDoc.getPages()[0];
+        const trim = deriveTrim(firstPage, artworkBleed);
+
+        // Same expectedArtwork divergence WARN as 'all' mode — the
+        // rule is per-design and applies regardless of output shape.
+        const eaW = template.expectedArtwork && Number.isFinite(template.expectedArtwork.width)  ? template.expectedArtwork.width  : null;
+        const eaH = template.expectedArtwork && Number.isFinite(template.expectedArtwork.height) ? template.expectedArtwork.height : null;
+        const divergence =
+          eaW !== null && eaH !== null &&
+          (Math.abs(trim.width  - eaW) > 0.5 || Math.abs(trim.height - eaH) > 0.5);
+        if (divergence) {
+          anyDivergence = true;
+          logger.logWarning(
+            `[imposition] artwork trim ${trim.width.toFixed(2)} × ${trim.height.toFixed(2)} pt ` +
+            `differs from template '${template.name}' expectedArtwork ${eaW} × ${eaH} pt ` +
+            `by > 0.5 pt — layout used the real trim; template design assumption may need updating`,
+            { jobId: job.id, pdf: pdfFile.filename }
+          );
+        }
+
+        const layout = computeLayout({
+          sheetWidth:     paperSize.width,
+          sheetHeight:    paperSize.height,
+          margins:        template.margins || {},
+          gutter:         template.gutter || 0,
+          cellWidth:      trim.width,
+          cellHeight:     trim.height,
+          autoRotate:     !!template.autoRotate,
+          mode:           template.mode,
+          duplexFlipEdge: template.duplexFlipEdge,
+        });
+
+        // ONE full sheet. `quantity: layout.perSheet` gives a natural
+        // full sheet regardless of fillLastSheet (a partial sheet
+        // requires quantity < perSheet). fillLastSheet stays false so
+        // the compose engine's per-sheet loop terminates at 1 sheet.
+        const composed = await composeImposition({
+          artworkBytes: bytes,
+          quantity:     layout.perSheet,
+          layout,
+          sheetWidth:   paperSize.width,
+          sheetHeight:  paperSize.height,
+          mode:         template.mode,
+          cropMarks:    !!template.cropMarks,
+          artworkBleed,
+          logger,
+        });
+
+        // REAL per-design totals for the filename — what the operator
+        // needs on the press. `perDesignSheets` is the count that
+        // WOULD have been produced in 'all' mode; the operator sets
+        // the press copy count to this value.
+        const perDesignSheets = Math.ceil(pdfFile.quantity / layout.perSheet);
+        const designSuffix    = multiDesign ? `_D${i + 1}` : '';
+
+        // Apply pdfPipeline per master file — each master is a
+        // standalone press artifact; a banner sheet on the front of
+        // one master is what the operator would expect.
+        let outBytes = composed.pdfBytes;
+        if (route.pdfPipeline && Array.isArray(route.pdfPipeline.steps) && route.pdfPipeline.steps.length > 0) {
+          const jobContext = {
+            jobNumber:    job.job_name || job.order_number || String(job.id),
+            orderId:      String(job.order_id || job.id),
+            qty:          pdfFile.quantity,   // per-design qty for master mode
+            customerName: job.customer_name || '',
+          };
+          const transformed = await applyPdfPipeline(new Uint8Array(outBytes), route.pdfPipeline, jobContext);
+          outBytes = Buffer.from(transformed);
+        } else {
+          outBytes = Buffer.from(outBytes);
+        }
+
+        const destFilename = resolveImpositionFilename({
+          template,
+          job,
+          totalCopies:  pdfFile.quantity,
+          totalSheets:  perDesignSheets,
+          designSuffix,
+          logger,
+        });
+        const destPath = path.join(destFolder, destFilename);
+        await fs.promises.writeFile(destPath, outBytes);
+
+        perDesign.push({
+          filename: pdfFile.filename,
+          qty:      pdfFile.quantity,
+          sheets:   perDesignSheets,
+          rotated:  !!layout.rotated,
+          destFile: destFilename,
+        });
+        destFiles.push({ path: destPath, filename: destFilename });
+        totalCopies += pdfFile.quantity;
+        totalSheets += perDesignSheets;
+      }
+    } catch (composeErr) {
+      const msg = `Imposition failed for job ${job.id}: ${composeErr.message}`;
+      logger.logError('[imposition] compose failure — job errored', composeErr, {
+        jobId: job.id, template: template.name, outputSheets: 'master',
+      });
+      jobService.updateJobLocally(job.id, { _status: 'error', _errorMessage: msg });
+      return { success: false, error: msg };
+    }
+
+    logger.info('Job sent to print via PDF copy (imposition, master mode)', {
+      jobId:              job.id,
+      controller:         route.controllerName,
+      template:           template.name,
+      outputSheets:       'master',
+      designs:            perDesign.length,
+      perDesign,
+      totalCopies,
+      totalSheets,
+      expectedArtworkWarn: anyDivergence,
+      destFolder,
+      destFiles:          destFiles.map(f => f.filename),
+    });
+
+    await this._markCompleted(job.id);
+
+    return {
+      success:     true,
+      method:      'pdf_copy_imposition',
+      outputSheets:'master',
+      sourcePath:  jobFolderPath,
+      // destPath keeps its "single path" contract by pointing at the
+      // LAST file written; destFiles is the complete list for callers
+      // (tests, log readers) that need every master.
+      destPath:    destFiles.length > 0 ? destFiles[destFiles.length - 1].path : destFolder,
+      destFiles,
       template:    template.name,
       designs:     perDesign.length,
       totalCopies,

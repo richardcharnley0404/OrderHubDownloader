@@ -280,6 +280,25 @@ function validateTemplate(input, { existingTemplates = [], paperSizes = [] } = {
     fillLastSheet = input.fillLastSheet;
   }
 
+  // M9 outputSheets — enum with default 'all'. 'master' produces ONE
+  // full sheet per design (the operator multiplies with the press's
+  // own copy count — proof 1, then run IMPQTY copies). The all-sheets
+  // default exists because operators get the multiplication wrong;
+  // master is the opt-in for those who don't. Anything other than the
+  // two known values rejects rather than silently coerce — a
+  // hand-edited JSON with a typo shouldn't quietly pick 'all'.
+  let outputSheets;
+  if (input.outputSheets === undefined || input.outputSheets === null) {
+    outputSheets = 'all';
+  } else if (input.outputSheets !== 'all' && input.outputSheets !== 'master') {
+    return {
+      ok: false,
+      error: `Template outputSheets must be 'all' or 'master' (got ${JSON.stringify(input.outputSheets)}).`,
+    };
+  } else {
+    outputSheets = input.outputSheets;
+  }
+
   // expectedArtwork — REQUIRED per §5.1
   if (!input.expectedArtwork || typeof input.expectedArtwork !== 'object') {
     return { ok: false, error: 'Template expectedArtwork { width, height } is required (§5.1).' };
@@ -438,6 +457,7 @@ function validateTemplate(input, { existingTemplates = [], paperSizes = [] } = {
       artworkBleed,
       cropMarks:       !!input.cropMarks,
       fillLastSheet,
+      outputSheets,
       mode:            input.mode,
       duplexFlipEdge:  input.mode === 'duplex' ? input.duplexFlipEdge : null,
       productCodes:    codes,

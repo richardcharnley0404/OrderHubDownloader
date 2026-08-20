@@ -43,9 +43,13 @@ const WIN32_RESERVED = /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
  * The M7 default convention. Exported so tests and any future caller
  * (a "revert to default" button, a log message that names the
  * fallback) all read the same shape from one place.
+ *
+ * `designSuffix` (M9): inserted between the QTY/IMPQTY tail and .pdf.
+ * Empty by default; `_D1`/`_D2`/... in multi-design master mode (one
+ * file per design). Single-design master mode gets no suffix.
  */
-function defaultImpositionFilename({ orderNumber, jobId, totalCopies, totalSheets }) {
-  return `${orderNumber}_${jobId}_QTY${totalCopies}_IMPQTY${totalSheets}.pdf`;
+function defaultImpositionFilename({ orderNumber, jobId, totalCopies, totalSheets, designSuffix = '' }) {
+  return `${orderNumber}_${jobId}_QTY${totalCopies}_IMPQTY${totalSheets}${designSuffix}.pdf`;
 }
 
 /**
@@ -57,14 +61,18 @@ function defaultImpositionFilename({ orderNumber, jobId, totalCopies, totalSheet
  * @param {object} params.template       imposition template (reads filenameTemplate)
  * @param {object} params.job            job object (order_number, id, job_name, etc.)
  * @param {number} params.totalCopies    sum of per-image manifest quantities
+ *                                       ('all' mode) OR per-design qty ('master')
  * @param {number} params.totalSheets    sum of composeImposition().sheets
+ *                                       ('all' mode) OR per-design sheets ('master')
+ * @param {string} [params.designSuffix] M9: '_D1'/'_D2'/... in multi-design
+ *                                       master mode; empty otherwise
  * @param {object} [params.logger]       optional; logger.logWarning is called on
  *                                       an empty-resolution fallback
  */
-function resolveImpositionFilename({ template, job, totalCopies, totalSheets, logger }) {
+function resolveImpositionFilename({ template, job, totalCopies, totalSheets, designSuffix = '', logger }) {
   const orderNumber = job.order_number || String(job.id || '');
   const jobId       = job.id;
-  const defaults    = { orderNumber, jobId, totalCopies, totalSheets };
+  const defaults    = { orderNumber, jobId, totalCopies, totalSheets, designSuffix };
   const raw = (template && typeof template.filenameTemplate === 'string')
     ? template.filenameTemplate.trim()
     : '';
@@ -136,7 +144,12 @@ function resolveImpositionFilename({ template, job, totalCopies, totalSheets, lo
   // "CON_safe" or a UUID rename). Extension isn't part of the match.
   if (WIN32_RESERVED.test(stem)) stem = `_${stem}`;
 
-  return `${stem}.pdf`;
+  // M9 designSuffix inserted between stem and .pdf. `_D1` is short
+  // enough that we don't recount against STEM_MAX — a single-digit or
+  // small-double-digit design index is what real multi-design jobs
+  // look like, and a longer stem staying inside the cap by 3–4 chars
+  // isn't a real Windows concern.
+  return `${stem}${designSuffix}.pdf`;
 }
 
 /**

@@ -1711,6 +1711,15 @@
             </label>
           </div>
 
+          <div class="form-group">
+            <label for="itOutputSheets">Output sheets</label>
+            <select id="itOutputSheets">
+              <option value="all">All sheets (press prints the file once)</option>
+              <option value="master">Single master sheet (press prints IMPQTY copies)</option>
+            </select>
+            <small class="field-hint">Master mode: the file contains one full sheet; the operator sets the press copy count to the IMPQTY in the filename. The sheet is always filled — quantities round up to full sheets. Multi-design jobs get one file per design with a <code>_D1</code>, <code>_D2</code>… suffix.</small>
+          </div>
+
           <div class="form-row">
             <div class="form-group form-group-grow">
               <label for="itMode">Mode</label>

@@ -1,9 +1,9 @@
 # PDF Copy — imposition templates & paper sizes
 
 **Status:** code-complete, unreleased (2026-08-20). Six build milestones
-plus two operator-feedback passes (M7, M8) landed as separate reviewed
-commits; the feature is off by default on every existing pdf_copy
-controller and awaits release. See §10 for the build record.
+plus three operator-feedback passes (M7, M8, M9) landed as separate
+reviewed commits; the feature is off by default on every existing
+pdf_copy controller and awaits release. See §10 for the build record.
 
 **Operator-facing doc:** [`imposition-operator-guide.md`](imposition-operator-guide.md)
 — setup path with the 12×18 / 5×7 grad-card worked example, filename
@@ -414,6 +414,33 @@ setup, not per-controller routing.
      / {filename}.pdf              (default convention or custom template)
    ```
 
+   **M9 amendment (2026-08-20, master-sheet mode):** the OUTPUT
+   naming and destination are unchanged; a new per-template
+   `outputSheets` enum selects between two OUTPUT SHAPES.
+   - `'all'` (default) — the pre-M9 behaviour: one file with every
+     printed sheet. Locked byte-identical by a dedicated test.
+   - `'master'` — one file per design containing ONE fully-imposed
+     sheet (1 page simplex, 2 pages duplex — that sheet's front +
+     mirrored back). The filename QTY/IMPQTY report the REAL
+     per-design ordered qty and sheet count (`ceil(qty/perSheet)`);
+     the operator sets the press's own copy count to IMPQTY and
+     gets QTY copies (plus overs from the always-filled sheet).
+     Multi-design jobs get a `_D{i}` suffix before `.pdf` (only
+     when >1 design; single-design gets no suffix). Master mode
+     IGNORES `fillLastSheet` — a master can't represent a partial
+     sheet; the compose call uses `quantity: layout.perSheet` which
+     forces one full sheet regardless. The `{qty}`/`{impQty}`
+     custom-template tokens resolve to per-design values in
+     multi-design master (not cross-design sums like 'all' mode).
+
+   Save-time validation: enum on `outputSheets`; absent → 'all'.
+   Anything other than `'all'` / `'master'` rejects with the exact
+   enum message so a hand-edited JSON typo can't silently coerce.
+
+   The all-sheets default exists because operators get the
+   multiplication wrong; master is the opt-in for those who don't
+   (per Richard's press-side testing).
+
 6. **Artwork preview rendering** in the template editor (showing the actual
    card PDF in the grid, not just rectangles) needs PDF rasterising in the
    renderer — pdf.js or similar, a new dependency. v1 preview with labelled
@@ -486,17 +513,19 @@ required an §8 item.
 | M5        | `7beaf67` | Dispatch wiring in `_sendViaPdfCopyRouted` + pdf_copy controller fields; 17 tests |
 | M6        | `c12338c` | CHANGELOG entry, operator guide, this build record, landmines, BACKLOG entry |
 | M7        | `dabce3e` | Operator-feedback pass: template editor wording (Finished Size, help text refresh), live printable-area readout, fill-last-sheet (default TRUE — Richard's call reversing §8); 9 tests |
-| M8        | (this commit) | Press-side feedback: per-template outputPath (absolute override), jobSubfolder toggle (DEFAULT FALSE — flat output), filenameTemplate ({token} + {qty}/{impQty} with distinguishing-token save rule); 16 new tests. Amends §7.5. |
+| M8        | `f6af57c` | Press-side feedback: per-template outputPath (absolute override), jobSubfolder toggle (DEFAULT FALSE — flat output), filenameTemplate ({token} + {qty}/{impQty} with distinguishing-token save rule); 16 new tests. Amends §7.5. |
+| M9        | (this commit) | Master-sheet mode: per-template outputSheets 'all' \| 'master' (default 'all'); master produces one full sheet per design, filename IMPQTY reads as the press copy count, multi-design gets `_D{i}` suffix; 9 new tests. Amends §7.5. |
 
 Also in the sequence: `4b2b595` fixed the known `perfectlyClientClient.test.js`
 stability-polling flake that had been noise-swamping M3's preflight
 runs (RESOLVED in `docs/BACKLOG.md`).
 
 Suite growth: 2246 tests before M1 → 2347 after M5 (M6 adds no tests) →
-2356 after M7 → 2372 after M8. No CHANGELOG entry until M6 — every
-prior milestone deliberately shipped code with no operator-visible
-change until dispatch wired up. M7 and M8 amend the M6 entry rather
-than adding new ones; the feature is still unreleased.
+2356 after M7 → 2372 after M8 → 2381 after M9. No CHANGELOG entry
+until M6 — every prior milestone deliberately shipped code with no
+operator-visible change until dispatch wired up. M7, M8, and M9 amend
+the M6 entry rather than adding new ones; the feature is still
+unreleased.
 
 ## Sources
 

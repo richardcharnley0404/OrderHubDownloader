@@ -134,6 +134,15 @@ Fields, in the order that makes sense to fill:
   `{impQty}` alone are not sufficient (two jobs with the same totals
   would collide). Extension is always `.pdf`, appended automatically;
   any `.pdf` you type in the template is stripped and re-added once.
+- **Output sheets** — **All sheets** (default) puts every printed
+  sheet in the file: the operator sends the file to the press and
+  it prints once. **Single master sheet** puts one fully-imposed
+  sheet in the file and the operator sets the press's own copy
+  count to the IMPQTY in the filename (proof one sheet, run IMPQTY).
+  Master mode always fills the sheet (Fill last sheet is ignored)
+  and produces one file per design in multi-design jobs with
+  `_D1`, `_D2`… suffixes. See §4's "Master mode — proof-then-multiply"
+  paragraph for the worked example.
 
 Watch the preview as you fill fields:
 
@@ -217,6 +226,40 @@ count the operator sets on the press). Untick **Fill last sheet
 (prints extra copies rather than leaving blanks)** on the template
 if the lab needs exact counts — the same 10-copy job then prints
 2 cards on the last sheet with two empty slots.
+
+### Master mode — proof-then-multiply
+
+Set the template's **Output sheets** to **Single master sheet** for
+labs that prefer to proof one sheet, then set the press's own copy
+count to run the rest.
+
+The output is one PDF containing **one fully-imposed sheet** (1 page
+simplex, 2 pages duplex — that sheet's front and back). Everything
+else stays the same. The filename does the multiplication maths for
+the operator:
+
+- Same 10-copy grad-card job as above lands as
+  `..._QTY10_IMPQTY3.pdf` — 1 page in the file, but the filename
+  reads "10 copies ordered, run **3 copies of this sheet**". Operator
+  opens the file, checks the proof, sets the press to 3, prints 12
+  cards, trims. QTY and IMPQTY have the same meaning as all-sheets
+  mode; you get one page instead of 3.
+- **Master mode always fills the sheet.** A master can't represent
+  a partial — the whole workflow assumes each copy at the press is
+  identical to the proof. **Fill last sheet is ignored** when
+  master mode is on.
+- **Multi-design jobs get one file per design.** The 5-card design A
+  + 3-card design B job lands as two files:
+  `..._QTY5_IMPQTY2_D1.pdf` and `..._QTY3_IMPQTY1_D2.pdf`. Run D1
+  twice, run D2 once. Single-design jobs get no `_D` suffix.
+- **Custom filename templates apply as normal.** `{qty}` and
+  `{impQty}` resolve to the per-design values in multi-design master
+  mode, not the cross-design sums.
+
+Use all-sheets mode (the default) when the lab wants a single file
+to send and print in one go — no press copy-count step. Use master
+mode when the lab is comfortable multiplying at the press and wants
+the smaller file / faster proof.
 
 ---
 

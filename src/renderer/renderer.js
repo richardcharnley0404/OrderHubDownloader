@@ -9164,6 +9164,10 @@ async function handleBackupRelaunchNow() {
     // concerns; still stated explicitly).
     document.getElementById('itFillLastSheet').checked =
       t ? (t.fillLastSheet !== false) : true;
+    // M9 outputSheets — default 'all' both for new templates and for
+    // pre-M9 records that lack the field.
+    document.getElementById('itOutputSheets').value =
+      t && t.outputSheets === 'master' ? 'master' : 'all';
     document.getElementById('itMode').value          = t ? (t.mode || 'simplex') : 'simplex';
     document.getElementById('itDuplexFlipEdge').value = t ? (t.duplexFlipEdge || 'long') : 'long';
     document.getElementById('itOutputPath').value      = t ? (t.outputPath      || '') : '';
@@ -9226,6 +9230,7 @@ async function handleBackupRelaunchNow() {
       artworkBleed:    num('itArtworkBleed'),
       cropMarks:       document.getElementById('itCropMarks').checked,
       fillLastSheet:   document.getElementById('itFillLastSheet').checked,
+      outputSheets:    document.getElementById('itOutputSheets').value,
       mode:            document.getElementById('itMode').value,
       duplexFlipEdge:  document.getElementById('itDuplexFlipEdge').value,
       productCodes:    collectProductCodes(),
