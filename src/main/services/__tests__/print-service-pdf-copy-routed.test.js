@@ -249,6 +249,109 @@ test('no-change lock: applyImpositions off — output is byte-identical to pre-M
 });
 
 // ═════════════════════════════════════════════════════════════════════════
+// M10 TRIPWIRES: the non-imposition pdf_copy path stays PDF-only.
+//
+// Images become imposable in M10 ONLY on the imposition path with a matched
+// template. Every other flow must behave byte-identical to today. These
+// tests are the tripwires: they pass under pre-M10 code AND must keep
+// passing under M10 code — a regression that starts copying images through
+// the non-imposition path breaks them here rather than at a lab.
+// ═════════════════════════════════════════════════════════════════════════
+
+test('M10 tripwire: applyImpositions OFF + PDF+image manifest → only PDFs copied; images silently ignored (byte-identical to pre-M10)', async (t) => {
+  resetGlobals();
+  const pdfBytes  = await makeArtwork({ mediaW: 360, mediaH: 504 });
+  // 8 bytes of JPEG magic + junk. The non-imposition path doesn't inspect
+  // content — it filters by extension. Bytes are enough to prove the file
+  // exists and would be picked up if the filter admitted images.
+  const jpgBytes  = Buffer.from([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x00, 0x00]);
+  const { downloadRoot, outputRoot, jobFolderName } = await makeFixture({
+    orderNumber: 'PXT-M10T1',
+    orderId:     'ORD-M10T1',
+    jobId:       2001,
+    images: [
+      { filename: 'card.pdf',  body: pdfBytes, quantity: 1 },
+      { filename: 'photo.jpg', body: jpgBytes, quantity: 1 },
+    ],
+  });
+  __downloadDirectory = downloadRoot;
+  cleanup(t, downloadRoot, outputRoot);
+
+  const result = await printService._sendViaPdfCopyRouted(
+    { id: 2001, order_number: 'PXT-M10T1', order_id: 'ORD-M10T1', product_code: 'ANY' },
+    { outputPath: outputRoot, controllerName: 'PC-M10T1' },   // applyImpositions OFF
+  );
+
+  assert.equal(result.success, true, `unexpected failure: ${result.error}`);
+  assert.equal(result.method, 'pdf_copy', 'must NOT report pdf_copy_imposition');
+  // Only the PDF landed in the dest; photo.jpg silently ignored.
+  const expectedFolder = path.join(outputRoot, jobFolderName);
+  assert.deepEqual(fs.readdirSync(expectedFolder).sort(), ['card.pdf'],
+    'non-imposition pass-through stays PDF-only; images must be silently ignored');
+});
+
+test('M10 tripwire: applyImpositions OFF + all-images manifest → throws "No PDF files found" (byte-identical to pre-M10)', async (t) => {
+  resetGlobals();
+  const jpgBytes = Buffer.from([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x00, 0x00]);
+  const pngBytes = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+  const { downloadRoot, outputRoot } = await makeFixture({
+    orderNumber: 'PXT-M10T2',
+    orderId:     'ORD-M10T2',
+    jobId:       2002,
+    images: [
+      { filename: 'a.jpg', body: jpgBytes, quantity: 1 },
+      { filename: 'b.png', body: pngBytes, quantity: 1 },
+    ],
+  });
+  __downloadDirectory = downloadRoot;
+  cleanup(t, downloadRoot, outputRoot);
+
+  await assert.rejects(
+    () => printService._sendViaPdfCopyRouted(
+      { id: 2002, order_number: 'PXT-M10T2', order_id: 'ORD-M10T2', product_code: 'ANY' },
+      { outputPath: outputRoot, controllerName: 'PC-M10T2' },  // applyImpositions OFF
+    ),
+    /No PDF files found in job 2002/,
+    'non-imposition path must throw the same pre-M10 error when no PDFs are present',
+  );
+  // No output written.
+  assert.equal(fs.existsSync(outputRoot) ? fs.readdirSync(outputRoot).length : 0, 0);
+});
+
+test('M10 tripwire: applyImpositions ON + NO template match + PDF+image manifest → pass-through PDF-only (images not treated as pass-through)', async (t) => {
+  // The applyImpositions=on/no-match/root branch is still PDF-only —
+  // images aren't dumped un-imposed into the root because the whole
+  // idea of image imposition is that they land IMPOSED. Locks the
+  // "images require a template match" contract.
+  resetGlobals();
+  seedWorked5x7Template();   // template claims GRAD5X7, not 'UNMATCHED'
+  const pdfBytes = await makeArtwork({ mediaW: 360, mediaH: 504 });
+  const jpgBytes = Buffer.from([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x00, 0x00]);
+  const { downloadRoot, outputRoot, jobFolderName } = await makeFixture({
+    orderNumber: 'PXT-M10T3',
+    orderId:     'ORD-M10T3',
+    jobId:       2003,
+    images: [
+      { filename: 'card.pdf',  body: pdfBytes, quantity: 1 },
+      { filename: 'photo.jpg', body: jpgBytes, quantity: 1 },
+    ],
+  });
+  __downloadDirectory = downloadRoot;
+  cleanup(t, downloadRoot, outputRoot);
+
+  const result = await printService._sendViaPdfCopyRouted(
+    { id: 2003, order_number: 'PXT-M10T3', order_id: 'ORD-M10T3', product_code: 'UNMATCHED' },
+    { outputPath: outputRoot, controllerName: 'PC-M10T3', applyImpositions: true, unmatchedBehaviour: 'root' },
+  );
+
+  assert.equal(result.success, true, `unexpected failure: ${result.error}`);
+  assert.equal(result.method, 'pdf_copy', 'no-template pass-through must NOT report pdf_copy_imposition');
+  const expectedFolder = path.join(outputRoot, jobFolderName);
+  assert.deepEqual(fs.readdirSync(expectedFolder).sort(), ['card.pdf'],
+    'applyImpositions on + no template match → pass-through stays PDF-only');
+});
+
+// ═════════════════════════════════════════════════════════════════════════
 // TEST 2: applyImpositions on, no template, unmatchedBehaviour 'root'
 // (default) — behaves EXACTLY like the no-change lock (§7.4 "pass-through
 // means untouched, not relocated").
@@ -1024,6 +1127,418 @@ test('M9 master multi-design (qty 5 + qty 3 on 4-up): TWO files with _D1 / _D2 s
   for (const f of [fileD1, fileD2]) {
     const doc = await PDFDocument.load(fs.readFileSync(f));
     assert.equal(doc.getPageCount(), 1, `${path.basename(f)}: one full sheet`);
+  }
+});
+
+// ═════════════════════════════════════════════════════════════════════════
+// M10: JPEG/PNG image imposition
+// ═════════════════════════════════════════════════════════════════════════
+
+const sharp = require('sharp');
+const { PDFDocument: _PDFDoc, decodePDFRawStream } = require('pdf-lib');
+
+async function makeImage({ format, width, height, r = 255, g = 0, b = 0 }) {
+  const s = sharp({ create: { width, height, channels: 3, background: { r, g, b } } });
+  return format === 'png' ? await s.png().toBuffer() : await s.jpeg().toBuffer();
+}
+
+/**
+ * Extract every drawImage placement's transform matrix from a PDF's
+ * first page. pdf-lib emits `q <T-cm> <R-cm> <S-cm> <K-cm> /Image-N
+ * Do Q` for each image placement (observed 2026-08-20 with pdf-lib
+ * 1.17.1; matrices are translate, rotate, scale, skew respectively
+ * — verified against the M2 rotation-derivation docblock).
+ *
+ * Returns [{ translate:{x,y}, rotateMatrix:[a,b,c,d], scale:{w,h} }].
+ * Decomposition is trivial because pdf-lib emits them as separate
+ * consecutive cm operators — no need to invert a composite matrix.
+ */
+async function extractImagePlacements(pdfBytes, pageIndex = 0) {
+  const doc = await _PDFDoc.load(pdfBytes);
+  const arr = doc.getPage(pageIndex).node.Contents();
+  let raw = '';
+  for (let j = 0; j < arr.size(); j++) {
+    const ref = arr.get(j);
+    const stream = doc.context.lookup(ref);
+    if (stream.constructor.name !== 'PDFRawStream') continue;
+    raw += Buffer.from(decodePDFRawStream(stream).decode()).toString('latin1');
+  }
+  const NUM = String.raw`(-?\d+(?:\.\d+(?:[eE][-+]?\d+)?)?)`;
+  const CM  = new RegExp(`${NUM}\\s+${NUM}\\s+${NUM}\\s+${NUM}\\s+${NUM}\\s+${NUM}\\s+cm`, 'g');
+  const OP  = new RegExp(
+    `q\\s+${CM.source}\\s+${CM.source}\\s+${CM.source}\\s+${CM.source}\\s+/[^\\s]+\\s+Do\\s+Q`,
+    'g',
+  );
+  const placements = [];
+  let m;
+  while ((m = OP.exec(raw)) !== null) {
+    const nums = m.slice(1).map(Number);   // 24 numbers (4 cm × 6)
+    placements.push({
+      translate:    { x: nums[4],  y: nums[5]  },
+      rotateMatrix: [ nums[6],  nums[7],  nums[8],  nums[9]  ],
+      scale:        { w: nums[12], h: nums[15] },
+      // skew (nums[18..23]) is identity in every pdf-lib drawImage
+      // call today; captured for the test but not asserted.
+    });
+  }
+  return placements;
+}
+
+test('M10 exact-bounds compose: unrotated PNG image lands EXACTLY on the bleed box (position + size hand-computed)', async (t) => {
+  // Template: 5×7 in (360×504 pt) on 12×18 in sheet, 0.25 in margins
+  // and gutter, 9 pt bleed. Image: 500×700 px PNG (portrait, matches
+  // portrait cell → chooseRotation = 0).
+  //
+  // Hand-computed: layout cell 0 lands at (63, 657) per the M1
+  // worked-example test. With 9 pt bleed, image draw args are:
+  //   x = 63 − 9 = 54
+  //   y = 657 − 9 = 648
+  //   width  = 360 + 18 = 378
+  //   height = 504 + 18 = 522
+  // pdf-lib CTM sequence (translate + identity rotate + scale):
+  //   translate  = (54, 648)
+  //   rotate     = identity [1 0 0 1]
+  //   scale      = (378, 522)
+  resetGlobals();
+  seedWorked5x7Template({ artworkBleed: 9 });
+  const pngBytes = await makeImage({ format: 'png', width: 500, height: 700 });
+  const { downloadRoot, outputRoot } = await makeFixture({
+    orderNumber: 'PXT-M10E',
+    orderId:     'ORD-M10E',
+    jobId:       3001,
+    images: [{ filename: 'card.png', body: pngBytes, quantity: 4 }],
+  });
+  __downloadDirectory = downloadRoot;
+  cleanup(t, downloadRoot, outputRoot);
+
+  const result = await printService._sendViaPdfCopyRouted(
+    { id: 3001, order_number: 'PXT-M10E', order_id: 'ORD-M10E', product_code: 'GRAD5X7' },
+    { outputPath: outputRoot, controllerName: 'PC-M10E', applyImpositions: true, unmatchedBehaviour: 'root' },
+  );
+  assert.equal(result.success, true, `unexpected failure: ${result.error}`);
+
+  const expectedFile = path.join(outputRoot, 'PXT-M10E_3001_QTY4_IMPQTY1.pdf');
+  const placements = await extractImagePlacements(fs.readFileSync(expectedFile), 0);
+  assert.ok(placements.length >= 4, `expected ≥4 placements on the sheet (got ${placements.length})`);
+  // First cell placement — the one at the M1 worked-example top-left.
+  const p0 = placements[0];
+  assert.equal(p0.translate.x, 54,  'translate x = cellX(63) − bleed(9)');
+  assert.equal(p0.translate.y, 648, 'translate y = cellY(657) − bleed(9)');
+  assert.equal(p0.scale.w,     378, 'width  = trim(360) + 2×bleed(9) = 378');
+  assert.equal(p0.scale.h,     522, 'height = trim(504) + 2×bleed(9) = 522');
+  // Identity rotate: [1 0 0 1] means no rotation applied.
+  assert.deepEqual(p0.rotateMatrix, [1, 0, 0, 1], 'unrotated: identity rotate matrix');
+});
+
+test('M10 exact-bounds compose: rotated JPEG image (landscape on portrait cell) lands EXACTLY on the bleed box', async (t) => {
+  // Landscape image on portrait cell → chooseRotation returns 90.
+  // Same 5×7 template, 9 pt bleed. Layout cell 0 at (63, 657).
+  //
+  // computeImageDrawArgs for rotation=90:
+  //   x = cellX − bleed + bleedWidth   = 63 − 9 + 378 = 432
+  //   y = cellY − bleed                = 657 − 9      = 648
+  //   pre-rotation width  = bleedHeight = 522
+  //   pre-rotation height = bleedWidth  = 378
+  //
+  // pdf-lib CTM:
+  //   translate = (432, 648)
+  //   rotate    = 90° CCW ≈ [0 1 -1 0]  (tiny FP artifact on cos)
+  //   scale     = (522, 378)
+  resetGlobals();
+  seedWorked5x7Template({ artworkBleed: 9 });
+  const jpgBytes = await makeImage({ format: 'jpeg', width: 700, height: 500 });
+  const { downloadRoot, outputRoot } = await makeFixture({
+    orderNumber: 'PXT-M10R',
+    orderId:     'ORD-M10R',
+    jobId:       3002,
+    images: [{ filename: 'card.jpg', body: jpgBytes, quantity: 4 }],
+  });
+  __downloadDirectory = downloadRoot;
+  cleanup(t, downloadRoot, outputRoot);
+
+  const result = await printService._sendViaPdfCopyRouted(
+    { id: 3002, order_number: 'PXT-M10R', order_id: 'ORD-M10R', product_code: 'GRAD5X7' },
+    { outputPath: outputRoot, controllerName: 'PC-M10R', applyImpositions: true, unmatchedBehaviour: 'root' },
+  );
+  assert.equal(result.success, true, `unexpected failure: ${result.error}`);
+
+  const expectedFile = path.join(outputRoot, 'PXT-M10R_3002_QTY4_IMPQTY1.pdf');
+  const placements = await extractImagePlacements(fs.readFileSync(expectedFile), 0);
+  const p0 = placements[0];
+  assert.equal(p0.translate.x, 432, 'translate x = cellX(63) − bleed(9) + bleedWidth(378)');
+  assert.equal(p0.translate.y, 648, 'translate y = cellY(657) − bleed(9)');
+  assert.equal(p0.scale.w,     522, 'pre-rotation width  = bleedHeight = 522');
+  assert.equal(p0.scale.h,     378, 'pre-rotation height = bleedWidth  = 378');
+  // 90° CCW rotation matrix — cos component carries an FP artifact
+  // (~6e-17); assert the SHAPE is 90° CCW rather than the exact zero.
+  assert.ok(Math.abs(p0.rotateMatrix[0]) < 1e-9, 'a ≈ 0 (cos 90)');
+  assert.equal(p0.rotateMatrix[1], 1, 'b = 1 (sin 90)');
+  assert.equal(p0.rotateMatrix[2], -1, 'c = -1');
+  assert.ok(Math.abs(p0.rotateMatrix[3]) < 1e-9, 'd ≈ 0');
+});
+
+test('M10 duplex pair (2 images): image1 on FRONTS, image2 on BACKS; mirror invariant holds on ASYMMETRIC margins', async (t) => {
+  // Extended mirror invariant — asymmetric margins are the tripwire
+  // for the sheet-vs-usable-centreline mirror landmine (M1a/CLAUDE.md
+  // landmine). If image-duplex regresses to using the usable-area
+  // centreline for backs, this test fails; symmetric-margin duplex
+  // tests wouldn't catch it.
+  //
+  // Template: 5×7 on 12×18, left=1.0 in (asymmetric), other margins
+  // 0.25 in, gutter 0.25 in, 0 bleed, duplex long-edge, autoRotate on.
+  // From M1a: front[0] = (90, 657); back[0] = (414, 657)
+  // (sheetW=864, cellW=360 → 864−90−360 = 414).
+  resetGlobals();
+  seedImposition({
+    paperSizes: [{ id: 'ps-12x18', name: '12x18', unit: 'in', width: IN(12), height: IN(18) }],
+    impositionTemplates: [{
+      id: 'tpl-dpx-pair',
+      name: 'Duplex asym',
+      paperSizeId: 'ps-12x18',
+      gutter: IN(0.25),
+      margins: { top: IN(0.25), right: IN(0.25), bottom: IN(0.25), left: IN(1.0) },
+      expectedArtwork: { width: IN(5), height: IN(7) },
+      autoRotate: true, artworkBleed: 0, cropMarks: false,
+      fillLastSheet: true,
+      outputSheets: 'all',
+      mode: 'duplex', duplexFlipEdge: 'long',
+      productCodes: ['DPXPAIR'], outputSubfolder: '',
+    }],
+  });
+  // Two visibly-distinguishable images. Red = front, Blue = back.
+  const front = await makeImage({ format: 'png', width: 500, height: 700, r: 255, g: 0, b: 0 });
+  const back  = await makeImage({ format: 'png', width: 500, height: 700, r: 0,   g: 0, b: 255 });
+  const { downloadRoot, outputRoot } = await makeFixture({
+    orderNumber: 'PXT-M10P',
+    orderId:     'ORD-M10P',
+    jobId:       3003,
+    images: [
+      { filename: 'front.png', body: front, quantity: 4 },
+      { filename: 'back.png',  body: back,  quantity: 4 },
+    ],
+  });
+  __downloadDirectory = downloadRoot;
+  cleanup(t, downloadRoot, outputRoot);
+
+  const result = await printService._sendViaPdfCopyRouted(
+    { id: 3003, order_number: 'PXT-M10P', order_id: 'ORD-M10P', product_code: 'DPXPAIR' },
+    { outputPath: outputRoot, controllerName: 'PC-M10P', applyImpositions: true, unmatchedBehaviour: 'root' },
+  );
+  assert.equal(result.success, true, `unexpected failure: ${result.error}`);
+  const expectedFile = path.join(outputRoot, 'PXT-M10P_3003_QTY4_IMPQTY1.pdf');
+  // 1 sheet duplex → 2 pages (front + back). Both drawn.
+  const doc = await _PDFDoc.load(fs.readFileSync(expectedFile));
+  assert.equal(doc.getPageCount(), 2, 'duplex 1 sheet = 2 pages');
+  // Front placements at expected cell positions.
+  const front0 = await extractImagePlacements(fs.readFileSync(expectedFile), 0);
+  const back0  = await extractImagePlacements(fs.readFileSync(expectedFile), 1);
+  assert.equal(front0.length, 4, 'front page: 4 placements (2×2 grid)');
+  assert.equal(back0.length,  4, 'back page: 4 placements');
+  // Cell 0 on the front: (90, 657). Sheet-mirror on long-edge: back
+  // cell 0 at (sheetW − cellX − cellW, cellY) = (864 − 90 − 360, 657) = (414, 657).
+  assert.equal(front0[0].translate.x, 90);
+  assert.equal(front0[0].translate.y, 657);
+  assert.equal(back0[0].translate.x,  414, 'back mirror uses SHEET centreline (854 − 90 − 360)');
+  assert.equal(back0[0].translate.y,  657, 'back mirror preserves y for long-edge flip');
+});
+
+test('M10 duplex 1 image: blank backs + WARN', async (t) => {
+  resetGlobals();
+  seedWorked5x7Template({ mode: 'duplex', duplexFlipEdge: 'long' });
+  const pngBytes = await makeImage({ format: 'png', width: 500, height: 700 });
+  const { downloadRoot, outputRoot } = await makeFixture({
+    orderNumber: 'PXT-M10B',
+    orderId:     'ORD-M10B',
+    jobId:       3004,
+    images: [{ filename: 'card.png', body: pngBytes, quantity: 4 }],
+  });
+  __downloadDirectory = downloadRoot;
+  cleanup(t, downloadRoot, outputRoot);
+  const result = await printService._sendViaPdfCopyRouted(
+    { id: 3004, order_number: 'PXT-M10B', order_id: 'ORD-M10B', product_code: 'GRAD5X7' },
+    { outputPath: outputRoot, controllerName: 'PC-M10B', applyImpositions: true, unmatchedBehaviour: 'root' },
+  );
+  assert.equal(result.success, true, `unexpected failure: ${result.error}`);
+  const warn = __warnings.find(w =>
+    typeof w.message === 'string' && /duplex template with 1 image — back cells will be blank/.test(w.message));
+  assert.ok(warn, 'expected a WARN about 1-image duplex → blank backs');
+  const expectedFile = path.join(outputRoot, 'PXT-M10B_3004_QTY4_IMPQTY1.pdf');
+  const doc = await _PDFDoc.load(fs.readFileSync(expectedFile));
+  assert.equal(doc.getPageCount(), 2, 'still 2 pages — back exists but is blank');
+});
+
+test('M10 duplex 3 images: exact reject message names the count', async (t) => {
+  resetGlobals();
+  seedWorked5x7Template({ mode: 'duplex', duplexFlipEdge: 'long' });
+  const png = await makeImage({ format: 'png', width: 500, height: 700 });
+  const { downloadRoot, outputRoot } = await makeFixture({
+    orderNumber: 'PXT-M103',
+    orderId:     'ORD-M103',
+    jobId:       3005,
+    images: [
+      { filename: 'a.png', body: png, quantity: 4 },
+      { filename: 'b.png', body: png, quantity: 4 },
+      { filename: 'c.png', body: png, quantity: 4 },
+    ],
+  });
+  __downloadDirectory = downloadRoot;
+  cleanup(t, downloadRoot, outputRoot);
+  const result = await printService._sendViaPdfCopyRouted(
+    { id: 3005, order_number: 'PXT-M103', order_id: 'ORD-M103', product_code: 'GRAD5X7' },
+    { outputPath: outputRoot, controllerName: 'PC-M103', applyImpositions: true, unmatchedBehaviour: 'root' },
+  );
+  assert.equal(result.success, false);
+  assert.match(result.error, /Duplex imposition supports one image \(blank back\) or two images \(front\/back\); this job has 3/);
+});
+
+test('M10 duplex pair with mismatched quantities: exact reject message names both files and quantities', async (t) => {
+  resetGlobals();
+  seedWorked5x7Template({ mode: 'duplex', duplexFlipEdge: 'long' });
+  const png = await makeImage({ format: 'png', width: 500, height: 700 });
+  const { downloadRoot, outputRoot } = await makeFixture({
+    orderNumber: 'PXT-M10Q',
+    orderId:     'ORD-M10Q',
+    jobId:       3006,
+    images: [
+      { filename: 'front.png', body: png, quantity: 4 },
+      { filename: 'back.png',  body: png, quantity: 5 },
+    ],
+  });
+  __downloadDirectory = downloadRoot;
+  cleanup(t, downloadRoot, outputRoot);
+  const result = await printService._sendViaPdfCopyRouted(
+    { id: 3006, order_number: 'PXT-M10Q', order_id: 'ORD-M10Q', product_code: 'GRAD5X7' },
+    { outputPath: outputRoot, controllerName: 'PC-M10Q', applyImpositions: true, unmatchedBehaviour: 'root' },
+  );
+  assert.equal(result.success, false);
+  assert.match(result.error, /Duplex image pair quantities must match/);
+  assert.match(result.error, /'front\.png' quantity 4/);
+  assert.match(result.error, /'back\.png' quantity 5/);
+});
+
+test('M10 CMYK JPEG reject: exact operator-readable message names the file and the fix', async (t) => {
+  // sharp doesn't easily emit CMYK JPEGs, so build the SOF header
+  // by hand (the same technique image-artwork.test.js uses for
+  // unit-testing SOF parsing). 4-component SOF triggers the CMYK
+  // reject at classification time.
+  resetGlobals();
+  seedWorked5x7Template();
+  // Minimal JPEG with SOI + SOF0 (4 components) + EOI. The sniffer
+  // sees the JPEG magic; dimensions read from the SOF; component
+  // count = 4 → CMYK.
+  const cmykBytes = Buffer.from([
+    0xFF, 0xD8,                 // SOI
+    0xFF, 0xC0,                 // SOF0
+    0x00, 20,                   // length 20
+    8,                          // precision
+    0x01, 0x00, 0x01, 0x00,     // height 256, width 256
+    4,                          // 4 components (CMYK)
+    1, 0x22, 0,  2, 0x22, 0,  3, 0x22, 0,  4, 0x22, 0,
+    0xFF, 0xD9,                 // EOI
+  ]);
+  const { downloadRoot, outputRoot } = await makeFixture({
+    orderNumber: 'PXT-M10C',
+    orderId:     'ORD-M10C',
+    jobId:       3007,
+    images: [{ filename: 'cmyk.jpg', body: cmykBytes, quantity: 4 }],
+  });
+  __downloadDirectory = downloadRoot;
+  cleanup(t, downloadRoot, outputRoot);
+  const result = await printService._sendViaPdfCopyRouted(
+    { id: 3007, order_number: 'PXT-M10C', order_id: 'ORD-M10C', product_code: 'GRAD5X7' },
+    { outputPath: outputRoot, controllerName: 'PC-M10C', applyImpositions: true, unmatchedBehaviour: 'root' },
+  );
+  assert.equal(result.success, false);
+  assert.match(result.error, /Image 'cmyk\.jpg' is a CMYK JPEG which cannot be imposed/);
+  assert.match(result.error, /Re-export as RGB from the original artwork tool/);
+});
+
+test('M10 low-DPI WARN: 149-DPI-worst-axis image fires the WARN; dispatch still succeeds', async (t) => {
+  // 745×1050 px stretched to 5×7 in (360×504 pt) → dpiX = 149,
+  // dpiY = 150. Worst axis under 150 → WARN. Dispatch continues.
+  resetGlobals();
+  seedWorked5x7Template();
+  const pngBytes = await makeImage({ format: 'png', width: 745, height: 1050 });
+  const { downloadRoot, outputRoot } = await makeFixture({
+    orderNumber: 'PXT-M10D',
+    orderId:     'ORD-M10D',
+    jobId:       3008,
+    images: [{ filename: 'lowdpi.png', body: pngBytes, quantity: 4 }],
+  });
+  __downloadDirectory = downloadRoot;
+  cleanup(t, downloadRoot, outputRoot);
+  const result = await printService._sendViaPdfCopyRouted(
+    { id: 3008, order_number: 'PXT-M10D', order_id: 'ORD-M10D', product_code: 'GRAD5X7' },
+    { outputPath: outputRoot, controllerName: 'PC-M10D', applyImpositions: true, unmatchedBehaviour: 'root' },
+  );
+  assert.equal(result.success, true, `unexpected failure: ${result.error}`);
+  const warn = __warnings.find(w =>
+    typeof w.message === 'string' &&
+    /Image 'lowdpi\.png' effective DPI/.test(w.message) &&
+    /below the 150 DPI recommended threshold/.test(w.message));
+  assert.ok(warn, 'expected a low-DPI WARN naming the file and the threshold');
+});
+
+test('M10 mixed PDF+image job (simplex): sequential designs in manifest order, ONE output PDF concatenating both', async (t) => {
+  // Manifest: PDF (qty 4) then image (qty 8). Total copies = 12,
+  // total sheets = ceil(4/4) + ceil(8/4) = 1 + 2 = 3. Filename
+  // reports cross-design sums (§7.5).
+  resetGlobals();
+  seedWorked5x7Template();
+  const pdfBytes = await makeArtwork({ mediaW: 360, mediaH: 504 });
+  const pngBytes = await makeImage({ format: 'png', width: 500, height: 700 });
+  const { downloadRoot, outputRoot } = await makeFixture({
+    orderNumber: 'PXT-M10M',
+    orderId:     'ORD-M10M',
+    jobId:       3009,
+    images: [
+      { filename: 'design.pdf', body: pdfBytes, quantity: 4 },
+      { filename: 'photo.png',  body: pngBytes, quantity: 8 },
+    ],
+  });
+  __downloadDirectory = downloadRoot;
+  cleanup(t, downloadRoot, outputRoot);
+  const result = await printService._sendViaPdfCopyRouted(
+    { id: 3009, order_number: 'PXT-M10M', order_id: 'ORD-M10M', product_code: 'GRAD5X7' },
+    { outputPath: outputRoot, controllerName: 'PC-M10M', applyImpositions: true, unmatchedBehaviour: 'root' },
+  );
+  assert.equal(result.success, true, `unexpected failure: ${result.error}`);
+  assert.equal(result.totalCopies, 12);
+  assert.equal(result.totalSheets, 3);
+  const expectedFile = path.join(outputRoot, 'PXT-M10M_3009_QTY12_IMPQTY3.pdf');
+  const doc = await _PDFDoc.load(fs.readFileSync(expectedFile));
+  assert.equal(doc.getPageCount(), 3, 'PDF design (1 sheet) + image design (2 sheets) = 3 pages');
+});
+
+test('M10 master mode with image designs: one file per design, _D{i} suffix, per-design QTY/IMPQTY', async (t) => {
+  resetGlobals();
+  seedWorked5x7Template({ outputSheets: 'master' });
+  const pdfBytes = await makeArtwork({ mediaW: 360, mediaH: 504 });
+  const pngBytes = await makeImage({ format: 'png', width: 500, height: 700 });
+  const { downloadRoot, outputRoot } = await makeFixture({
+    orderNumber: 'PXT-M10K',
+    orderId:     'ORD-M10K',
+    jobId:       3010,
+    images: [
+      { filename: 'design.pdf', body: pdfBytes, quantity: 5 },
+      { filename: 'photo.png',  body: pngBytes, quantity: 3 },
+    ],
+  });
+  __downloadDirectory = downloadRoot;
+  cleanup(t, downloadRoot, outputRoot);
+  const result = await printService._sendViaPdfCopyRouted(
+    { id: 3010, order_number: 'PXT-M10K', order_id: 'ORD-M10K', product_code: 'GRAD5X7' },
+    { outputPath: outputRoot, controllerName: 'PC-M10K', applyImpositions: true, unmatchedBehaviour: 'root' },
+  );
+  assert.equal(result.success, true, `unexpected failure: ${result.error}`);
+  const fileD1 = path.join(outputRoot, 'PXT-M10K_3010_QTY5_IMPQTY2_D1.pdf');
+  const fileD2 = path.join(outputRoot, 'PXT-M10K_3010_QTY3_IMPQTY1_D2.pdf');
+  assert.ok(fs.existsSync(fileD1), `PDF-design master at ${fileD1}`);
+  assert.ok(fs.existsSync(fileD2), `image-design master at ${fileD2}`);
+  // Each is one full sheet — 1 page simplex.
+  for (const f of [fileD1, fileD2]) {
+    const d = await _PDFDoc.load(fs.readFileSync(f));
+    assert.equal(d.getPageCount(), 1);
   }
 });
 

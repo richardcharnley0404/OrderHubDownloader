@@ -340,7 +340,55 @@ template that dispatches to that press uses the same setting.
 
 ---
 
-## 8. What v1 does NOT do
+## 8. Image artwork — JPEG and PNG (M10)
+
+Imposition templates now accept **JPEG and PNG** artwork in addition
+to PDF. The rules are:
+
+- **Accepted formats:** `.jpg`, `.jpeg`, `.png` (and `.pdf`). The
+  format is decided by the file's **magic bytes**, not the extension
+  — a browser-download `.jpg` that's actually a PNG still gets
+  embedded correctly.
+- **CMYK JPEGs are rejected.** Re-export as RGB from the original
+  tool (Photoshop: Image → Mode → RGB Color; Illustrator: File →
+  Document Color Mode → RGB Color) and re-upload. The reject message
+  names the file and points at the fix.
+- **Images stretch to Finished Size + bleed.** The image is drawn at
+  exactly `Finished Size × Bleed × 2` — no cropping, no clipping,
+  and **the aspect ratio is allowed to distort**. This is deliberate:
+  guillotine cutting needs ink all the way to the trim edge, so a
+  scale-to-cover approach that leaves uncovered corners would produce
+  visible white edges. **Supply artwork at the right aspect ratio**
+  for undistorted output. A 5×7 in template stretches a 5:7 image
+  cleanly; a 4:3 photo on the same template gets squeezed sideways.
+- **Auto-rotation to reduce distortion.** If the image's pixel
+  orientation opposes the cell orientation (landscape image on a
+  portrait cell, or vice versa), the image is rotated 90° before
+  stretching — this minimises the per-axis distortion.
+- **Effective DPI guidance.** 300 DPI is recommended; anything
+  **below 150 DPI on either axis** (measured at the stretched size)
+  logs a WARN naming the file and both axes' DPI. The output still
+  prints — the WARN is a quality hint, not a failure.
+- **Duplex pairing — the two-image rule.** On a duplex template:
+  - **1 image in the job** → one design; the back cells are blank
+    (a WARN is logged, matching the 1-page PDF on duplex rule).
+  - **2 images in the job** → **image 1 goes on the FRONT, image 2
+    on the BACK** (manifest order). The pair's **quantities must
+    match** — a mismatch rejects with a message naming both files
+    and both quantities.
+  - **3+ images** → rejected. Do not pair them silently.
+- **Mixed PDF+image jobs** are supported. Each PDF is its own design;
+  images collapse into 0 or 1 image-design per the duplex/simplex
+  rules above. Everything else (multi-design output, master mode
+  `_D{i}` filenames, custom filename templates) works the same way it
+  does for PDFs.
+
+Images do NOT flow through the non-imposition (pass-through) path.
+An image in a job whose product code doesn't match any template goes
+nowhere — the pass-through is PDF-only by design (an image in the
+sheets root would confuse the operator).
+
+## 9. What v1 does NOT do
 
 Recorded so they're chosen, not missed:
 
@@ -353,12 +401,12 @@ Recorded so they're chosen, not missed:
 - **Work-and-turn / work-and-tumble** press-economy styles. Digital
   duplex engines don't need them; v1 is simplex or duplex-sheetwise
   only.
-- **Fill-last-sheet quantity rounding.** A job of 19 copies on 4-up
-  produces 5 sheets with the last showing 3 cards + one empty slot.
+- ~~**Fill-last-sheet quantity rounding.**~~ Shipped in M7 —
+  see §4's Fill-last-sheet paragraph.
 - **Per-sheet barcode / slug lines** for cut tracking. Would extend
   the existing order-identifier pipeline step.
 - **Rasterised artwork preview** in the template editor. v1's preview
   is labelled rectangles — the grid geometry is right; adding the
   actual card art would require pdf.js in the renderer.
-- **Imposing raster (JPEG) artwork.** PDF Copy is PDF-only today; that
-  stays.
+- ~~**Imposing raster (JPEG) artwork.**~~ Shipped in M10 — see
+  §8 above.

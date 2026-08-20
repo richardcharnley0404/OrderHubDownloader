@@ -522,10 +522,183 @@ async function composeImposition({
   return { pdfBytes, sheets, placedPerSheet };
 }
 
+/**
+ * composeImpositionImages({ images, quantity, layout, sheetWidth,
+ *   sheetHeight, mode, cropMarks, artworkBleed, fillLastSheet, logger })
+ *   → { pdfBytes, sheets, placedPerSheet }
+ *
+ * The image-artwork sibling of composeImposition. Every downstream
+ * concept (planPlacements, duplex mirror positions, crop marks,
+ * fill-last-sheet, master mode as one full sheet) is shared — the
+ * only differences are how artwork is embedded (embedJpg/embedPng vs
+ * embedPage) and how it is drawn (drawImage at the bleed box vs
+ * drawPage at the trim, with the stretch and optional 90° rotation
+ * baked into the drawImage args by image-artwork.computeImageDrawArgs).
+ *
+ * `images` is an array with 1 or 2 entries:
+ *   [{ bytes, format, rotation, filename }]
+ *
+ * - format: 'jpeg' | 'png' (sniffed at the dispatch boundary; here
+ *   we trust the caller's decision so this module stays pure).
+ * - rotation: 0 | 90 — the caller has already run chooseRotation
+ *   against the cell.
+ * - filename: passed through for the WARN log line only.
+ *
+ * Mode rules — the analogue of composeImposition's duplex rules:
+ *   simplex + 1 image → normal
+ *   simplex + 2 images → throws (v1 rejects: pairing two images on
+ *     a simplex template makes no imposition sense)
+ *   duplex + 1 image → blank backs + logger.logWarning (matches the
+ *     1-page PDF on duplex rule)
+ *   duplex + 2 images → image 0 on fronts, image 1 on backs
+ *   any + 0 images or > 2 images → throws
+ *
+ * All quantities go through planPlacements verbatim — the caller is
+ * responsible for asserting the duplex pair's per-image quantities
+ * match; here we take the caller's single `quantity` as authoritative.
+ */
+async function composeImpositionImages({
+  images,
+  quantity,
+  layout,
+  sheetWidth,
+  sheetHeight,
+  mode,
+  cropMarks    = false,
+  artworkBleed = 0,
+  fillLastSheet = false,
+  logger        = null,
+} = {}) {
+  if (!Array.isArray(images) || images.length === 0 || images.length > 2) {
+    throw new Error(
+      `composeImpositionImages: images must be an array of 1 or 2 entries (got ${images ? images.length : 'null'})`
+    );
+  }
+  for (const img of images) {
+    if (!img || (img.format !== 'jpeg' && img.format !== 'png')) {
+      throw new Error('composeImpositionImages: every image must have format "jpeg" or "png"');
+    }
+    if (!(img.bytes && (img.bytes.length || img.bytes.byteLength))) {
+      throw new Error('composeImpositionImages: every image must have non-empty bytes');
+    }
+    if (img.rotation !== 0 && img.rotation !== 90) {
+      throw new Error(`composeImpositionImages: rotation must be 0 or 90 (got ${img.rotation})`);
+    }
+  }
+  if (mode !== 'simplex' && mode !== 'duplex') {
+    throw new Error(`composeImpositionImages: mode must be 'simplex' or 'duplex' (got ${JSON.stringify(mode)})`);
+  }
+  if (mode === 'simplex' && images.length !== 1) {
+    throw new Error(`composeImpositionImages: simplex mode requires exactly 1 image (got ${images.length})`);
+  }
+  if (mode === 'duplex' && !Array.isArray(layout.back)) {
+    throw new Error('composeImpositionImages: duplex mode requires layout.back');
+  }
+  if (!layout || !Array.isArray(layout.front) ||
+      !Number.isInteger(layout.perSheet) || layout.perSheet <= 0 ||
+      !Number.isFinite(layout.cellW) || !Number.isFinite(layout.cellH)) {
+    throw new Error('composeImpositionImages: layout must be a computeLayout() result');
+  }
+  if (!Number.isFinite(sheetWidth) || !Number.isFinite(sheetHeight) ||
+      sheetWidth <= 0 || sheetHeight <= 0) {
+    throw new Error('composeImpositionImages: sheetWidth/sheetHeight must be positive numbers');
+  }
+
+  // 1-image duplex → blank backs + WARN (same posture as the 1-page
+  // PDF on duplex rule; operator sees a WARN so a mis-tagged
+  // simplex-on-duplex product still surfaces).
+  const blankBacks = (mode === 'duplex' && images.length === 1);
+  if (blankBacks && logger && typeof logger.logWarning === 'function') {
+    logger.logWarning(
+      '[imposition] duplex template with 1 image — back cells will be blank',
+    );
+  }
+
+  // Bleed value in points, non-negative. Used for the drawImage
+  // args computation via image-artwork.computeImageDrawArgs.
+  const bleed = Number.isFinite(artworkBleed) && artworkBleed >= 0 ? artworkBleed : 0;
+  const { computeImageDrawArgs } = require('./image-artwork');
+
+  const { plan, sheets, placedPerSheet } = planPlacements({ quantity, layout, mode, fillLastSheet });
+  const outDoc = await PDFDocument.create();
+
+  // Embed each image ONCE — pdf-lib caches embedded images and
+  // drawImage clones cheap into every cell. Reusing the same embed
+  // across dozens of placements is the whole point of embedJpg/Png.
+  const embeddedImages = await Promise.all(images.map(async (img) => {
+    if (img.format === 'jpeg') return outDoc.embedJpg(img.bytes);
+    return outDoc.embedPng(img.bytes);
+  }));
+
+  const outPages = [];
+  for (let s = 0; s < sheets; s++) {
+    outPages.push(outDoc.addPage([sheetWidth, sheetHeight]));
+    if (mode === 'duplex') outPages.push(outDoc.addPage([sheetWidth, sheetHeight]));
+  }
+  const pageStride = (mode === 'duplex') ? 2 : 1;
+
+  // Same crop-marks pass as composeImposition — uniform marks on
+  // every layout cell per sheet regardless of fill (§3.5 rationale).
+  if (cropMarks) {
+    for (let s = 0; s < sheets; s++) {
+      const frontPage = outPages[s * pageStride];
+      _drawCropMarks(frontPage, layout.front, layout.cellW, layout.cellH, bleed);
+      if (mode === 'duplex') {
+        const backPage = outPages[s * pageStride + 1];
+        _drawCropMarks(backPage, layout.back, layout.cellW, layout.cellH, bleed);
+      }
+    }
+  }
+
+  // Walk the plan and draw. Bleed box is derived from the cell
+  // dimensions — the caller has already ensured (via image-artwork.
+  // computeBleedBox at the dispatch layer) that the template's
+  // Finished Size equals layout.cellW/H post-rotation, so the bleed
+  // box we compute here matches what the operator sees in the editor.
+  const bleedWidthFront  = layout.cellW + 2 * bleed;
+  const bleedHeightFront = layout.cellH + 2 * bleed;
+  for (const entry of plan) {
+    const isBack = (entry.side === 'back');
+    const sourceIdx = isBack ? (images.length > 1 ? 1 : null) : 0;
+    if (sourceIdx === null) continue;   // blank back
+    const targetPage = outPages[entry.sheet * pageStride + (isBack ? 1 : 0)];
+    const emb        = embeddedImages[sourceIdx];
+    const img        = images[sourceIdx];
+    const drawArgs   = computeImageDrawArgs({
+      cellX:       entry.x,
+      cellY:       entry.y,
+      bleed,
+      bleedWidth:  bleedWidthFront,
+      bleedHeight: bleedHeightFront,
+      rotation:    img.rotation,
+    });
+    if (drawArgs.rotation === 90) {
+      targetPage.drawImage(emb, {
+        x:      drawArgs.x,
+        y:      drawArgs.y,
+        width:  drawArgs.width,
+        height: drawArgs.height,
+        rotate: degrees(90),
+      });
+    } else {
+      targetPage.drawImage(emb, {
+        x:      drawArgs.x,
+        y:      drawArgs.y,
+        width:  drawArgs.width,
+        height: drawArgs.height,
+      });
+    }
+  }
+
+  const pdfBytes = await outDoc.save();
+  return { pdfBytes, sheets, placedPerSheet };
+}
+
 module.exports = {
   deriveTrim,
   planPlacements,
   composeImposition,
+  composeImpositionImages,
   // Exposed for the M2 test suite. Not a public API — do not build on
   // these from dispatch or UI code.
   _internal: {

@@ -3888,8 +3888,22 @@ class PrintService {
     // imposition path (§3.4) and available to pipeline steps in the
     // pass-through path via jobContext.qty (unchanged — jobContext.qty
     // still comes from job.qty for byte-identical parity there).
-    const pdfFiles = jobManifest.images
-      .filter(img => path.extname(img.filename).toLowerCase() === '.pdf')
+    //
+    // M10: two extension filters coexist deliberately.
+    //   `artworkFiles` includes PDFs + JPEGs + PNGs and feeds ONLY the
+    //     imposition-with-matched-template branch (images become
+    //     imposable there).
+    //   `pdfFiles` stays PDF-only for every OTHER branch (non-
+    //     imposition dispatch AND the no-template pass-through
+    //     branches). That's the M10 tripwire: images must never leak
+    //     into a pass-through folder — an image sitting in a hot
+    //     folder next to imposed sheets isn't "un-imposed pass-
+    //     through", it's a mistake.
+    const artworkFiles = jobManifest.images
+      .filter(img => {
+        const ext = path.extname(img.filename).toLowerCase();
+        return ext === '.pdf' || ext === '.jpg' || ext === '.jpeg' || ext === '.png';
+      })
       .map(img => {
         const basename = path.basename(img.filename);
         return {
@@ -3898,12 +3912,14 @@ class PrintService {
           quantity:   img.quantity || 1,
         };
       });
+    const pdfFiles = artworkFiles.filter(f =>
+      path.extname(f.filename).toLowerCase() === '.pdf'
+    );
 
-    if (pdfFiles.length === 0) {
-      throw new Error(`No PDF files found in job ${job.id} manifest.`);
-    }
-
-    // ── Imposition dispatch fork ────────────────────────────────────
+    // ── Imposition dispatch fork (checked FIRST so an images-only
+    // job on a matched template dispatches without hitting the
+    // PDF-only "No PDF files found" throw the non-imposition path
+    // still uses) ────────────────────────────────────────────────
     if (route.applyImpositions) {
       // Lazy require so the imposition modules only load when a lab has
       // actually opted in — matches the pdf-pipeline lazy require below.
@@ -3911,12 +3927,20 @@ class PrintService {
       const template = impositionService.findTemplateForProductCode(job.product_code);
 
       if (template) {
+        if (artworkFiles.length === 0) {
+          throw new Error(`No imposable files (PDF/JPEG/PNG) found in job ${job.id} manifest.`);
+        }
         return this._sendViaPdfCopyImposition(
-          job, route, template, pdfFiles, jobFolderName, jobFolderPath,
+          job, route, template, artworkFiles, jobFolderName, jobFolderPath,
         );
       }
 
-      // No template → pass-through per unmatchedBehaviour.
+      // No template → pass-through per unmatchedBehaviour. PDF-only —
+      // images never pass through un-imposed (they'd land loose next
+      // to imposed sheets and confuse the operator).
+      if (pdfFiles.length === 0) {
+        throw new Error(`No PDF files found in job ${job.id} manifest.`);
+      }
       if (route.unmatchedBehaviour === 'productCodeSubfolder') {
         const rawCode  = String(job.product_code || '').trim();
         // UNSAFE_CHARS covers Win32 reserved chars incl. path separators;
@@ -3930,6 +3954,9 @@ class PrintService {
     }
 
     // ── Today's behaviour (no-change lock) ──────────────────────────
+    if (pdfFiles.length === 0) {
+      throw new Error(`No PDF files found in job ${job.id} manifest.`);
+    }
     const destFolder = path.join(route.outputPath, jobFolderName);
     return this._pdfCopyPassthroughWrite(job, route, pdfFiles, destFolder, jobFolderPath);
   }
@@ -4013,13 +4040,15 @@ class PrintService {
    * Failures fail the job (never a silent fallback to raw PDF — the
    * whole feature exists to prevent wrongly-imposed dispatch).
    */
-  async _sendViaPdfCopyImposition(job, route, template, pdfFiles, jobFolderName, jobFolderPath) {
+  async _sendViaPdfCopyImposition(job, route, template, artworkFiles, jobFolderName, jobFolderPath) {
     // Lazy requires — matches the pdf-pipeline lazy require above. Also
     // means a lab that hasn't wired imposition never pulls pdf-lib for
     // pdf_copy dispatch.
     const { PDFDocument } = require('pdf-lib');
     const { computeLayout } = require('../../pdf-pipeline/imposition-layout');
-    const { deriveTrim, composeImposition } = require('../../pdf-pipeline/imposition-compose');
+    const {
+      deriveTrim, composeImposition, composeImpositionImages,
+    } = require('../../pdf-pipeline/imposition-compose');
     const { applyPdfPipeline } = require('../../pdf-pipeline/pipeline');
     const impositionService = require('./imposition-service');
 
@@ -4045,30 +4074,33 @@ class PrintService {
     // copies). Default 'all' matches every pre-M9 template unchanged.
     const outputSheets = template.outputSheets === 'master' ? 'master' : 'all';
 
-    // ── Master-mode dispatch (§7.5 M9 amendment) ────────────────────
-    //
-    // ONE file per design (multi-design jobs get a `_D{i}` suffix
-    // before .pdf when — and ONLY when — the job has more than one
-    // design). Each file is a single fully-filled sheet: simplex = 1
-    // page, duplex = 2 pages (that sheet's front + its mirrored
-    // back). The QTY/IMPQTY in the filename report the PER-DESIGN
-    // ordered qty and the REAL sheet count that WOULD have been
-    // produced — the operator sets the press copy count to IMPQTY and
-    // gets QTY copies (plus overs from the fill).
-    //
-    // Master mode IGNORES fillLastSheet on the template. A master
-    // cannot represent a partial sheet — overs are inherent to the
-    // "run IMPQTY copies of one sheet" workflow. Compose is called
-    // with `quantity: layout.perSheet` which forces one full sheet
-    // regardless of the fill flag; the flag is deliberately not
-    // threaded through.
+    // M10 — build the designs list once (classify PDF vs image, run
+    // CMYK / duplex-pair / duplex-3+ rules, precompute layouts and
+    // image rotations). Both 'all' and 'master' dispatchers consume
+    // the same list, so classification rules live in ONE place.
+    let designs;
+    try {
+      designs = await this._classifyAndBuildImpositionDesigns({
+        job, template, paperSize, artworkFiles, artworkBleed,
+        deriveTrim, computeLayout, logger,
+      });
+    } catch (buildErr) {
+      const msg = `Imposition failed for job ${job.id}: ${buildErr.message}`;
+      logger.logError('[imposition] design classification failed — job errored', buildErr, {
+        jobId: job.id, template: template.name,
+      });
+      jobService.updateJobLocally(job.id, { _status: 'error', _errorMessage: msg });
+      return { success: false, error: msg };
+    }
+
     if (outputSheets === 'master') {
       return this._sendViaPdfCopyImpositionMaster({
-        job, route, template, paperSize, pdfFiles, jobFolderName, jobFolderPath, artworkBleed,
-        deriveTrim, computeLayout, composeImposition, applyPdfPipeline,
+        job, route, template, paperSize, designs, jobFolderName, jobFolderPath, artworkBleed,
+        composeImposition, composeImpositionImages, applyPdfPipeline,
       });
     }
-    // ── 'all' mode (M8 shape, byte-identical to pre-M9 output) ──────
+    // ── 'all' mode (M8 shape, byte-identical to pre-M9 output for
+    // PDF-only jobs) ────────────────────────────────────────────────
     const finalDoc     = await PDFDocument.create();
     const perDesign    = [];
     let totalCopies    = 0;
@@ -4076,68 +4108,12 @@ class PrintService {
     let anyDivergence  = false;
 
     try {
-      for (const pdfFile of pdfFiles) {
-        if (!fs.existsSync(pdfFile.sourcePath)) {
-          throw new Error(`PDF not found: ${pdfFile.sourcePath}`);
-        }
-        const bytes    = await fs.promises.readFile(pdfFile.sourcePath);
-        const srcDoc   = await PDFDocument.load(bytes);
-        const firstPage = srcDoc.getPages()[0];
-        // SHARED trim derivation from M2 — do NOT reimplement here (same
-        // discipline as buildDestFolder). If it drifts, the layout below
-        // and the compose validation would silently mis-place cells.
-        const trim = deriveTrim(firstPage, artworkBleed);
-
-        // expectedArtwork divergence (§5.1 decision): layout uses the
-        // REAL trim regardless — the WARN is a signal to the lab that
-        // their design assumption drifted, not a dispatch failure.
-        const eaW = template.expectedArtwork && Number.isFinite(template.expectedArtwork.width)  ? template.expectedArtwork.width  : null;
-        const eaH = template.expectedArtwork && Number.isFinite(template.expectedArtwork.height) ? template.expectedArtwork.height : null;
-        const divergence =
-          eaW !== null && eaH !== null &&
-          (Math.abs(trim.width  - eaW) > 0.5 || Math.abs(trim.height - eaH) > 0.5);
-        if (divergence) {
-          anyDivergence = true;
-          logger.logWarning(
-            `[imposition] artwork trim ${trim.width.toFixed(2)} × ${trim.height.toFixed(2)} pt ` +
-            `differs from template '${template.name}' expectedArtwork ${eaW} × ${eaH} pt ` +
-            `by > 0.5 pt — layout used the real trim; template design assumption may need updating`,
-            { jobId: job.id, pdf: pdfFile.filename }
-          );
-        }
-
-        // Real trim IS the cell — this is where the runtime layout
-        // decision happens (autoRotate/perSheet all derive from it).
-        const layout = computeLayout({
-          sheetWidth:     paperSize.width,
-          sheetHeight:    paperSize.height,
-          margins:        template.margins || {},
-          gutter:         template.gutter || 0,
-          cellWidth:      trim.width,
-          cellHeight:     trim.height,
-          autoRotate:     !!template.autoRotate,
-          mode:           template.mode,
-          duplexFlipEdge: template.duplexFlipEdge,
-        });
-
-        const composed = await composeImposition({
-          artworkBytes: bytes,
-          quantity:     pdfFile.quantity,
-          layout,
-          sheetWidth:   paperSize.width,
-          sheetHeight:  paperSize.height,
-          mode:         template.mode,
-          cropMarks:    !!template.cropMarks,
-          artworkBleed,
-          // M7 fill-last-sheet: read as `!== false` so a template
-          // stored before M7 (missing the field) adopts the default-
-          // true behaviour. Save-time validation defaults absent to
-          // true too, so this is a belt-and-braces safety net for
-          // records that predate M7 or came in via hand-edited JSON.
-          // Sheet count and filename are unchanged either way — see
-          // planPlacements' fillLastSheet docstring.
+      for (const design of designs) {
+        const composed = await this._composeOneDesign({
+          design, template, paperSize, artworkBleed,
+          cropMarks:     !!template.cropMarks,
           fillLastSheet: template.fillLastSheet !== false,
-          logger,
+          composeImposition, composeImpositionImages, logger,
         });
 
         // Concatenate this design's imposed pages into the final doc.
@@ -4147,13 +4123,15 @@ class PrintService {
         const copiedPages = await finalDoc.copyPages(composedDoc, composedDoc.getPageIndices());
         for (const p of copiedPages) finalDoc.addPage(p);
 
-        totalCopies += pdfFile.quantity;
+        totalCopies += design.quantity;
         totalSheets += composed.sheets;
+        anyDivergence = anyDivergence || composed.expectedArtworkWarn;
         perDesign.push({
-          filename: pdfFile.filename,
-          qty:      pdfFile.quantity,
+          filename: design.filename,
+          kind:     design.kind,
+          qty:      design.quantity,
           sheets:   composed.sheets,
-          rotated:  !!layout.rotated,
+          rotated:  composed.rotated,
         });
       }
     } catch (composeErr) {
@@ -4277,17 +4255,17 @@ class PrintService {
    * reports the run length; the file itself is one sheet.
    */
   async _sendViaPdfCopyImpositionMaster({
-    job, route, template, paperSize, pdfFiles, jobFolderName, jobFolderPath, artworkBleed,
-    deriveTrim, computeLayout, composeImposition, applyPdfPipeline,
+    job, route, template, paperSize, designs, jobFolderName, jobFolderPath, artworkBleed,
+    composeImposition, composeImpositionImages, applyPdfPipeline,
   }) {
-    const { PDFDocument } = require('pdf-lib');
     const { resolveImpositionFilename } = require('./imposition-filename');
 
-    // Multi-design (>1 file) → _D{i} suffix, 1-based. Single-design
+    // Multi-design (>1 design) → _D{i} suffix, 1-based. Single-design
     // gets an empty suffix (M9 spec: single-design master files do
     // NOT get a suffix — otherwise every existing single-design lab
     // that flips to master gets a filename churn that isn't in scope).
-    const multiDesign = pdfFiles.length > 1;
+    // Note: an image PAIR on duplex is ONE design, not two.
+    const multiDesign = designs.length > 1;
 
     const baseDest = (typeof template.outputPath === 'string' && template.outputPath.trim())
       ? template.outputPath.trim()
@@ -4304,66 +4282,23 @@ class PrintService {
 
     try {
       fs.mkdirSync(destFolder, { recursive: true });
-      for (let i = 0; i < pdfFiles.length; i++) {
-        const pdfFile = pdfFiles[i];
-        if (!fs.existsSync(pdfFile.sourcePath)) {
-          throw new Error(`PDF not found: ${pdfFile.sourcePath}`);
-        }
-        const bytes    = await fs.promises.readFile(pdfFile.sourcePath);
-        const srcDoc   = await PDFDocument.load(bytes);
-        const firstPage = srcDoc.getPages()[0];
-        const trim = deriveTrim(firstPage, artworkBleed);
+      for (let i = 0; i < designs.length; i++) {
+        const design = designs[i];
 
-        // Same expectedArtwork divergence WARN as 'all' mode — the
-        // rule is per-design and applies regardless of output shape.
-        const eaW = template.expectedArtwork && Number.isFinite(template.expectedArtwork.width)  ? template.expectedArtwork.width  : null;
-        const eaH = template.expectedArtwork && Number.isFinite(template.expectedArtwork.height) ? template.expectedArtwork.height : null;
-        const divergence =
-          eaW !== null && eaH !== null &&
-          (Math.abs(trim.width  - eaW) > 0.5 || Math.abs(trim.height - eaH) > 0.5);
-        if (divergence) {
-          anyDivergence = true;
-          logger.logWarning(
-            `[imposition] artwork trim ${trim.width.toFixed(2)} × ${trim.height.toFixed(2)} pt ` +
-            `differs from template '${template.name}' expectedArtwork ${eaW} × ${eaH} pt ` +
-            `by > 0.5 pt — layout used the real trim; template design assumption may need updating`,
-            { jobId: job.id, pdf: pdfFile.filename }
-          );
-        }
-
-        const layout = computeLayout({
-          sheetWidth:     paperSize.width,
-          sheetHeight:    paperSize.height,
-          margins:        template.margins || {},
-          gutter:         template.gutter || 0,
-          cellWidth:      trim.width,
-          cellHeight:     trim.height,
-          autoRotate:     !!template.autoRotate,
-          mode:           template.mode,
-          duplexFlipEdge: template.duplexFlipEdge,
-        });
-
-        // ONE full sheet. `quantity: layout.perSheet` gives a natural
-        // full sheet regardless of fillLastSheet (a partial sheet
-        // requires quantity < perSheet). fillLastSheet stays false so
-        // the compose engine's per-sheet loop terminates at 1 sheet.
-        const composed = await composeImposition({
-          artworkBytes: bytes,
-          quantity:     layout.perSheet,
-          layout,
-          sheetWidth:   paperSize.width,
-          sheetHeight:  paperSize.height,
-          mode:         template.mode,
-          cropMarks:    !!template.cropMarks,
-          artworkBleed,
-          logger,
+        // Master mode: force ONE full sheet regardless of the design's
+        // ordered quantity. The compose helper takes an override.
+        const composed = await this._composeOneDesign({
+          design, template, paperSize, artworkBleed,
+          cropMarks:      !!template.cropMarks,
+          fillLastSheet:  template.fillLastSheet !== false,
+          composeImposition, composeImpositionImages, logger,
+          masterOverride: true,
         });
 
         // REAL per-design totals for the filename — what the operator
         // needs on the press. `perDesignSheets` is the count that
-        // WOULD have been produced in 'all' mode; the operator sets
-        // the press copy count to this value.
-        const perDesignSheets = Math.ceil(pdfFile.quantity / layout.perSheet);
+        // WOULD have been produced in 'all' mode.
+        const perDesignSheets = Math.ceil(design.quantity / design.layout.perSheet);
         const designSuffix    = multiDesign ? `_D${i + 1}` : '';
 
         // Apply pdfPipeline per master file — each master is a
@@ -4374,7 +4309,7 @@ class PrintService {
           const jobContext = {
             jobNumber:    job.job_name || job.order_number || String(job.id),
             orderId:      String(job.order_id || job.id),
-            qty:          pdfFile.quantity,   // per-design qty for master mode
+            qty:          design.quantity,   // per-design qty for master mode
             customerName: job.customer_name || '',
           };
           const transformed = await applyPdfPipeline(new Uint8Array(outBytes), route.pdfPipeline, jobContext);
@@ -4386,7 +4321,7 @@ class PrintService {
         const destFilename = resolveImpositionFilename({
           template,
           job,
-          totalCopies:  pdfFile.quantity,
+          totalCopies:  design.quantity,
           totalSheets:  perDesignSheets,
           designSuffix,
           logger,
@@ -4395,15 +4330,17 @@ class PrintService {
         await fs.promises.writeFile(destPath, outBytes);
 
         perDesign.push({
-          filename: pdfFile.filename,
-          qty:      pdfFile.quantity,
+          filename: design.filename,
+          kind:     design.kind,
+          qty:      design.quantity,
           sheets:   perDesignSheets,
-          rotated:  !!layout.rotated,
+          rotated:  composed.rotated,
           destFile: destFilename,
         });
         destFiles.push({ path: destPath, filename: destFilename });
-        totalCopies += pdfFile.quantity;
+        totalCopies += design.quantity;
         totalSheets += perDesignSheets;
+        anyDivergence = anyDivergence || composed.expectedArtworkWarn;
       }
     } catch (composeErr) {
       const msg = `Imposition failed for job ${job.id}: ${composeErr.message}`;
@@ -4445,6 +4382,298 @@ class PrintService {
       totalCopies,
       totalSheets,
       expectedArtworkWarn: anyDivergence,
+    };
+  }
+
+  /**
+   * M10 helper — classify artwork files into imposition-ready designs.
+   *
+   * For each file in manifest order:
+   *   - PDFs become their own design; deriveTrim + computeLayout run
+   *     here so the compose helper doesn't have to. Divergence WARN
+   *     fires here so it lands ONCE per design regardless of output
+   *     shape.
+   *   - Images: on the first image encountered, the ENTIRE job's
+   *     image count decides what happens:
+   *       * simplex → each image is its own design (per-file).
+   *       * duplex + 1 image → one image design (blank back, WARN
+   *         emitted later by composeImpositionImages).
+   *       * duplex + 2 images → ONE image design as an F/B pair;
+   *         quantities must match or the design build throws with
+   *         an exact operator-readable message.
+   *       * duplex + 3+ images → throws with an exact message.
+   *     Subsequent images in a duplex-pair configuration are marked
+   *     "consumed" and skipped during emit.
+   *
+   * Every design descriptor carries a precomputed `layout` — for
+   * image designs the layout is derived from template.expectedArtwork
+   * (all image designs on a template use the same layout); for PDF
+   * designs the layout is derived from that PDF's real trim.
+   *
+   * Throws on validation failure (CMYK JPEG, quantity mismatch,
+   * duplex 3+ images, unknown image format). Callers wrap the throw
+   * in the standard "imposition failed for job N" job-error path.
+   */
+  async _classifyAndBuildImpositionDesigns({
+    job, template, paperSize, artworkFiles, artworkBleed,
+    deriveTrim, computeLayout, logger,
+  }) {
+    const { PDFDocument } = require('pdf-lib');
+    const {
+      sniffFormat, readImageDimensions, cmykRejectMessage, chooseRotation,
+    } = require('../../pdf-pipeline/image-artwork');
+
+    // First pass — read bytes, classify, sniff formats, do image
+    // pre-checks (CMYK reject). This is where dispatch-time image
+    // validation lives.
+    const classified = [];
+    for (const f of artworkFiles) {
+      const ext = path.extname(f.filename).toLowerCase();
+      if (!fs.existsSync(f.sourcePath)) {
+        throw new Error(`Artwork not found: ${f.sourcePath}`);
+      }
+      const bytes = await fs.promises.readFile(f.sourcePath);
+      if (ext === '.pdf') {
+        classified.push({ kind: 'pdf', file: f, bytes });
+      } else {
+        // .jpg / .jpeg / .png — but sniff magic bytes (extension not trusted).
+        const format = sniffFormat(bytes);
+        if (format !== 'jpeg' && format !== 'png') {
+          throw new Error(
+            `Image '${f.filename}' is not a valid JPEG or PNG ` +
+            `(magic bytes did not match).`
+          );
+        }
+        const dims = readImageDimensions(bytes, format);
+        if (format === 'jpeg' && dims.colorSpace === 'cmyk') {
+          throw new Error(cmykRejectMessage(f.filename));
+        }
+        classified.push({ kind: 'image', file: f, bytes, format, dims });
+      }
+    }
+
+    // Duplex image-count rules (§3 of the M10 spec).
+    const imageEntries = classified.filter(c => c.kind === 'image');
+    if (template.mode === 'duplex' && imageEntries.length >= 3) {
+      throw new Error(
+        `Duplex imposition supports one image (blank back) or two images (front/back); ` +
+        `this job has ${imageEntries.length}.`
+      );
+    }
+    let pairConsumedIndex = -1;   // index into `classified` of the 2nd image in a pair; skipped on emit
+    if (template.mode === 'duplex' && imageEntries.length === 2) {
+      const [a, b] = imageEntries;
+      if (a.file.quantity !== b.file.quantity) {
+        throw new Error(
+          `Duplex image pair quantities must match: ` +
+          `'${a.file.filename}' quantity ${a.file.quantity} vs ` +
+          `'${b.file.filename}' quantity ${b.file.quantity}. ` +
+          `Fix the manifest so both images request the same quantity.`
+        );
+      }
+      pairConsumedIndex = classified.indexOf(b);
+    }
+
+    // Image layout: all image designs on a template share ONE layout,
+    // computed from the template's expected artwork. Compute once so
+    // the per-design loop doesn't redo it.
+    let imageLayout = null;
+    if (imageEntries.length > 0 && template.expectedArtwork) {
+      imageLayout = computeLayout({
+        sheetWidth:     paperSize.width,
+        sheetHeight:    paperSize.height,
+        margins:        template.margins || {},
+        gutter:         template.gutter || 0,
+        cellWidth:      template.expectedArtwork.width,
+        cellHeight:     template.expectedArtwork.height,
+        autoRotate:     !!template.autoRotate,
+        mode:           template.mode,
+        duplexFlipEdge: template.duplexFlipEdge,
+      });
+    }
+
+    // Second pass — emit designs in manifest order.
+    const designs = [];
+    for (let idx = 0; idx < classified.length; idx++) {
+      const c = classified[idx];
+      if (c.kind === 'pdf') {
+        // Derive trim + layout for this PDF at classification time so
+        // the compose helper's contract stays simple ("here's what to
+        // draw, here's where"). Divergence WARN fires here.
+        const srcDoc = await PDFDocument.load(c.bytes);
+        const firstPage = srcDoc.getPages()[0];
+        const trim = deriveTrim(firstPage, artworkBleed);
+        const eaW = template.expectedArtwork && Number.isFinite(template.expectedArtwork.width)  ? template.expectedArtwork.width  : null;
+        const eaH = template.expectedArtwork && Number.isFinite(template.expectedArtwork.height) ? template.expectedArtwork.height : null;
+        const divergence =
+          eaW !== null && eaH !== null &&
+          (Math.abs(trim.width  - eaW) > 0.5 || Math.abs(trim.height - eaH) > 0.5);
+        if (divergence) {
+          logger.logWarning(
+            `[imposition] artwork trim ${trim.width.toFixed(2)} × ${trim.height.toFixed(2)} pt ` +
+            `differs from template '${template.name}' expectedArtwork ${eaW} × ${eaH} pt ` +
+            `by > 0.5 pt — layout used the real trim; template design assumption may need updating`,
+            { jobId: job.id, pdf: c.file.filename }
+          );
+        }
+        const layout = computeLayout({
+          sheetWidth:     paperSize.width,
+          sheetHeight:    paperSize.height,
+          margins:        template.margins || {},
+          gutter:         template.gutter || 0,
+          cellWidth:      trim.width,
+          cellHeight:     trim.height,
+          autoRotate:     !!template.autoRotate,
+          mode:           template.mode,
+          duplexFlipEdge: template.duplexFlipEdge,
+        });
+        designs.push({
+          kind:          'pdf',
+          filename:      c.file.filename,
+          quantity:      c.file.quantity,
+          bytes:         c.bytes,
+          layout,
+          expectedArtworkWarn: divergence,
+        });
+        continue;
+      }
+
+      // c.kind === 'image'
+      if (idx === pairConsumedIndex) continue;   // paired with an earlier image
+      if (template.mode === 'duplex' && imageEntries.length === 2 && c === imageEntries[0]) {
+        // Emit the pair design at the position of the first image.
+        const [a, b] = imageEntries;
+        designs.push({
+          kind:     'image',
+          filename: a.file.filename,   // primary display name; b logged inside images[]
+          quantity: a.file.quantity,   // == b.file.quantity, asserted above
+          layout:   imageLayout,
+          images: [a, b].map(entry => ({
+            sourcePath: entry.file.sourcePath,
+            filename:   entry.file.filename,
+            bytes:      entry.bytes,
+            format:     entry.format,
+            dims:       entry.dims,
+            rotation:   chooseRotation(entry.dims.width, entry.dims.height, imageLayout.cellW, imageLayout.cellH),
+          })),
+          expectedArtworkWarn: false,   // images are stretched to fit; no divergence possible
+        });
+        continue;
+      }
+      // Simplex, or duplex with a single image (blank back). Either
+      // way this image is its OWN design.
+      designs.push({
+        kind:     'image',
+        filename: c.file.filename,
+        quantity: c.file.quantity,
+        layout:   imageLayout,
+        images: [{
+          sourcePath: c.file.sourcePath,
+          filename:   c.file.filename,
+          bytes:      c.bytes,
+          format:     c.format,
+          dims:       c.dims,
+          rotation:   chooseRotation(c.dims.width, c.dims.height, imageLayout.cellW, imageLayout.cellH),
+        }],
+        expectedArtworkWarn: false,
+      });
+    }
+    return designs;
+  }
+
+  /**
+   * M10 helper — compose a single design to imposed PDF bytes,
+   * dispatching to composeImposition (PDF) or composeImpositionImages
+   * (image), reporting back sheets + rotated + expectedArtworkWarn in
+   * a uniform shape.
+   *
+   * `masterOverride: true` forces one full sheet regardless of the
+   * design's ordered quantity — that's how master mode reuses the
+   * same compose call as 'all' mode without a second helper.
+   *
+   * Also runs a per-image DPI check for image designs and emits a
+   * WARN when the effective DPI falls below the threshold; the WARN
+   * fires here so the M10 spec's "below 150 DPI on either axis warns"
+   * rule reads out of one place.
+   */
+  async _composeOneDesign({
+    design, template, paperSize, artworkBleed,
+    cropMarks, fillLastSheet,
+    composeImposition, composeImpositionImages, logger,
+    masterOverride = false,
+  }) {
+    const layout   = design.layout;
+    const quantity = masterOverride ? layout.perSheet : design.quantity;
+
+    if (design.kind === 'pdf') {
+      const composed = await composeImposition({
+        artworkBytes: design.bytes,
+        quantity,
+        layout,
+        sheetWidth:  paperSize.width,
+        sheetHeight: paperSize.height,
+        mode:        template.mode,
+        cropMarks,
+        artworkBleed,
+        fillLastSheet,
+        logger,
+      });
+      return {
+        pdfBytes: composed.pdfBytes,
+        sheets:   composed.sheets,
+        rotated:  !!layout.rotated,
+        expectedArtworkWarn: !!design.expectedArtworkWarn,
+      };
+    }
+
+    // Image design — per-image DPI WARN check first (fires once per
+    // dispatch, before compose does any work).
+    const { effectiveDpi, lowDpiWarnMessage } = require('../../pdf-pipeline/image-artwork');
+    for (const img of design.images) {
+      // Stretched dimensions match the bleed box; if the image is
+      // rotated 90°, pixel width/height swap against the target axes.
+      const stretchWpt = (layout.cellW + 2 * artworkBleed);
+      const stretchHpt = (layout.cellH + 2 * artworkBleed);
+      const pxW = img.rotation === 90 ? img.dims.height : img.dims.width;
+      const pxH = img.rotation === 90 ? img.dims.width  : img.dims.height;
+      const dpi = effectiveDpi({
+        pixelWidth:      pxW,
+        pixelHeight:     pxH,
+        stretchWidthPt:  stretchWpt,
+        stretchHeightPt: stretchHpt,
+      });
+      if (dpi.belowThreshold) {
+        logger.logWarning(
+          lowDpiWarnMessage({
+            filename: img.filename, dpiX: dpi.dpiX, dpiY: dpi.dpiY, worstAxis: dpi.worstAxis,
+          }),
+          { jobId: design.filename ? undefined : undefined /* jobId not in scope; log meta thin */ }
+        );
+      }
+    }
+
+    const composed = await composeImpositionImages({
+      images: design.images.map(i => ({
+        bytes:    i.bytes,
+        format:   i.format,
+        rotation: i.rotation,
+        filename: i.filename,
+      })),
+      quantity,
+      layout,
+      sheetWidth:  paperSize.width,
+      sheetHeight: paperSize.height,
+      mode:        template.mode,
+      cropMarks,
+      artworkBleed,
+      fillLastSheet,
+      logger,
+    });
+    return {
+      pdfBytes: composed.pdfBytes,
+      sheets:   composed.sheets,
+      rotated:  !!layout.rotated,
+      expectedArtworkWarn: false,
     };
   }
 

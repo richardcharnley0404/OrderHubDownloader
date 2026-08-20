@@ -1,9 +1,11 @@
 # PDF Copy — imposition templates & paper sizes
 
 **Status:** code-complete, unreleased (2026-08-20). Six build milestones
-plus three operator-feedback passes (M7, M8, M9) landed as separate
-reviewed commits; the feature is off by default on every existing
-pdf_copy controller and awaits release. See §10 for the build record.
+plus four operator-feedback passes (M7, M8, M9, M10) landed as
+separate reviewed commits; the feature is off by default on every
+existing pdf_copy controller and awaits release. M10 extends
+imposition to JPEG/PNG artwork alongside PDF. See §10 for the build
+record.
 
 **Operator-facing doc:** [`imposition-operator-guide.md`](imposition-operator-guide.md)
 — setup path with the 12×18 / 5×7 grad-card worked example, filename
@@ -514,18 +516,19 @@ required an §8 item.
 | M6        | `c12338c` | CHANGELOG entry, operator guide, this build record, landmines, BACKLOG entry |
 | M7        | `dabce3e` | Operator-feedback pass: template editor wording (Finished Size, help text refresh), live printable-area readout, fill-last-sheet (default TRUE — Richard's call reversing §8); 9 tests |
 | M8        | `f6af57c` | Press-side feedback: per-template outputPath (absolute override), jobSubfolder toggle (DEFAULT FALSE — flat output), filenameTemplate ({token} + {qty}/{impQty} with distinguishing-token save rule); 16 new tests. Amends §7.5. |
-| M9        | (this commit) | Master-sheet mode: per-template outputSheets 'all' \| 'master' (default 'all'); master produces one full sheet per design, filename IMPQTY reads as the press copy count, multi-design gets `_D{i}` suffix; 9 new tests. Amends §7.5. |
+| M9        | `62c4746` | Master-sheet mode: per-template outputSheets 'all' \| 'master' (default 'all'); master produces one full sheet per design, filename IMPQTY reads as the press copy count, multi-design gets `_D{i}` suffix; 9 new tests. Amends §7.5. |
+| M10       | (this commit) | JPEG/PNG image imposition: new pure `image-artwork` module (format sniff, JPEG SOF, PNG IHDR, CMYK reject, stretch + rotate geometry, effective DPI); new `composeImpositionImages`; dispatch designs-list refactor with duplex pair rule (2 images → F/B) and CMYK / 3+-images / qty-mismatch rejects; images stretch to bleed box (no crop). No new template or controller fields — images become imposable purely because the product code matches. 46 new tests (33 image-artwork unit + 10 dispatch + 3 tripwires). |
 
 Also in the sequence: `4b2b595` fixed the known `perfectlyClientClient.test.js`
 stability-polling flake that had been noise-swamping M3's preflight
 runs (RESOLVED in `docs/BACKLOG.md`).
 
 Suite growth: 2246 tests before M1 → 2347 after M5 (M6 adds no tests) →
-2356 after M7 → 2372 after M8 → 2381 after M9. No CHANGELOG entry
-until M6 — every prior milestone deliberately shipped code with no
-operator-visible change until dispatch wired up. M7, M8, and M9 amend
-the M6 entry rather than adding new ones; the feature is still
-unreleased.
+2356 after M7 → 2372 after M8 → 2381 after M9 → 2427 after M10. No
+CHANGELOG entry until M6 — every prior milestone deliberately shipped
+code with no operator-visible change until dispatch wired up. M7,
+M8, M9, and M10 amend the M6 entry rather than adding new ones; the
+feature is still unreleased.
 
 ## Sources
 

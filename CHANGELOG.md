@@ -103,6 +103,30 @@ produces one output file, designs sequential inside it — never mixed
 on a sheet. The filename totals sum across designs: two designs of
 40 copies each at 4-up land as `..._QTY80_IMPQTY20.pdf`.
 
+**JPEG and PNG artwork can be imposed too, not just PDF.** Templates
+that match an image manifest impose it the same way they impose PDFs
+— same layouts, same duplex rules, same output filenames, same
+master mode. Images are stretched to the template's Finished Size
+plus bleed (no cropping, non-uniform scale allowed) so ink reaches
+every trim edge for guillotine cutting; supply artwork at the right
+aspect ratio for undistorted output. If the image's pixel orientation
+opposes the cell's, the image is auto-rotated 90° before stretching
+to minimise distortion. CMYK JPEGs are rejected with a message
+naming the file and pointing at the "re-export as RGB" fix (Photoshop:
+Image → Mode → RGB Color). Effective DPI below 150 on either axis
+logs a WARN naming the file and both axes' DPI (300 DPI recommended);
+the output still prints. On duplex templates the rule mirrors the
+PDF path's 1-vs-2-page rule: **1 image → blank backs + WARN, 2
+images → image 1 on the front and image 2 on the back** with
+quantities that must match. 3+ images on a duplex template rejects
+with an exact message. Mixed PDF+image jobs work: each design goes
+sequentially in manifest order, master mode `_D{i}` filenames and
+custom filename templates apply the same way. Images do NOT flow
+through the non-imposition (pass-through) path — that stays PDF-only
+by design, so an image in a job without a template match is a fixable
+problem (assign the code to a template) rather than a loose file in
+the sheets root.
+
 **Master-sheet mode** — a per-template **Output sheets** setting
 opts a lab into a smaller file for proof-then-multiply workflows.
 Default is **All sheets**: the file contains every printed sheet
