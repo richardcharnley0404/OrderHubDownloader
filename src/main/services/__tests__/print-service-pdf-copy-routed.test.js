@@ -602,3 +602,45 @@ test('template.outputSubfolder: imposed output nests one level deeper', async (t
   const expectedFile = path.join(outputRoot, 'imposed', jobFolderName, 'PXT-OS_1201_QTY4_IMPQTY1.pdf');
   assert.ok(fs.existsSync(expectedFile), `subfolder-wrapped file must exist at ${expectedFile}`);
 });
+
+// ═════════════════════════════════════════════════════════════════════════
+// TEST 10 (M7): fillLastSheet on — filename semantics UNCHANGED. QTY
+// stays the ordered qty, IMPQTY stays the sheet count; only the empty
+// cells on the last sheet stop existing.
+// ═════════════════════════════════════════════════════════════════════════
+
+test('M7 fillLastSheet on: qty 10 on 4-up → filename still _QTY10_IMPQTY3 (fill removes blanks, never changes QTY or IMPQTY)', async (t) => {
+  resetGlobals();
+  seedWorked5x7Template({ fillLastSheet: true });
+  const pdfBytes = await makeArtwork({ mediaW: 360, mediaH: 504 });
+  const { downloadRoot, outputRoot, jobFolderName } = await makeFixture({
+    orderNumber: 'PXT-FLS',
+    orderId:     'ORD-FLS',
+    jobId:       1301,
+    images: [{ filename: 'card.pdf', body: pdfBytes, quantity: 10 }],
+  });
+  __downloadDirectory = downloadRoot;
+  cleanup(t, downloadRoot, outputRoot);
+
+  const result = await printService._sendViaPdfCopyRouted(
+    { id: 1301, order_number: 'PXT-FLS', order_id: 'ORD-FLS', product_code: 'GRAD5X7' },
+    {
+      outputPath:         outputRoot,
+      controllerName:     'PC-Fill',
+      applyImpositions:   true,
+      unmatchedBehaviour: 'root',
+    },
+  );
+
+  assert.equal(result.success, true, `unexpected failure: ${result.error}`);
+  // The whole M7 filename contract in one line: QTY tracks the customer's
+  // ordered quantity (10), IMPQTY tracks the sheet count (ceil(10/4)=3).
+  // Neither changes when the last sheet is filled — filling replaces
+  // blanks with overs, not sheets with sheets.
+  assert.equal(result.totalCopies, 10);
+  assert.equal(result.totalSheets, 3);
+  const expectedFile = path.join(outputRoot, jobFolderName, 'PXT-FLS_1301_QTY10_IMPQTY3.pdf');
+  assert.ok(fs.existsSync(expectedFile), `filename must NOT change with fill on: expected ${expectedFile}`);
+  const reopened = await PDFDocument.load(fs.readFileSync(expectedFile));
+  assert.equal(reopened.getPageCount(), 3, 'simplex sheet count unchanged by fill');
+});

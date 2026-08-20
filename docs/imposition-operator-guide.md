@@ -180,9 +180,17 @@ Decoding the filename:
   the press. 20 copies at 4-up = 5 sheets.
 
 Open the PDF: 5 pages, each 12×18 in, each with a 2×2 grid of the grad
-card. The last sheet is fully populated (20 = 4 × 5); a job with 19
-copies would produce IMPQTY5 too, with the last sheet showing 3 cards
-and one empty slot.
+card. The last sheet is fully populated (20 = 4 × 5).
+
+A job of 10 copies through the same template lands as
+`..._QTY10_IMPQTY3.pdf` — 3 pages, and by default the last sheet is
+**filled with 2 extra copies** (12 cards printed on 3 sheets) because
+the sheet prints either way and the overs cost nothing. QTY still
+reads 10 (the customer's order); IMPQTY still reads 3 (the sheet
+count the operator sets on the press). Untick **Fill last sheet
+(prints extra copies rather than leaving blanks)** on the template
+if the lab needs exact counts — the same 10-copy job then prints
+2 cards on the last sheet with two empty slots.
 
 ---
 

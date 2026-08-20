@@ -107,13 +107,13 @@ function deriveTrim(page, artworkBleed = 0) {
 }
 
 /**
- * planPlacements({quantity, layout, mode}) — pure, deterministic.
+ * planPlacements({quantity, layout, mode, fillLastSheet?}) — pure,
+ * deterministic.
  *   → { plan, sheets, placedPerSheet }
  *
  * The plan is the source of truth for what goes where. Each entry is
  * { sheet, side, cellIndex, x, y, rotated }; the composer walks it in
- * order and draws each placement. Blank cells on a partial last sheet
- * produce NO plan entry (the composer therefore draws nothing there).
+ * order and draws each placement.
  *
  * For duplex the plan always includes back entries (front then back per
  * sheet, in row-major cell order). Whether the back has artwork to draw
@@ -121,15 +121,40 @@ function deriveTrim(page, artworkBleed = 0) {
  * blank backs (§7.2 decision), but the plan still lists the back cells
  * so a caller inspecting the plan sees the intended geometry.
  *
+ * ── fillLastSheet (M7, 2026-08-20) ────────────────────────────────────
+ *
+ * When false (the default, and the pre-M7 behaviour): a partial last
+ * sheet emits ONLY the remaining copies. qty 10 on 4-up simplex → 3
+ * sheets, 4 + 4 + 2 placements = 10 entries. Duplex: 4F+4B on sheets
+ * 0/1, 2F+2B on sheet 2.
+ *
+ * When true (the template DEFAULT — Richard's M7 call, reversing §8):
+ * the last sheet's remaining cells are FILLED with additional copies of
+ * the same design (fronts AND mirrored backs — a filled sheet is just a
+ * full sheet). qty 10 on 4-up simplex → 3 sheets, 4 + 4 + 4 = 12
+ * placements. Duplex: 4F+4B on every sheet, including the last.
+ *
+ * Sheet COUNT is UNCHANGED either way — filling only removes blanks
+ * from an existing sheet; it never adds a new sheet. The exact-fit edge
+ * (qty = k × perSheet) collapses to the same result with fill on or
+ * off — this is the case that MUST not add a phantom sheet, and the
+ * tests lock it. Dispatch keeps the filename semantics unchanged too:
+ * QTY on the filename is the ordered quantity, IMPQTY is the sheet
+ * count, and neither changes when filling — only the empty cells stop
+ * existing.
+ *
  * Ordering rules (locked; the tests assert them):
  *   1. Sheets in ascending order (0, 1, …).
  *   2. Within a sheet, all fronts first, then all backs (for duplex).
  *   3. Within a side, cells in row-major layout order (which matches
  *      layout.front[]/layout.back[]).
- *   4. On the partial last sheet, only lastSheetCount cells per side;
- *      back-mirroring still applies (back[i] only for placed i).
+ *   4. Without fillLastSheet: on the partial last sheet, only
+ *      lastSheetCount cells per side; back-mirroring still applies
+ *      (back[i] only for placed i).
+ *   5. With fillLastSheet: every sheet is full; the last sheet's
+ *      overs use cellIndex 0..perSheet-1 in the same row-major order.
  */
-function planPlacements({ quantity, layout, mode }) {
+function planPlacements({ quantity, layout, mode, fillLastSheet = false }) {
   if (!Number.isInteger(quantity) || quantity <= 0) {
     throw new Error(`planPlacements: quantity must be a positive integer (got ${quantity})`);
   }
@@ -155,7 +180,12 @@ function planPlacements({ quantity, layout, mode }) {
 
   for (let s = 0; s < sheets; s++) {
     const remaining = quantity - placed;
-    const thisSheet = Math.min(perSheet, remaining);
+    // Without fill: last sheet emits only the remaining copies.
+    // With    fill: every sheet is full (including the last). The
+    //               exact-fit edge (remaining ≥ perSheet) collapses to
+    //               the same `perSheet` value on both branches, so
+    //               fill never adds a phantom sheet.
+    const thisSheet = fillLastSheet ? perSheet : Math.min(perSheet, remaining);
 
     for (let i = 0; i < thisSheet; i++) {
       const cell = layout.front[i];
@@ -183,7 +213,12 @@ function planPlacements({ quantity, layout, mode }) {
       }
     }
 
-    placed += thisSheet;
+    // Track ORDERED progress, not filled placements. Only used to
+    // compute `remaining` for the next iteration's partial-sheet
+    // calculation; when fill is on, `remaining` isn't consulted for
+    // the placement count but is kept honest for any future caller
+    // that wants to know ordered-vs-filled.
+    placed += Math.min(perSheet, remaining);
   }
 
   return { plan, sheets, placedPerSheet: perSheet };
@@ -354,7 +389,15 @@ async function composeImposition({
   mode,
   cropMarks    = false,
   artworkBleed = 0,
-  logger       = null,
+  // M7: forwarded verbatim to planPlacements. Default false so an
+  // omitted flag reproduces pre-M7 behaviour byte-for-byte; the
+  // template's own default (true, at the M3 read boundary) is what
+  // makes fill the operator-facing default. See planPlacements'
+  // fillLastSheet docstring for the exact semantics — sheet count
+  // and filename are unchanged either way; only empty cells stop
+  // existing.
+  fillLastSheet = false,
+  logger        = null,
 } = {}) {
   if (!artworkBytes) {
     throw new Error('composeImposition: artworkBytes is required');
@@ -423,7 +466,7 @@ async function composeImposition({
   }
 
   // Plan (pure, deterministic)
-  const { plan, sheets, placedPerSheet } = planPlacements({ quantity, layout, mode });
+  const { plan, sheets, placedPerSheet } = planPlacements({ quantity, layout, mode, fillLastSheet });
 
   // Output doc, sheet-per-page (2× for duplex)
   const outDoc = await PDFDocument.create();

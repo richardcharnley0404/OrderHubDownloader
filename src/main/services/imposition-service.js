@@ -260,6 +260,24 @@ function validateTemplate(input, { existingTemplates = [], paperSizes = [] } = {
     };
   }
 
+  // fillLastSheet (M7): strict boolean when supplied; DEFAULT TRUE when
+  // absent — Richard's call: "you would normally fill the sheet". A
+  // template stored before M7 shipped that lacks the field therefore
+  // adopts the new default on next save; nothing has released so no
+  // migration path is needed. Truthy non-booleans reject explicitly so
+  // a hand-edited JSON can't smuggle "yes" through as true.
+  let fillLastSheet;
+  if (input.fillLastSheet === undefined) {
+    fillLastSheet = true;
+  } else if (typeof input.fillLastSheet !== 'boolean') {
+    return {
+      ok: false,
+      error: `Template fillLastSheet must be a boolean (got ${JSON.stringify(input.fillLastSheet)}).`,
+    };
+  } else {
+    fillLastSheet = input.fillLastSheet;
+  }
+
   // expectedArtwork — REQUIRED per §5.1
   if (!input.expectedArtwork || typeof input.expectedArtwork !== 'object') {
     return { ok: false, error: 'Template expectedArtwork { width, height } is required (§5.1).' };
@@ -344,6 +362,7 @@ function validateTemplate(input, { existingTemplates = [], paperSizes = [] } = {
       autoRotate:      !!input.autoRotate,
       artworkBleed,
       cropMarks:       !!input.cropMarks,
+      fillLastSheet,
       mode:            input.mode,
       duplexFlipEdge:  input.mode === 'duplex' ? input.duplexFlipEdge : null,
       productCodes:    codes,

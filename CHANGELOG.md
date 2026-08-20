@@ -49,6 +49,16 @@ numbers matter to the operator:
   sheets because the operator loads sheets, not pages. So a duplex
   job with `IMPQTY10` is a 20-page PDF and a 10-sheet press run.
 
+**A partial last sheet is filled with extra copies by default.** A
+job of 10 copies on a 4-up template prints 12 cards on 3 sheets —
+the sheet runs anyway and the overs cost nothing. QTY stays at 10
+(what the customer ordered) and IMPQTY stays at 3 (the sheet count);
+only the two blank cells on the last sheet stop existing. Untick
+**Fill last sheet** on the template if a lab needs exact counts —
+the same job then prints 10 cards on 3 sheets with two empty slots.
+Exact-fit qty (e.g. 8 copies at 4-up) never adds a phantom sheet
+regardless of the setting.
+
 A job with multiple PDFs (e.g. a grad-card order with two designs)
 produces one output file, designs sequential inside it — never mixed
 on a sheet. The filename totals sum across designs: two designs of

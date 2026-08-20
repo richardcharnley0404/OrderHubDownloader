@@ -9157,10 +9157,18 @@ async function handleBackupRelaunchNow() {
     document.getElementById('itArtworkBleed').value  = t ? pointsToUnit(t.artworkBleed || 0,  unit) : '0';
     document.getElementById('itAutoRotate').checked  = t ? !!t.autoRotate : false;
     document.getElementById('itCropMarks').checked   = t ? !!t.cropMarks  : false;
+    // fillLastSheet defaults TRUE for a new template (Richard: "you would
+    // normally fill the sheet"). For an existing template the field
+    // defaults to true when absent, so pre-M7 records adopt the new
+    // behaviour on next save (nothing has shipped so no migration
+    // concerns; still stated explicitly).
+    document.getElementById('itFillLastSheet').checked =
+      t ? (t.fillLastSheet !== false) : true;
     document.getElementById('itMode').value          = t ? (t.mode || 'simplex') : 'simplex';
     document.getElementById('itDuplexFlipEdge').value = t ? (t.duplexFlipEdge || 'long') : 'long';
     document.getElementById('itOutputSubfolder').value = t ? (t.outputSubfolder || '') : '';
     updateFlipEdgeVisibility();
+    updatePrintableArea();
     renderProductCodes(t ? t.productCodes : []);
 
     const errEl = document.getElementById('itSaveError');
@@ -9210,11 +9218,43 @@ async function handleBackupRelaunchNow() {
       autoRotate:      document.getElementById('itAutoRotate').checked,
       artworkBleed:    num('itArtworkBleed'),
       cropMarks:       document.getElementById('itCropMarks').checked,
+      fillLastSheet:   document.getElementById('itFillLastSheet').checked,
       mode:            document.getElementById('itMode').value,
       duplexFlipEdge:  document.getElementById('itDuplexFlipEdge').value,
       productCodes:    collectProductCodes(),
       outputSubfolder: document.getElementById('itOutputSubfolder').value,
     };
+  }
+
+  /**
+   * Live "Printable area" readout under the margins block. Pure
+   * subtraction — no IPC needed. Kept beside the unit helpers so the
+   * display is consistent (paper's unit, trailing-zero-trimmed).
+   *
+   * Called on every input that could change it: paper-size change,
+   * any of the four margin fields. When no paper size is picked yet,
+   * shows the placeholder text.
+   */
+  function updatePrintableArea() {
+    const el = document.getElementById('itPrintableArea');
+    if (!el) return;
+    const ps = paperSizeById(document.getElementById('itPaperSizeId').value);
+    if (!ps) {
+      el.textContent = 'Printable area: pick a paper size to compute.';
+      return;
+    }
+    const unit = ps.unit || 'in';
+    const num = (id) => {
+      const v = parseFloat(document.getElementById(id).value);
+      return Number.isFinite(v) ? unitToPoints(v, unit) : 0;
+    };
+    const usableW = ps.width  - num('itMarginLeft') - num('itMarginRight');
+    const usableH = ps.height - num('itMarginTop')  - num('itMarginBottom');
+    if (usableW <= 0 || usableH <= 0) {
+      el.textContent = `Printable area: margins consume the whole sheet.`;
+      return;
+    }
+    el.textContent = `Printable area: ${pointsToUnit(usableW, unit)} × ${pointsToUnit(usableH, unit)} ${unit}.`;
   }
 
   // ─── Preview (debounced, calls the REAL M1 engine via IPC) ────────
@@ -9347,10 +9387,12 @@ async function handleBackupRelaunchNow() {
   document.getElementById('itMode')?.addEventListener('change',     () => { updateFlipEdgeVisibility(); requestPreview(); });
   document.getElementById('itDuplexFlipEdge')?.addEventListener('change', requestPreview);
   document.getElementById('itPaperSizeId')?.addEventListener('change', () => {
-    // Unit hint changes with paper size; also re-preview.
+    // Unit hint changes with paper size; also re-preview and refresh the
+    // printable-area readout (paper dims and unit both changed).
     const unit = currentTemplateUnit();
     const hint = document.getElementById('itUnitHint');
     if (hint) hint.textContent = `Widths, heights, margins, gutter and bleed are entered in ${unit} (this paper size's unit).`;
+    updatePrintableArea();
     requestPreview();
   });
   ['itArtworkW','itArtworkH','itMarginTop','itMarginRight','itMarginBottom','itMarginLeft','itGutter','itArtworkBleed','itAutoRotate'].forEach((id) => {
@@ -9359,6 +9401,19 @@ async function handleBackupRelaunchNow() {
     el.addEventListener('input',  requestPreview);
     el.addEventListener('change', requestPreview);
   });
+  // Live printable-area readout — only depends on paper size + the four
+  // margin fields. Bound separately from the preview so it updates
+  // without a debounce (subtraction is instantaneous; no IPC).
+  ['itMarginTop','itMarginRight','itMarginBottom','itMarginLeft'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('input',  updatePrintableArea);
+    el.addEventListener('change', updatePrintableArea);
+  });
+  // fillLastSheet is a template setting, not a layout input — it doesn't
+  // change the preview geometry (fill affects placements per sheet,
+  // never sheet count or cell positions). Left off the preview trigger
+  // list deliberately.
   document.getElementById('itAddProductCodeBtn')?.addEventListener('click', () => {
     document.getElementById('itProductCodesList').appendChild(buildProductCodeRow(''));
   });

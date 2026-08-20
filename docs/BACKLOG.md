@@ -211,10 +211,9 @@ they're chosen next time, not missed:
   card PDF inside each cell would need PDF rasterising in the renderer
   (pdf.js or similar), a new dependency. The v1 preview is enough to
   validate geometry; adding artwork is polish.
-- **Fill-last-sheet quantity rounding.** A job of 19 copies on 4-up
-  currently produces 5 sheets with the last showing 3 cards + one
-  empty slot. A toggle to bump the qty to 20 (nearest fill) is
-  natural to add.
+- ~~Fill-last-sheet quantity rounding~~ — **shipped in M7 (2026-08-20)**
+  after first-hands-on operator feedback. Default true per template;
+  see `pdf-imposition-investigation.md` §8.
 - **Per-sheet barcode / slug lines** for cut tracking. The existing
   order-identifier pipeline step already draws text; extending it to
   stamp a per-sheet marker outside the cells is small once a lab wants

@@ -259,6 +259,114 @@ test('planPlacements: duplex qty 5 on 4-up → sheet 0 has 4F+4B, sheet 1 has 1F
   assert.equal(s1[1].y, layout.back[0].y);
 });
 
+// ─── M7: fillLastSheet — Richard's call, reversing §8 ────────────────────
+//
+// The four tests below lock the fill behaviour together with the ONE
+// edge that MUST NOT regress: filling never adds a sheet. Existing
+// partial-sheet tests above run WITHOUT the flag (default false) and
+// still pass byte-identical — the no-change lock for the pre-M7 shape.
+
+test('planPlacements fillLastSheet=true: simplex qty 10 on 4-up → 3 sheets, 12 placements, last sheet has 4', () => {
+  // Ordered qty = 10; perSheet = 4; ceil(10/4) = 3 sheets. Without fill
+  // the last sheet would be a partial 2 (10 - 8). With fill it's 4, so
+  // total placements = 4 + 4 + 4 = 12. The extra two are overs — the
+  // sheet prints anyway, so the operator gets 2 free copies.
+  const layout = _synthLayout({
+    perSheet: 4,
+    front: [{ x: 0, y: 100 }, { x: 50, y: 100 }, { x: 0, y: 0 }, { x: 50, y: 0 }],
+  });
+  const out = planPlacements({ quantity: 10, layout, mode: 'simplex', fillLastSheet: true });
+  assert.equal(out.sheets, 3, 'sheet count is unchanged by fill (ordered qty / perSheet)');
+  assert.equal(out.plan.length, 12);
+  const s2 = out.plan.filter(e => e.sheet === 2);
+  assert.equal(s2.length, 4, 'last sheet must be filled to perSheet');
+  assert.deepEqual(s2.map(e => e.cellIndex), [0, 1, 2, 3],
+    'filled overs use cellIndex 0..perSheet-1 in row-major order');
+});
+
+test('planPlacements fillLastSheet=true: duplex qty 10 on 4-up → 24 entries; last sheet 4F+4B; mirror invariant holds through the filled cells', () => {
+  // Extends the existing "mirror on partial sheet" test to the filled
+  // case: with 4 backs on the last sheet (up from 2), each back's
+  // (x, y) must still equal the mirror of its paired front pulled
+  // from layout.back[cellIndex]. The user's spec: "12 backs, every
+  // one still the sheet-mirror of its front (extend the existing
+  // mirror invariant test to the filled sheet)."
+  const layout = _synthLayout({
+    perSheet: 4,
+    front: [{ x: 0, y: 100 }, { x: 50, y: 100 }, { x: 0, y: 0 }, { x: 50, y: 0 }],
+    // back positions are the layout's own mirror decisions — the plan
+    // simply pulls from layout.back[cellIndex]. Constructed here so
+    // each back[i] is a visibly-distinct mirror of front[i], not a
+    // repeat of the front value.
+    back:  [{ x: 50, y: 100 }, { x: 0, y: 100 }, { x: 50, y: 0 }, { x: 0, y: 0 }],
+  });
+  const out = planPlacements({ quantity: 10, layout, mode: 'duplex', fillLastSheet: true });
+  assert.equal(out.sheets, 3);
+  assert.equal(out.plan.length, 24, '3 sheets × (4 fronts + 4 backs) = 24 entries with fill');
+  // For each sheet, exactly 4 fronts then 4 backs, row-major cellIndex.
+  for (let s = 0; s < 3; s++) {
+    const onSheet = out.plan.filter(e => e.sheet === s);
+    assert.equal(onSheet.length, 8, `sheet ${s} filled to 4F+4B`);
+    for (let i = 0; i < 4; i++) {
+      assert.equal(onSheet[i].side,      'front', `sheet ${s} entry ${i}`);
+      assert.equal(onSheet[i].cellIndex, i);
+      assert.equal(onSheet[i].x, layout.front[i].x);
+      assert.equal(onSheet[i].y, layout.front[i].y);
+    }
+    for (let i = 0; i < 4; i++) {
+      const backEntry = onSheet[4 + i];
+      assert.equal(backEntry.side,      'back', `sheet ${s} back entry ${i}`);
+      assert.equal(backEntry.cellIndex, i);
+      // The invariant: back[i] in the plan equals layout.back[i]
+      // verbatim — the LAYOUT computes the sheet-centreline mirror
+      // (locked by the M1a asymmetric-margin tests), and the plan
+      // never reinterprets it. If a fill regression tried to
+      // recompute mirror positions instead of pulling from the
+      // layout, THAT would be a wrong-back-on-wrong-front bug and
+      // this equality would catch it.
+      assert.equal(backEntry.x, layout.back[i].x, `sheet ${s} back ${i} .x`);
+      assert.equal(backEntry.y, layout.back[i].y, `sheet ${s} back ${i} .y`);
+    }
+  }
+});
+
+test('planPlacements fillLastSheet=true: EXACT-FIT qty 8 on 4-up → 2 sheets (no phantom extra sheet)', () => {
+  // The edge that goes wrong quietly: an implementation that thinks
+  // "fill means always add overs" would treat exact-fit qty as needing
+  // an extra sheet full of overs. Richard's rule is filling REMOVES
+  // BLANKS from an existing sheet — it never adds a sheet. Fill on or
+  // off, qty 8 on 4-up = 2 full sheets = 8 placements.
+  const layout = _synthLayout({
+    perSheet: 4,
+    front: [{ x: 0, y: 100 }, { x: 50, y: 100 }, { x: 0, y: 0 }, { x: 50, y: 0 }],
+  });
+  const filled  = planPlacements({ quantity: 8, layout, mode: 'simplex', fillLastSheet: true });
+  const partial = planPlacements({ quantity: 8, layout, mode: 'simplex', fillLastSheet: false });
+  assert.equal(filled.sheets,  2, 'fill on: exact-fit stays 2 sheets');
+  assert.equal(partial.sheets, 2, 'fill off: exact-fit is also 2 sheets');
+  assert.equal(filled.plan.length,  8);
+  assert.equal(partial.plan.length, 8);
+  assert.deepEqual(filled.plan.map(e => ({ s: e.sheet, i: e.cellIndex })),
+                   partial.plan.map(e => ({ s: e.sheet, i: e.cellIndex })),
+                   'fill on vs off produces identical plans when the qty exactly fills perSheet × sheets');
+});
+
+test('planPlacements: fillLastSheet defaults to false — pre-M7 caller shape is byte-identical to explicit false', () => {
+  // The default matters: the pre-M7 behaviour (partial last sheet) must
+  // be preserved when the CALLER omits the option. The template's own
+  // fillLastSheet default is TRUE (M3 read boundary), but the engine's
+  // default is FALSE so that a hand-written caller who wrote
+  // planPlacements({q, l, m}) before M7 keeps getting the pre-M7 shape.
+  const layout = _synthLayout({
+    perSheet: 4,
+    front: [{ x: 0, y: 100 }, { x: 50, y: 100 }, { x: 0, y: 0 }, { x: 50, y: 0 }],
+  });
+  const omitted   = planPlacements({ quantity: 10, layout, mode: 'simplex' });
+  const explicit  = planPlacements({ quantity: 10, layout, mode: 'simplex', fillLastSheet: false });
+  assert.equal(omitted.plan.length, 10);
+  assert.deepEqual(omitted, explicit);
+});
+
 test('planPlacements: rotated flag flows from layout to every plan entry', () => {
   const layout = _synthLayout({
     perSheet: 2,

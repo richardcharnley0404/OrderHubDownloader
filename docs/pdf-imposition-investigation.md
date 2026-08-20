@@ -1,10 +1,9 @@
 # PDF Copy — imposition templates & paper sizes
 
-**Status:** code-complete, unreleased (2026-08-19). All six milestones
-landed as separate reviewed commits over one session; the feature is
-off by default on every existing pdf_copy controller and awaits
-Richard's manual pass on real lab hardware before a release. See §10
-for the build record.
+**Status:** code-complete, unreleased (2026-08-20). Six build milestones
+plus one operator-feedback pass (M7) landed as separate reviewed
+commits; the feature is off by default on every existing pdf_copy
+controller and awaits release. See §10 for the build record.
 
 **Operator-facing doc:** [`imposition-operator-guide.md`](imposition-operator-guide.md)
 — setup path with the 12×18 / 5×7 grad-card worked example, filename
@@ -397,7 +396,14 @@ setup, not per-controller routing.
 - Ganging/nesting multiple jobs per sheet (§7.1)
 - Mixed orientations on one sheet
 - Work-and-turn / work-and-tumble styles (litho economics, not digital)
-- Fill-last-sheet quantity rounding
+- ~~Fill-last-sheet quantity rounding~~ — **shipped in M7 (2026-08-20)**
+  after first-hands-on operator feedback. Richard's call reversed the
+  original parking: a partial last sheet is filled with extra copies by
+  default because the sheet prints anyway and overs cost nothing. A
+  per-template `fillLastSheet` boolean (default true) toggles it. QTY
+  stays the ordered quantity, IMPQTY stays the sheet count — filling
+  removes blanks, never adds sheets. See the operator guide's §4
+  worked-example paragraph.
 - Barcode/slug lines per sheet for cut tracking (natural follow-on; the
   order-identifier pipeline step already draws text and could be extended)
 - Imposing raster images (JPEG) — pdf_copy is PDF-only today; keep it so
@@ -436,15 +442,18 @@ required an §8 item.
 | M3        | `26a7e37` | Org-level stores + IPC + save-time validation (`imposition-service.js`); 38 tests |
 | M4        | `fee4c90` | Settings screens + live preview IPC (`imposition-preview.js`); 11 tests   |
 | M5        | `7beaf67` | Dispatch wiring in `_sendViaPdfCopyRouted` + pdf_copy controller fields; 17 tests |
-| M6        | (this commit) | CHANGELOG entry, operator guide, this build record, landmines, BACKLOG entry |
+| M6        | `c12338c` | CHANGELOG entry, operator guide, this build record, landmines, BACKLOG entry |
+| M7        | (this commit) | Operator-feedback pass: template editor wording (Finished Size, help text refresh), live printable-area readout, fill-last-sheet (default TRUE — Richard's call reversing §8); 9 tests |
 
 Also in the sequence: `4b2b595` fixed the known `perfectlyClientClient.test.js`
 stability-polling flake that had been noise-swamping M3's preflight
 runs (RESOLVED in `docs/BACKLOG.md`).
 
-Suite growth: 2246 tests before M1 → 2347 after M5 (M6 adds no tests).
-No CHANGELOG entry until M6 — every prior milestone deliberately shipped
-code with no operator-visible change until dispatch wired up.
+Suite growth: 2246 tests before M1 → 2347 after M5 (M6 adds no tests) →
+2356 after M7. No CHANGELOG entry until M6 — every prior milestone
+deliberately shipped code with no operator-visible change until
+dispatch wired up. M7 amends the M6 entry rather than adding a new
+one; the feature is still unreleased.
 
 ## Sources
 

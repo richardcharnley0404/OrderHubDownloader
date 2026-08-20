@@ -4101,6 +4101,14 @@ class PrintService {
           mode:         template.mode,
           cropMarks:    !!template.cropMarks,
           artworkBleed,
+          // M7 fill-last-sheet: read as `!== false` so a template
+          // stored before M7 (missing the field) adopts the default-
+          // true behaviour. Save-time validation defaults absent to
+          // true too, so this is a belt-and-braces safety net for
+          // records that predate M7 or came in via hand-edited JSON.
+          // Sheet count and filename are unchanged either way — see
+          // planPlacements' fillLastSheet docstring.
+          fillLastSheet: template.fillLastSheet !== false,
           logger,
         });
 

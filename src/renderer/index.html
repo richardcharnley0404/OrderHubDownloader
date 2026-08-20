@@ -1639,7 +1639,7 @@
           </div>
 
           <fieldset class="it-fieldset">
-            <legend>Expected Artwork</legend>
+            <legend>Finished Size</legend>
             <div class="form-row">
               <div class="form-group form-group-grow">
                 <label for="itArtworkW">Width</label>
@@ -1650,11 +1650,12 @@
                 <input type="number" id="itArtworkH" step="0.01" min="0">
               </div>
             </div>
-            <small class="field-hint">Design-time cell size. Dispatch always uses the real artwork trim; this value is what save-time fit validation and the preview grid are computed against (§5.1).</small>
+            <small class="field-hint">This is the Trim Size and not the supplied artwork size.</small>
           </fieldset>
 
           <fieldset class="it-fieldset">
             <legend>Margins</legend>
+            <small class="field-hint" style="display:block;margin-bottom:6px;">The sheet edges the press can't (or shouldn't) print into.</small>
             <div class="form-row">
               <div class="form-group form-group-grow">
                 <label for="itMarginTop">Top</label>
@@ -1673,17 +1674,19 @@
                 <input type="number" id="itMarginLeft" step="0.01" min="0" value="0">
               </div>
             </div>
+            <small class="field-hint" id="itPrintableArea" style="display:block;margin-top:4px;">Printable area: pick a paper size to compute.</small>
           </fieldset>
 
           <div class="form-row">
             <div class="form-group form-group-grow">
               <label for="itGutter">Gutter</label>
               <input type="number" id="itGutter" step="0.01" min="0" value="0">
+              <small class="field-hint">The distance between the trim lines of adjacent finished pieces.</small>
             </div>
             <div class="form-group form-group-grow">
               <label for="itArtworkBleed">Artwork Bleed</label>
               <input type="number" id="itArtworkBleed" step="0.01" min="0" value="0">
-              <small class="field-hint">0 = trust the artwork's TrimBox. Gutter must be ≥ 2× bleed.</small>
+              <small class="field-hint">The amount of supplied bleed on the artwork.<br>0 = trust the artwork's TrimBox. Gutter must be ≥ 2× bleed.</small>
             </div>
           </div>
 
@@ -1698,6 +1701,13 @@
             <label>
               <input type="checkbox" id="itCropMarks">
               <span>Draw crop marks</span>
+            </label>
+          </div>
+
+          <div class="form-group checkbox-group">
+            <label>
+              <input type="checkbox" id="itFillLastSheet">
+              <span>Fill last sheet (prints extra copies rather than leaving blanks)</span>
             </label>
           </div>
 

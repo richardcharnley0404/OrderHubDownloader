@@ -365,6 +365,51 @@ test('template save: duplex mode persists duplexFlipEdge; simplex nulls it', () 
   assert.equal(duplexSaved.duplexFlipEdge, 'long');
 });
 
+// ─── M7: fillLastSheet ────────────────────────────────────────────────
+
+test('template validate: fillLastSheet DEFAULTS TO TRUE when absent (M7 read-boundary default)', () => {
+  __resetStore();
+  _seedPaperSize();
+  const input = _validTemplateInput();
+  // Fixture already omits fillLastSheet — this asserts the omission
+  // produces `true` on the persisted record, so a template written
+  // via a UI that hasn't heard of the field yet still fills sheets.
+  assert.equal(input.fillLastSheet, undefined, 'fixture omits fillLastSheet (guards against test drift)');
+  const v = validateTemplate(input, { existingTemplates: [], paperSizes: listPaperSizes() });
+  assert.equal(v.ok, true);
+  assert.equal(v.value.fillLastSheet, true);
+});
+
+test('template validate: fillLastSheet explicit true accepted', () => {
+  __resetStore();
+  _seedPaperSize();
+  const v = validateTemplate(_validTemplateInput({ fillLastSheet: true }), {
+    existingTemplates: [], paperSizes: listPaperSizes(),
+  });
+  assert.equal(v.ok, true);
+  assert.equal(v.value.fillLastSheet, true);
+});
+
+test('template validate: fillLastSheet explicit false accepted (opt-out for labs that want exact counts)', () => {
+  __resetStore();
+  _seedPaperSize();
+  const v = validateTemplate(_validTemplateInput({ fillLastSheet: false }), {
+    existingTemplates: [], paperSizes: listPaperSizes(),
+  });
+  assert.equal(v.ok, true);
+  assert.equal(v.value.fillLastSheet, false);
+});
+
+test('template validate: fillLastSheet non-boolean REJECTS with exact message (strict boolean)', () => {
+  __resetStore();
+  _seedPaperSize();
+  const v = validateTemplate(_validTemplateInput({ fillLastSheet: 'yes' }), {
+    existingTemplates: [], paperSizes: listPaperSizes(),
+  });
+  assert.equal(v.ok, false);
+  assert.equal(v.error, 'Template fillLastSheet must be a boolean (got "yes").');
+});
+
 // ═════════════════════════════════════════════════════════════════════════
 // Fit validation — driven through the REAL M1 engine.
 //
