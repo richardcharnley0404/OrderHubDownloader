@@ -3481,6 +3481,12 @@ button {
   font-size: 12px;
   line-height: 1.4;
 }
+/* Codebase convention: `.hidden` has no global rule (auditing every element
+   for false matches isn't worth it) so every component that uses the class
+   ships its own hide rule. .it-preview-error and .modal-save-error missed
+   this in M4 and rendered as empty pink boxes at rest — 2026-08-20 fix. */
+.it-preview-error.hidden { display: none; }
+.modal-save-error.hidden { display: none; }
 
 /* Product-code repeating row (matches the routing .mapping-row look). */
 .it-code-row {
