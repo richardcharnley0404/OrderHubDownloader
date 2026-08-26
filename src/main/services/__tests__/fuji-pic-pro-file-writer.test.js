@@ -370,6 +370,119 @@ test('deliverToDigin: same-volume rename → destFolder exists, staging gone, me
   assert.equal(bytes, 'bytes-1');
 });
 
+// ── TRIPWIRES (1.15.3) — same-volume no-change lock ──────────────────────
+//
+// 1.15.3 introduces an EXDEV cross-volume path that writes into
+// `{diginPath}/.ohd-inbox-{...}` and then renames intra-DIGIN. These
+// tripwires assert same-volume delivery is byte-identical to today:
+// atomic rename, no inbox, no extra file / folder anywhere. If the
+// 1.15.3 fix accidentally engages the cross-volume plumbing when
+// same-volume would have worked, these tests fail loudly.
+//
+// Do NOT delete these when the cross-volume path is added — the whole
+// point is to lock that the healthy-config majority of labs sees zero
+// change from 1.15.3.
+
+test('TRIPWIRE (1.15.3): same-volume rename creates NO `.ohd-inbox-*` folder inside DIGIN', async (t) => {
+  // Locks that cross-volume plumbing is not engaged when a plain
+  // rename works. If a future edit unifies the code paths and always
+  // routes through the inbox (even on same-volume), this test fails
+  // — same-volume must NOT create the inbox scaffolding.
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const stagingRoot   = path.join(dir, 'staging'); await fsp.mkdir(stagingRoot);
+  const stagingFolder = path.join(stagingRoot, 'ORD-TW1'); await fsp.mkdir(stagingFolder);
+  await writeJpeg(path.join(stagingFolder, '0001.jpg'), 'tw1-1');
+  await writeJpeg(path.join(stagingFolder, '0002.jpg'), 'tw1-2');
+  const diginPath = path.join(dir, 'digin'); await fsp.mkdir(diginPath);
+
+  const result = await deliverToDigin({
+    stagingFolder, diginPath, orderId: 'ORD-TW1',
+    deps: { logger: silentLogger },
+  });
+
+  assert.equal(result.method, 'rename',
+    'same-volume path must return method:"rename" — not any inbox variant');
+  const dirents = await fsp.readdir(diginPath);
+  assert.deepEqual(dirents, ['ORD-TW1'],
+    `DIGIN must contain ONLY the delivered folder; found: ${JSON.stringify(dirents)}. ` +
+    'If an `.ohd-inbox-*` appears here on a same-volume delivery, the fix is engaging ' +
+    'cross-volume plumbing when it shouldn\'t.');
+  const inboxLike = dirents.filter(n => n.startsWith('.ohd-inbox-'));
+  assert.deepEqual(inboxLike, [],
+    'no .ohd-inbox-* folder may exist in DIGIN after a same-volume delivery');
+});
+
+test('TRIPWIRE (1.15.3): same-volume rename calls rename EXACTLY once and mkdir/copyFile ZERO times on DIGIN side', async (t) => {
+  // Byte-identical means the syscall shape doesn't change: one atomic
+  // rename, no directory creation on the DIGIN side, no file copy.
+  // This test instruments the fs so any deviation surfaces.
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const stagingRoot   = path.join(dir, 'staging'); await fsp.mkdir(stagingRoot);
+  const stagingFolder = path.join(stagingRoot, 'ORD-TW2'); await fsp.mkdir(stagingFolder);
+  await writeJpeg(path.join(stagingFolder, '0001.jpg'), 'tw2');
+  const diginPath = path.join(dir, 'digin'); await fsp.mkdir(diginPath);
+
+  const calls = { rename: 0, mkdir: 0, copyFile: 0, cp: 0, writeFile: 0 };
+  const instrumented = {
+    ...fsp,
+    rename:   async (...args) => { calls.rename++;   return fsp.rename(...args); },
+    mkdir:    async (...args) => { calls.mkdir++;    return fsp.mkdir(...args); },
+    copyFile: async (...args) => { calls.copyFile++; return fsp.copyFile(...args); },
+    cp:       async (...args) => { calls.cp++;       return fsp.cp(...args); },
+    writeFile:async (...args) => { calls.writeFile++;return fsp.writeFile(...args); },
+  };
+
+  const result = await deliverToDigin({
+    stagingFolder, diginPath, orderId: 'ORD-TW2',
+    deps: { fsPromises: instrumented, logger: silentLogger },
+  });
+
+  assert.equal(result.method, 'rename');
+  assert.equal(calls.rename, 1, `rename must be called exactly once; was ${calls.rename}`);
+  assert.equal(calls.mkdir, 0, `no mkdir on same-volume delivery; was ${calls.mkdir}`);
+  assert.equal(calls.copyFile, 0, `no copyFile on same-volume delivery; was ${calls.copyFile}`);
+  assert.equal(calls.cp, 0, `no fsp.cp on same-volume delivery; was ${calls.cp}`);
+  assert.equal(calls.writeFile, 0, `no writeFile on same-volume delivery; was ${calls.writeFile}`);
+});
+
+test('TRIPWIRE (1.15.3): after same-volume rename, destFolder contents are byte-identical to staging', async (t) => {
+  // Redundant with the older happy-path test that reads 0001.jpg,
+  // but stronger: locks the WHOLE folder byte-for-byte so any future
+  // "post-rename normalisation" would surface here.
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const stagingRoot   = path.join(dir, 'staging'); await fsp.mkdir(stagingRoot);
+  const stagingFolder = path.join(stagingRoot, 'ORD-TW3'); await fsp.mkdir(stagingFolder);
+  const expected = new Map();
+  for (let i = 1; i <= 5; i++) {
+    const name  = `${String(i).padStart(4, '0')}.jpg`;
+    const bytes = `tw3-content-${i}-${'x'.repeat(i * 17)}`;
+    await fsp.writeFile(path.join(stagingFolder, name), bytes);
+    expected.set(name, bytes);
+  }
+  const diginPath = path.join(dir, 'digin'); await fsp.mkdir(diginPath);
+
+  const result = await deliverToDigin({
+    stagingFolder, diginPath, orderId: 'ORD-TW3',
+    deps: { logger: silentLogger },
+  });
+
+  assert.equal(result.method, 'rename');
+  const delivered = new Set(await fsp.readdir(result.destFolder));
+  assert.equal(delivered.size, expected.size,
+    `delivered file count must equal staged file count; got ${delivered.size} vs ${expected.size}`);
+  for (const [name, bytes] of expected) {
+    assert.ok(delivered.has(name), `${name} must appear in destFolder`);
+    const got = await fsp.readFile(path.join(result.destFolder, name), 'utf-8');
+    assert.equal(got, bytes, `${name} bytes must be identical to staged`);
+  }
+});
+
 test('M7b deliverToDigin: EXDEV throws the co-location error AND nothing is written inside DIGIN before the rename', async (t) => {
   // Pre-M7b, an EXDEV cross-volume rename triggered the "slow path":
   // copy the staged folder into `{diginPath}/{orderId}.ohdtmp`, rename
