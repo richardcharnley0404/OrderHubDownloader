@@ -307,7 +307,13 @@ test('fujipicpro controller with a valid maxPrintsPerJob-shaped value is NOT rej
 // in deliverToDigin is now the ONLY authoritative check. Tests below
 // lock the contract: no volume verdict rejects a save.
 
-test('v1.15.1: certain-different does NOT reject; save succeeds with a warning', async () => {
+test('v1.15.3: certain-different does NOT reject; save succeeds with the cross-volume advisory', async () => {
+  // v1.15.1 warned "dispatch will stop with an error" for every
+  // non-certain-same verdict. v1.15.3 supports cross-volume delivery
+  // via the N-lite path, so that wording is factually wrong. Warning
+  // reshaped: only certain-different fires it now (the operator has
+  // a fast alternative if they can co-locate). The wording tells
+  // them delivery still works but is slower.
   resetState();
   __setVolumeResult({ verdict: 'certain-different', code: 'different-drives' });
   try {
@@ -315,20 +321,21 @@ test('v1.15.1: certain-different does NOT reject; save succeeds with a warning',
       imageStagingRoot: 'C:\\pp\\stage',
       diginPath:        'D:\\pp\\digin',
     }));
-    assert.equal(result.success, true, 'certain-different MUST NOT block the save (v1.15.1)');
+    assert.equal(result.success, true, 'certain-different MUST NOT block the save');
     assert.equal(__controllers.length, 1, 'controller MUST persist');
     assert.ok(Array.isArray(result.warnings) && result.warnings.length >= 1,
-      'result MUST carry a warnings array with the co-location advisory');
-    const w = result.warnings.find(x => x.kind === 'picpro-volume-uncertain');
-    assert.ok(w, 'warning kind must be picpro-volume-uncertain');
-    assert.match(w.text, /may be on different volumes/);
-    assert.match(w.text, /dispatch will stop with an error/,
-      'warning must point operators at the dispatch-time behaviour');
+      'result MUST carry a warnings array with the cross-volume advisory');
+    const w = result.warnings.find(x => x.kind === 'picpro-volume-cross');
+    assert.ok(w, 'warning kind must be picpro-volume-cross (v1.15.3)');
+    assert.match(w.text, /Dispatch will still succeed/,
+      'warning must state that delivery still works — v1.15.3 supports cross-volume');
+    assert.match(w.text, /copy is slower/,
+      'warning must state the trade-off so an operator who CAN co-locate knows there is a fast alternative');
     assert.match(w.text, /C:\\pp\\stage/, 'warning must name Image Staging Root');
     assert.match(w.text, /D:\\pp\\digin/, 'warning must name DIGIN Path');
     // Warn-level log for the Activity Log, with the verdict + code
     // metadata for diagnostics.
-    const logged = __warns.find(x => /volume verdict is not certain-same/.test(x.msg));
+    const logged = __warns.find(x => /different volumes/.test(x.msg));
     assert.ok(logged, 'must log advisory at warn level');
     assert.equal(logged.meta.verdict, 'certain-different');
     assert.equal(logged.meta.code,    'different-drives');
@@ -337,13 +344,15 @@ test('v1.15.1: certain-different does NOT reject; save succeeds with a warning',
   }
 });
 
-test('v1.15.1: indeterminate (same-server-different-share) does NOT reject; save succeeds with a warning', async () => {
+test('v1.15.3: indeterminate (same-server-different-share) saves SILENTLY — no warning (v1.15.3 change)', async () => {
   // The exact 1.15.0 hard-block regression: a real lab configured
   // \\labserver1\Pixfizz Digin Staging and \\labserver1\Digin — two
   // shares on the same server. The 1.15.0 string check called that
   // cross-volume and refused the save. Under v1.15.1 the verdict is
-  // indeterminate (could be same physical volume, could not — you
-  // can't tell from names) and the save proceeds with a warning.
+  // indeterminate and the save proceeded with a warning. Under
+  // v1.15.3 the runtime path handles either case correctly (same-
+  // volume rename or cross-volume N-lite fallback), so there is no
+  // need to cry wolf at save time — the operator sees no warning.
   resetState();
   __setVolumeResult({ verdict: 'indeterminate', code: 'same-server-different-share' });
   try {
@@ -351,18 +360,22 @@ test('v1.15.1: indeterminate (same-server-different-share) does NOT reject; save
       imageStagingRoot: '\\\\labserver1\\Pixfizz Digin Staging',
       diginPath:        '\\\\labserver1\\Digin',
     }));
-    assert.equal(result.success, true, 'indeterminate (same-server-different-share) MUST NOT block the save');
-    assert.equal(__controllers.length, 1, 'the exact 1.15.0 hard-block config MUST now persist');
-    assert.ok(result.warnings && result.warnings.length >= 1);
-    const logged = __warns.find(x => /volume verdict is not certain-same/.test(x.msg));
-    assert.equal(logged.meta.verdict, 'indeterminate');
-    assert.equal(logged.meta.code,    'same-server-different-share');
+    assert.equal(result.success, true, 'indeterminate MUST NOT block the save');
+    assert.equal(__controllers.length, 1, 'the exact 1.15.0 hard-block config MUST persist');
+    const volumeWarning = (result.warnings || []).find(
+      x => x.kind === 'picpro-volume-cross' || x.kind === 'picpro-volume-uncertain'
+    );
+    assert.equal(volumeWarning, undefined,
+      'indeterminate MUST NOT produce a volume advisory under v1.15.3 — the runtime handles either case correctly');
+    const logged = __warns.find(x => /different volumes/.test(x.msg));
+    assert.equal(logged, undefined,
+      'indeterminate MUST NOT log the advisory under v1.15.3');
   } finally {
     __setVolumeResult({ verdict: 'certain-same' });
   }
 });
 
-test('v1.15.1: certain-same saves silently — no warning', async () => {
+test('v1.15.3: certain-same saves silently — no warning', async () => {
   resetState();
   // Default fake result is already certain-same; be explicit.
   __setVolumeResult({ verdict: 'certain-same' });
@@ -373,9 +386,11 @@ test('v1.15.1: certain-same saves silently — no warning', async () => {
   assert.equal(result.success, true);
   assert.equal(__controllers.length, 1);
   assert.ok(Array.isArray(result.warnings), 'warnings MUST always be an array (even when empty) — renderer branches on length');
-  const volumeWarning = (result.warnings || []).find(x => x.kind === 'picpro-volume-uncertain');
+  const volumeWarning = (result.warnings || []).find(
+    x => x.kind === 'picpro-volume-cross' || x.kind === 'picpro-volume-uncertain'
+  );
   assert.equal(volumeWarning, undefined, 'certain-same MUST NOT produce a volume warning');
-  const logged = __warns.find(x => /volume verdict/.test(x.msg));
+  const logged = __warns.find(x => /volume verdict|different volumes/.test(x.msg));
   assert.equal(logged, undefined, 'certain-same MUST NOT log the advisory');
 });
 

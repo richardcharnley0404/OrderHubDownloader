@@ -1,3 +1,74 @@
+## v1.15.3 - 2026-08-26
+
+**Fixed: Fuji PIC Pro can deliver orders again on labs where Image
+Staging Root and DIGIN Path live on different shares.** The v1.15.0
+release removed cross-volume delivery entirely — every dispatch on
+paths that OHD's rename couldn't atomically move across (typical
+symptom: separate UNC shares on the same server, mapped drives to
+different physical volumes) failed at the DIGIN move with a
+"same-volume required" error, and v1.15.1 softened the save-time
+check but didn't restore delivery. Labs whose storage layout genuinely
+required separate shares — the specific case that surfaced this was
+a lab with `\\Labserver1\Pixfizz Digin Staging` and `\\labserver1\Digin`
+as two shares on one server, both share roots, no way to co-locate —
+could save the controller from v1.15.1 onwards but every order stalled.
+
+The v1.15.3 restoration copies the staged folder into a
+non-order-shaped scratch folder inside DIGIN (`.ohd-inbox-...` with
+no order code in the name), then atomically renames it to the final
+order id **only after** OrderGateway has consumed the `.txt`.
+PIC Pro never sees the scratch folder — its name doesn't match any
+merge container id — and the delivered folder appears atomically
+under the correct name. Same-volume delivery on every lab that
+worked before v1.15.0 is byte-for-byte unchanged; the fix engages
+only when a rename would otherwise fail.
+
+Confirmed at the reporting lab: PIC Pro ignores the `.ohd-inbox-`
+folder shape entirely (folder created manually with two JPEGs left
+untouched for ten minutes), and OrderGateway is patient with the
+container-to-DIGIN gap (their failed 1.15.2 order's container was
+still sitting in Merge Data days later, no error raised on their
+side, waiting for the DIGIN folder that never came).
+
+**Fixed: PIC Pro delivery failures now show as red jobs with an
+actionable error, instead of the job sitting at "in production"
+forever.** Every kind of async delivery failure — the cross-volume
+issue that this release fixes, plus permission errors, network
+drops, DIGIN mount going missing mid-order, OrderGateway not
+consuming the `.txt`, PIC Pro stalling on the build — used to log
+quietly to the Activity Log while the Jobs grid kept showing "in
+production" with no indication anything was wrong. The affected
+lab spent hours watching orders stuck this way with nothing telling
+them why. Now the job goes red with the specific error message
+naming the path that failed, the timeout that fired, and what to
+check.
+
+This fix is independent of the cross-volume change above. A lab
+that hits an unrelated PIC Pro delivery failure now sees the
+failure on the Jobs grid instead of a silent stall.
+
+**Added: OHD's own scratch folders in DIGIN clean themselves up.**
+As part of the cross-volume path, OHD writes a temporary
+`.ohd-inbox-...` folder inside DIGIN, then renames it to the order
+id. If the copy is interrupted (network drop, OHD crash, whatever)
+the temp folder can be left behind. OHD now sweeps its own DIGIN
+folder every hour and removes any `.ohd-inbox-...` folder older
+than 6 hours, regardless of which OHD process created it. Nothing
+for the operator to do — if you see stale `.ohd-inbox-...` folders
+in DIGIN they will be gone by this time tomorrow at the latest.
+The threshold is configurable per controller
+(`staleInboxThresholdHours`, default 6, allowed range 1–168) if
+your setup ever requires a much longer copy than the default
+allows for.
+
+**Downgrade-friendly.** No stored-config shape change. A controller
+saved on v1.15.3 loads unchanged on v1.15.2 (the new
+`staleInboxThresholdHours` field is optional and defaults on read).
+Same-volume labs see zero change; cross-volume labs see cross-volume
+delivery working where it had stopped working in v1.15.0.
+
+---
+
 ## v1.15.2 - 2026-08-19
 
 **Changed: ROES XML imports now carry the shipping method through to

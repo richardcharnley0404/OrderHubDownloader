@@ -208,20 +208,39 @@ carries through into the dispatch record's `negNumberMap` so
 fact. Extensions are lowercased on stage (a DIGIN watcher that
 cares about `.jpg` vs `.JPG` would otherwise reject).
 
-**Two operational constraints on Image Staging Root:**
+**One operational constraint on Image Staging Root:**
 
-1. **Same volume as `diginPath`.** The DIGIN delivery is an atomic
-   `fs.rename` when both paths share a volume. Cross-volume returns
-   `EXDEV`, and OHD falls back to a recursive copy into
-   `{diginPath}/{orderId}.ohdtmp` → rename to `{orderId}` → clean up
-   staging. That works but is slow on a large order (per-file
-   copies over SMB), so co-locate for the fast path.
-2. **Must not overlap `orderDataPath` / `diginPath` /
+1. **Must not overlap `orderDataPath` / `diginPath` /
    `mergeDataPath`.** Rejected at save time. Setting them equal or
    nesting inside each other creates ordering / cleanup hazards
    (`stageImages` would `rm -rf` the .txt, DIGIN watching would fire
    during staging, etc.). Sibling folders under a common ancestor
    are fine.
+
+**Volume relationship — same-volume preferred, cross-volume supported.**
+DIGIN delivery uses an atomic `fs.rename` when Image Staging Root
+and DIGIN Path are on the same volume — this is the fast path and
+what every co-located lab hits. Cross-volume returns `EXDEV`, and
+OHD falls back to the "N-lite" cross-volume delivery path introduced
+in v1.15.3: recursive copy into `{diginPath}/.ohd-inbox-...` (a
+scratch folder whose name deliberately does NOT match any order-id
+pattern PIC Pro's DIGIN watcher recognises), then intra-DIGIN atomic
+rename to `{orderId}` once OrderGateway has consumed the `.txt`.
+
+The cross-volume path is slower (per-file copies over SMB) but
+correct — PIC Pro never sees a partial folder because the scratch
+name isn't ingested, and the final rename appears atomically in
+DIGIN as `{orderId}` matching the merge container. See
+`docs/picpro-cross-volume-investigation.md` for the design and the
+empirical tests that confirmed PIC Pro ignores the `.ohd-inbox-*`
+shape.
+
+Co-locate if you can (fast). Leave separate if you can't
+(supported).
+
+The v1.15.3 sweep — see the CHANGELOG entry — cleans up any
+`.ohd-inbox-*` folders left in DIGIN by a crashed or interrupted
+cross-volume dispatch, so no manual cleanup is ever required.
 
 The per-order staging subfolder is wiped before every write so a
 retry doesn't ship a stale `0001.<oldext>` alongside a current

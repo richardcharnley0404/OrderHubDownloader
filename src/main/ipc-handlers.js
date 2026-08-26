@@ -1409,15 +1409,31 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
           controller.imageStagingRoot,
           controller.diginPath,
         );
-        if (volume.verdict !== 'certain-same') {
+        // 1.15.3: cross-volume delivery is now supported via the
+        // N-lite path (see docs/picpro-cross-volume-investigation.md).
+        // The 1.15.1 advisory warning that told the operator
+        // "dispatch will stop with an error" is now factually wrong
+        // for the indeterminate case (it usually WORKS — either same
+        // volume, or the cross-volume fallback delivers). Warning
+        // downgraded:
+        //   - certain-same    → no warning (unchanged)
+        //   - certain-different → warn about the slower cross-volume
+        //     path so an operator who could co-locate knows there's
+        //     a fast alternative
+        //   - indeterminate  → no warning (avoid crying wolf; the
+        //     runtime path handles either case correctly)
+        if (volume.verdict === 'certain-different') {
           const text =
-            'Image Staging Root and DIGIN Path may be on different volumes. ' +
-            'If they are, dispatch will stop with an error — OHD can\'t tell ' +
-            'for certain from network paths alone. ' +
+            'Image Staging Root and DIGIN Path are on different volumes. ' +
+            'Dispatch will still succeed (v1.15.3 uses a copy-then-rename ' +
+            'inside DIGIN so PIC Pro only sees the complete folder), but the ' +
+            'copy is slower than the same-volume atomic rename. If you can ' +
+            'move Image Staging Root onto the same volume as DIGIN Path, ' +
+            'delivery is faster and less exposed to network interruptions. ' +
             `Image Staging Root: ${controller.imageStagingRoot}. ` +
             `DIGIN Path: ${controller.diginPath}.`;
-          warnings.push({ kind: 'picpro-volume-uncertain', text });
-          logger.logWarning('[routing] save-controller — PIC Pro volume verdict is not certain-same (advisory)', {
+          warnings.push({ kind: 'picpro-volume-cross', text });
+          logger.logWarning('[routing] save-controller — PIC Pro paths on different volumes (advisory; delivery still works, just slower)', {
             controllerId:     controller.id,
             name:             controller.name,
             imageStagingRoot: controller.imageStagingRoot,
