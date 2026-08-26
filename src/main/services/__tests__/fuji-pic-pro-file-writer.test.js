@@ -483,103 +483,297 @@ test('TRIPWIRE (1.15.3): after same-volume rename, destFolder contents are byte-
   }
 });
 
-test('M7b deliverToDigin: EXDEV throws the co-location error AND nothing is written inside DIGIN before the rename', async (t) => {
-  // Pre-M7b, an EXDEV cross-volume rename triggered the "slow path":
-  // copy the staged folder into `{diginPath}/{orderId}.ohdtmp`, rename
-  // that in place, remove staging. A customer disproved the "Frontier
-  // ignores .ohdtmp" assumption written into that code (2026-08-18):
-  // PIC Pro ingested the .ohdtmp folder mid-copy as a blank order and
-  // then re-ingested the renamed folder as the correct order. Slow
-  // path deleted. Now: rename attempts (fast path), EXDEV throws with
-  // an actionable message naming both configured paths and the fix.
-  //
-  // This test locks TWO invariants:
-  //   1. EXDEV throws the named error — never falls back to a
-  //      copy-into-DIGIN slow path that could reintroduce the bug.
-  //   2. DIGIN is untouched — no file, no folder, no `.ohdtmp`
-  //      sibling appears there. Since v1.15.1 the save-time
-  //      isSameVolume check is ADVISORY (three-state; only
-  //      certain-same suppresses a warning, and it never rejects a
-  //      save), so THIS dispatch-time throw is the AUTHORITATIVE
-  //      cross-volume check. Do not weaken it — the string check
-  //      cannot tell same-server-different-share apart from a real
-  //      cross-volume misconfiguration, so the filesystem has to.
+// ── 1.15.3 N-lite cross-volume delivery (B) ────────────────────────────────
+//
+// The M7b throw-on-EXDEV tests that used to live here were replaced.
+// 1.15.3 supports cross-volume delivery via .ohd-inbox-* → intra-DIGIN
+// rename per the N-lite design in
+// `docs/picpro-cross-volume-investigation.md`. Tests below lock:
+//   1. EXDEV triggers the cross-volume path and the final on-disk
+//      state is byte-identical to a same-volume delivery.
+//   2. The inbox name discipline — order code never appears in the
+//      name, prefix is stable, instance-scoping is present.
+//   3. Failure modes leave a partial inbox behind (for the sweep) and
+//      leave staging intact (retry-safe).
+//   4. controllerId is required to reach the cross-volume path — a
+//      missing controllerId is a hard error, not a silent inbox
+//      without instance-scoping.
+
+test('1.15.3 deliverToDigin: EXDEV triggers cross-volume delivery — final state byte-identical to same-volume', async (t) => {
+  // The whole point of N-lite: after the copy-then-rename completes,
+  // DIGIN contains {orderId}/ with the same files that would have
+  // ended up there on a same-volume rename. No `.ohd-inbox-*` folder
+  // remains — the intra-DIGIN rename cleared it. Staging is cleaned
+  // up on success (best-effort).
   const dir = await makeTempDir();
   t.after(() => fsp.rm(dir, { recursive: true, force: true }));
 
   const stagingRoot   = path.join(dir, 'staging'); await fsp.mkdir(stagingRoot);
-  const stagingFolder = path.join(stagingRoot, 'ORD-2'); await fsp.mkdir(stagingFolder);
-  await writeJpeg(path.join(stagingFolder, '0001.jpg'), 'exdev-1');
-  await writeJpeg(path.join(stagingFolder, '0002.jpg'), 'exdev-2');
+  const stagingFolder = path.join(stagingRoot, 'ORD-XV'); await fsp.mkdir(stagingFolder);
+  await writeJpeg(path.join(stagingFolder, '0001.jpg'), 'xv-1');
+  await writeJpeg(path.join(stagingFolder, '0002.jpg'), 'xv-2');
+  const diginPath = path.join(dir, 'digin'); await fsp.mkdir(diginPath);
 
+  // Inject rename that throws EXDEV on the staging→DIGIN move, but
+  // lets the intra-DIGIN inbox→dest rename succeed. The second rename
+  // targets a same-share path so a real rename would work — we let
+  // the real fs handle it.
+  let renameCall = 0;
+  const injected = {
+    ...fsp,
+    rename: async (src, dst) => {
+      renameCall++;
+      if (renameCall === 1) {
+        const err = new Error('EXDEV cross-device link not permitted');
+        err.code = 'EXDEV';
+        throw err;
+      }
+      return fsp.rename(src, dst);
+    },
+  };
+
+  const result = await deliverToDigin({
+    stagingFolder, diginPath, orderId: 'ORD-XV',
+    controllerId: 'ctrl-abc',
+    deps: { fsPromises: injected, logger: silentLogger },
+  });
+
+  assert.equal(result.method, 'copy-then-rename');
+  assert.equal(result.destFolder, path.join(diginPath, 'ORD-XV'));
+  assert.ok(result.inboxPath && result.inboxPath.includes('.ohd-inbox-'),
+    'inboxPath is returned so the caller can persist it for sweep cross-check');
+
+  // Final DIGIN state matches same-volume outcome exactly.
+  const dirents = await fsp.readdir(diginPath);
+  assert.deepEqual(dirents, ['ORD-XV'],
+    `DIGIN must contain only the final folder; found: ${JSON.stringify(dirents)}`);
+  const delivered = await fsp.readdir(path.join(diginPath, 'ORD-XV'));
+  assert.deepEqual(delivered.sort(), ['0001.jpg', '0002.jpg']);
+  assert.equal(await fsp.readFile(path.join(diginPath, 'ORD-XV', '0001.jpg'), 'utf-8'), 'xv-1');
+  assert.equal(await fsp.readFile(path.join(diginPath, 'ORD-XV', '0002.jpg'), 'utf-8'), 'xv-2');
+
+  // Staging cleaned up on success.
+  assert.equal(fs.existsSync(stagingFolder), false,
+    'staging folder must be removed after successful cross-volume delivery');
+});
+
+test('1.15.3 deliverToDigin: cross-volume inbox name never contains the order id', async (t) => {
+  // The load-bearing safety property. Injects deterministic clock +
+  // rand + instanceId + controllerId and asserts the generated inbox
+  // name (a) starts with the well-known prefix, (b) contains the
+  // sanitised controllerId, (c) contains the instanceId, (d) does
+  // NOT contain the orderId as a substring.
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const stagingRoot   = path.join(dir, 'staging'); await fsp.mkdir(stagingRoot);
+  const stagingFolder = path.join(stagingRoot, 'ORD-NAME'); await fsp.mkdir(stagingFolder);
+  await writeJpeg(path.join(stagingFolder, '0001.jpg'), 'x');
+  const diginPath = path.join(dir, 'digin'); await fsp.mkdir(diginPath);
+
+  let renameCall = 0;
+  const injected = {
+    ...fsp,
+    rename: async (src, dst) => {
+      renameCall++;
+      if (renameCall === 1) { const err = new Error('EXDEV'); err.code = 'EXDEV'; throw err; }
+      return fsp.rename(src, dst);
+    },
+  };
+
+  const result = await deliverToDigin({
+    stagingFolder, diginPath, orderId: 'ORD-NAME',
+    controllerId: 'ctrl-lab1',
+    deps: {
+      fsPromises: injected,
+      logger: silentLogger,
+      instanceId: '11112222-3333-4444-5555-666677778888',
+      clock: () => 1_700_000_000_000,
+      rand:  () => 'deadbeef',
+    },
+  });
+
+  const inboxBase = path.basename(result.inboxPath);
+  assert.ok(inboxBase.startsWith('.ohd-inbox-'),
+    `inbox must start with the OHD prefix; got ${inboxBase}`);
+  // Sanitiser replaces `-` (not in [A-Za-z0-9._]) with `_`, so
+  // 'ctrl-lab1' arrives as 'ctrl_lab1'. Checking the sanitised form
+  // proves the sanitiser ran AND the controllerId reached the name.
+  assert.ok(inboxBase.includes('ctrl_lab1'),
+    `inbox must include sanitised controllerId for sweep scoping; got ${inboxBase}`);
+  assert.ok(inboxBase.includes('1111222233334444555566667777'),
+    `inbox must include instanceId (dashes stripped); got ${inboxBase}`);
+  assert.ok(!inboxBase.includes('ORD-NAME'),
+    `inbox must NOT contain the order id — safety invariant. got ${inboxBase}`);
+});
+
+test('1.15.3 deliverToDigin: substring-trap — controllerId containing orderId triggers hard throw', async (t) => {
+  // Defensive: controllerId is normally crypto.randomUUID(), which
+  // can't collide with real order ids, but a synthetic id
+  // deliberately built to embed the orderId proves the invariant is
+  // mechanical: _buildInboxName throws instead of returning a name
+  // that would silently expose the order id via the controllerId
+  // component. If this test ever starts failing because the check
+  // was removed for "brevity", DO NOT remove the check — the whole
+  // safety property of the cross-volume path depends on it.
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const stagingRoot   = path.join(dir, 'staging'); await fsp.mkdir(stagingRoot);
+  const stagingFolder = path.join(stagingRoot, 'ORD-TRAP'); await fsp.mkdir(stagingFolder);
+  await writeJpeg(path.join(stagingFolder, '0001.jpg'), 'x');
   const diginPath = path.join(dir, 'digin'); await fsp.mkdir(diginPath);
 
   const injected = {
     ...fsp,
+    rename: async () => { const err = new Error('EXDEV'); err.code = 'EXDEV'; throw err; },
+  };
+
+  // Uses alphanumeric-only strings so the sanitiser (which replaces
+  // anything outside [A-Za-z0-9._] with `_`) doesn't accidentally
+  // defeat the trap — we want the trap to hit the includes() check,
+  // not be smuggled away by character replacement. The orderId
+  // 'ORD123' survives the sanitiser verbatim inside the
+  // controllerId, so the generated name provably contains the order
+  // id — and the check must throw.
+  await assert.rejects(
+    deliverToDigin({
+      stagingFolder, diginPath, orderId: 'ORD123',
+      controllerId: 'prefix.ORD123.suffix', // synthetic trap; survives sanitiser
+      deps: {
+        fsPromises: injected,
+        logger: silentLogger,
+        instanceId: 'x',
+        clock: () => 0,
+        rand:  () => 'r',
+      },
+    }),
+    /refusing to build inbox name that contains the order id/,
+  );
+});
+
+test('1.15.3 deliverToDigin: cross-volume path requires controllerId — missing throws', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const stagingRoot   = path.join(dir, 'staging'); await fsp.mkdir(stagingRoot);
+  const stagingFolder = path.join(stagingRoot, 'ORD-NC'); await fsp.mkdir(stagingFolder);
+  await writeJpeg(path.join(stagingFolder, '0001.jpg'), 'x');
+  const diginPath = path.join(dir, 'digin'); await fsp.mkdir(diginPath);
+
+  const injected = {
+    ...fsp,
+    rename: async () => { const err = new Error('EXDEV'); err.code = 'EXDEV'; throw err; },
+  };
+
+  await assert.rejects(
+    deliverToDigin({
+      stagingFolder, diginPath, orderId: 'ORD-NC',
+      // NO controllerId — the monitor should always provide one, but
+      // this test locks the failure mode if it doesn't.
+      deps: { fsPromises: injected, logger: silentLogger },
+    }),
+    /cross-volume delivery requires `controllerId`/,
+  );
+});
+
+test('1.15.3 deliverToDigin: cross-volume copy failure — partial inbox left, staging preserved for retry', async (t) => {
+  // The design says leave the partial inbox for the age-based sweep
+  // rather than rm it here (rm on a partial can race a mid-network
+  // hiccup). Staging must be intact so the caller can retry with a
+  // fresh inbox on the next call.
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const stagingRoot   = path.join(dir, 'staging'); await fsp.mkdir(stagingRoot);
+  const stagingFolder = path.join(stagingRoot, 'ORD-CF'); await fsp.mkdir(stagingFolder);
+  await writeJpeg(path.join(stagingFolder, '0001.jpg'), 'a');
+  await writeJpeg(path.join(stagingFolder, '0002.jpg'), 'b');
+  const diginPath = path.join(dir, 'digin'); await fsp.mkdir(diginPath);
+
+  // rename EXDEVs; the recursive copy proceeds, but we make copyFile
+  // fail on the SECOND file (so a partial inbox with 0001 exists).
+  let renameCall = 0, copyCall = 0;
+  const injected = {
+    ...fsp,
+    rename: async (src, dst) => {
+      renameCall++;
+      if (renameCall === 1) { const err = new Error('EXDEV'); err.code = 'EXDEV'; throw err; }
+      return fsp.rename(src, dst);
+    },
+    copyFile: async (src, dst) => {
+      copyCall++;
+      if (copyCall === 2) {
+        const err = new Error('EACCES access denied mid-copy');
+        err.code = 'EACCES';
+        throw err;
+      }
+      return fsp.copyFile(src, dst);
+    },
+  };
+
+  await assert.rejects(
+    deliverToDigin({
+      stagingFolder, diginPath, orderId: 'ORD-CF',
+      controllerId: 'ctrl-cf',
+      deps: { fsPromises: injected, logger: silentLogger },
+    }),
+    /EACCES/,
+    'copy failure must propagate untouched — the operator sees the underlying error',
+  );
+
+  // Partial inbox left behind for the sweep. Filename is unknown at
+  // this level (has a random suffix), so check by prefix.
+  const dirents = await fsp.readdir(diginPath);
+  const inboxes = dirents.filter(n => n.startsWith('.ohd-inbox-'));
+  assert.equal(inboxes.length, 1,
+    `exactly one partial inbox must remain in DIGIN for the age-based sweep to clean up; found ${JSON.stringify(dirents)}`);
+  // Should have 0001.jpg (succeeded) and NOT 0002.jpg (failed).
+  const partial = await fsp.readdir(path.join(diginPath, inboxes[0]));
+  assert.deepEqual(partial, ['0001.jpg']);
+
+  // Staging preserved — retry with a fresh inbox is safe.
+  assert.ok(fs.existsSync(stagingFolder),
+    'staging folder must remain after a copy failure so retry can restart');
+  assert.equal(await fsp.readFile(path.join(stagingFolder, '0001.jpg'), 'utf-8'), 'a');
+  assert.equal(await fsp.readFile(path.join(stagingFolder, '0002.jpg'), 'utf-8'), 'b');
+});
+
+test('1.15.3 deliverToDigin: cross-volume rename failure — inbox left, staging preserved', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const stagingRoot   = path.join(dir, 'staging'); await fsp.mkdir(stagingRoot);
+  const stagingFolder = path.join(stagingRoot, 'ORD-RF'); await fsp.mkdir(stagingFolder);
+  await writeJpeg(path.join(stagingFolder, '0001.jpg'), 'a');
+  const diginPath = path.join(dir, 'digin'); await fsp.mkdir(diginPath);
+
+  // First rename EXDEV, second rename EPERM (the intra-DIGIN one).
+  let renameCall = 0;
+  const injected = {
+    ...fsp,
     rename: async () => {
-      const err = new Error('EXDEV cross-device link not permitted');
-      err.code = 'EXDEV';
+      renameCall++;
+      if (renameCall === 1) { const err = new Error('EXDEV'); err.code = 'EXDEV'; throw err; }
+      const err = new Error('EPERM operation not permitted');
+      err.code = 'EPERM';
       throw err;
     },
   };
 
   await assert.rejects(
     deliverToDigin({
-      stagingFolder, diginPath, orderId: 'ORD-2',
+      stagingFolder, diginPath, orderId: 'ORD-RF',
+      controllerId: 'ctrl-rf',
       deps: { fsPromises: injected, logger: silentLogger },
     }),
-    /same volume/,
-    'EXDEV must throw the co-location error, never silently fall through to a slow path',
+    /EPERM/,
   );
 
-  // Load-bearing: DIGIN must be untouched. No `.ohdtmp` sibling, no
-  // partial folder, no anything. Locks that a future maintainer
-  // doesn't reintroduce a slow-path fallback that lands even one
-  // byte inside diginPath before the (never-reached) rename.
   const dirents = await fsp.readdir(diginPath);
-  assert.deepEqual(dirents, [],
-    'nothing may be written inside diginPath when the rename fails');
-
-  // Staging is untouched too — the slow path used to clean it up,
-  // but with no slow path there's nothing to clean up. The staged
-  // folder stays where it was so the operator can inspect it after
-  // fixing the config and retrying.
-  assert.ok(fs.existsSync(stagingFolder),
-    'staging folder is left in place when delivery fails');
-});
-
-test('M7b deliverToDigin: EXDEV error text names both configured paths and the fix', async (t) => {
-  // Named the paths + the fix in the error so the operator sees
-  // exactly what to change without having to read the log. Locking
-  // the wording so a future refactor can't quietly weaken it.
-  const dir = await makeTempDir();
-  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
-
-  const stagingRoot   = path.join(dir, 'staging'); await fsp.mkdir(stagingRoot);
-  const stagingFolder = path.join(stagingRoot, 'ORD-3'); await fsp.mkdir(stagingFolder);
-  await writeJpeg(path.join(stagingFolder, '0001.jpg'), 'x');
-  const diginPath = path.join(dir, 'digin'); await fsp.mkdir(diginPath);
-
-  const injected = {
-    ...fsp,
-    rename: async () => { const e = new Error('EXDEV'); e.code = 'EXDEV'; throw e; },
-  };
-
-  let caught;
-  try {
-    await deliverToDigin({
-      stagingFolder, diginPath, orderId: 'ORD-3',
-      deps: { fsPromises: injected, logger: silentLogger },
-    });
-  } catch (err) { caught = err; }
-  assert.ok(caught, 'must throw');
-  assert.match(caught.message, /Image Staging Root and DIGIN Path must be on the same volume/);
-  assert.match(caught.message, new RegExp(stagingFolder.replace(/[\\/]/g, '\\$&')),
-    'error must name the configured Image Staging Root so the operator sees exactly which path is wrong');
-  assert.match(caught.message, new RegExp(diginPath.replace(/[\\/]/g, '\\$&')),
-    'error must name the configured DIGIN Path');
-  assert.match(caught.message, /Save-time validation now enforces this/,
-    'error must reference the save-time enforcement so the operator knows the retry gate exists');
+  const inboxes = dirents.filter(n => n.startsWith('.ohd-inbox-'));
+  assert.equal(inboxes.length, 1, 'inbox left behind for sweep after rename failure');
+  assert.ok(fs.existsSync(stagingFolder), 'staging preserved for retry after rename failure');
 });
 
 test('deliverToDigin: non-EXDEV rename error propagates untouched', async (t) => {

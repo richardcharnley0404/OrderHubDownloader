@@ -30,9 +30,25 @@
 const path = require('node:path');
 const nodeFs         = require('node:fs');
 const nodeFsPromises = require('node:fs/promises');
+const nodeCrypto     = require('node:crypto');
 
 const CMD_FILENAME_PREFIX = 'ohd_';
 const ORDER_FILE_TMP_SUFFIX = '.tmp';
+
+// N-lite cross-volume delivery (1.15.3). See
+// `docs/picpro-cross-volume-investigation.md` for the full design.
+// This prefix is load-bearing: PIC Pro's DIGIN watcher is presumed to
+// ignore folders whose names don't look like order ids, and this name
+// deliberately does not. The presumption is confirmed for the specific
+// lab that reported the bug — Tests 1 and 2 from the lab test pack.
+const INBOX_PREFIX = '.ohd-inbox-';
+
+// Per-process instance id. Generated at module load, stable for the
+// life of the OS process, cleared with the process. The age-based
+// sweep uses this to scope cleanup to inboxes THIS OHD process
+// created; other-process inboxes are handled by the older-than-
+// threshold branch.
+const _PROCESS_INSTANCE_ID = nodeCrypto.randomUUID();
 
 // ── stageImages ─────────────────────────────────────────────────────────────
 
@@ -184,19 +200,20 @@ async function writeOrderFile({
 // ── deliverToDigin ─────────────────────────────────────────────────────────
 
 /**
- * Move the staged image folder into DIGIN as a single unit so DIGIN
- * never sees a half-copied folder. This is always a same-volume
- * atomic rename — cross-volume delivery is not supported (see the
- * EXDEV branch below for the customer incident that removed it).
+ * Move the staged image folder into DIGIN. Two paths:
  *
- * Co-location of `imageStagingRoot` and `diginPath` is enforced at
- * save time by `probeSameVolume` (below) via the IPC save-controller
- * handler. If we ever reach here at dispatch time with cross-volume
- * paths, it's because a pre-M7b controller was never re-saved after
- * the fix landed — throw with a specific message naming both paths
- * and the fix so the operator sees exactly what to change, rather
- * than falling back to a slow-path that could recreate the deleted
- * bug.
+ * 1. **Same volume** — atomic `fs.rename` of staging → DIGIN. Byte-
+ *    identical to pre-1.15.3 behaviour. This is the healthy-config
+ *    path every co-located lab uses.
+ * 2. **Cross volume (EXDEV)** — copy staging → `{diginPath}/.ohd-inbox-*`
+ *    (recursive copy, cross-volume), then intra-DIGIN atomic rename
+ *    of the inbox → `{orderId}`. See
+ *    `docs/picpro-cross-volume-investigation.md` for the design (the
+ *    "N-lite" variant) and the two hypotheses it rests on:
+ *    (a) PIC Pro's DIGIN watcher ignores folders whose names don't
+ *    match an order-id pattern, and (b) OrderGateway is patient
+ *    about waiting for the DIGIN folder after consuming the `.txt`.
+ *    Both were confirmed at the reporting lab before this shipped.
  *
  * DIGIN Path MUST exist — same reasoning as writeOrderFile.
  *
@@ -221,13 +238,23 @@ async function writeOrderFile({
  * @param {string} args.stagingFolder
  * @param {string} args.diginPath
  * @param {string} args.orderId
+ * @param {string} [args.controllerId] — required to enter the
+ *   cross-volume branch (used in the inbox name so the sweep can
+ *   scope cleanup). Optional for same-volume calls; if a call
+ *   without controllerId hits EXDEV, the writer throws a specific
+ *   error naming the missing dep.
  * @param {object} [args.deps]
- * @returns {Promise<{ destFolder: string, method: 'rename' | 'already-delivered' }>}
+ * @returns {Promise<{
+ *   destFolder: string,
+ *   method: 'rename' | 'copy-then-rename' | 'already-delivered',
+ *   inboxPath?: string
+ * }>}
  */
 async function deliverToDigin({
   stagingFolder,
   diginPath,
   orderId,
+  controllerId,
   deps = {},
 }) {
   const fs         = deps.fs         || nodeFs;
@@ -264,42 +291,208 @@ async function deliverToDigin({
     throw new Error(`Fuji PIC Pro writer: stagingFolder does not exist: ${stagingFolder}`);
   }
 
-  // Same-volume atomic rename — the only supported delivery path.
-  //
-  // Before M7b (2026-08-18), an EXDEV fallback copied the staged
-  // folder into `{diginPath}/{orderId}.ohdtmp` and then renamed it in
-  // place. A comment on that code asserted "Frontier's DIGIN watch
-  // ignores it until the rename lands" — that was an assumption about
-  // a third-party product written as fact. A customer disproved it:
-  // PIC Pro ingested the `.ohdtmp` folder while it was still being
-  // copied (producing a blank order) and then ingested the renamed
-  // folder (the correct order), duplicating every order.
-  //
-  // The slow path was removed. Co-location of imageStagingRoot and
-  // diginPath is now enforced at save time by probeSameVolume(). A
-  // pre-M7b controller that was never re-saved would trip here at
-  // dispatch time; we throw with the operator-actionable fix.
+  // Fast path — same-volume atomic rename. Byte-identical to pre-
+  // 1.15.3 behaviour; the tripwires in the writer's test suite lock
+  // this. Every co-located lab (i.e. every healthy configuration)
+  // takes this branch and sees zero change.
   try {
     await fsPromises.rename(stagingFolder, destFolder);
     return { destFolder, method: 'rename' };
   } catch (err) {
     if (err && err.code === 'EXDEV') {
-      const msg =
-        'Fuji PIC Pro delivery failed: Image Staging Root and DIGIN Path must be on the same volume. ' +
-        'The previous cross-volume delivery fallback was removed after PIC Pro was observed ingesting ' +
-        'the partial .ohdtmp sibling, producing a blank duplicate order per real order. ' +
-        `Configured Image Staging Root: ${stagingFolder}. Configured DIGIN Path: ${diginPath}. ` +
-        'Fix: in Settings → Routing → Order Controllers → Edit this controller, move Image Staging Root ' +
-        'onto the same volume as DIGIN Path, then Save. Save-time validation now enforces this on new ' +
-        'and edited controllers.';
-      (log.logError || log.error || (() => {})).call(log,
-        '[fuji-pic-pro] deliverToDigin: cross-volume paths — refusing the deprecated slow path',
-        { stagingFolder, diginPath, orderId },
-      );
-      throw new Error(msg);
+      return await _deliverViaCrossVolumeInbox({
+        stagingFolder,
+        diginPath,
+        destFolder,
+        orderId,
+        controllerId,
+        deps,
+      });
     }
     throw err;
   }
+}
+
+/**
+ * Internal — the EXDEV cross-volume branch of deliverToDigin.
+ *
+ * Not exported. Callers reach this via deliverToDigin only, so the
+ * same-volume rename-first ordering is preserved. See the design doc
+ * for why this is variant "N-lite" and not "N": the copy runs INSIDE
+ * `_stepDelivering` (after OrderGateway has consumed the `.txt` and
+ * the container exists), not synchronously in dispatch — which keeps
+ * the exposure window equal to the copy duration and rests on only
+ * the name hypothesis, not container-gating.
+ *
+ * Failure discipline:
+ *   - Copy fails → throw, partial inbox left behind for the age-based
+ *     sweep. Do NOT rm here — a network flake in the middle is
+ *     another opportunity to race a network hiccup.
+ *   - Rename fails → throw, inbox left behind (sweep). Staging is
+ *     still intact so retry is safe (fresh inbox on the next call).
+ *   - rm-staging fails → warn, return success. The dispatched order
+ *     is already safely delivered; a lingering staging folder is
+ *     cosmetic.
+ */
+async function _deliverViaCrossVolumeInbox({
+  stagingFolder,
+  diginPath,
+  destFolder,
+  orderId,
+  controllerId,
+  deps,
+}) {
+  const fsPromises = deps.fsPromises || nodeFsPromises;
+  const log        = deps.logger     || { info: () => {}, warn: () => {}, logWarning: () => {}, logError: () => {} };
+  const instanceId = deps.instanceId || _PROCESS_INSTANCE_ID;
+  const clock      = deps.clock      || (() => Date.now());
+  const rand       = deps.rand       || (() => nodeCrypto.randomBytes(4).toString('hex'));
+
+  if (!controllerId) {
+    // A pre-1.15.3 caller reaching the cross-volume path with no
+    // controllerId — the inbox name loses its instance-scoping and
+    // the sweep can no longer discriminate. Fail loud rather than
+    // silently generate a controllerId-less inbox.
+    throw new Error(
+      'Fuji PIC Pro writer: cross-volume delivery requires `controllerId`. ' +
+      `staging=${stagingFolder} digin=${diginPath} orderId=${orderId}. ` +
+      'This is an internal wiring error — the monitor should have supplied ' +
+      'controllerId from the pending entry.'
+    );
+  }
+
+  const inboxName = _buildInboxName({
+    controllerId,
+    instanceId,
+    orderId,
+    ts: clock(),
+    rand: rand(),
+  });
+  const inboxPath = path.join(diginPath, inboxName);
+
+  // Copy the staged folder into a scratch location inside DIGIN. PIC
+  // Pro's watcher does not match on this name (per the empirical
+  // test at the reporting lab). No merge container matches it
+  // either — the merge container is `{orderId}.con`, which we will
+  // land into via the rename below.
+  try {
+    await _copyDirRecursive(stagingFolder, inboxPath, fsPromises);
+  } catch (copyErr) {
+    (log.logError || log.error || (() => {})).call(log,
+      '[fuji-pic-pro] cross-volume copy failed — partial inbox left for age-based sweep',
+      copyErr,
+      { stagingFolder, inboxPath, orderId, controllerId },
+    );
+    throw copyErr;
+  }
+
+  // Intra-DIGIN atomic rename. Both sides are inside the same share,
+  // so this is a same-volume rename by construction — always atomic.
+  // The moment this returns, PIC Pro sees `{orderId}` in DIGIN
+  // matching the merge container OrderGateway has already produced.
+  try {
+    await fsPromises.rename(inboxPath, destFolder);
+  } catch (renameErr) {
+    (log.logError || log.error || (() => {})).call(log,
+      '[fuji-pic-pro] intra-DIGIN rename failed — inbox left for sweep, staging preserved for retry',
+      renameErr,
+      { inboxPath, destFolder, orderId, controllerId },
+    );
+    throw renameErr;
+  }
+
+  // Best-effort cleanup of the emptied-out staging folder. Failure
+  // here is cosmetic — the order is already delivered — so warn
+  // and return success.
+  try {
+    await fsPromises.rm(stagingFolder, { recursive: true, force: true });
+  } catch (cleanupErr) {
+    (log.logWarning || log.warn || (() => {})).call(log,
+      '[fuji-pic-pro] failed to clean up staging folder after cross-volume delivery — dispatched order is fine',
+      { stagingFolder, error: cleanupErr && cleanupErr.message },
+    );
+  }
+
+  return { destFolder, method: 'copy-then-rename', inboxPath };
+}
+
+/**
+ * Recursive directory copy. Flat structure is the current PIC Pro
+ * shape (0001.jpg, 0002.jpg, ...) but the helper is deliberately
+ * recursive so a future nested-structure change wouldn't silently
+ * lose files.
+ *
+ * WARNING (recorded in `docs/picpro-cross-volume-investigation.md`
+ * under the mtime-resets-the-clock caveat): the age-based sweep's
+ * threshold defence assumes writes hit the inbox folder DIRECTLY —
+ * which they do while the copy is flat. If nested structure is
+ * introduced under the inbox, the parent's mtime does not update
+ * during the nested writes, and a long copy could let the parent's
+ * own mtime age past the sweep threshold while the copy is still
+ * in flight. The threshold (6 hours) has 2× headroom against the
+ * worst realistic case (2.8 hours), so this is safe today, but a
+ * change to either the threshold or the nesting must be considered
+ * jointly.
+ */
+async function _copyDirRecursive(source, dest, fsPromises) {
+  await fsPromises.mkdir(dest, { recursive: true });
+  const dirents = await fsPromises.readdir(source, { withFileTypes: true });
+  for (const dirent of dirents) {
+    const s = path.join(source, dirent.name);
+    const d = path.join(dest, dirent.name);
+    if (dirent.isDirectory()) {
+      await _copyDirRecursive(s, d, fsPromises);
+    } else {
+      await fsPromises.copyFile(s, d);
+    }
+  }
+}
+
+/**
+ * Build the inbox folder name.
+ *
+ * Naming discipline is load-bearing — the safety property of the
+ * cross-volume path is that the inbox name does NOT look like an
+ * order id, so PIC Pro's DIGIN watcher ignores it. Throws if the
+ * generated name would contain the orderId as a substring (which
+ * could happen if the controllerId string happens to include it).
+ * That check is defensive — controller ids are `crypto.randomUUID()`
+ * so a collision with a real order code is vanishingly unlikely —
+ * but the assertion makes the invariant mechanical.
+ *
+ * Characters are restricted to filesystem-safe on Windows/SMB
+ * (`[A-Za-z0-9._]`); anything else in controllerId is replaced with
+ * `_`. Instance id has its dashes stripped for readability.
+ */
+function _buildInboxName({ controllerId, instanceId, orderId, ts, rand }) {
+  const safeController = String(controllerId).replace(/[^A-Za-z0-9._]/g, '_');
+  const safeInstance   = String(instanceId).replace(/[^A-Za-z0-9]/g, '');
+  const name = `${INBOX_PREFIX}${safeController}-${safeInstance}-${ts}-${rand}`;
+  if (typeof orderId === 'string' && orderId.length > 0 && name.includes(orderId)) {
+    throw new Error(
+      'Fuji PIC Pro writer: refusing to build inbox name that contains the order id — the whole safety property of the cross-volume path depends on PIC Pro not matching the name against a real order id. ' +
+      `controllerId=${controllerId} orderId=${orderId} generated=${name}`
+    );
+  }
+  return name;
+}
+
+/**
+ * True iff the given DIRECTORY ENTRY name is an OHD inbox this
+ * process owns — i.e., it starts with the well-known prefix, the
+ * controllerId matches, and the instanceId matches. Used by the
+ * age-based sweep to determine "recent, own-process" scope.
+ */
+function _isOwnInboxName(name, { controllerId, instanceId }) {
+  if (typeof name !== 'string') return false;
+  const safeController = String(controllerId).replace(/[^A-Za-z0-9._]/g, '_');
+  const safeInstance   = String(instanceId).replace(/[^A-Za-z0-9]/g, '');
+  return name.startsWith(`${INBOX_PREFIX}${safeController}-${safeInstance}-`);
+}
+
+/** True iff the name starts with the inbox prefix (any owner). */
+function _isAnyInboxName(name) {
+  return typeof name === 'string' && name.startsWith(INBOX_PREFIX);
 }
 
 // ── writeCommandFile ──────────────────────────────────────────────────────
@@ -539,10 +732,19 @@ module.exports = {
   deliverToDigin,
   writeCommandFile,
   isSameVolume,
+  // Sweep uses these to scope discovery and cleanup.
+  INBOX_PREFIX,
+  PROCESS_INSTANCE_ID: _PROCESS_INSTANCE_ID,
+  _isOwnInboxName,
+  _isAnyInboxName,
   _internals: {
     _padNegNumber,
     _parseVolume,
+    _buildInboxName,
+    _copyDirRecursive,
+    _deliverViaCrossVolumeInbox,
     CMD_FILENAME_PREFIX,
     ORDER_FILE_TMP_SUFFIX,
+    INBOX_PREFIX,
   },
 };

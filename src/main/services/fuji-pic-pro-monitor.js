@@ -562,12 +562,17 @@ class FujiPicProMonitor {
 
   async _stepDelivering(entry, now) {
     // No filesystem watch to wait on — perform the DIGIN move now.
+    // The writer picks path based on the outcome: same-volume rename
+    // returns immediately, EXDEV triggers the N-lite cross-volume
+    // path (copy to inbox + intra-DIGIN rename). See
+    // `docs/picpro-cross-volume-investigation.md`.
     try {
       const { deliverToDigin } = this._fileWriter || _defaultWriter();
       await deliverToDigin({
         stagingFolder: entry.stagingFolder,
         diginPath:     entry.diginPath,
         orderId:       entry.orderId,
+        controllerId:  entry.controllerId,
         deps:          { logger: this._logger, fs: this._fs },
       });
     } catch (err) {
@@ -577,7 +582,7 @@ class FujiPicProMonitor {
         err,
         { orderId: entry.orderId, stagingFolder: entry.stagingFolder, diginPath: entry.diginPath },
       );
-      this._resolveEntry(entry, 'failed', now);
+      this._resolveEntry(entry, 'failed', now, err);
       return;
     }
     this._advance(entry, 'building', now);
