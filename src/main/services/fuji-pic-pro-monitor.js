@@ -98,6 +98,17 @@ const FS_WATCH_DEBOUNCE_MS    = 500;
 const DEFAULT_GATEWAY_TIMEOUT_MS = 2 * 60 * 1000;
 const DEFAULT_BUILD_TIMEOUT_MS   = 30 * 60 * 1000;
 
+// 1.15.3 age-based inbox sweep (D). See
+// `docs/picpro-cross-volume-investigation.md` §M4 for the discipline
+// and threshold justification. Runs opportunistically inside the
+// regular scan cycle (naturally serialised with delivery via
+// `_scanInFlight`), triggered when at least this long has passed since
+// the last sweep.
+const DEFAULT_INBOX_SWEEP_INTERVAL_MS   = 60 * 60 * 1000;      // 1 hour
+const DEFAULT_STALE_INBOX_THRESHOLD_MS  = 6 * 60 * 60 * 1000;  // 6 hours
+const MIN_STALE_INBOX_THRESHOLD_MS      = 1 * 60 * 60 * 1000;  // 1 hour
+const MAX_STALE_INBOX_THRESHOLD_MS      = 168 * 60 * 60 * 1000; // 1 week
+
 // Terminal state → the monitor drops the entry after emitting.
 const TERMINAL_STATUSES = new Set(['accepted', 'failed', 'timed_out']);
 
@@ -128,6 +139,127 @@ async function _classifyPath(fs, filePath) {
     if (err && err.code === 'ENOENT') return 'absent';
     return 'unknown';
   }
+}
+
+/**
+ * 1.15.3 (D) — age-based inbox sweep.
+ *
+ * Two-tier discipline per §M4 of the design doc
+ * (`docs/picpro-cross-volume-investigation.md`):
+ *   1. **Recent** (mtime < staleThresholdMs old): instance-scoped.
+ *      Own-instance recent inboxes with no matching pending entry
+ *      are orphans (because we run inside `_scanInFlight` mutex, so
+ *      any `_stepDelivering` has already returned by the time we
+ *      look; a surviving own-instance inbox IS an orphan). Other
+ *      recent inboxes belong to another controller / OHD process
+ *      and are LEFT ALONE.
+ *   2. **Old** (mtime >= staleThresholdMs): reaped UNCONDITIONALLY,
+ *      regardless of controllerId or instanceId. No legitimate
+ *      in-flight copy could be this old, so anything past the
+ *      threshold is a leak (crashed prior instance, machine swap,
+ *      third-party wearing our prefix).
+ *
+ * mtime, not birthtime, deliberately: an active recursive copy
+ * writes files DIRECTLY into the inbox folder (flat structure —
+ * PIC Pro orders are `0001.jpg`, `0002.jpg`, ...) which bumps the
+ * parent folder's mtime on every add. A stalled copy has a static
+ * mtime and IS reaped, which is correct.
+ *
+ * CAVEAT (recorded in the design doc): mtime-resets-the-clock
+ * requires FLAT writes. If nested subdirectories are ever
+ * introduced under the inbox, the parent's mtime wouldn't update
+ * during nested writes and a long copy could be reaped mid-flight.
+ * The 6h default has ~2x headroom against the worst realistic copy
+ * (2.8h) so this is safe today, but a change to the threshold OR
+ * to nesting must be considered jointly. If either changes, switch
+ * the age measurement to `Math.max(...allDescendantMtimes)`.
+ *
+ * @returns {Promise<{swept, keptRecent, oldReaped, ownInstanceReaped, errors: Array}>}
+ */
+async function _sweepInboxes(diginPath, {
+  controllerId,
+  instanceId,
+  staleThresholdMs,
+  fsPromises,
+  logger,
+  now,
+}) {
+  const summary = {
+    swept:              0,
+    ownInstanceReaped:  0,
+    oldReaped:          0,
+    keptRecent:         0,
+    errors:             [],
+  };
+  let entries;
+  try {
+    entries = await fsPromises.readdir(diginPath);
+  } catch (err) {
+    // ENOENT on DIGIN itself is a config problem elsewhere — surface
+    // as a warn, don't sweep. Any other stat error same posture.
+    (logger.logWarning || logger.warn || (() => {})).call(logger,
+      '[fuji-pic-pro] inbox sweep: readdir(diginPath) failed — no sweep this cycle',
+      { diginPath, error: err && err.message, code: err && err.code },
+    );
+    return summary;
+  }
+
+  const {
+    INBOX_PREFIX: prefix,
+    _isOwnInboxName: isOwn,
+  } = require('./fuji-pic-pro-file-writer');
+
+  for (const name of entries) {
+    if (!name.startsWith(prefix)) continue;
+    const full = path.join(diginPath, name);
+    let stat;
+    try {
+      stat = await fsPromises.stat(full);
+    } catch (err) {
+      // Race: someone removed it between readdir and stat, or a
+      // permission blip. Skip, no error.
+      summary.errors.push({ path: full, phase: 'stat', code: err && err.code });
+      continue;
+    }
+    const ageMs = now - stat.mtime.getTime();
+    if (ageMs >= staleThresholdMs) {
+      // OLD — reap unconditionally.
+      try {
+        await fsPromises.rm(full, { recursive: true, force: true });
+        summary.oldReaped++;
+        summary.swept++;
+        (logger.info || (() => {})).call(logger,
+          '[fuji-pic-pro] inbox sweep: reaped stale inbox (older than threshold)',
+          { path: full, ageHours: (ageMs / 3600000).toFixed(2), thresholdHours: (staleThresholdMs / 3600000).toFixed(2) },
+        );
+      } catch (err) {
+        summary.errors.push({ path: full, phase: 'rm-old', code: err && err.code });
+      }
+      continue;
+    }
+    // RECENT — instance-scoped.
+    if (isOwn(name, { controllerId, instanceId })) {
+      // Own controller + own instanceId, but no _stepDelivering is
+      // in-flight (scan mutex guarantees this). Orphan.
+      try {
+        await fsPromises.rm(full, { recursive: true, force: true });
+        summary.ownInstanceReaped++;
+        summary.swept++;
+        (logger.info || (() => {})).call(logger,
+          '[fuji-pic-pro] inbox sweep: reaped own-instance orphan inbox',
+          { path: full, ageMinutes: (ageMs / 60000).toFixed(1) },
+        );
+      } catch (err) {
+        summary.errors.push({ path: full, phase: 'rm-own', code: err && err.code });
+      }
+    } else {
+      // Recent, not ours — belongs to another controller or OHD
+      // instance. Leave it alone; the age threshold will catch it
+      // eventually if the other actor forgets about it.
+      summary.keptRecent++;
+    }
+  }
+  return summary;
 }
 
 // ── Monitor ─────────────────────────────────────────────────────────────────
@@ -174,6 +306,21 @@ class FujiPicProMonitor {
     // In-memory mirror of the persisted queue. Loaded on start,
     // rewritten to disk on every mutation.
     this._pending = new Map(); // orderId → entry
+
+    // 1.15.3 age-based inbox sweep (D). Configuration is read from
+    // the active controller in startMonitoring; overrides via deps
+    // exist for tests. Wall-clock timestamp of the last sweep — 0
+    // means "sweep on the next _scan".
+    this._inboxSweepIntervalMs  = Number.isFinite(deps.inboxSweepIntervalMs)
+      ? deps.inboxSweepIntervalMs
+      : DEFAULT_INBOX_SWEEP_INTERVAL_MS;
+    this._staleInboxThresholdMs = Number.isFinite(deps.staleInboxThresholdMs)
+      ? deps.staleInboxThresholdMs
+      : DEFAULT_STALE_INBOX_THRESHOLD_MS;
+    this._lastInboxSweepAt      = 0;
+    // Instance id is normally the module-load constant; injectable for
+    // tests that need deterministic own-instance scoping.
+    this._instanceId = deps.instanceId || require('./fuji-pic-pro-file-writer').PROCESS_INSTANCE_ID;
   }
 
   /**
@@ -210,6 +357,22 @@ class FujiPicProMonitor {
     }
     this._controller = controller || {};
     this._callback   = callback;
+
+    // 1.15.3 (D): honour a per-controller override for the stale-
+    // inbox threshold. Clamped to [1h, 168h]; anything outside the
+    // range is a config error and gets clamped silently rather than
+    // rejected — the default is safe.
+    if (controller && Number.isFinite(controller.staleInboxThresholdHours)) {
+      const requestedMs = controller.staleInboxThresholdHours * 3600_000;
+      this._staleInboxThresholdMs = Math.max(
+        MIN_STALE_INBOX_THRESHOLD_MS,
+        Math.min(MAX_STALE_INBOX_THRESHOLD_MS, requestedMs),
+      );
+    }
+    // Force a sweep on the next _scan by resetting the timestamp.
+    // Startup sweep runs opportunistically from the scan loop rather
+    // than blocking startMonitoring — the caller expects fast return.
+    this._lastInboxSweepAt = 0;
 
     // Restore persisted queue.
     this._loadFromStore();
@@ -478,12 +641,65 @@ class FujiPicProMonitor {
           this._resolveEntry(entry, 'failed', now, err);
         }
       }
+
+      // 1.15.3 (D): opportunistic inbox sweep. Runs inside the same
+      // `_scanInFlight` mutex as delivery, so an in-flight
+      // `_stepDelivering` above has already returned by this point —
+      // any surviving own-instance inbox is unambiguously an orphan.
+      await this._maybeSweepInboxes(now);
+
       // Fast → slow cadence switch when the queue drains.
       this._rescheduleSweep();
     } finally {
       // Always clear the flag, even if the loop throws — otherwise
       // one bad scan permanently locks the monitor.
       this._scanInFlight = false;
+    }
+  }
+
+  /**
+   * 1.15.3 (D) — decide whether the interval has elapsed, and if so
+   * run one inbox sweep. Called at the tail of `_scan()`, inside the
+   * mutex, so it does not race with delivery.
+   *
+   * Silent no-op when no controller is active (start hasn't happened
+   * yet, or stop has torn down) or when the diginPath isn't set on
+   * the controller. Errors from the sweep are already logged inside
+   * `_sweepInboxes` — we still swallow any leftover here so a busted
+   * sweep can't take down the scan loop.
+   */
+  async _maybeSweepInboxes(now) {
+    if (!this._controller || !this._controller.diginPath) return;
+    if ((now - this._lastInboxSweepAt) < this._inboxSweepIntervalMs) return;
+    this._lastInboxSweepAt = now;
+    try {
+      const summary = await _sweepInboxes(this._controller.diginPath, {
+        controllerId:     this._controller.id || 'unassigned',
+        instanceId:       this._instanceId,
+        staleThresholdMs: this._staleInboxThresholdMs,
+        fsPromises:       this._fs.promises,
+        logger:           this._logger,
+        now,
+      });
+      if (summary.swept > 0 || summary.errors.length > 0) {
+        (this._logger.info || (() => {})).call(this._logger,
+          '[fuji-pic-pro] inbox sweep completed',
+          {
+            diginPath:         this._controller.diginPath,
+            swept:             summary.swept,
+            ownInstanceReaped: summary.ownInstanceReaped,
+            oldReaped:         summary.oldReaped,
+            keptRecent:        summary.keptRecent,
+            errors:            summary.errors,
+          },
+        );
+      }
+    } catch (err) {
+      (this._logger.logError || this._logger.error || (() => {})).call(this._logger,
+        '[fuji-pic-pro] inbox sweep threw — swallowed so the scan loop stays alive',
+        err,
+        { diginPath: this._controller.diginPath },
+      );
     }
   }
 
@@ -818,9 +1034,14 @@ module.exports = {
     DEFAULT_IDLE_SWEEP_MS,
     DEFAULT_GATEWAY_TIMEOUT_MS,
     DEFAULT_BUILD_TIMEOUT_MS,
+    DEFAULT_INBOX_SWEEP_INTERVAL_MS,
+    DEFAULT_STALE_INBOX_THRESHOLD_MS,
+    MIN_STALE_INBOX_THRESHOLD_MS,
+    MAX_STALE_INBOX_THRESHOLD_MS,
     TERMINAL_STATUSES,
     REQUIRED_ABSENT_OBSERVATIONS,
     _classifyPath,
     _sanitiseControllerIdForStoreName,
+    _sweepInboxes,
   },
 };
