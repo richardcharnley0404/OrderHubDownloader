@@ -388,6 +388,20 @@ An image in a job whose product code doesn't match any template goes
 nowhere — the pass-through is PDF-only by design (an image in the
 sheets root would confuse the operator).
 
+**Known limitation — EXIF rotation is ignored.** JPEGs carry an
+optional `Orientation` tag that photo viewers use to auto-rotate the
+image on screen: a phone typically stores photos in the sensor's
+native (usually landscape) orientation and sets the tag to "rotate
+90° for display". OHD imposition reads only the stored pixel
+dimensions, so a phone photo that previews upright in Photos or
+Preview but is stored sideways **will impose sideways**. Artwork
+exported from design tools (Photoshop, Illustrator, Affinity,
+InDesign) writes the pixels in the intended orientation and is
+unaffected. If a phone-camera JPEG needs to be imposed, open it in
+any image editor and re-save (Photoshop: File → Export → Save for
+Web; Preview on Mac: File → Export) — the editor bakes the EXIF
+rotation into the pixel data and OHD then imposes it upright.
+
 ## 9. What v1 does NOT do
 
 Recorded so they're chosen, not missed:

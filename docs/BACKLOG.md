@@ -222,6 +222,21 @@ they're chosen next time, not missed:
   imposition engine consumes PDF pages. Adding raster support would
   need a JPEG-to-page wrapper in composeImposition.
 
+**EXIF orientation support in image imposition (M10 follow-on, 2026-08-20).**
+`image-artwork.js` reads JPEG SOF stored pixel dimensions and
+ignores the EXIF Orientation tag entirely. Consequence: a phone
+photo that previews upright but is stored sideways with EXIF
+`Orientation=6` (rotate 90° for display) imposes sideways. Design
+tools (Photoshop, Illustrator, Affinity) always write pixels in
+the intended orientation and are unaffected; only phone-camera
+JPEGs and a few web-download shapes carry EXIF rotation. If a lab
+reports sideways images: read APP1 → EXIF IFD0 → tag `0x0112`
+(Orientation), pre-swap width/height for orientations 5–8 before
+`chooseRotation` sees them, and bake the turn into `drawImage`'s
+rotation argument. ~40 lines in `image-artwork.js`. Build only if
+a lab reports the problem — the operator guide's §8 known-limitation
+paragraph already tells them the re-save-in-an-editor workaround.
+
 **Filename templates deliberately don't apply to reprints (M4, 2026-08-17).**
 `_sendReprintViaFolderCopy` (`src/main/services/print-service.js`) keeps the
 original filenames into its `…_{id}-r{n}` folder — the M3 template on the
