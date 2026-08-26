@@ -3224,6 +3224,9 @@ class PrintService {
         gatewayTimeoutMs:    route.gatewayTimeoutMs,
         buildTimeoutMs:      route.buildTimeoutMs,
         sendReleaseCommand:  route.sendReleaseCommand === true,
+        // 1.15.3 silent-stall fix: stamp _status:'error' on this
+        // single job if the async delivery fails.
+        jobIds:              [job.id],
       });
     } catch (enqueueErr) {
       // Fix 9: duplicate orderId (in-flight submission not yet
@@ -3724,6 +3727,10 @@ class PrintService {
         gatewayTimeoutMs:    sharedRoute.gatewayTimeoutMs,
         buildTimeoutMs:      sharedRoute.buildTimeoutMs,
         sendReleaseCommand:  sharedRoute.sendReleaseCommand === true,
+        // 1.15.3 silent-stall fix: order-level dispatch stamps
+        // _status:'error' on every job in the group if the async
+        // delivery fails.
+        jobIds:              activeItems.map(i => i.job.id),
       });
     } catch (enqueueErr) {
       logger.logError('Fuji PIC Pro order-level enqueue failed — refusing to write .txt', enqueueErr, {

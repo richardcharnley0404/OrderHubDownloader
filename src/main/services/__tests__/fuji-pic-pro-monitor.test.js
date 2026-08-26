@@ -1048,3 +1048,237 @@ test('sweep cadence flips between active (1s) and idle (60s) as the queue drains
     'flips back to idle when the queue empties');
   monitor.stopMonitoring();
 });
+
+// ── 1.15.3 silent-stall fix (C) ──────────────────────────────────────────
+//
+// The monitor emits `errorMessage` and `jobIds` on every failure /
+// timed_out callback so the print-controller-service adapter can call
+// jobService.updateJobLocally({_status:'error',_errorMessage}) instead
+// of letting the job sit at "in production" indefinitely. These tests
+// lock the exact wording per site (per the task brief — every message
+// gets its own test) and the jobIds threading.
+
+test('1.15.3 silent-stall: enqueueSubmission persists jobIds on the entry', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const ws = await setupWorkspace(dir, { orderId: 'ORD-JIDS' });
+
+  const { monitor } = makeMonitor();
+  monitor.startMonitoring({}, () => {});
+  const entry = monitor.enqueueSubmission({
+    orderId:       'ORD-JIDS',
+    orderRef:      'ORD-JIDS',
+    stagingFolder: ws.stagingFolder,
+    orderDataPath: ws.orderData,
+    diginPath:     ws.diginPath,
+    controllerId:  'ctrl-jids',
+    jobIds:        ['job-1', 'job-2', 'job-3'],
+  });
+  assert.deepEqual(entry.jobIds, ['job-1', 'job-2', 'job-3'],
+    'entry must record jobIds so the terminal callback can name every job to error');
+
+  const pending = monitor.getPending()[0];
+  assert.deepEqual(pending.jobIds, ['job-1', 'job-2', 'job-3'],
+    'persisted entry carries jobIds through rehydrate');
+  monitor.stopMonitoring();
+});
+
+test('1.15.3 silent-stall: enqueueSubmission defaults jobIds to [] when caller omits (reprint pattern)', async (t) => {
+  // Reprints do NOT stamp the parent job to error on failure. This
+  // locks the default so a caller that forgets to pass jobIds
+  // doesn't accidentally trigger the wrong parent-error behaviour.
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const ws = await setupWorkspace(dir, { orderId: 'ORD-DEF' });
+
+  const { monitor } = makeMonitor();
+  monitor.startMonitoring({}, () => {});
+  const entry = monitor.enqueueSubmission({
+    orderId:       'ORD-DEF',
+    orderRef:      'ORD-DEF',
+    stagingFolder: ws.stagingFolder,
+    orderDataPath: ws.orderData,
+    diginPath:     ws.diginPath,
+    controllerId:  'ctrl-def',
+  });
+  assert.deepEqual(entry.jobIds, []);
+  monitor.stopMonitoring();
+});
+
+test('1.15.3 silent-stall: gateway-timeout callback carries jobIds AND an operator-readable errorMessage', async (t) => {
+  // Message must name (a) the orderId, (b) the timeout in seconds,
+  // (c) the configured Order Data path, and (d) suggest checking
+  // OrderGateway.exe. Each of these is a piece of information the
+  // lab operator needs to act on the failure without opening the
+  // Activity Log.
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const ws = await setupWorkspace(dir, { orderId: 'ORD-GT' });
+
+  const clock = makeClock(1_000_000);
+  const { monitor } = makeMonitor({ clock });
+  const cb = recorderCallback();
+  monitor.startMonitoring({}, cb);
+  enqueue(monitor, ws, 'ORD-GT', { gatewayTimeoutMs: 5_000 });
+
+  // Force the gateway timeout branch by leaving the .txt in place.
+  clock.advance(6_000);
+  await monitor._scanNow();
+
+  assert.equal(cb.events[0].status, 'failed');
+  assert.deepEqual(cb.events[0].jobIds, [],
+    'jobIds echoed on the event so the adapter can iterate them');
+  assert.match(cb.events[0].errorMessage, /ORD-GT/,
+    'errorMessage names the orderId');
+  assert.match(cb.events[0].errorMessage, /5s/,
+    'errorMessage names the actual timeout in seconds (5000ms → 5s)');
+  assert.match(cb.events[0].errorMessage, /OrderGateway\.exe/,
+    'errorMessage points the operator at OrderGateway.exe');
+  assert.match(
+    cb.events[0].errorMessage,
+    new RegExp(ws.orderData.replace(/[\\/]/g, '\\$&')),
+    'errorMessage names the configured Order Data path');
+  monitor.stopMonitoring();
+});
+
+test('1.15.3 silent-stall: build-timeout callback carries an operator-readable errorMessage naming DIGIN + minutes', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const ws = await setupWorkspace(dir, { orderId: 'ORD-BT' });
+
+  const clock = makeClock(1_000_000);
+  const { monitor } = makeMonitor({ clock });
+  const cb = recorderCallback();
+  monitor.startMonitoring({}, cb);
+  enqueue(monitor, ws, 'ORD-BT', {
+    buildTimeoutMs: 600_000,
+    // No mergeDataPath — locks the "no merge suffix" branch too.
+  });
+
+  // Advance through awaiting-gateway + delivering.
+  await fsp.unlink(path.join(ws.orderData, 'ORD-BT.txt'));
+  for (let i = 0; i < _internals.REQUIRED_ABSENT_OBSERVATIONS; i++) {
+    await monitor._scanNow();
+  }
+  assert.equal(monitor.getPending()[0].phase, 'building');
+
+  // Cross the build timeout with DIGIN still holding the folder.
+  clock.advance(601_000);
+  await monitor._scanNow();
+
+  assert.equal(cb.events[0].status, 'timed_out',
+    'a stuck build is timed_out, not failed');
+  assert.match(cb.events[0].errorMessage, /ORD-BT/);
+  assert.match(cb.events[0].errorMessage, /10 minutes/,
+    'errorMessage names the build timeout as minutes (600000ms → 10 min)');
+  assert.match(cb.events[0].errorMessage,
+    new RegExp(ws.diginPath.replace(/[\\/]/g, '\\$&')),
+    'errorMessage names the DIGIN path so the operator knows where to look');
+  assert.match(cb.events[0].errorMessage, /No \[release\] command was sent/,
+    'errorMessage tells the operator that no [release] was written (no accidental print of an incomplete build)');
+  monitor.stopMonitoring();
+});
+
+test('1.15.3 silent-stall: txt-commit gap → operator-readable errorMessage names the abort condition', async (t) => {
+  // The txtCommitted-false timeout branch fires when dispatch crashed
+  // between enqueueSubmission and writeOrderFile. Message must say
+  // WHAT happened and WHAT the operator should do (retry).
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const ws = await setupWorkspace(dir, { orderId: 'ORD-COMMIT' });
+
+  const clock = makeClock(1_000_000);
+  const { monitor } = makeMonitor({ clock });
+  const cb = recorderCallback();
+  monitor.startMonitoring({}, cb);
+  // Enqueue directly, do NOT call markCommitted — simulates the
+  // dispatch-crashed-between-enqueue-and-write state.
+  monitor.enqueueSubmission({
+    orderId:       'ORD-COMMIT',
+    orderRef:      'ORD-COMMIT',
+    stagingFolder: ws.stagingFolder,
+    orderDataPath: ws.orderData,
+    diginPath:     ws.diginPath,
+    controllerId:  'ctrl-commit',
+    gatewayTimeoutMs: 5_000,
+  });
+
+  clock.advance(6_000);
+  await monitor._scanNow();
+
+  assert.equal(cb.events[0].status, 'failed');
+  assert.match(cb.events[0].errorMessage, /ORD-COMMIT/);
+  assert.match(cb.events[0].errorMessage, /between the enqueue and the \.txt write/,
+    'errorMessage explains the specific abort condition');
+  assert.match(cb.events[0].errorMessage, /Retry the dispatch/,
+    'errorMessage tells the operator to retry');
+  monitor.stopMonitoring();
+});
+
+test('1.15.3 silent-stall: delivery-failure callback propagates the writer\'s specific error message', async (t) => {
+  // The writer throws domain-specific errors (EXDEV pre-1.15.3
+  // co-location, EPERM, EACCES, "diginPath does not exist", etc.).
+  // The monitor must NOT swallow these into a generic "delivery
+  // failed" — the specific message is what the operator needs.
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const ws = await setupWorkspace(dir, { orderId: 'ORD-DF' });
+
+  const clock = makeClock(1_000_000);
+  // Inject a file writer whose deliverToDigin throws a specific
+  // error, so we lock the propagation regardless of what the real
+  // writer emits today.
+  const fakeWriter = {
+    ...fileWriter,
+    deliverToDigin: async () => {
+      throw new Error('SPECIFIC-WRITER-ERROR-MESSAGE-abc123');
+    },
+  };
+  const store  = makeInMemoryStore();
+  const monitor = new FujiPicProMonitor({
+    deps: { store, logger: silentLogger, clock, fs, fileWriter: fakeWriter },
+  });
+
+  const cb = recorderCallback();
+  monitor.startMonitoring({}, cb);
+  enqueue(monitor, ws, 'ORD-DF');
+
+  await fsp.unlink(path.join(ws.orderData, 'ORD-DF.txt'));
+  for (let i = 0; i < _internals.REQUIRED_ABSENT_OBSERVATIONS; i++) {
+    await monitor._scanNow();
+  }
+
+  assert.equal(cb.events[0].status, 'failed');
+  assert.match(cb.events[0].errorMessage, /SPECIFIC-WRITER-ERROR-MESSAGE-abc123/,
+    'the writer error text reaches the callback verbatim so the operator sees the exact reason');
+  monitor.stopMonitoring();
+});
+
+test('1.15.3 silent-stall: accepted callback has null errorMessage (no false positives on happy path)', async (t) => {
+  // Locks that a successful delivery does NOT set errorMessage to
+  // something truthy, which would cause the adapter to error the
+  // job even after acceptance. Regression guard against a future
+  // refactor that leaks a stale err through the wrong branch.
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const ws = await setupWorkspace(dir, { orderId: 'ORD-HAPPY' });
+
+  const { monitor } = makeMonitor();
+  const cb = recorderCallback();
+  monitor.startMonitoring({}, cb);
+  enqueue(monitor, ws, 'ORD-HAPPY');
+
+  await fsp.unlink(path.join(ws.orderData, 'ORD-HAPPY.txt'));
+  for (let i = 0; i < _internals.REQUIRED_ABSENT_OBSERVATIONS; i++) {
+    await monitor._scanNow();
+  }
+  await fsp.rm(path.join(ws.diginPath, 'ORD-HAPPY'), { recursive: true, force: true });
+  for (let i = 0; i < _internals.REQUIRED_ABSENT_OBSERVATIONS; i++) {
+    await monitor._scanNow();
+  }
+
+  assert.equal(cb.events[0].status, 'accepted');
+  assert.equal(cb.events[0].errorMessage, null,
+    'accepted callbacks must NOT carry an error message');
+  monitor.stopMonitoring();
+});

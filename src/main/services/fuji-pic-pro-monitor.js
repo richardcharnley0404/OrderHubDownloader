@@ -273,6 +273,12 @@ class FujiPicProMonitor {
    * @param {number} [args.gatewayTimeoutMs]
    * @param {number} [args.buildTimeoutMs]
    * @param {boolean} [args.sendReleaseCommand]
+   * @param {string[]} [args.jobIds] — JobStore ids to stamp with
+   *   `_status:'error'` if this submission terminates in failure.
+   *   Single-job dispatch passes `[job.id]`; order-level dispatch
+   *   passes every active job id in the group. Reprint dispatch
+   *   leaves this empty so the parent job isn't errored by a
+   *   sibling reprint's failure.
    * @returns {object} the persisted entry
    */
   enqueueSubmission(args) {
@@ -304,6 +310,13 @@ class FujiPicProMonitor {
       orderRef:            args.orderRef || args.orderId,
       orderId:             args.orderId,
       controllerId:        args.controllerId || null,
+      // 1.15.3 silent-stall fix: capture the JobStore ids so a
+      // terminal-failure callback can stamp `_status:'error'`
+      // via jobService.updateJobLocally in print-controller-service.
+      // Kept as an array (order-level dispatch passes many) with
+      // an empty default for reprints (which do not error the
+      // parent) and older callers that don't know about the field.
+      jobIds:              Array.isArray(args.jobIds) ? [...args.jobIds] : [],
       stagingFolder:       args.stagingFolder,
       orderDataPath:       args.orderDataPath,
       diginPath:           args.diginPath,
@@ -459,7 +472,10 @@ class FujiPicProMonitor {
             err,
             { orderId: entry.orderId, phase: entry.phase },
           );
-          this._resolveEntry(entry, 'failed', now);
+          // Preserve the original error's message so the operator
+          // sees exactly what step blew up, rather than a generic
+          // "delivery failed" text.
+          this._resolveEntry(entry, 'failed', now, err);
         }
       }
       // Fast → slow cadence switch when the queue drains.
@@ -483,7 +499,10 @@ class FujiPicProMonitor {
         return this._stepReleasing(entry, now);
       default:
         // Unknown phase — safety net. Drop the entry.
-        this._resolveEntry(entry, 'failed', now);
+        this._resolveEntry(entry, 'failed', now, new Error(
+          `Fuji PIC Pro monitor entered an unknown phase "${entry.phase}" for order ${entry.orderId}. ` +
+          'This is a programmer error — please report it. The order was abandoned; retry the dispatch.'
+        ));
         return undefined;
     }
   }
@@ -506,7 +525,11 @@ class FujiPicProMonitor {
         // have failed AND dispatch didn't dequeue (crash between
         // enqueue and write). Resolve as failed. No .txt cleanup
         // needed because there's nothing on disk to unlink.
-        this._resolveEntry(entry, 'failed', now);
+        this._resolveEntry(entry, 'failed', now, new Error(
+          `Fuji PIC Pro dispatch was aborted between the enqueue and the .txt write for order ${entry.orderId}. ` +
+          'No order file was submitted to OrderGateway. This usually means OHD was killed (or crashed) mid-dispatch, ' +
+          'or the .txt write failed with an error that was already surfaced on the Jobs grid. Retry the dispatch.'
+        ));
       }
       return;
     }
@@ -556,7 +579,13 @@ class FujiPicProMonitor {
           );
         }
       }
-      this._resolveEntry(entry, 'failed', now);
+      const gatewayTimeoutSec = Math.round(entry.gatewayTimeoutMs / 1000);
+      this._resolveEntry(entry, 'failed', now, new Error(
+        `OrderGateway did not consume the order file within ${gatewayTimeoutSec}s for order ${entry.orderId}. ` +
+        `Check that OrderGateway.exe is running and configured to watch Order Data at: ${entry.orderDataPath}. ` +
+        `Also confirm the machine can reach that path (permissions / SMB share still mounted). ` +
+        `The stale order file was cleaned up automatically — you can safely retry the dispatch once OrderGateway is back.`
+      ));
     }
   }
 
@@ -626,7 +655,17 @@ class FujiPicProMonitor {
       // Timed out — don't send [release] (the build hasn't finished,
       // releasing an incomplete order is worse than not printing at
       // all).
-      this._resolveEntry(entry, 'timed_out', now);
+      const buildTimeoutMin = Math.round(entry.buildTimeoutMs / 60000);
+      const mergeSuffix = entry.mergeDataPath
+        ? ` and Merge Data path: ${entry.mergeDataPath}`
+        : '';
+      this._resolveEntry(entry, 'timed_out', now, new Error(
+        `PIC Pro did not finish building order ${entry.orderId} within ${buildTimeoutMin} minutes. ` +
+        `The DIGIN folder and any merge container are still present — PIC Pro is stalled or the operator ` +
+        `console has manually held the job. Check PIC Pro's queue, then inspect DIGIN path: ${entry.diginPath}${mergeSuffix}. ` +
+        `No [release] command was sent — releasing an incomplete build is worse than not printing at all. ` +
+        `Retry the dispatch once PIC Pro is unblocked.`
+      ));
     }
   }
 
@@ -665,32 +704,47 @@ class FujiPicProMonitor {
     this._persist();
   }
 
-  _resolveEntry(entry, status, now) {
+  /**
+   * @param {object} entry
+   * @param {'accepted'|'failed'|'timed_out'} status
+   * @param {number} now
+   * @param {Error} [err] — 1.15.3 silent-stall fix. Non-null for
+   *   every failure/timed_out site so the callback (and downstream
+   *   `jobService.updateJobLocally`) surfaces an operator-readable
+   *   message on the Jobs grid instead of leaving the job at "in
+   *   production" indefinitely. `accepted` calls pass `null`.
+   */
+  _resolveEntry(entry, status, now, err = null) {
     this._pending.delete(entry.orderId);
     this._persist();
     if (!TERMINAL_STATUSES.has(status)) {
       // Programmer error — treat as failed.
       status = 'failed';
     }
-    this._emit(entry, status, now);
+    this._emit(entry, status, now, err);
   }
 
-  _emit(entry, status, now) {
+  _emit(entry, status, now, err = null) {
     if (!this._callback) return;
     try {
       this._callback({
-        orderRef:  entry.orderRef,
+        orderRef:     entry.orderRef,
+        jobIds:       Array.isArray(entry.jobIds) ? [...entry.jobIds] : [],
         status,
-        phase:     entry.phase,
-        timestamp: new Date(now),
+        phase:        entry.phase,
+        timestamp:    new Date(now),
+        // Present on every failure/timed_out; null on accepted.
+        // Downstream adapter (print-controller-service.onPicProStatus)
+        // passes this into jobService.updateJobLocally.
+        errorMessage: err && err.message ? String(err.message) : null,
       });
-    } catch (err) {
+    } catch (cbErr) {
       // Never let a callback throw take down the monitor. Log so it's
       // visible — a silent swallow makes debugging hopeless.
       (this._logger.logError || this._logger.error || (() => {})).call(
         this._logger,
         '[fuji-pic-pro] callback threw — swallowing so the monitor stays alive',
-        err,
+        cbErr,
         { orderRef: entry.orderRef, status },
       );
     }

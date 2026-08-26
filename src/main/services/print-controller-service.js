@@ -196,6 +196,16 @@ class PrintControllerService {
       // as the JobMaker adapter above. Any non-'accepted' terminal
       // status collapses to 'failed' so the JobStore surfaces the
       // problem without needing new statuses.
+      //
+      // 1.15.3 silent-stall fix: on `failed` / `timed_out` the monitor
+      // now carries `event.errorMessage` (from a specific Error built
+      // at each terminal-failure site) and `event.jobIds` (from the
+      // enqueue call — dispatch stamps the JobStore ids for the jobs
+      // that would otherwise sit at "in production" forever). For each
+      // jobId, call jobService.updateJobLocally so the Jobs grid shows
+      // a red job with the operator-readable message instead of a
+      // silent stall. Reprints enqueue with an empty jobIds so the
+      // parent job is not errored by a sibling reprint's failure.
       const onPicProStatus = (event) => {
         if (event.status === 'timed_out' || event.status === 'failed') {
           logger.warn('Fuji PIC Pro submission did not complete cleanly', {
@@ -203,7 +213,36 @@ class PrintControllerService {
             orderRef:   event.orderRef,
             phase:      event.phase,
             status:     event.status,
+            jobIds:     event.jobIds || [],
+            errorMessage: event.errorMessage || null,
           });
+
+          const jobIds = Array.isArray(event.jobIds) ? event.jobIds : [];
+          if (jobIds.length > 0) {
+            const message = event.errorMessage ||
+              `Fuji PIC Pro delivery did not complete cleanly (status: ${event.status}). ` +
+              'Check the Activity Log for details.';
+            // Lazy require: jobService pulls in electron-store and the
+            // routing chain, which we don't want at module load for
+            // headless test harnesses. It IS available at runtime by
+            // the time a monitor callback can fire.
+            // eslint-disable-next-line global-require
+            const jobService = require('./job-service');
+            for (const jobId of jobIds) {
+              try {
+                jobService.updateJobLocally(jobId, {
+                  _status:       'error',
+                  _errorMessage: message,
+                });
+              } catch (updateErr) {
+                logger.logError(
+                  '[fuji-pic-pro] jobService.updateJobLocally failed — job may remain stuck at "in production"',
+                  updateErr,
+                  { jobId, orderRef: event.orderRef },
+                );
+              }
+            }
+          }
         }
         onStatusChange({
           orderNumber: event.orderRef,
