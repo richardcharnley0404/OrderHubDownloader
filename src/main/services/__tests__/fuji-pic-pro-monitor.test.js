@@ -1520,6 +1520,106 @@ test('1.15.3 sweep: fires opportunistically from _scan when interval has elapsed
   monitor.stopMonitoring();
 });
 
+test('1.15.3 sweep MUTEX-ORDERING: an inbox created by _stepDelivering in a scan MUST be reaped by the SAME scan\'s sweep tail — not left for the next hourly interval', async (t) => {
+  // Load-bearing invariant behind the sweep design: because
+  // _maybeSweepInboxes runs at the TAIL of _scan(), inside the same
+  // _scanInFlight mutex as the entry loop, any inbox created (and
+  // NOT renamed away — e.g. a failed delivery) during the entry
+  // loop is visible to the sweep in the same scan.
+  //
+  // If a future refactor moves the sweep OUTSIDE the mutex (a
+  // separate setInterval, a background task, whatever), THIS test
+  // fails: the sweep won't run in the same scan as the delivery,
+  // and the reap that this test asserts as instantaneous would
+  // slip to the next hourly cycle. See the "why this is safe" note
+  // in _sweepInboxes's docstring and _maybeSweepInboxes's docstring
+  // — both explicitly cite this ordering as the reason we can reap
+  // recent own-instance inboxes without cross-checking a persisted
+  // inboxPath.
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const ws = await setupWorkspace(dir, { orderId: 'ORD-MTX' });
+
+  const CONTROLLER_ID = 'ctrl-mtx';
+  const INSTANCE_ID   = 'mutexinstance1234567';
+
+  // Fake writer: deliverToDigin creates an own-instance inbox
+  // folder in DIGIN (simulating an interrupted N-lite cross-volume
+  // copy that succeeded partially, then failed), then throws.
+  // If the sweep runs AFTER this in the same scan, the partial
+  // inbox is reaped. If the sweep runs BEFORE (or on a different
+  // timer), the partial inbox survives the scan.
+  let inboxPathCreated = null;
+  const fakeWriter = {
+    ...fileWriter,
+    deliverToDigin: async ({ diginPath, controllerId }) => {
+      // Force the same inbox-name discipline the real writer uses,
+      // via a name that _isOwnInboxName will match.
+      const inboxName = makeInboxName(controllerId, INSTANCE_ID, 9999, 'abcd');
+      inboxPathCreated = path.join(diginPath, inboxName);
+      await fsp.mkdir(inboxPathCreated);
+      await fsp.writeFile(path.join(inboxPathCreated, '0001.jpg'), 'partial');
+      const err = new Error('simulated mid-delivery failure — inbox left behind');
+      err.code = 'ESIMULATED';
+      throw err;
+    },
+  };
+
+  const clock = makeClock(100_000_000_000);
+  const store = makeInMemoryStore();
+  // inboxSweepIntervalMs: 0 — this test is about the ORDERING within
+  // a scan, not the interval gating. Setting the interval to 0
+  // guarantees the sweep runs on every scan, so if the decisive
+  // scan's sweep didn't reap the just-created inbox, it's because
+  // the sweep runs BEFORE delivery — the invariant this test locks.
+  const monitor = new FujiPicProMonitor({
+    deps: {
+      store, logger: silentLogger, clock, fs, fileWriter: fakeWriter,
+      inboxSweepIntervalMs: 0,
+    },
+  });
+  monitor._instanceId = INSTANCE_ID;
+  monitor.startMonitoring({ id: CONTROLLER_ID, diginPath: ws.diginPath }, () => {});
+  enqueue(monitor, ws, 'ORD-MTX', { controllerId: CONTROLLER_ID });
+
+  // Advance out of awaiting-gateway into delivering.
+  await fsp.unlink(path.join(ws.orderData, 'ORD-MTX.txt'));
+  for (let i = 0; i < _internals.REQUIRED_ABSENT_OBSERVATIONS - 1; i++) {
+    await monitor._scanNow();
+  }
+  // Sanity: no inbox exists before the delivering scan.
+  const priorDirents = await fsp.readdir(ws.diginPath);
+  assert.deepEqual(priorDirents.filter(n => n.startsWith('.ohd-inbox-')), [],
+    'no inbox should exist before the delivering scan');
+
+  // THIS scan is the one that (a) advances awaiting-gateway →
+  // delivering, (b) runs the fake deliverToDigin which creates and
+  // then abandons the inbox, and (c) runs _maybeSweepInboxes at the
+  // tail. All three must happen inside the ONE scan; the sweep
+  // MUST see the inbox delivery just left behind.
+  await monitor._scanNow();
+
+  // The fake writer set inboxPathCreated to the folder it created.
+  assert.ok(inboxPathCreated,
+    'deliverToDigin ran in this scan (created the partial inbox)');
+
+  // The sweep should have reaped it during the same scan's tail.
+  assert.equal(fs.existsSync(inboxPathCreated), false,
+    'MUTEX-ORDERING BROKEN: the inbox created by _stepDelivering in this scan ' +
+    'survived past _scan()\'s return. That means _maybeSweepInboxes did NOT run at ' +
+    'the tail of THIS scan — someone has moved it out of the _scanInFlight mutex, ' +
+    'and the sweep\'s "safe to reap recent own-instance inboxes without cross-checking ' +
+    'inFlightInboxPaths" reasoning no longer holds. Restore the tail-of-_scan call site ' +
+    '(see _maybeSweepInboxes docstring).');
+
+  // Corroborating check: DIGIN has no leftover own-instance inbox
+  // whatsoever after the scan.
+  const finalDirents = await fsp.readdir(ws.diginPath);
+  assert.deepEqual(finalDirents.filter(n => n.startsWith('.ohd-inbox-')), [],
+    'no .ohd-inbox-* folder may survive a scan in which the sweep ran');
+  monitor.stopMonitoring();
+});
+
 test('1.15.3 sweep: NOT fired if interval has not elapsed since the last sweep', async (t) => {
   const dir = await makeTempDir();
   t.after(() => fsp.rm(dir, { recursive: true, force: true }));
