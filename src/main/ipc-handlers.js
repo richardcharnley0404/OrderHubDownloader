@@ -1425,11 +1425,10 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
         if (volume.verdict === 'certain-different') {
           const text =
             'Image Staging Root and DIGIN Path are on different volumes. ' +
-            'Dispatch will still succeed (v1.15.3 uses a copy-then-rename ' +
-            'inside DIGIN so PIC Pro only sees the complete folder), but the ' +
-            'copy is slower than the same-volume atomic rename. If you can ' +
-            'move Image Staging Root onto the same volume as DIGIN Path, ' +
-            'delivery is faster and less exposed to network interruptions. ' +
+            'Dispatch will succeed, but the cross-volume copy is slower ' +
+            'than the same-volume atomic rename. If you can move Image ' +
+            'Staging Root onto the same volume as DIGIN Path, delivery is ' +
+            'faster and less exposed to network interruptions. ' +
             `Image Staging Root: ${controller.imageStagingRoot}. ` +
             `DIGIN Path: ${controller.diginPath}.`;
           warnings.push({ kind: 'picpro-volume-cross', text });

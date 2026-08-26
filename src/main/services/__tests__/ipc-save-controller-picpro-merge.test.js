@@ -327,10 +327,17 @@ test('v1.15.3: certain-different does NOT reject; save succeeds with the cross-v
       'result MUST carry a warnings array with the cross-volume advisory');
     const w = result.warnings.find(x => x.kind === 'picpro-volume-cross');
     assert.ok(w, 'warning kind must be picpro-volume-cross (v1.15.3)');
-    assert.match(w.text, /Dispatch will still succeed/,
-      'warning must state that delivery still works — v1.15.3 supports cross-volume');
-    assert.match(w.text, /copy is slower/,
+    assert.match(w.text, /Dispatch will succeed/,
+      'warning must state that dispatch works');
+    assert.match(w.text, /cross-volume copy is slower/,
       'warning must state the trade-off so an operator who CAN co-locate knows there is a fast alternative');
+    // Lock the ABSENCE of the removed claim: pre-fix wording asserted
+    // "PIC Pro only sees the complete folder" as fact — that is the
+    // unverified hypothesis the design doc's Tests 1/2 exist to
+    // confirm, and asserting it in operator-facing UI is out of scope
+    // for a save-time advisory. Removed; do not re-introduce.
+    assert.doesNotMatch(w.text, /PIC Pro only sees|complete folder/,
+      'warning MUST NOT claim what PIC Pro sees — that is an unverified hypothesis, not a fact for a save-time advisory');
     assert.match(w.text, /C:\\pp\\stage/, 'warning must name Image Staging Root');
     assert.match(w.text, /D:\\pp\\digin/, 'warning must name DIGIN Path');
     // Warn-level log for the Activity Log, with the verdict + code

@@ -16,19 +16,19 @@ could save the controller from v1.15.1 onwards but every order stalled.
 The v1.15.3 restoration copies the staged folder into a
 non-order-shaped scratch folder inside DIGIN (`.ohd-inbox-...` with
 no order code in the name), then atomically renames it to the final
-order id **only after** OrderGateway has consumed the `.txt`.
-PIC Pro never sees the scratch folder — its name doesn't match any
-merge container id — and the delivered folder appears atomically
-under the correct name. Same-volume delivery on every lab that
-worked before v1.15.0 is byte-for-byte unchanged; the fix engages
-only when a rename would otherwise fail.
+order id **only after** OrderGateway has consumed the `.txt`. The
+delivered folder appears atomically under the correct name.
+Same-volume delivery on every lab that worked before v1.15.0 is
+byte-for-byte unchanged; the fix engages only when a rename would
+otherwise fail.
 
-Confirmed at the reporting lab: PIC Pro ignores the `.ohd-inbox-`
-folder shape entirely (folder created manually with two JPEGs left
-untouched for ten minutes), and OrderGateway is patient with the
-container-to-DIGIN gap (their failed 1.15.2 order's container was
-still sitting in Merge Data days later, no error raised on their
-side, waiting for the DIGIN folder that never came).
+Confirmed at the reporting lab before this release shipped: PIC Pro
+left an `.ohd-inbox-`-prefixed folder untouched in DIGIN across a
+ten-minute window (empirical test of the name discipline), and
+OrderGateway is patient with the container-to-DIGIN gap (their
+failed 1.15.2 order's container was still sitting in Merge Data
+days later, no error raised on their side, waiting for the DIGIN
+folder that never came).
 
 **Fixed: PIC Pro delivery failures now show as red jobs with an
 actionable error, instead of the job sitting at "in production"

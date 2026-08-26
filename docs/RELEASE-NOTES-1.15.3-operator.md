@@ -55,15 +55,16 @@ container. No mid-copy race, no blank duplicate, no manual cleanup.
   volume: **no change from before 1.15.0**, delivery is a single
   atomic rename as it always was.
 - Labs whose two paths are on different volumes (typical for a
-  multi-share lab server): **delivery works again**. The copy is
-  slower than the same-volume rename by the time it takes to move
-  the images once across the network, but the folder that appears
-  in DIGIN is the correct complete folder — no `.ohdtmp`, no blank
-  duplicates. Save-time UI: OHD still shows the volume warning if
-  it can tell for certain your two paths are on different drive
-  letters or different servers (so you know delivery will be
-  slower). If it can't tell — two shares on one server — save
-  proceeds silently, and dispatch figures it out at run time.
+  multi-share lab server): **delivery works again**. The
+  cross-volume copy is slower than the same-volume rename by the
+  time it takes to move the images once across the network; the
+  final folder appearing in DIGIN is a single atomic rename, with
+  no `.ohdtmp` sibling of the sort 1.15.0 removed. Save-time UI:
+  OHD still shows the volume warning if it can tell for certain
+  your two paths are on different drive letters or different
+  servers (so you know delivery will be slower). If it can't tell
+  — two shares on one server — save proceeds silently, and
+  dispatch figures it out at run time.
 
 **Where scratch folders go and how they clean up.** OHD writes its
 scratch folder inside DIGIN itself with a distinctive name pattern —
