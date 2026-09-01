@@ -41,13 +41,23 @@ restore delivery.
 **1.15.3 supports cross-volume delivery again**, but via a different
 mechanism than the one removed in 1.15.0. When Image Staging Root and
 DIGIN are on different volumes, OHD now copies the staged folder into
-a scratch folder inside DIGIN with a name that PIC Pro is never
-going to mistake for a real order (starts with `.ohd-inbox-`, does
-not contain the order code) — then atomically renames it to the
-correct order id **only after** OrderGateway has consumed the `.txt`.
-PIC Pro never sees the scratch folder as an order, and the delivered
+a scratch folder inside DIGIN with a name deliberately built not to
+look like an order id (starts with `.ohd-inbox-`, does not contain
+the order code) — then atomically renames it to the correct order
+id **only after** OrderGateway has consumed the `.txt`. The delivered
 folder appears atomically under the correct name matching its merge
-container. No mid-copy race, no blank duplicate, no manual cleanup.
+container.
+
+The design assumes PIC Pro's DIGIN watcher will not treat a folder
+with the `.ohd-inbox-` name shape as an order (because it doesn't
+match any merge container id), and that OrderGateway waits patiently
+for the DIGIN folder to appear after consuming the `.txt`. Neither
+assumption has been verified against a real PIC Pro install yet. If
+you are the first lab to install this and you see blank duplicate
+orders (assumption on the name shape wrong) or the order errors on
+PIC Pro's side while OHD says delivering (assumption on OrderGateway
+patience wrong), please let us know — that's the exact signal we
+need. Same-volume labs are unaffected either way.
 
 **What you should see.**
 
@@ -94,11 +104,11 @@ Independent of the cross-volume fix above: every kind of async
 PIC Pro delivery failure — the cross-volume issue from 1.15.0
 onwards, permission errors on DIGIN, the DIGIN share going
 unreachable mid-order, OrderGateway not consuming the `.txt`
-because it isn't running, PIC Pro stalling on the build — used to
-log quietly to the Activity Log while the Jobs grid kept showing
-the job as "in production". If you spent hours wondering why an
-order wasn't coming through with nothing telling you why, this fix
-is for you.
+because it isn't running, PIC Pro stalling on the build — logged
+quietly to the Activity Log while the Jobs grid kept showing the
+job as "in production". If you have ever chased a stuck PIC Pro
+job without a visible reason on the Jobs grid, this fix is for
+you.
 
 **From 1.15.3 onwards**, an async delivery failure marks the job as
 red with the specific error message: the path that failed, the
@@ -116,9 +126,11 @@ other kind of PIC Pro delivery failure benefits from it.
 
 No changes for any other controller type. No changes for Folder
 Copy, Darkroom Pro, Fuji JobMaker, DPOF, or Film Scans. XML hot
-folders unchanged from 1.15.2. Everything works exactly as it did
-last week — unless you're the lab whose orders had stopped
-delivering, in which case you should be back in business.
+folders unchanged from 1.15.2. Everything else works exactly as it
+did last week. If you are the lab whose orders had stopped
+delivering, this release is aimed at getting cross-volume delivery
+working for your setup — please send a test order first and confirm
+before switching your production queue back on.
 
 ---
 

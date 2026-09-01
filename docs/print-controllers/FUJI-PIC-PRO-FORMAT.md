@@ -223,20 +223,26 @@ and DIGIN Path are on the same volume — this is the fast path and
 what every co-located lab hits. Cross-volume returns `EXDEV`, and
 OHD falls back to the "N-lite" cross-volume delivery path introduced
 in v1.15.3: recursive copy into `{diginPath}/.ohd-inbox-...` (a
-scratch folder whose name deliberately does NOT match any order-id
-pattern PIC Pro's DIGIN watcher recognises), then intra-DIGIN atomic
-rename to `{orderId}` once OrderGateway has consumed the `.txt`.
+scratch folder whose name is deliberately built not to look like an
+order id — starts with `.ohd-inbox-`, contains no order code), then
+intra-DIGIN atomic rename to `{orderId}` once OrderGateway has
+consumed the `.txt`.
 
-The cross-volume path is slower (per-file copies over SMB) but
-correct — PIC Pro never sees a partial folder because the scratch
-name isn't ingested, and the final rename appears atomically in
-DIGIN as `{orderId}` matching the merge container. See
-`docs/picpro-cross-volume-investigation.md` for the design and the
-empirical tests that confirmed PIC Pro ignores the `.ohd-inbox-*`
-shape.
+The cross-volume path is slower than the same-volume rename by the
+time it takes to copy the images across the network. The safety of
+the cross-volume path rests on two unverified hypotheses about
+PIC Pro / OrderGateway: (a) the DIGIN watcher does not treat a
+folder with the `.ohd-inbox-` prefix as an order, and (b)
+OrderGateway waits patiently for the DIGIN folder to appear after
+consuming the `.txt`. Both hypotheses are motivated by the PIC Pro
+spec but have not been confirmed against real hardware as of this
+writing. `docs/picpro-cross-volume-investigation.md` documents the
+design, the two hypotheses, and the specific lab tests that would
+settle each one; those tests have not yet been run.
 
-Co-locate if you can (fast). Leave separate if you can't
-(supported).
+Co-locate if you can (fast, does not depend on either hypothesis).
+Leave separate if you can't (supported, subject to the two
+hypotheses).
 
 The v1.15.3 sweep — see the CHANGELOG entry — cleans up any
 `.ohd-inbox-*` folders left in DIGIN by a crashed or interrupted

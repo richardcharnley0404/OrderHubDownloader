@@ -22,26 +22,32 @@ Same-volume delivery on every lab that worked before v1.15.0 is
 byte-for-byte unchanged; the fix engages only when a rename would
 otherwise fail.
 
-Confirmed at the reporting lab before this release shipped: PIC Pro
-left an `.ohd-inbox-`-prefixed folder untouched in DIGIN across a
-ten-minute window (empirical test of the name discipline), and
-OrderGateway is patient with the container-to-DIGIN gap (their
-failed 1.15.2 order's container was still sitting in Merge Data
-days later, no error raised on their side, waiting for the DIGIN
-folder that never came).
+The safety of the cross-volume path rests on two hypotheses about
+PIC Pro / OrderGateway behaviour: (a) PIC Pro's DIGIN watcher does
+NOT match a folder whose name starts with the `.ohd-inbox-` prefix
+and contains no order id — so the scratch folder is invisible to
+PIC Pro during the copy; and (b) OrderGateway is patient with the
+gap between consuming the `.txt` and the DIGIN folder appearing —
+so a slow cross-volume copy does not cause OrderGateway to abandon
+the order. Both hypotheses are motivated by the PIC Pro spec but
+are unverified against real hardware as of this release; the tests
+that would settle them are documented in
+`docs/picpro-cross-volume-investigation.md` and have not yet been
+run at the reporting lab. If either hypothesis turns out false,
+delivery may still fail — same visible symptom as 1.15.2 for
+hypothesis (b), or a return of the blank-duplicate shape from
+pre-M7b for hypothesis (a).
 
 **Fixed: PIC Pro delivery failures now show as red jobs with an
 actionable error, instead of the job sitting at "in production"
 forever.** Every kind of async delivery failure — the cross-volume
 issue that this release fixes, plus permission errors, network
 drops, DIGIN mount going missing mid-order, OrderGateway not
-consuming the `.txt`, PIC Pro stalling on the build — used to log
+consuming the `.txt`, PIC Pro stalling on the build — logged
 quietly to the Activity Log while the Jobs grid kept showing "in
-production" with no indication anything was wrong. The affected
-lab spent hours watching orders stuck this way with nothing telling
-them why. Now the job goes red with the specific error message
-naming the path that failed, the timeout that fired, and what to
-check.
+production" with no indication anything was wrong. Now the job
+goes red with the specific error message naming the path that
+failed, the timeout that fired, and what to check.
 
 This fix is independent of the cross-volume change above. A lab
 that hits an unrelated PIC Pro delivery failure now sees the
