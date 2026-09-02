@@ -29,6 +29,28 @@ The only artifact this repo produces is a single Windows NSIS installer:
 
 ---
 
+## Finding the last release
+
+`git tag --list "v*" --sort=-version:refname | head -5` shows the most
+recent releases. Tags are annotated, point at the `chore(release):
+X.Y.Z` commit, and are named `v{version}` (`v1.15.3`, not
+`1.15.3` or `1.15.3-release`).
+
+**Pre-1.16.0 fallback.** Tagging lapsed between v1.7.22 (2026-07-24)
+and the 1.15.x hotfix work in August–September 2026. The v1.8.0
+through v1.15.3 tags were back-created on 2026-09-02 at the
+`chore(release): {version}` commits identified from `git log --grep`
+and cross-referenced against this file's byte-count log; they are
+now the authoritative reference for those releases. If a tag is ever
+missing for a version you know shipped (nothing in `git tag --list`
+matches), fall back to `git log --grep="^chore(release): "` on
+`main` and match against this file's byte-count log — the byte
+count is the tie-breaker when a version had more than one
+`chore(release):` commit (see v1.15.3's initial-vs-rebuilt case
+below).
+
+---
+
 ## 1. Pre-flight
 
 Before touching the version number:
@@ -142,7 +164,42 @@ S3 upload — see [Auto-update is dormant](#auto-update-is-dormant)
 for why `latest.yml` is not shipped and how you'd wire it up if you
 ever wanted to.
 
-## 6. Upload
+## 6. Tag the release
+
+Create an annotated tag at the `chore(release): {version}` commit
+and push it together with the S3 upload in step 7. The tag records
+the exact commit whose build shipped, so anyone later cutting a
+hotfix branch (or asking "what changed since 1.15.3?") can start
+from `git tag --list` rather than grepping commit messages.
+
+```powershell
+# From the project root, on main (or on the release commit).
+git tag -a v{version} -m "OrderHub Desktop v{version}" {commit}
+git push origin v{version}
+```
+
+- `{version}` matches `package.json` (no `v` prefix in the file;
+  the tag carries the `v`).
+- `{commit}` is the `chore(release): {version}` commit. On a
+  clean release with no rebuild, this is the commit at `HEAD`
+  after step 3 (CHANGELOG) has landed; `git tag -a v{version}
+  -m "..."` (no explicit commit hash) tags `HEAD`.
+- **If you rebuilt** (see the v1.15.3 case in the byte-count
+  log — the initial `chore(release): 1.15.3` commit built an
+  installer that never shipped; the rebuild's `chore(release):`
+  commit carries the byte count for the .exe that actually
+  went to S3): tag the REBUILD's `chore(release):` commit, not
+  the initial bump. The byte-count log's line for the version
+  is the tie-breaker — the tag points at the commit whose build
+  matches the recorded byte count.
+- Tag is **annotated** (`-a` with `-m`, not lightweight). Annotated
+  tags carry the tagger + date and survive `git describe` cleanly.
+
+Push the tag AT THE SAME TIME as you paste the S3 link into
+OrderHub. `git tag --list` and OrderHub's release list stay in
+step that way.
+
+## 7. Upload
 
 One file, one destination.
 
@@ -198,7 +255,7 @@ code one:
    expects a directory URL and appends `latest.yml` under the
    hood).
 
-## 7. Unsigned installer — SmartScreen
+## 8. Unsigned installer — SmartScreen
 
 The installer is unsigned. Windows SmartScreen shows one of two
 warnings the first time an operator runs it:
