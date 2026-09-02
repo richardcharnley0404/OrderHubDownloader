@@ -1,4 +1,4 @@
-## Unreleased
+## v1.16.0 - 2026-09-02
 
 **Added: PDF Copy controllers can impose artwork onto press sheets at
 dispatch — one imposition template replaces the "one hot folder per
