@@ -201,7 +201,7 @@ Design-doc — decisions, out-of-scope list, build record — in
 
 ---
 
-## v1.15.3 - 2026-08-26
+## v1.15.3 - 2026-09-01
 
 **Fixed: Fuji PIC Pro can deliver orders again on labs where Image
 Staging Root and DIGIN Path live on different shares.** The v1.15.0
