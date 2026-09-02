@@ -96,6 +96,24 @@ committed as M7. Fix landed in M7a; the corrected assertion is `'PXDEMOX091YEC'`
 into a *falsely-confident* one, which is strictly worse than leaving it
 untested — reviewers see the title and move on.
 
+**Never document unrun tests as fact.** Assertions in docs, changelogs and
+operator notes about outside-world behaviour (what PIC Pro does, what
+OrderGateway does, what happened at a lab) must be observed, not expected.
+The 1.15.3 CHANGELOG was drafted asserting that the lab tests documented in
+`docs/picpro-cross-volume-investigation.md` had been run and had confirmed
+both cross-volume safety hypotheses — the tests had not been sent, let alone
+run. Caught in review before release, but only just. Rule: if it has not
+been observed by us or reported by the lab, it is not a fact yet. Anything
+expected but unverified is named as an expectation, with a pointer to where
+the test that would settle it is defined (design doc, backlog entry,
+whatever). Same discipline as the invariant-derived-assertions rule above,
+one turn later in the pipeline — that rule guards tests against false
+confidence at write time, this one guards docs at ship time. If you catch
+yourself writing "confirmed at the lab", "verified in production",
+"observed to work" in a docstring / changelog / operator note, first grep
+the repo for the report or the test result you are citing. If you cannot
+cite one, the wording is wrong.
+
 **Singletons.** Most services export a live instance (`module.exports = new
 Foo()`); some export `{ instance, Class }` so tests can construct their own.
 Services hold mutable in-process state, so tests must stub or reset rather than
@@ -168,6 +186,61 @@ with no visible change, check `git diff --ignore-cr-at-eol` before believing it.
   disagrees with dispatch. If you need to touch the trim rule or the
   layout math, change the ONE implementation. This is the M5a class of
   bug the folder-copy `buildDestFolder` landmine also names.
+- **Files or folders OHD creates inside a folder a third-party system
+  watches must carry names that cannot be mistaken for real work.**
+  The `.ohdtmp` phantom-order defect (1.14.x, fixed in 1.15.0) happened
+  because the temp folder OHD wrote inside DIGIN was named
+  `{orderId}.ohdtmp` — the order code was a substring, PIC Pro's DIGIN
+  watcher matched on it, and every cross-volume order arrived as a real
+  order plus a blank duplicate. The 1.15.3 cross-volume path is only
+  safe because its `.ohd-inbox-{controller}-{instance}-{ts}-{rand}`
+  name deliberately does NOT match any order or container id, and a
+  defensive assertion in `_buildInboxName`
+  (`src/main/services/fuji-pic-pro-file-writer.js`) throws if the
+  generated name would ever contain the orderId as a substring. Locked
+  by the "substring-trap" test in
+  `src/main/services/__tests__/fuji-pic-pro-file-writer.test.js`
+  (`1.15.3 deliverToDigin: substring-trap — controllerId containing
+  orderId triggers hard throw`) — do NOT delete that test as
+  paranoid; the safety property of the whole cross-volume design
+  depends on it. Same rule applies to the two same-class latent
+  risks documented in `docs/BACKLOG.md` ("Tmp-in-watched-folder
+  writers") — `writeOrderFile`'s `.txt.tmp` inside Order Data and
+  JobMaker's `.txt.tmp` inside the hot folder are only presumed safe
+  today; if either becomes a real defect, the fix is a different
+  name, not a different location. Do not "tidy" the `.ohd-inbox-`
+  prefix out into something shorter or more order-like — the whole
+  point is that it does not look like an order.
+- **A failure that happens after the dispatch entry point returns
+  must set the job to error with an actionable message, never
+  log-and-continue.** The 1.15.3 silent-stall fix existed because
+  the PIC Pro delivery path did the latter: EXDEV, EACCES, DIGIN
+  mount going missing mid-order, gateway timeout, build timeout —
+  every one of them logged to Winston and quietly resolved the
+  monitor entry as `failed`, while the Jobs grid kept showing the
+  job at "in production" indefinitely because dispatch had already
+  called `_markInProduction` synchronously. A lab's orders stalled
+  this way for days; nobody found out until they emailed us. Fix
+  pattern (see `src/main/services/fuji-pic-pro-monitor.js`
+  `_resolveEntry` / `_emit` and
+  `src/main/services/print-controller-service.js` `onPicProStatus`):
+  thread `jobIds` from dispatch through the monitor's terminal-
+  failure callback, and have the callback call
+  `jobService.updateJobLocally(jobId, { _status: 'error',
+  _errorMessage })` with the specific error text from the failure
+  site. Every terminal-failure site in the monitor builds its own
+  specific Error so the operator sees what actually broke, not a
+  generic "delivery failed" — locked one test per site in
+  `fuji-pic-pro-monitor.test.js` under the `1.15.3 silent-stall:`
+  prefix. **Known exception: PIC Pro reprints** — reprints have no
+  JobStore entity to stamp; the async failure gap is documented in
+  `docs/BACKLOG.md` under "PIC Pro reprint async delivery failure
+  is not surfaced anywhere". **Not audited: JobMaker, Darkroom Pro,
+  DPOF.** Each of those has its own async delivery paths that were
+  not part of the 1.15.3 audit; when touching any of them next,
+  check whether the async terminal-failure path calls
+  `updateJobLocally({_status:'error'})` with a specific message, or
+  whether it just logs and drops.
 
 ## Misnamed / dead code — don't be misled
 
