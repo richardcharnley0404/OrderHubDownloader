@@ -45,6 +45,37 @@ delivered. Surfaced rather than silent, so it's safe — but closeable: on rehyd
 `txtCommitted` is false *and* the `.txt` is still on disk, the write clearly succeeded and
 the flag can be set.
 
+**PIC Pro reprint async delivery failure is not surfaced anywhere
+(1.15.3 identified, not fixed).** The 1.15.3 silent-stall fix
+(`_stepDelivering`'s catch → `updateJobLocally({_status:'error'})`)
+works because dispatch stamps `entry.jobIds = [job.id]` on
+enqueue and the monitor's terminal-failure callback iterates them.
+Reprints cannot use this mechanism: reprints have no JobStore
+entity (`src/main/services/print-service.js:1157-1159` — "a
+reprint is a sibling job that lives only in OHD's local files and
+on the printer's queue"), so there is no `job.id` to pass through.
+`parentJob.id` exists but is design-forbidden ("parent lifecycle
+untouched"); `reprintJobId` is a filesystem folder name, not a
+JobStore key, and `jobService.updateJobLocally` silently no-ops on
+non-matching ids (`src/main/services/job-service.js:762-767`,
+guarded by `findIndex(...) === -1`). Result: an async PIC Pro
+reprint delivery failure logs to Winston, resolves the monitor
+entry as `failed`, and shows nowhere in the UI. Sync reprint
+dispatch failures ARE surfaced —
+`src/main/ipc-handlers.js:2842-2861` returns `{success:false,
+error}` to the renderer at the moment `sendReprint` returns — so
+this only affects failures that happen after `sendReprint` returned
+success. Closing it needs a new surface, not a wiring change:
+either a `_deliveryStatus` / `_errorMessage` field on the reprint
+sidecar written by `print-controller-service.onPicProStatus` (needs
+a callback path from the monitor back to the sidecar plus the
+reprintJobPath persisted on the entry), or a
+`_lastReprintFailure` field on the parent job (visible via
+`updateJobLocally(parentJob.id, ...)` without touching the
+parent's `_status` — a design choice). Not release-blocking; the
+same class of defect existed before 1.15.3 and was masked by the
+broader silent-stall bug that 1.15.3 fixed for real jobs.
+
 **Flaky test — RESOLVED 2026-08-19.** `perfectlyClearClient.test.js`
 "stability polling" (`:482` / `:487`) was a scheduling race: the test's
 25 ms poll interval + 30 ms rewrite delay put the rewrite ~5 ms AFTER

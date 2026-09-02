@@ -201,6 +201,83 @@ Design-doc — decisions, out-of-scope list, build record — in
 
 ---
 
+## v1.15.3 - 2026-08-26
+
+**Fixed: Fuji PIC Pro can deliver orders again on labs where Image
+Staging Root and DIGIN Path live on different shares.** The v1.15.0
+release removed cross-volume delivery entirely — every dispatch on
+paths that OHD's rename couldn't atomically move across (typical
+symptom: separate UNC shares on the same server, mapped drives to
+different physical volumes) failed at the DIGIN move with a
+"same-volume required" error, and v1.15.1 softened the save-time
+check but didn't restore delivery. Labs whose storage layout genuinely
+required separate shares — the specific case that surfaced this was
+a lab with `\\Labserver1\Pixfizz Digin Staging` and `\\labserver1\Digin`
+as two shares on one server, both share roots, no way to co-locate —
+could save the controller from v1.15.1 onwards but every order stalled.
+
+The v1.15.3 restoration copies the staged folder into a
+non-order-shaped scratch folder inside DIGIN (`.ohd-inbox-...` with
+no order code in the name), then atomically renames it to the final
+order id **only after** OrderGateway has consumed the `.txt`. The
+delivered folder appears atomically under the correct name.
+Same-volume delivery on every lab that worked before v1.15.0 is
+byte-for-byte unchanged; the fix engages only when a rename would
+otherwise fail.
+
+The safety of the cross-volume path rests on two hypotheses about
+PIC Pro / OrderGateway behaviour: (a) PIC Pro's DIGIN watcher does
+NOT match a folder whose name starts with the `.ohd-inbox-` prefix
+and contains no order id — so the scratch folder is invisible to
+PIC Pro during the copy; and (b) OrderGateway is patient with the
+gap between consuming the `.txt` and the DIGIN folder appearing —
+so a slow cross-volume copy does not cause OrderGateway to abandon
+the order. Both hypotheses are motivated by the PIC Pro spec but
+are unverified against real hardware as of this release; the tests
+that would settle them are documented in
+`docs/picpro-cross-volume-investigation.md` and have not yet been
+run at the reporting lab. If either hypothesis turns out false,
+delivery may still fail — same visible symptom as 1.15.2 for
+hypothesis (b), or a return of the blank-duplicate shape from
+pre-M7b for hypothesis (a).
+
+**Fixed: PIC Pro delivery failures now show as red jobs with an
+actionable error, instead of the job sitting at "in production"
+forever.** Every kind of async delivery failure — the cross-volume
+issue that this release fixes, plus permission errors, network
+drops, DIGIN mount going missing mid-order, OrderGateway not
+consuming the `.txt`, PIC Pro stalling on the build — logged
+quietly to the Activity Log while the Jobs grid kept showing "in
+production" with no indication anything was wrong. Now the job
+goes red with the specific error message naming the path that
+failed, the timeout that fired, and what to check.
+
+This fix is independent of the cross-volume change above. A lab
+that hits an unrelated PIC Pro delivery failure now sees the
+failure on the Jobs grid instead of a silent stall.
+
+**Added: OHD's own scratch folders in DIGIN clean themselves up.**
+As part of the cross-volume path, OHD writes a temporary
+`.ohd-inbox-...` folder inside DIGIN, then renames it to the order
+id. If the copy is interrupted (network drop, OHD crash, whatever)
+the temp folder can be left behind. OHD now sweeps its own DIGIN
+folder every hour and removes any `.ohd-inbox-...` folder older
+than 6 hours, regardless of which OHD process created it. Nothing
+for the operator to do — if you see stale `.ohd-inbox-...` folders
+in DIGIN they will be gone by this time tomorrow at the latest.
+The threshold is configurable per controller
+(`staleInboxThresholdHours`, default 6, allowed range 1–168) if
+your setup ever requires a much longer copy than the default
+allows for.
+
+**Downgrade-friendly.** No stored-config shape change. A controller
+saved on v1.15.3 loads unchanged on v1.15.2 (the new
+`staleInboxThresholdHours` field is optional and defaults on read).
+Same-volume labs see zero change; cross-volume labs see cross-volume
+delivery working where it had stopped working in v1.15.0.
+
+---
+
 ## v1.15.2 - 2026-08-19
 
 **Changed: ROES XML imports now carry the shipping method through to

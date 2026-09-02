@@ -1048,3 +1048,631 @@ test('sweep cadence flips between active (1s) and idle (60s) as the queue drains
     'flips back to idle when the queue empties');
   monitor.stopMonitoring();
 });
+
+// ── 1.15.3 silent-stall fix (C) ──────────────────────────────────────────
+//
+// The monitor emits `errorMessage` and `jobIds` on every failure /
+// timed_out callback so the print-controller-service adapter can call
+// jobService.updateJobLocally({_status:'error',_errorMessage}) instead
+// of letting the job sit at "in production" indefinitely. These tests
+// lock the exact wording per site (per the task brief — every message
+// gets its own test) and the jobIds threading.
+
+test('1.15.3 silent-stall: enqueueSubmission persists jobIds on the entry', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const ws = await setupWorkspace(dir, { orderId: 'ORD-JIDS' });
+
+  const { monitor } = makeMonitor();
+  monitor.startMonitoring({}, () => {});
+  const entry = monitor.enqueueSubmission({
+    orderId:       'ORD-JIDS',
+    orderRef:      'ORD-JIDS',
+    stagingFolder: ws.stagingFolder,
+    orderDataPath: ws.orderData,
+    diginPath:     ws.diginPath,
+    controllerId:  'ctrl-jids',
+    jobIds:        ['job-1', 'job-2', 'job-3'],
+  });
+  assert.deepEqual(entry.jobIds, ['job-1', 'job-2', 'job-3'],
+    'entry must record jobIds so the terminal callback can name every job to error');
+
+  const pending = monitor.getPending()[0];
+  assert.deepEqual(pending.jobIds, ['job-1', 'job-2', 'job-3'],
+    'persisted entry carries jobIds through rehydrate');
+  monitor.stopMonitoring();
+});
+
+test('1.15.3 silent-stall: enqueueSubmission defaults jobIds to [] when caller omits (reprint pattern)', async (t) => {
+  // Reprints do NOT stamp the parent job to error on failure. This
+  // locks the default so a caller that forgets to pass jobIds
+  // doesn't accidentally trigger the wrong parent-error behaviour.
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const ws = await setupWorkspace(dir, { orderId: 'ORD-DEF' });
+
+  const { monitor } = makeMonitor();
+  monitor.startMonitoring({}, () => {});
+  const entry = monitor.enqueueSubmission({
+    orderId:       'ORD-DEF',
+    orderRef:      'ORD-DEF',
+    stagingFolder: ws.stagingFolder,
+    orderDataPath: ws.orderData,
+    diginPath:     ws.diginPath,
+    controllerId:  'ctrl-def',
+  });
+  assert.deepEqual(entry.jobIds, []);
+  monitor.stopMonitoring();
+});
+
+test('1.15.3 silent-stall: gateway-timeout callback carries jobIds AND an operator-readable errorMessage', async (t) => {
+  // Message must name (a) the orderId, (b) the timeout in seconds,
+  // (c) the configured Order Data path, and (d) suggest checking
+  // OrderGateway.exe. Each of these is a piece of information the
+  // lab operator needs to act on the failure without opening the
+  // Activity Log.
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const ws = await setupWorkspace(dir, { orderId: 'ORD-GT' });
+
+  const clock = makeClock(1_000_000);
+  const { monitor } = makeMonitor({ clock });
+  const cb = recorderCallback();
+  monitor.startMonitoring({}, cb);
+  enqueue(monitor, ws, 'ORD-GT', { gatewayTimeoutMs: 5_000 });
+
+  // Force the gateway timeout branch by leaving the .txt in place.
+  clock.advance(6_000);
+  await monitor._scanNow();
+
+  assert.equal(cb.events[0].status, 'failed');
+  assert.deepEqual(cb.events[0].jobIds, [],
+    'jobIds echoed on the event so the adapter can iterate them');
+  assert.match(cb.events[0].errorMessage, /ORD-GT/,
+    'errorMessage names the orderId');
+  assert.match(cb.events[0].errorMessage, /5s/,
+    'errorMessage names the actual timeout in seconds (5000ms → 5s)');
+  assert.match(cb.events[0].errorMessage, /OrderGateway\.exe/,
+    'errorMessage points the operator at OrderGateway.exe');
+  assert.match(
+    cb.events[0].errorMessage,
+    new RegExp(ws.orderData.replace(/[\\/]/g, '\\$&')),
+    'errorMessage names the configured Order Data path');
+  monitor.stopMonitoring();
+});
+
+test('1.15.3 silent-stall: build-timeout callback carries an operator-readable errorMessage naming DIGIN + minutes', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const ws = await setupWorkspace(dir, { orderId: 'ORD-BT' });
+
+  const clock = makeClock(1_000_000);
+  const { monitor } = makeMonitor({ clock });
+  const cb = recorderCallback();
+  monitor.startMonitoring({}, cb);
+  enqueue(monitor, ws, 'ORD-BT', {
+    buildTimeoutMs: 600_000,
+    // No mergeDataPath — locks the "no merge suffix" branch too.
+  });
+
+  // Advance through awaiting-gateway + delivering.
+  await fsp.unlink(path.join(ws.orderData, 'ORD-BT.txt'));
+  for (let i = 0; i < _internals.REQUIRED_ABSENT_OBSERVATIONS; i++) {
+    await monitor._scanNow();
+  }
+  assert.equal(monitor.getPending()[0].phase, 'building');
+
+  // Cross the build timeout with DIGIN still holding the folder.
+  clock.advance(601_000);
+  await monitor._scanNow();
+
+  assert.equal(cb.events[0].status, 'timed_out',
+    'a stuck build is timed_out, not failed');
+  assert.match(cb.events[0].errorMessage, /ORD-BT/);
+  assert.match(cb.events[0].errorMessage, /10 minutes/,
+    'errorMessage names the build timeout as minutes (600000ms → 10 min)');
+  assert.match(cb.events[0].errorMessage,
+    new RegExp(ws.diginPath.replace(/[\\/]/g, '\\$&')),
+    'errorMessage names the DIGIN path so the operator knows where to look');
+  assert.match(cb.events[0].errorMessage, /No \[release\] command was sent/,
+    'errorMessage tells the operator that no [release] was written (no accidental print of an incomplete build)');
+  monitor.stopMonitoring();
+});
+
+test('1.15.3 silent-stall: txt-commit gap → operator-readable errorMessage names the abort condition', async (t) => {
+  // The txtCommitted-false timeout branch fires when dispatch crashed
+  // between enqueueSubmission and writeOrderFile. Message must say
+  // WHAT happened and WHAT the operator should do (retry).
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const ws = await setupWorkspace(dir, { orderId: 'ORD-COMMIT' });
+
+  const clock = makeClock(1_000_000);
+  const { monitor } = makeMonitor({ clock });
+  const cb = recorderCallback();
+  monitor.startMonitoring({}, cb);
+  // Enqueue directly, do NOT call markCommitted — simulates the
+  // dispatch-crashed-between-enqueue-and-write state.
+  monitor.enqueueSubmission({
+    orderId:       'ORD-COMMIT',
+    orderRef:      'ORD-COMMIT',
+    stagingFolder: ws.stagingFolder,
+    orderDataPath: ws.orderData,
+    diginPath:     ws.diginPath,
+    controllerId:  'ctrl-commit',
+    gatewayTimeoutMs: 5_000,
+  });
+
+  clock.advance(6_000);
+  await monitor._scanNow();
+
+  assert.equal(cb.events[0].status, 'failed');
+  assert.match(cb.events[0].errorMessage, /ORD-COMMIT/);
+  assert.match(cb.events[0].errorMessage, /between the enqueue and the \.txt write/,
+    'errorMessage explains the specific abort condition');
+  assert.match(cb.events[0].errorMessage, /Retry the dispatch/,
+    'errorMessage tells the operator to retry');
+  monitor.stopMonitoring();
+});
+
+test('1.15.3 silent-stall: delivery-failure callback propagates the writer\'s specific error message', async (t) => {
+  // The writer throws domain-specific errors (EXDEV pre-1.15.3
+  // co-location, EPERM, EACCES, "diginPath does not exist", etc.).
+  // The monitor must NOT swallow these into a generic "delivery
+  // failed" — the specific message is what the operator needs.
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const ws = await setupWorkspace(dir, { orderId: 'ORD-DF' });
+
+  const clock = makeClock(1_000_000);
+  // Inject a file writer whose deliverToDigin throws a specific
+  // error, so we lock the propagation regardless of what the real
+  // writer emits today.
+  const fakeWriter = {
+    ...fileWriter,
+    deliverToDigin: async () => {
+      throw new Error('SPECIFIC-WRITER-ERROR-MESSAGE-abc123');
+    },
+  };
+  const store  = makeInMemoryStore();
+  const monitor = new FujiPicProMonitor({
+    deps: { store, logger: silentLogger, clock, fs, fileWriter: fakeWriter },
+  });
+
+  const cb = recorderCallback();
+  monitor.startMonitoring({}, cb);
+  enqueue(monitor, ws, 'ORD-DF');
+
+  await fsp.unlink(path.join(ws.orderData, 'ORD-DF.txt'));
+  for (let i = 0; i < _internals.REQUIRED_ABSENT_OBSERVATIONS; i++) {
+    await monitor._scanNow();
+  }
+
+  assert.equal(cb.events[0].status, 'failed');
+  assert.match(cb.events[0].errorMessage, /SPECIFIC-WRITER-ERROR-MESSAGE-abc123/,
+    'the writer error text reaches the callback verbatim so the operator sees the exact reason');
+  monitor.stopMonitoring();
+});
+
+// ── 1.15.3 age-based inbox sweep (D) ────────────────────────────────────
+//
+// The sweep runs opportunistically at the tail of `_scan()`. Two tiers
+// per §M4 of the design doc: instance-scoped for recent folders,
+// unconditional reap for anything past the threshold. These tests hit
+// the module-level `_sweepInboxes` directly (so we can control mtime
+// via utimes) and one end-to-end test via startMonitoring.
+
+const { PROCESS_INSTANCE_ID, INBOX_PREFIX } =
+  require('../fuji-pic-pro-file-writer');
+
+// Mirrors the sanitiser inside fuji-pic-pro-file-writer._buildInboxName.
+// Kept here explicitly rather than requiring an internal so the test
+// asserts against the OBSERVABLE naming shape from a sanitiser
+// perspective — if the writer's sanitiser ever changes, this helper
+// (and the sweep's _isOwnInboxName) must move together.
+function safeCtrl(id)     { return String(id).replace(/[^A-Za-z0-9._]/g, '_'); }
+function safeInstance(id) { return String(id).replace(/[^A-Za-z0-9]/g, ''); }
+function makeInboxName(controllerId, instanceId, ts = 1234, rand = 'abcdef') {
+  return `${INBOX_PREFIX}${safeCtrl(controllerId)}-${safeInstance(instanceId)}-${ts}-${rand}`;
+}
+
+async function makeInbox(diginPath, name, mtimeMs, files = ['0001.jpg']) {
+  const full = path.join(diginPath, name);
+  await fsp.mkdir(full, { recursive: true });
+  for (const f of files) {
+    await fsp.writeFile(path.join(full, f), `content-${f}`);
+  }
+  // Set the folder's own mtime — utimes on the directory. The atime
+  // arg is required but not exercised in the sweep.
+  await fsp.utimes(full, new Date(mtimeMs), new Date(mtimeMs));
+  return full;
+}
+
+test('1.15.3 sweep: stale inbox with own controllerId+instanceId and no pending → reaped', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const CONTROLLER_ID = 'ctrl-sweep-a';
+  const INSTANCE_ID   = 'aabbccddeeff11223344';
+  const now = 100_000_000_000;
+  const stalePath = await makeInbox(
+    dir,
+    makeInboxName(CONTROLLER_ID, INSTANCE_ID),
+    now - 10 * 3600_000, // 10 hours old
+  );
+
+  const summary = await _internals._sweepInboxes(dir, {
+    controllerId:     CONTROLLER_ID,
+    instanceId:       INSTANCE_ID,
+    staleThresholdMs: 6 * 3600_000,
+    fsPromises:       fsp,
+    logger:           silentLogger,
+    now,
+  });
+
+  assert.equal(fs.existsSync(stalePath), false, 'stale own-instance inbox reaped');
+  assert.equal(summary.swept, 1);
+  assert.equal(summary.oldReaped, 1);
+});
+
+test('1.15.3 sweep: RECENT inbox with own controllerId+instanceId → reaped as orphan (scan mutex guarantees no in-flight)', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const CONTROLLER_ID = 'ctrl-sweep-r';
+  const INSTANCE_ID   = 'a111b222c333d444e555';
+  const now = 100_000_000_000;
+  const recentPath = await makeInbox(
+    dir,
+    makeInboxName(CONTROLLER_ID, INSTANCE_ID),
+    now - 60_000, // 1 minute old
+  );
+
+  const summary = await _internals._sweepInboxes(dir, {
+    controllerId:     CONTROLLER_ID,
+    instanceId:       INSTANCE_ID,
+    staleThresholdMs: 6 * 3600_000,
+    fsPromises:       fsp,
+    logger:           silentLogger,
+    now,
+  });
+
+  assert.equal(fs.existsSync(recentPath), false,
+    'own-instance recent inbox reaped (scan-mutex-guaranteed no in-flight)');
+  assert.equal(summary.ownInstanceReaped, 1);
+  assert.equal(summary.oldReaped, 0);
+});
+
+test('1.15.3 sweep: RECENT inbox with a DIFFERENT controllerId → NOT touched', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const now = 100_000_000_000;
+  const otherPath = await makeInbox(
+    dir,
+    makeInboxName('other-controller', 'someinstance'),
+    now - 60_000,
+  );
+
+  const summary = await _internals._sweepInboxes(dir, {
+    controllerId:     'ctrl-me',
+    instanceId:       'my-instance-id-1234',
+    staleThresholdMs: 6 * 3600_000,
+    fsPromises:       fsp,
+    logger:           silentLogger,
+    now,
+  });
+
+  assert.ok(fs.existsSync(otherPath),
+    'a recent inbox from a different controllerId belongs to another actor — leave it alone');
+  assert.equal(summary.keptRecent, 1);
+});
+
+test('1.15.3 sweep: RECENT inbox with SAME controllerId but DIFFERENT instanceId → NOT touched', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const CONTROLLER_ID = 'ctrl-same';
+  const now = 100_000_000_000;
+  const otherInstancePath = await makeInbox(
+    dir,
+    makeInboxName(CONTROLLER_ID, 'otherinstance'),
+    now - 60_000,
+  );
+
+  const summary = await _internals._sweepInboxes(dir, {
+    controllerId:     CONTROLLER_ID,
+    instanceId:       'this-instance-differs',
+    staleThresholdMs: 6 * 3600_000,
+    fsPromises:       fsp,
+    logger:           silentLogger,
+    now,
+  });
+
+  assert.ok(fs.existsSync(otherInstancePath),
+    'same controllerId but different instanceId — could be a concurrent OHD process, leave alone');
+  assert.equal(summary.keptRecent, 1);
+});
+
+test('1.15.3 sweep: OLD inbox with a foreign controllerId → REAPED unconditionally (age wins)', async (t) => {
+  // The whole point of the age tier: past the threshold, ownership
+  // doesn't matter — no legitimate in-flight copy can be this old,
+  // so the folder is a leak from ANY actor.
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const now = 100_000_000_000;
+  const otherPath = await makeInbox(
+    dir,
+    makeInboxName('some-other-ctrl', 'fake-instance'),
+    now - 10 * 3600_000, // 10 hours
+  );
+
+  const summary = await _internals._sweepInboxes(dir, {
+    controllerId:     'ctrl-me',
+    instanceId:       'my-instance',
+    staleThresholdMs: 6 * 3600_000,
+    fsPromises:       fsp,
+    logger:           silentLogger,
+    now,
+  });
+
+  assert.equal(fs.existsSync(otherPath), false,
+    'past the threshold, ownership doesn\'t matter — reap');
+  assert.equal(summary.oldReaped, 1);
+});
+
+test('1.15.3 sweep: non-inbox folder in DIGIN → NOT touched', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const now = 100_000_000_000;
+  // A real order folder and a totally unrelated folder.
+  const orderFolder = path.join(dir, 'ORD-REAL-123');
+  await fsp.mkdir(orderFolder);
+  await fsp.writeFile(path.join(orderFolder, '0001.jpg'), 'x');
+  const otherFolder = path.join(dir, 'lab-owned-folder');
+  await fsp.mkdir(otherFolder);
+  await fsp.writeFile(path.join(otherFolder, 'notes.txt'), 'y');
+
+  const summary = await _internals._sweepInboxes(dir, {
+    controllerId:     'ctrl-x',
+    instanceId:       'iid-x',
+    staleThresholdMs: 6 * 3600_000,
+    fsPromises:       fsp,
+    logger:           silentLogger,
+    now,
+  });
+
+  assert.ok(fs.existsSync(orderFolder),
+    'real order folder is NOT prefixed with INBOX_PREFIX — must be left alone');
+  assert.ok(fs.existsSync(otherFolder),
+    'a lab-owned folder without our prefix must be left alone');
+  assert.equal(summary.swept, 0);
+});
+
+test('1.15.3 sweep: ENOENT on DIGIN readdir → warn, no throw', async (t) => {
+  const missingPath = path.join(await makeTempDir(), 'never-existed');
+  const summary = await _internals._sweepInboxes(missingPath, {
+    controllerId:     'x',
+    instanceId:       'x',
+    staleThresholdMs: 6 * 3600_000,
+    fsPromises:       fsp,
+    logger:           silentLogger,
+    now:              Date.now(),
+  });
+  assert.equal(summary.swept, 0);
+  assert.equal(summary.errors.length, 0);
+});
+
+test('1.15.3 sweep: staleInboxThresholdHours on the controller clamps to [1, 168]', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  // Too-low value should clamp to 1h, not 0.
+  const { monitor: mon1 } = makeMonitor();
+  mon1.startMonitoring({ id: 'c1', diginPath: dir, staleInboxThresholdHours: 0.5 }, () => {});
+  assert.equal(mon1._staleInboxThresholdMs, _internals.MIN_STALE_INBOX_THRESHOLD_MS,
+    'below-minimum threshold clamped to 1h');
+  mon1.stopMonitoring();
+
+  // Too-high value should clamp to 168h, not 500.
+  const { monitor: mon2 } = makeMonitor();
+  mon2.startMonitoring({ id: 'c2', diginPath: dir, staleInboxThresholdHours: 500 }, () => {});
+  assert.equal(mon2._staleInboxThresholdMs, _internals.MAX_STALE_INBOX_THRESHOLD_MS,
+    'above-maximum threshold clamped to 168h');
+  mon2.stopMonitoring();
+
+  // In-range: 24h passes through.
+  const { monitor: mon3 } = makeMonitor();
+  mon3.startMonitoring({ id: 'c3', diginPath: dir, staleInboxThresholdHours: 24 }, () => {});
+  assert.equal(mon3._staleInboxThresholdMs, 24 * 3600_000);
+  mon3.stopMonitoring();
+});
+
+test('1.15.3 sweep: fires opportunistically from _scan when interval has elapsed', async (t) => {
+  // Wire an in-flight controller with a controlled clock. Drop a
+  // stale inbox in DIGIN. Set _lastInboxSweepAt = 0. Trigger _scan.
+  // Assert the inbox is gone and _lastInboxSweepAt was updated.
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const CONTROLLER_ID = 'ctrl-scan-sweep';
+  const INSTANCE_ID   = 'sweep-scan-instance-abcdef';
+  const clock = makeClock(100_000_000_000);
+  const { monitor } = makeMonitor({ clock });
+  monitor._instanceId = INSTANCE_ID;
+  monitor.startMonitoring({ id: CONTROLLER_ID, diginPath: dir }, () => {});
+
+  const stalePath = await makeInbox(
+    dir,
+    makeInboxName(CONTROLLER_ID, INSTANCE_ID),
+    clock() - 10 * 3600_000, // 10 hours
+  );
+
+  // First scan — _lastInboxSweepAt is 0 so interval check passes.
+  await monitor._scanNow();
+
+  assert.equal(fs.existsSync(stalePath), false,
+    'first scan under an active monitor should trigger the sweep and remove the stale inbox');
+  assert.equal(monitor._lastInboxSweepAt, clock(),
+    'sweep timestamp advanced to now');
+  monitor.stopMonitoring();
+});
+
+test('1.15.3 sweep MUTEX-ORDERING: an inbox created by _stepDelivering in a scan MUST be reaped by the SAME scan\'s sweep tail — not left for the next hourly interval', async (t) => {
+  // Load-bearing invariant behind the sweep design: because
+  // _maybeSweepInboxes runs at the TAIL of _scan(), inside the same
+  // _scanInFlight mutex as the entry loop, any inbox created (and
+  // NOT renamed away — e.g. a failed delivery) during the entry
+  // loop is visible to the sweep in the same scan.
+  //
+  // If a future refactor moves the sweep OUTSIDE the mutex (a
+  // separate setInterval, a background task, whatever), THIS test
+  // fails: the sweep won't run in the same scan as the delivery,
+  // and the reap that this test asserts as instantaneous would
+  // slip to the next hourly cycle. See the "why this is safe" note
+  // in _sweepInboxes's docstring and _maybeSweepInboxes's docstring
+  // — both explicitly cite this ordering as the reason we can reap
+  // recent own-instance inboxes without cross-checking a persisted
+  // inboxPath.
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const ws = await setupWorkspace(dir, { orderId: 'ORD-MTX' });
+
+  const CONTROLLER_ID = 'ctrl-mtx';
+  const INSTANCE_ID   = 'mutexinstance1234567';
+
+  // Fake writer: deliverToDigin creates an own-instance inbox
+  // folder in DIGIN (simulating an interrupted N-lite cross-volume
+  // copy that succeeded partially, then failed), then throws.
+  // If the sweep runs AFTER this in the same scan, the partial
+  // inbox is reaped. If the sweep runs BEFORE (or on a different
+  // timer), the partial inbox survives the scan.
+  let inboxPathCreated = null;
+  const fakeWriter = {
+    ...fileWriter,
+    deliverToDigin: async ({ diginPath, controllerId }) => {
+      // Force the same inbox-name discipline the real writer uses,
+      // via a name that _isOwnInboxName will match.
+      const inboxName = makeInboxName(controllerId, INSTANCE_ID, 9999, 'abcd');
+      inboxPathCreated = path.join(diginPath, inboxName);
+      await fsp.mkdir(inboxPathCreated);
+      await fsp.writeFile(path.join(inboxPathCreated, '0001.jpg'), 'partial');
+      const err = new Error('simulated mid-delivery failure — inbox left behind');
+      err.code = 'ESIMULATED';
+      throw err;
+    },
+  };
+
+  const clock = makeClock(100_000_000_000);
+  const store = makeInMemoryStore();
+  // inboxSweepIntervalMs: 0 — this test is about the ORDERING within
+  // a scan, not the interval gating. Setting the interval to 0
+  // guarantees the sweep runs on every scan, so if the decisive
+  // scan's sweep didn't reap the just-created inbox, it's because
+  // the sweep runs BEFORE delivery — the invariant this test locks.
+  const monitor = new FujiPicProMonitor({
+    deps: {
+      store, logger: silentLogger, clock, fs, fileWriter: fakeWriter,
+      inboxSweepIntervalMs: 0,
+    },
+  });
+  monitor._instanceId = INSTANCE_ID;
+  monitor.startMonitoring({ id: CONTROLLER_ID, diginPath: ws.diginPath }, () => {});
+  enqueue(monitor, ws, 'ORD-MTX', { controllerId: CONTROLLER_ID });
+
+  // Advance out of awaiting-gateway into delivering.
+  await fsp.unlink(path.join(ws.orderData, 'ORD-MTX.txt'));
+  for (let i = 0; i < _internals.REQUIRED_ABSENT_OBSERVATIONS - 1; i++) {
+    await monitor._scanNow();
+  }
+  // Sanity: no inbox exists before the delivering scan.
+  const priorDirents = await fsp.readdir(ws.diginPath);
+  assert.deepEqual(priorDirents.filter(n => n.startsWith('.ohd-inbox-')), [],
+    'no inbox should exist before the delivering scan');
+
+  // THIS scan is the one that (a) advances awaiting-gateway →
+  // delivering, (b) runs the fake deliverToDigin which creates and
+  // then abandons the inbox, and (c) runs _maybeSweepInboxes at the
+  // tail. All three must happen inside the ONE scan; the sweep
+  // MUST see the inbox delivery just left behind.
+  await monitor._scanNow();
+
+  // The fake writer set inboxPathCreated to the folder it created.
+  assert.ok(inboxPathCreated,
+    'deliverToDigin ran in this scan (created the partial inbox)');
+
+  // The sweep should have reaped it during the same scan's tail.
+  assert.equal(fs.existsSync(inboxPathCreated), false,
+    'MUTEX-ORDERING BROKEN: the inbox created by _stepDelivering in this scan ' +
+    'survived past _scan()\'s return. That means _maybeSweepInboxes did NOT run at ' +
+    'the tail of THIS scan — someone has moved it out of the _scanInFlight mutex, ' +
+    'and the sweep\'s "safe to reap recent own-instance inboxes without cross-checking ' +
+    'inFlightInboxPaths" reasoning no longer holds. Restore the tail-of-_scan call site ' +
+    '(see _maybeSweepInboxes docstring).');
+
+  // Corroborating check: DIGIN has no leftover own-instance inbox
+  // whatsoever after the scan.
+  const finalDirents = await fsp.readdir(ws.diginPath);
+  assert.deepEqual(finalDirents.filter(n => n.startsWith('.ohd-inbox-')), [],
+    'no .ohd-inbox-* folder may survive a scan in which the sweep ran');
+  monitor.stopMonitoring();
+});
+
+test('1.15.3 sweep: NOT fired if interval has not elapsed since the last sweep', async (t) => {
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const CONTROLLER_ID = 'ctrl-interval';
+  const INSTANCE_ID   = 'interval-instance-abc';
+  const clock = makeClock(100_000_000_000);
+  const { monitor } = makeMonitor({ clock });
+  monitor._instanceId = INSTANCE_ID;
+  monitor.startMonitoring({ id: CONTROLLER_ID, diginPath: dir }, () => {});
+  // Simulate a prior sweep 30 minutes ago — well under the 1h interval.
+  monitor._lastInboxSweepAt = clock() - 30 * 60_000;
+
+  const stalePath = await makeInbox(
+    dir,
+    makeInboxName(CONTROLLER_ID, INSTANCE_ID),
+    clock() - 10 * 3600_000,
+  );
+
+  await monitor._scanNow();
+
+  assert.ok(fs.existsSync(stalePath),
+    'sweep must NOT fire within the interval — the stale inbox survives this scan');
+  assert.equal(monitor._lastInboxSweepAt, clock() - 30 * 60_000,
+    'sweep timestamp unchanged');
+  monitor.stopMonitoring();
+});
+
+test('1.15.3 silent-stall: accepted callback has null errorMessage (no false positives on happy path)', async (t) => {
+  // Locks that a successful delivery does NOT set errorMessage to
+  // something truthy, which would cause the adapter to error the
+  // job even after acceptance. Regression guard against a future
+  // refactor that leaks a stale err through the wrong branch.
+  const dir = await makeTempDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const ws = await setupWorkspace(dir, { orderId: 'ORD-HAPPY' });
+
+  const { monitor } = makeMonitor();
+  const cb = recorderCallback();
+  monitor.startMonitoring({}, cb);
+  enqueue(monitor, ws, 'ORD-HAPPY');
+
+  await fsp.unlink(path.join(ws.orderData, 'ORD-HAPPY.txt'));
+  for (let i = 0; i < _internals.REQUIRED_ABSENT_OBSERVATIONS; i++) {
+    await monitor._scanNow();
+  }
+  await fsp.rm(path.join(ws.diginPath, 'ORD-HAPPY'), { recursive: true, force: true });
+  for (let i = 0; i < _internals.REQUIRED_ABSENT_OBSERVATIONS; i++) {
+    await monitor._scanNow();
+  }
+
+  assert.equal(cb.events[0].status, 'accepted');
+  assert.equal(cb.events[0].errorMessage, null,
+    'accepted callbacks must NOT carry an error message');
+  monitor.stopMonitoring();
+});
