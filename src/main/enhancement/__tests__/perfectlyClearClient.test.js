@@ -676,3 +676,306 @@ test('copy-back stray temp cleanup: no ".tmp_<pid>_<rand>" files left in the des
     await fsp.rm(destDir, { recursive: true, force: true });
   }
 });
+
+// ── 2026-09-06 setup-phase DeadlineError handling ───────────────────────────
+//
+// Three deterministic locks for the fix that stopped setup-phase
+// DeadlineErrors escaping as unhandled rejections. Injection is by
+// mutating one op on the shared `fs/promises` module object — the client's
+// captured `fs` reference (line 72 of perfectlyClearClient.js) resolves
+// property lookups at call time, so mutating `fsp[op]` in the test is
+// seen by the client. Restored in a finally block so tests don't
+// contaminate each other. Test-concurrency=1 (see package.json) prevents
+// cross-test races on the mutation.
+//
+// Assertions are derived from the invariant each test title states, not
+// from observed output — this is the class of test the CLAUDE.md
+// convention exists for.
+
+test('setup mkdir DeadlineError does NOT escape — batch resolves with every file as timeout', async () => {
+  // Invariant: A DeadlineError from the setup-phase mkdir (the very first
+  // fs call in processBatch) must NOT surface to the caller as a raw
+  // rejection. batchInputDir does not exist, so nothing stages; the poll
+  // loop finds nothing in output/rejected; the wall clock expires and
+  // every file resolves as 'timeout'. This is the exact escape path the
+  // `hard wall-clock deadline` test at :574 caught intermittently under
+  // perOpTimeoutMs:1 — this test proves the fix deterministically by
+  // injecting a DeadlineError directly rather than racing a 1ms timeout.
+  __config = { _machineId: 'test-machine' };
+  const ch = await makeChannel('setup-mkdir-dl');
+  const destDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'ohd-pc-dst-'));
+  try {
+    const srcA = await makeSourceFile('a.jpg', 'a-bytes');
+    const srcB = await makeSourceFile('b.jpg', 'b-bytes');
+    const srcC = await makeSourceFile('c.jpg', 'c-bytes');
+    const files = [
+      { sourcePath: srcA, destPath: path.join(destDir, 'a.jpg') },
+      { sourcePath: srcB, destPath: path.join(destDir, 'b.jpg') },
+      { sourcePath: srcC, destPath: path.join(destDir, 'c.jpg') },
+    ];
+
+    // Fail fsp.mkdir with a DeadlineError ONLY for paths inside the
+    // channel's inputFolder (i.e., the batchInputDir processBatch is
+    // trying to create). mkdtemp is a different fs function and is
+    // unaffected. Any later pollOnce mkdir(dest) targets destDir, also
+    // outside inputFolder — passes through.
+    const originalMkdir = fsp.mkdir;
+    fsp.mkdir = async function (p, opts) {
+      if (typeof p === 'string' && p.startsWith(ch.config.inputFolder + path.sep)) {
+        throw new DeadlineError('mkdir', 5);
+      }
+      return originalMkdir.call(this, p, opts);
+    };
+
+    const WALL_MS = 300;
+    const t0 = Date.now();
+    let results;
+    let threw = null;
+    try {
+      results = await processBatch({
+        config:         ch.config,
+        files,
+        timeoutMs:      WALL_MS,
+        // perOpTimeoutMs deliberately generous — the DeadlineError is
+        // injected by the stub, not by _withDeadline firing. Any
+        // fallback fs cleanup (rm etc.) uses this value and needs
+        // enough headroom to actually complete on Windows.
+        perOpTimeoutMs: 30_000,
+        pollIntervalMs: TEST_POLL_MS,
+      });
+    } catch (err) {
+      threw = err;
+    } finally {
+      fsp.mkdir = originalMkdir;
+    }
+    const elapsed = Date.now() - t0;
+
+    // Derived from invariant "must NOT escape": expected value is null.
+    assert.equal(threw, null,
+      'processBatch MUST NOT throw when the setup mkdir DeadlineErrors — that is the bug this test locks');
+
+    // Derived from invariant "every file resolves as 'timeout'": expected
+    // status per file is exactly 'timeout', not observed after the fact.
+    assert.equal(results.length, 3);
+    for (const r of results) {
+      assert.equal(r.status, 'timeout',
+        `every file MUST resolve as 'timeout' when setup mkdir DeadlineErrors; got ${r.status} for ${path.basename(r.sourcePath)}`);
+    }
+
+    // Derived from invariant "batch rides the wall clock to termination":
+    // elapsed >= wallMs (minus one poll interval slack for the last-
+    // iteration check that exits the while loop), and elapsed is bounded
+    // sanely above wallMs so we detect a case where the fix accidentally
+    // blocked past the deadline. Both bounds derived from the state
+    // machine's termination rules, not from observation.
+    assert.ok(elapsed >= WALL_MS - TEST_POLL_MS,
+      `batch must ride the wall clock (>= ${WALL_MS - TEST_POLL_MS}ms), not short-circuit; took ${elapsed}ms`);
+    assert.ok(elapsed < WALL_MS * 3,
+      `batch must resolve near wallMs (< ${WALL_MS * 3}ms); took ${elapsed}ms`);
+  } finally {
+    await ch.cleanup();
+    await fsp.rm(destDir, { recursive: true, force: true });
+  }
+});
+
+test('per-file staging DeadlineError isolates to that file — others stage and complete normally', async () => {
+  // Invariant: A DeadlineError from _copyViaTemp for ONE file must NOT
+  // contaminate other files in the batch. Files whose copyFile / rename
+  // succeed stage normally, get moved to output by the QuickServer, and
+  // resolve as 'enhanced'. The one deadlined file resolves as 'timeout'
+  // (never staged, never observed in output/rejected, wall clock).
+  //
+  // rename is the same code path inside _copyViaTemp's try (both are
+  // wrapped in _withDeadline and both propagate to the SAME catch). This
+  // test injects at copyFile because it is the first per-op call and
+  // therefore the earliest escape point; the rename case is covered by
+  // the audit and by the invariant that _copyViaTemp's outer catch
+  // rethrows any DeadlineError from either op.
+  __config = { _machineId: 'test-machine' };
+  const ch = await makeChannel('per-file-dl');
+  // Server enhances everything it CAN see — but it can't see files that
+  // never staged.
+  const qs = startFakeQuickServer(ch.config, () => 'output');
+  const destDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'ohd-pc-dst-'));
+  try {
+    const srcA = await makeSourceFile('a.jpg', 'a-bytes');
+    const srcB = await makeSourceFile('b.jpg', 'b-bytes'); // will DeadlineError
+    const srcC = await makeSourceFile('c.jpg', 'c-bytes');
+    const files = [
+      { sourcePath: srcA, destPath: path.join(destDir, 'a.jpg') },
+      { sourcePath: srcB, destPath: path.join(destDir, 'b.jpg') },
+      { sourcePath: srcC, destPath: path.join(destDir, 'c.jpg') },
+    ];
+
+    const originalCopy = fsp.copyFile;
+    fsp.copyFile = async function (src, dst, ...rest) {
+      if (src === srcB) {
+        throw new DeadlineError('copyFile', 5);
+      }
+      return originalCopy.call(this, src, dst, ...rest);
+    };
+
+    let results;
+    try {
+      results = await processBatch({
+        config:         ch.config,
+        files,
+        timeoutMs:      3_000,
+        perOpTimeoutMs: 30_000,
+        pollIntervalMs: TEST_POLL_MS,
+      });
+    } finally {
+      fsp.copyFile = originalCopy;
+    }
+
+    assert.equal(results.length, 3);
+    const byName = Object.fromEntries(results.map(r => [path.basename(r.sourcePath), r]));
+
+    // Derived from invariant "isolates to that file": A and C, whose
+    // copyFile did NOT DeadlineError, are staged and served by the
+    // fake QuickServer. Their expected terminal status is 'enhanced'
+    // because the server was configured with decide=() => 'output'.
+    assert.equal(byName['a.jpg'].status, 'enhanced',
+      'file A must stage and reach output when its own copyFile does NOT DeadlineError — isolation invariant');
+    assert.equal(byName['c.jpg'].status, 'enhanced',
+      'file C must stage and reach output when its own copyFile does NOT DeadlineError — isolation invariant');
+
+    // Derived from invariant "that file resolves as 'timeout'": B was
+    // never staged (its copyFile DeadlineErrored), never appears in
+    // output/rejected, and the wall-clock terminal reason is 'timeout'.
+    assert.equal(byName['b.jpg'].status, 'timeout',
+      'file B must resolve as timeout when its own copyFile DeadlineErrors — must NOT contaminate A or C');
+  } finally {
+    qs.stop();
+    await ch.cleanup();
+    await fsp.rm(destDir, { recursive: true, force: true });
+  }
+});
+
+test('setup mkdir non-DeadlineError (EACCES) throws immediately with no wall-clock wait — no-change lock', async () => {
+  // Invariant: The DeadlineError swallow branch added in 2026-09-06 is
+  // DeadlineError-only. A non-DeadlineError from the setup mkdir must
+  // still throw immediately with the underlying error, exactly as it did
+  // before the fix. Locks that a future edit generalising the swallow
+  // (e.g. `catch (err) { setupDeadlined = true; ... }` without the
+  // instanceof check) would fail this test.
+  __config = { _machineId: 'test-machine' };
+  const ch = await makeChannel('setup-mkdir-eacces');
+  const destDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'ohd-pc-dst-'));
+  try {
+    const src = await makeSourceFile('a.jpg', 'a-bytes');
+
+    const originalMkdir = fsp.mkdir;
+    fsp.mkdir = async function (p, opts) {
+      if (typeof p === 'string' && p.startsWith(ch.config.inputFolder + path.sep)) {
+        const err = new Error('EACCES: permission denied');
+        err.code = 'EACCES';
+        throw err;
+      }
+      return originalMkdir.call(this, p, opts);
+    };
+
+    const WALL_MS = 3_000;
+    const t0 = Date.now();
+    let threw = null;
+    try {
+      await processBatch({
+        config:         ch.config,
+        files:          [{ sourcePath: src, destPath: path.join(destDir, 'a.jpg') }],
+        timeoutMs:      WALL_MS,
+        perOpTimeoutMs: 30_000,
+        pollIntervalMs: TEST_POLL_MS,
+      });
+    } catch (err) {
+      threw = err;
+    } finally {
+      fsp.mkdir = originalMkdir;
+    }
+    const elapsed = Date.now() - t0;
+
+    // Derived from invariant "throws immediately with the underlying error":
+    // expected error code is EACCES, not any wrapped or normalised form.
+    assert.ok(threw, 'processBatch MUST throw on non-DeadlineError from setup mkdir');
+    assert.equal(threw.code, 'EACCES',
+      'thrown error must be the underlying EACCES, not wrapped or normalised');
+
+    // Derived from invariant "no wall-clock wait": elapsed must be a
+    // small fraction of wallMs. The pre-fix behaviour also threw
+    // immediately at this same site, so this bound is derived from the
+    // fix's promise that the DeadlineError-only swallow does not
+    // accidentally regress non-DeadlineError to wait the wall clock.
+    // Ceiling wallMs/10 = 300ms: comfortable slack for setup, well
+    // below wallMs so a regression would be obvious.
+    assert.ok(elapsed < WALL_MS / 10,
+      `non-DeadlineError must throw immediately, not ride the wall clock; took ${elapsed}ms of ${WALL_MS}ms wall`);
+  } finally {
+    await ch.cleanup();
+    await fsp.rm(destDir, { recursive: true, force: true });
+  }
+});
+
+test('setup copyFile non-DeadlineError (ENOENT) throws immediately AND cleans up batchInputDir — no-change lock', async () => {
+  // Invariant: The DeadlineError swallow branch inside the per-file
+  // staging loop is DeadlineError-only. A non-DeadlineError from
+  // _copyViaTemp must propagate to the outer catch, which cleans up
+  // (removes batchInputDir) and rethrows. Locks two things: (a) the
+  // per-file catch does not swallow non-DeadlineErrors; (b) the outer
+  // cleanup path still runs on the non-DeadlineError branch.
+  __config = { _machineId: 'test-machine' };
+  const ch = await makeChannel('setup-copy-enoent');
+  const destDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'ohd-pc-dst-'));
+  try {
+    const src = await makeSourceFile('a.jpg', 'a-bytes');
+
+    const originalCopy = fsp.copyFile;
+    fsp.copyFile = async function (s, d, ...rest) {
+      if (s === src) {
+        const err = new Error('ENOENT: no such file or directory');
+        err.code = 'ENOENT';
+        throw err;
+      }
+      return originalCopy.call(this, s, d, ...rest);
+    };
+
+    const WALL_MS = 3_000;
+    const t0 = Date.now();
+    let threw = null;
+    try {
+      await processBatch({
+        config:         ch.config,
+        files:          [{ sourcePath: src, destPath: path.join(destDir, 'a.jpg') }],
+        timeoutMs:      WALL_MS,
+        perOpTimeoutMs: 30_000,
+        pollIntervalMs: TEST_POLL_MS,
+      });
+    } catch (err) {
+      threw = err;
+    } finally {
+      fsp.copyFile = originalCopy;
+    }
+    const elapsed = Date.now() - t0;
+
+    assert.ok(threw, 'processBatch MUST throw on non-DeadlineError from setup copyFile');
+    assert.equal(threw.code, 'ENOENT',
+      'thrown error must be the underlying ENOENT');
+
+    assert.ok(elapsed < WALL_MS / 10,
+      `non-DeadlineError must throw immediately, not ride the wall clock; took ${elapsed}ms of ${WALL_MS}ms wall`);
+
+    // Derived from invariant "outer cleanup still runs": batchInputDir
+    // (created by the successful setup mkdir before copyFile failed) is
+    // removed by the outer catch's _bestEffortRemove. Assert nothing
+    // starting with the client's batchName prefix (`ohd_`) remains in
+    // inputFolder. The specific batchName is unknowable from the test
+    // (random suffix), so the assertion is on the invariant that NO
+    // ohd_-prefixed subdir survives, not on the specific name we
+    // happened to observe.
+    const leftInInput = await fsp.readdir(ch.config.inputFolder);
+    const orphanBatchDirs = leftInInput.filter(n => n.startsWith('ohd_'));
+    assert.deepEqual(orphanBatchDirs, [],
+      `cleanup MUST remove batchInputDir on non-DeadlineError throw; found orphans: ${JSON.stringify(orphanBatchDirs)}`);
+  } finally {
+    await ch.cleanup();
+    await fsp.rm(destDir, { recursive: true, force: true });
+  }
+});
