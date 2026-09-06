@@ -1,3 +1,60 @@
+## Unreleased
+
+**Fixed: Perfectly Clear batch setup no longer escapes a
+`DeadlineError` as an unhandled rejection when the target filesystem
+is slow.** `processBatch` in `src/main/enhancement/perfectlyClearClient.js`
+wraps every per-op filesystem call (`readdir`, `stat`, `copyFile`,
+`rename`, `unlink`, `rm`, `mkdir`) in `_withDeadline` so a wedged
+SMB share cannot hang the whole batch. The poll loop's per-op
+DeadlineErrors were already handled as "observation missed, keep
+polling" (`readdir` → `[]`, `stat` → `null`, in-loop `mkdir` /
+`copyFile` on the copy-back path → per-file `'rejected'`). The
+SETUP-phase per-ops — the initial `mkdir` of the batch input
+folder, and the per-file `copyFile` / `rename` inside `_copyViaTemp`
+that stages inputs before polling starts — had NO such handling: a
+DeadlineError there escaped to the caller of `processBatch` as an
+unhandled rejection, defeating the wall-clock guarantee the deadline
+machinery exists to provide.
+
+Caught by the `hard wall-clock deadline: batch resolves within
+timeoutMs even with aggressive per-op cap starving observations`
+test at `perfectlyClearClient.test.js:574`, which uses
+`perOpTimeoutMs: 1` to force the deadline to fire and asserts the
+batch resolves near its wall-clock timeout with every file marked
+`'timeout'`. Reproduced on Windows at ~20% frequency across a
+10-run sample; the intermittent shape came from `mkdir` on
+Windows filesystem happening to complete in <1ms under warm cache
+and >1ms under any contention (background I/O, antivirus scan). In
+production `DEFAULT_PER_OP_TIMEOUT_MS` is well above realistic
+`mkdir` times so the escape never fired in the field — the test
+found the asymmetry between the setup phase and the poll loop
+before a lab did.
+
+Fix: setup phase now handles DeadlineError the same way the poll
+loop does. A DeadlineError from the setup `mkdir` sets a flag that
+skips the staging loop entirely; unstaged files are unaccounted
+for during polling and end up `'timeout'` when the wall clock
+expires — same terminal outcome as if the QuickServer never
+responded. A DeadlineError from a per-file `_copyViaTemp` skips
+just that file (continue to the next); other files that stage
+successfully still get their chance. Non-DeadlineError failures
+(EACCES, disk full, ENOENT source, real staging errors) still
+surface as raw throws immediately — no wall-clock wait — locked
+by the `per-op deadline on input staging: staging copyFile
+deadline surfaces as a client-level throw (not a wedge)` test at
+`perfectlyClearClient.test.js:613` (an ENOENT-source test whose
+title is misleading — the test is really about fast surfacing of
+non-deadline errors during staging).
+
+Fix verified by 10 consecutive first-attempt-green full-suite runs
+on the originally-flaking Windows dev box (2452 tests each).
+
+Not release-blocking on its own — production `perOpTimeoutMs` never
+triggers this — so shipping with the next feature bump, not as a
+hotfix.
+
+---
+
 ## v1.16.0 - 2026-09-02
 
 **Added: PDF Copy controllers can impose artwork onto press sheets at

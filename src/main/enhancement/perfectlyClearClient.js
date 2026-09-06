@@ -296,22 +296,79 @@ async function processBatch(opts = {}) {
   const startedAt = Date.now();
 
   // 1. Stage all input files (temp + rename) before any polling starts.
-  await _withDeadline(fs.mkdir(batchInputDir, { recursive: true }), perOpMs, 'mkdir');
+  //
+  // DeadlineErrors during setup — the mkdir here or a per-file copyFile /
+  // rename inside `_copyViaTemp` — mean the target filesystem is too slow
+  // for the configured `perOpMs`. Pre-2026-09-06 these escaped as
+  // unhandled rejections to the caller (the perfectlyClearClient
+  // `hard wall-clock deadline` test at :574 caught this asymmetry against
+  // the poll loop, where `readdir` DeadlineErrors are already treated as
+  // "observation missed, keep polling"). Setup now handles them the same
+  // way — a mkdir deadline skips the staging loop entirely, and a
+  // per-file staging deadline skips just that file. Every unstaged file
+  // surfaces as `timeout` when the poll loop can't find it and the wall
+  // clock expires; that is the same terminal outcome as a server that
+  // never responded.
+  //
+  // Non-DeadlineError failures (EACCES, disk full, ENOENT source, etc.)
+  // still surface as raw throws — no wall-clock wait, the caller sees
+  // the reason immediately. This is what the `per-op deadline on input
+  // staging` test at :613 locks (ENOENT source → fast reject, not a
+  // wedge).
+  let setupDeadlined = false;
   try {
-    for (const r of records) {
-      const finalPath = path.join(batchInputDir, r.inputName);
-      await _copyViaTemp(r.sourcePath, finalPath, perOpMs);
-    }
+    await _withDeadline(fs.mkdir(batchInputDir, { recursive: true }), perOpMs, 'mkdir');
   } catch (err) {
+    if (err instanceof DeadlineError) {
+      setupDeadlined = true;
+      try {
+        logger.logWarning && logger.logWarning(
+          `pc: batch ${batchName} setup mkdir deadline exceeded (${err.timeoutMs}ms); no files will be staged, batch will time out at wall clock`
+        );
+      } catch (_) { /* logger stub */ }
+    } else {
+      // Real mkdir error. Nothing has been created and nothing has been
+      // reported to onFileDone, so let the caller see the raw error.
+      try {
+        logger.logError && logger.logError(`pc: batch ${batchName} failed during input staging`, err);
+      } catch (_) { /* ignore */ }
+      throw err;
+    }
+  }
+
+  if (!setupDeadlined) {
     try {
-      logger.logError && logger.logError(`pc: batch ${batchName} failed during input staging`, err);
-    } catch (_) { /* ignore */ }
-    // Nothing has been reported to onFileDone yet, so let the caller see the
-    // raw error. Still clean up whatever we may have created.
-    await _bestEffortRemove(batchInputDir,    perOpMs);
-    await _bestEffortRemove(batchOutputDir,   perOpMs);
-    await _bestEffortRemove(batchRejectedDir, perOpMs);
-    throw err;
+      for (const r of records) {
+        const finalPath = path.join(batchInputDir, r.inputName);
+        try {
+          await _copyViaTemp(r.sourcePath, finalPath, perOpMs);
+        } catch (err) {
+          if (err instanceof DeadlineError) {
+            // Per-file staging deadline — this file is unstaged; the
+            // poll loop will not observe it in output / rejected, and
+            // it will be marked `timeout` at wall clock. Continue with
+            // the next record so other files still get their chance.
+            try {
+              logger.logWarning && logger.logWarning(
+                `pc: batch ${batchName} staging deadline exceeded for ${r.inputName} (op: ${err.op}, ${err.timeoutMs}ms); file will time out`
+              );
+            } catch (_) { /* logger stub */ }
+            continue;
+          }
+          throw err;
+        }
+      }
+    } catch (err) {
+      try {
+        logger.logError && logger.logError(`pc: batch ${batchName} failed during input staging`, err);
+      } catch (_) { /* ignore */ }
+      // Nothing has been reported to onFileDone yet, so let the caller
+      // see the raw error. Clean up whatever we may have created.
+      await _bestEffortRemove(batchInputDir,    perOpMs);
+      await _bestEffortRemove(batchOutputDir,   perOpMs);
+      await _bestEffortRemove(batchRejectedDir, perOpMs);
+      throw err;
+    }
   }
 
   // 2. If the caller aborted before we started polling, short-circuit.
