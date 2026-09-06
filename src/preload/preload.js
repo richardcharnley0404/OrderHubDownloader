@@ -13,6 +13,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   selectPdfFile:   () => ipcRenderer.invoke('dialog:selectPdfFile'),
   exportCsv: (defaultName, content) => ipcRenderer.invoke('dialog:exportCsv', { defaultName, content }),
 
+  // 1.16.1 — path reachability probe for the Fuji JobMaker
+  // fujiImageRoot save-time advisory.
+  canReachPath: (p) => ipcRenderer.invoke('ohd:util:can-reach-path', p),
+
   // Connection testing
   testFtpConnection: (credentials) => ipcRenderer.invoke('ftp:testConnection', credentials),
   testApiConnection: (key) => ipcRenderer.invoke('api:testConnection', key),

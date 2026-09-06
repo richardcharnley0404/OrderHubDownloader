@@ -1654,6 +1654,10 @@ class PrintService {
 
     const controllerCfg = {
       imageStagingRoot:  route.imageStagingRoot,
+      // 1.16.1 — Fuji-view root emitted as `ImagePath=` in the .txt.
+      // Route resolver falls back to imageStagingRoot for pre-1.16.1
+      // controllers; same-machine setups pass through unchanged.
+      fujiImageRoot:     route.fujiImageRoot || route.imageStagingRoot,
       printerName:       route.printerName || '',
       autoCorrect:       route.autoCorrect === undefined ? null : route.autoCorrect,
       backprintMode:     route.backprintMode     || 'none',
@@ -1677,6 +1681,11 @@ class PrintService {
       writeResult = await fujiJobMakerFileWriter.writeOrderFiles({
         hotFolderPath:    route.outputPath,
         imageStagingRoot: route.imageStagingRoot,
+        // 1.16.1 — triggers the dispatch-time reachability check between
+        // stage-images and .txt-write when this differs from
+        // imageStagingRoot. Same-machine setups pass a value equal to
+        // imageStagingRoot and the check is a no-op.
+        fujiImageRoot:    route.fujiImageRoot || route.imageStagingRoot,
         orderRef:         reprintOrderRef,
         imageFiles,
         surfaceFiles,
@@ -2855,6 +2864,10 @@ class PrintService {
 
     const controllerCfg = {
       imageStagingRoot:  route.imageStagingRoot,
+      // 1.16.1 — Fuji-view root emitted as `ImagePath=` in the .txt.
+      // Route resolver falls back to imageStagingRoot for pre-1.16.1
+      // controllers; same-machine setups pass through unchanged.
+      fujiImageRoot:     route.fujiImageRoot || route.imageStagingRoot,
       printerName:       route.printerName || '',
       autoCorrect:       route.autoCorrect === undefined ? null : route.autoCorrect,
       backprintMode:     route.backprintMode     || 'none',
@@ -2876,6 +2889,11 @@ class PrintService {
       writeResult = await fujiJobMakerFileWriter.writeOrderFiles({
         hotFolderPath:    route.outputPath,
         imageStagingRoot: route.imageStagingRoot,
+        // 1.16.1 — triggers the dispatch-time reachability check between
+        // stage-images and .txt-write when this differs from
+        // imageStagingRoot. Same-machine setups pass a value equal to
+        // imageStagingRoot and the check is a no-op.
+        fujiImageRoot:    route.fujiImageRoot || route.imageStagingRoot,
         // Job No (job_name) — must match fujiJob.orderRef so the staging
         // folder and the .txt's ImagePath line up.
         orderRef:         job.job_name || job.order_number || '',

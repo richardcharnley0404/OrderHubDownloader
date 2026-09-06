@@ -179,6 +179,13 @@ function resolveRoute(job) {
               controllerName:    overrideCtrl.name,
               outputPath:        overrideCtrl.outputPath,
               imageStagingRoot:  overrideCtrl.imageStagingRoot  || '',
+              // 1.16.1 — the artwork root as the Fuji JobMaker machine
+              // reaches it. Emitted as `ImagePath=` in the .txt. Falls
+              // back to imageStagingRoot for pre-1.16.1 controllers that
+              // haven't been re-saved since the migration (mirrors the
+              // save-time migration default: same-machine setups get the
+              // same value).
+              fujiImageRoot:     overrideCtrl.fujiImageRoot     || overrideCtrl.imageStagingRoot || '',
               printerName:       overrideCtrl.printerName       || '',
               autoCorrect:       overrideCtrl.autoCorrect === undefined ? null : overrideCtrl.autoCorrect,
               backprintMode:     overrideCtrl.backprintMode     || 'none',
@@ -559,6 +566,15 @@ function resolveRoute(job) {
       // named `outputPath` for parity with every other controller type.
       outputPath:        controller.outputPath,
       imageStagingRoot:  controller.imageStagingRoot  || '',
+      // 1.16.1 — the artwork root as the Fuji JobMaker machine reaches
+      // it. Emitted as `ImagePath=` in the .txt. Falls back to
+      // imageStagingRoot for pre-1.16.1 controllers that haven't been
+      // re-saved since the migration (mirrors the save-time migration
+      // default: same-machine setups get the same value). Both this
+      // literal AND the channel-mapping-override literal above carry
+      // the field — CLAUDE.md-recorded parity landmine, locked by
+      // routing-override-fujijobmaker-fujiImageRoot.test.js.
+      fujiImageRoot:     controller.fujiImageRoot      || controller.imageStagingRoot || '',
       printerName:       controller.printerName       || '',
       autoCorrect:       controller.autoCorrect === undefined ? null : controller.autoCorrect,
       backprintMode:     controller.backprintMode     || 'none',

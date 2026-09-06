@@ -361,3 +361,115 @@ test('PrintQty defaults to 1 when image.quantity is null/undefined', () => {
   const qty = [...out.matchAll(/^PrintQty=(\d+)$/gm)].map((m) => m[1]);
   assert.deepEqual(qty, ['1', '1', '0']);
 });
+
+// ── 1.16.1 fujiImageRoot: emitted ImagePath uses the Fuji-view root ─────────
+
+test('1.16.1: ImagePath emits fujiImageRoot (not imageStagingRoot) when the two differ', () => {
+  // Invariant: when the two roots differ (cross-machine case), the
+  // emitted `.txt` MUST carry the Fuji-view path in `ImagePath=`, not
+  // OHD's local write path — that is the whole reason the field
+  // exists. imageStagingRoot continues to govern where OHD writes,
+  // asserted separately via the writer's tests.
+  const job = bMakeBallyJob();
+  const controller = {
+    ...bMakeBallyController(),
+    imageStagingRoot: 'C:\\Users\\op\\ohd\\Artwork',           // OHD's local view
+    fujiImageRoot:    '\\\\labserver1\\Pixfizz\\Artwork',      // Fuji's view
+  };
+  const [out] = generateFujiJobMakerFiles(job, controller);
+  const line = out.contents.split(/\r?\n/).find(l => l.startsWith('ImagePath='));
+  assert.ok(line, 'output MUST contain an ImagePath= line');
+  // Derived from _buildImagePath's contract: {fujiImageRoot}\{orderRef}\
+  // with trailing backslash preserved.
+  assert.equal(line, 'ImagePath=\\\\labserver1\\Pixfizz\\Artwork\\BALLY-Q7F39E\\',
+    'ImagePath MUST be built from fujiImageRoot, not imageStagingRoot, and end in a single backslash');
+  assert.ok(!line.includes('C:\\Users\\op\\ohd\\Artwork'),
+    'ImagePath MUST NOT leak OHD\'s local imageStagingRoot into the file the Fuji machine reads');
+});
+
+test('1.16.1: ImagePath normalisation rules unchanged — trailing-separator / UNC / no-slash-conversion apply to fujiImageRoot too', () => {
+  // The new field uses the same _buildImagePath helper as the old,
+  // so its normalisation invariants transfer. Locked separately here
+  // so a future refactor that switched fujiImageRoot to a different
+  // normaliser would surface.
+  const job = { ...bMakeBallyJob(), orderRef: 'X1' };
+  const shared = { ...bMakeBallyController(), imageStagingRoot: 'unused-here' };
+
+  // (a) Trailing separator on input is normalised to a single \.
+  const [a] = generateFujiJobMakerFiles(job, { ...shared, fujiImageRoot: '\\\\srv\\share\\Art' });
+  const [b] = generateFujiJobMakerFiles(job, { ...shared, fujiImageRoot: '\\\\srv\\share\\Art\\' });
+  const aLine = a.contents.split(/\r?\n/).find(l => l.startsWith('ImagePath='));
+  const bLine = b.contents.split(/\r?\n/).find(l => l.startsWith('ImagePath='));
+  assert.equal(aLine, bLine, 'trailing-separator tolerance MUST match — with or without, same result');
+  assert.equal(aLine, 'ImagePath=\\\\srv\\share\\Art\\X1\\');
+
+  // (b) UNC leading backslashes survive.
+  assert.ok(aLine.startsWith('ImagePath=\\\\'),
+    'UNC leading \\\\ MUST survive — otherwise Fuji cannot resolve the share');
+
+  // (c) Forward slashes on input are NOT converted (matches
+  //     _buildImagePath's contract at line 152 of the existing test
+  //     suite: `Z:/Artwork/` → `Z:/Artwork\X1\`).
+  const [c] = generateFujiJobMakerFiles(job, { ...shared, fujiImageRoot: 'Z:/Artwork/' });
+  const cLine = c.contents.split(/\r?\n/).find(l => l.startsWith('ImagePath='));
+  assert.equal(cLine, 'ImagePath=Z:/Artwork\\X1\\',
+    'forward slashes on input are preserved — no slash conversion in the middle');
+});
+
+// ── 11. TRIPWIRE (1.16.1) — fujiImageRoot no-change lock ─────────────────────
+//
+// 1.16.1 adds a `fujiImageRoot` field to Fuji JobMaker controllers so the
+// path OHD writes images to can differ from the path OHD writes into the
+// emitted `.txt`'s `ImagePath=` line. Existing controllers must be
+// unaffected on upgrade — their post-migration `fujiImageRoot` is
+// pre-filled from `imageStagingRoot`, and the emitted `.txt` must be
+// BYTE-IDENTICAL to the pre-1.16.1 output.
+//
+// The invariant this test locks: setting fujiImageRoot to the same value
+// as imageStagingRoot (the migration case), or leaving fujiImageRoot
+// unset / null / empty (fallback cases), all produce the same output as
+// having ONLY imageStagingRoot set (the pre-1.16.1 shape). The assertion
+// compares generator outputs across configurations of the SAME test —
+// nothing hard-coded from observed output.
+
+test('TRIPWIRE (1.16.1): when fujiImageRoot equals imageStagingRoot (or is absent / null / empty), the emitted .txt is byte-identical to the pre-1.16.1 shape', () => {
+  const job = bMakeBallyJob();
+  const baseController = bMakeBallyController(); // has imageStagingRoot only — pre-1.16.1 shape
+
+  // Baseline: imageStagingRoot only (pre-1.16.1).
+  const [baseline] = generateFujiJobMakerFiles(job, baseController);
+
+  // Case A: fujiImageRoot === imageStagingRoot (migration default: on
+  // upgrade OHD pre-fills fujiImageRoot with imageStagingRoot's value
+  // so every existing controller keeps working with no operator action).
+  const controllerSame = { ...baseController, fujiImageRoot: baseController.imageStagingRoot };
+  const [same] = generateFujiJobMakerFiles(job, controllerSame);
+
+  // Case B: fujiImageRoot === '' (explicit empty — falls through to
+  // imageStagingRoot).
+  const controllerEmpty = { ...baseController, fujiImageRoot: '' };
+  const [empty] = generateFujiJobMakerFiles(job, controllerEmpty);
+
+  // Case C: fujiImageRoot === null (falls through to imageStagingRoot).
+  const controllerNull = { ...baseController, fujiImageRoot: null };
+  const [nullCase] = generateFujiJobMakerFiles(job, controllerNull);
+
+  // Case D: fujiImageRoot === undefined (field never set — same as A on
+  // a controller that predates the migration). Already covered by
+  // `baseline` above, asserted separately for symmetry.
+  assert.equal(baseController.fujiImageRoot, undefined,
+    'baseline controller has NO fujiImageRoot — pre-1.16.1 shape');
+
+  // Filename invariant: none of these change the filename.
+  assert.equal(same.filename,     baseline.filename, 'A: filename byte-identical');
+  assert.equal(empty.filename,    baseline.filename, 'B: filename byte-identical');
+  assert.equal(nullCase.filename, baseline.filename, 'C: filename byte-identical');
+
+  // Contents invariant: byte-identical output.
+  assert.equal(same.contents,     baseline.contents,
+    'A (fujiImageRoot === imageStagingRoot): contents MUST be byte-identical to pre-1.16.1 — this is the no-change lock for existing controllers on upgrade');
+  assert.equal(empty.contents,    baseline.contents,
+    'B (fujiImageRoot === ""): contents MUST be byte-identical to pre-1.16.1 — empty falls through to imageStagingRoot');
+  assert.equal(nullCase.contents, baseline.contents,
+    'C (fujiImageRoot === null): contents MUST be byte-identical to pre-1.16.1 — null falls through to imageStagingRoot');
+});

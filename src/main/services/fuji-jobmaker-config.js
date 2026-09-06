@@ -57,6 +57,9 @@ const ALLOW_IMAGE_MODE_IN_V0 = false;
  *   name             non-empty string
  *   hotFolderPath    non-empty string
  *   imageStagingRoot non-empty string
+ *   fujiImageRoot    non-empty string (1.16.1; pre-filled from
+ *                    imageStagingRoot on migration so existing
+ *                    controllers open with a valid value)
  *
  * Optional fields (defaulted in `normalized`):
  *   printerName        '' (omit when blank)
@@ -90,10 +93,43 @@ function validateControllerConfig(controller) {
   if (!hotFolderPath) errors.push('hotFolderPath is required');
   out.hotFolderPath = hotFolderPath;
 
-  // imageStagingRoot
+  // imageStagingRoot — where OHD writes the per-order image folder.
   const imageStagingRoot = _trim(controller.imageStagingRoot);
   if (!imageStagingRoot) errors.push('imageStagingRoot is required');
   out.imageStagingRoot = imageStagingRoot;
+
+  // fujiImageRoot (1.16.1) — the artwork root as the Fuji JobMaker
+  // machine reaches it. This is what OHD writes into the emitted
+  // `.txt`'s `ImagePath=` line. When OHD and Fuji JobMaker run on the
+  // same machine, this is identical to imageStagingRoot; when they
+  // run on different machines, imageStagingRoot is OHD's local path
+  // and fujiImageRoot is the same folder expressed as the Fuji
+  // machine sees it (typically a UNC share).
+  //
+  // Migration rule: a controller that predates 1.16.1 has no
+  // fujiImageRoot. On read the field is pre-filled from
+  // imageStagingRoot so every existing controller opens with a valid
+  // value and saves immediately. This mirrors the same-machine case
+  // and is the correct default — a controller whose paths already
+  // worked keeps working with no operator action. A bare "required
+  // field with no default" would reproduce the 1.15.0 defect that
+  // blocked a lab from saving their controller; that lesson is
+  // recorded as the "never document unrun tests as fact" convention
+  // in CLAUDE.md and applies here as "never require a new field
+  // without a migration default that keeps existing configs valid".
+  //
+  // Save-time validation: required (post-migration a blank value is
+  // an operator error — every controller had a valid value pre-filled
+  // for them). No reachability check here — that is done by the IPC
+  // caller as an advisory warning, and by dispatch as a hard check.
+  const fujiImageRootInput = controller.fujiImageRoot;
+  const fujiImageRoot = _trim(
+    fujiImageRootInput === undefined || fujiImageRootInput === null
+      ? imageStagingRoot // migration default
+      : fujiImageRootInput
+  );
+  if (!fujiImageRoot) errors.push('fujiImageRoot is required');
+  out.fujiImageRoot = fujiImageRoot;
 
   // printerName — optional
   out.printerName = _trim(controller.printerName);

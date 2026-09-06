@@ -186,7 +186,19 @@ function _buildSurfaceFile(group, job, controller) {
   // ── [OrderInfo] ─────────────────────────────────────────────────────────
   lines.push('[OrderInfo]');
   lines.push(`Order_ID=${_buildOrderId(job.orderRef, group.surfaceCode, group.surface)}`);
-  lines.push(`ImagePath=${_buildImagePath(controller.imageStagingRoot, job.orderRef)}`);
+  // ImagePath — the path OHD writes into the .txt for Frontier to read
+  // artwork from. Historically this was `controller.imageStagingRoot`
+  // (same as where OHD writes). From 1.16.1 there is a separate
+  // `controller.fujiImageRoot` field that lets the emitted path differ
+  // from the local write path — needed when OHD and Fuji JobMaker run
+  // on different machines. When same-machine, the two are equal by
+  // migration default, so the emitted value is byte-identical to
+  // pre-1.16.1 (locked by the tripwire test in
+  // fuji-jobmaker-generator.test.js). Fallback preserves back-compat
+  // for any code path that hands us a controller object with only
+  // imageStagingRoot set (tests, legacy call sites).
+  const imagePathRoot = controller.fujiImageRoot || controller.imageStagingRoot;
+  lines.push(`ImagePath=${_buildImagePath(imagePathRoot, job.orderRef)}`);
 
   if (controller.printerName) {
     lines.push(`Printer=${controller.printerName}`);

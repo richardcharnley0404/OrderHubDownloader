@@ -28,6 +28,10 @@ test('valid minimal controller — only required fields set', () => {
     name: 'Frontier MS01',
     hotFolderPath: '\\\\MASTER\\jobmaker\\',
     imageStagingRoot: '\\\\MASTER\\Pixfizz\\Artwork\\',
+    // fujiImageRoot deliberately omitted — the 1.16.1 migration
+    // default pre-fills it from imageStagingRoot so an existing
+    // "minimal controller" still validates without the operator
+    // touching the new field.
   });
   assert.equal(result.valid, true, result.errors.join('; '));
   assert.deepEqual(result.normalized, {
@@ -35,6 +39,9 @@ test('valid minimal controller — only required fields set', () => {
     name: 'Frontier MS01',
     hotFolderPath: '\\\\MASTER\\jobmaker\\',
     imageStagingRoot: '\\\\MASTER\\Pixfizz\\Artwork\\',
+    // 1.16.1 migration default — same value as imageStagingRoot when
+    // the operator has not customised it.
+    fujiImageRoot: '\\\\MASTER\\Pixfizz\\Artwork\\',
     printerName: '',
     autoCorrect: null,
     backprintMode: DEFAULT_BACKPRINT_MODE,
@@ -92,9 +99,82 @@ test('whitespace-only required fields are rejected', () => {
     name: '   ',
     hotFolderPath: '\t',
     imageStagingRoot: '',
+    // fujiImageRoot deliberately omitted — with imageStagingRoot
+    // blank, the 1.16.1 migration default (fujiImageRoot = imageStagingRoot)
+    // yields blank too, so a fourth "fujiImageRoot is required" error
+    // fires. This is intentional: after the migration a blank
+    // fujiImageRoot is an operator error, same shape as any other
+    // blank required field.
   });
   assert.equal(result.valid, false);
-  assert.equal(result.errors.length, 3);
+  assert.equal(result.errors.length, 4);
+});
+
+// ── 1.16.1 fujiImageRoot: migration + required-after-migration ──────────────
+
+test('1.16.1 fujiImageRoot migration: absent → pre-filled from imageStagingRoot; save succeeds', () => {
+  // Pre-1.16.1 controllers open with fujiImageRoot pre-filled from
+  // imageStagingRoot so they save immediately with no operator action.
+  // This is the "nobody is ever locked out of their own settings
+  // screen" invariant recorded on the field's docstring — a bare
+  // required field with no migration default would reproduce the
+  // 1.15.0 defect that blocked a lab from saving their controller.
+  const result = validateControllerConfig({
+    type: 'fujijobmaker',
+    name: 'Legacy JM',
+    hotFolderPath: '\\\\MASTER\\jm\\',
+    imageStagingRoot: '\\\\MASTER\\Artwork\\',
+    // fujiImageRoot omitted — this is the migration case
+  });
+  assert.equal(result.valid, true, result.errors.join('; '));
+  assert.equal(result.normalized.fujiImageRoot, '\\\\MASTER\\Artwork\\',
+    'migration MUST pre-fill fujiImageRoot from imageStagingRoot so existing controllers save with no action');
+});
+
+test('1.16.1 fujiImageRoot: null → pre-filled from imageStagingRoot (same as absent)', () => {
+  const result = validateControllerConfig({
+    type: 'fujijobmaker',
+    name: 'JM',
+    hotFolderPath: 'X',
+    imageStagingRoot: 'Y',
+    fujiImageRoot: null,
+  });
+  assert.equal(result.valid, true);
+  assert.equal(result.normalized.fujiImageRoot, 'Y',
+    'null MUST fall back to imageStagingRoot — the "field never explicitly set" shape');
+});
+
+test('1.16.1 fujiImageRoot: explicit different value is preserved (cross-machine case)', () => {
+  const result = validateControllerConfig({
+    type: 'fujijobmaker',
+    name: 'JM',
+    hotFolderPath: 'C:\\ohd\\hot',
+    imageStagingRoot: 'C:\\ohd\\artwork',
+    fujiImageRoot: '\\\\labserver1\\artwork',
+  });
+  assert.equal(result.valid, true);
+  assert.equal(result.normalized.imageStagingRoot, 'C:\\ohd\\artwork',
+    'imageStagingRoot MUST be preserved separately from fujiImageRoot — this is the cross-machine case the field exists for');
+  assert.equal(result.normalized.fujiImageRoot, '\\\\labserver1\\artwork',
+    'fujiImageRoot MUST be preserved when explicitly set to a different value');
+});
+
+test('1.16.1 fujiImageRoot: explicit empty string AFTER migration is REJECTED', () => {
+  // Post-migration, an empty fujiImageRoot is an operator error — every
+  // controller had a valid value pre-filled for them. This test locks
+  // that the fix does not silently accept blank as "fall back again".
+  const result = validateControllerConfig({
+    type: 'fujijobmaker',
+    name: 'JM',
+    hotFolderPath: 'X',
+    imageStagingRoot: 'Y',
+    fujiImageRoot: '   ',   // whitespace only, trims to ''
+  });
+  assert.equal(result.valid, false);
+  assert.ok(
+    result.errors.some(e => /fujiImageRoot is required/.test(e)),
+    'errors MUST call out fujiImageRoot specifically; got: ' + result.errors.join('; '),
+  );
 });
 
 test('autoCorrect coerces 0/1/true/false/null', () => {

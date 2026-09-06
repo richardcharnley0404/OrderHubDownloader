@@ -1,4 +1,53 @@
-## Unreleased
+## v1.16.1 - 2026-09-06
+
+**Added: Fuji JobMaker controllers can now have a different artwork
+path for OHD and for the Fuji JobMaker machine.** Until now the
+path OHD wrote images to (`imageStagingRoot`) was also the exact
+string OHD wrote into the emitted `.txt`'s `ImagePath=` line — which
+worked when OHD and Fuji JobMaker ran on the same machine, but
+silently broke when they ran on different machines: OHD would write
+`C:\Users\op\Documents\OrderHub Controllers\Fuji Jobmaker\Artwork\{orderRef}\`
+into a `.txt` that a different machine then tried to resolve locally
+and failed.
+
+Split into two fields:
+
+- **Image Staging Root** (existing) — where OHD writes the image
+  files.
+- **Image Path (Fuji JobMaker view)** (new) — the same folder
+  expressed as the Fuji JobMaker machine reaches it. This is what
+  OHD writes into `ImagePath=`.
+
+When both run on the same machine, the two are the same path (that
+is the migration default — every existing controller opens with
+Image Path pre-filled from Image Staging Root, saves immediately
+with no operator action). When they run on different machines,
+Image Path is typically a UNC share like
+`\\labserver1\Pixfizz\Artwork\` or a mapped drive letter as
+configured on the Fuji machine.
+
+Verification at save is advisory — OHD warns if it cannot see the
+path from its side, but never blocks a save (a UNC that only the
+Fuji machine resolves is a legitimate configuration and blocking
+here would repeat the 1.15.1 mistake). Verification at dispatch is
+strict on the discriminable case: if the path root resolves from
+OHD but the order subfolder does not, OHD fails the job with an
+actionable message before writing the `.txt` — because Fuji gives
+no in-band failure signal, and the alternative is the order sitting
+in the hot folder until the Failure Timeout fires 30 minutes later
+with nothing telling the operator why. If OHD cannot see the path
+root at all, dispatch proceeds with a warning in the Activity Log —
+Fuji itself becomes the authoritative check.
+
+**Also in this release: the Perfectly Clear batch setup DeadlineError
+fix carried forward from Unreleased**, described below.
+
+Compat: no operator action is required to upgrade. Every existing
+JobMaker controller opens post-1.16.1 with Image Path pre-filled to
+match Image Staging Root, and its emitted `.txt` is byte-identical
+to what 1.16.0 produced. Locked by a tripwire test.
+
+---
 
 **Fixed: Perfectly Clear batch setup no longer escapes a
 `DeadlineError` as an unhandled rejection when the target filesystem
@@ -47,11 +96,10 @@ title is misleading — the test is really about fast surfacing of
 non-deadline errors during staging).
 
 Fix verified by 10 consecutive first-attempt-green full-suite runs
-on the originally-flaking Windows dev box (2452 tests each).
-
-Not release-blocking on its own — production `perOpTimeoutMs` never
-triggers this — so shipping with the next feature bump, not as a
-hotfix.
+on the originally-flaking Windows dev box (2452 tests each) and
+locked by four deterministic tests that inject a fake `fs/promises`
+whose ops reject with `DeadlineError` directly — no reliance on the
+1ms timing race the original test used to reproduce it.
 
 ---
 

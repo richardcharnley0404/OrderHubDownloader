@@ -231,9 +231,41 @@ latent version of it waiting for a customer to trip.
   OrderGateway but doesn't state extension filtering; we don't know whether
   OrderGateway ingests `.tmp` files. The fix would be to write the tmp file
   to a same-volume sibling of `orderDataPath` and rename in.
-- `fuji-jobmaker-file-writer.js:92` — same shape: `{surface}.txt.tmp` inside
-  the JobMaker hot folder, then rename to `{surface}.txt`. Frontier's JobMaker
-  watch is presumed to filter by `.txt`. Presumed, not confirmed.
+- `fuji-jobmaker-file-writer.js` (line ~156, post-1.16.1) — same shape:
+  `{surface}.txt.tmp` written into the JobMaker hot folder, then
+  renamed to `{surface}.txt`. 1.16.1 investigation while adding
+  `fujiImageRoot`:
+    - **What is written:** the full `.txt` contents in one call to
+      `fs.promises.writeFile(tmpPath, contents, 'utf-8')`, followed
+      immediately by `fs.promises.rename(tmpPath, finalPath)`. One
+      `.tmp` per surface file (a typical order has one surface, so
+      one `.tmp` per dispatch).
+    - **Where:** inside `hotFolderPath` (Frontier's watch folder) —
+      the same directory as the final `.txt`.
+    - **How long it exists:** writeFile → rename, no delay between.
+      Milliseconds on a local disk; can stretch to seconds on a slow
+      SMB share under contention. If OHD crashes between the two
+      calls, the `.tmp` is left behind indefinitely; the next
+      dispatch of the same `{surface}` overwrites it via writeFile's
+      default truncate mode.
+    - **Could Frontier match it?** Frontier's JobMaker watch is
+      presumed to filter by the `.txt` extension. `.txt.tmp`'s
+      actual last extension per `path.extname` is `.tmp`; if
+      Frontier does an extension-based match (as its spec implies),
+      the temp is safe. If it does a substring match on `.txt`
+      anywhere in the filename, the temp is unsafe — a scan while
+      the `.tmp` exists could ingest a partial file. **Presumed, not
+      confirmed.** Same class as the pre-M7b PIC Pro `.ohdtmp`
+      assumption, which is why this class of bug is worth closing
+      as a group.
+    - **Lower-risk than the PIC Pro case, but still latent.** The
+      `.txt.tmp` name does not contain the order code — its
+      structure is `{orderRef}_{surface}.txt.tmp` — so a scanner
+      matching on order-code presence would still fire. And unlike
+      the PIC Pro `.ohdtmp` folder (which was written recursively
+      over seconds), this is a single file write followed by an
+      atomic rename, so the exposure window is much smaller.
+      Neither difference makes it safe, only lower probability.
 
 Neither has a customer report today. Fix pattern is the same for both: introduce
 a save-time co-location check between the tmp-write location and the watched

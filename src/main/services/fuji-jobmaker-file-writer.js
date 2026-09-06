@@ -37,6 +37,28 @@ const path = require('path');
 
 const TMP_SUFFIX = '.tmp';
 
+/**
+ * Resolve the default logger safely — the production service logger
+ * requires electron at load time, so a bare require throws under
+ * `node:test`. This wrapper falls back to a no-op stub so the writer
+ * can run headlessly without an injected logger.
+ */
+function _defaultLogger() {
+  try {
+    // eslint-disable-next-line global-require
+    return require('./logger');
+  } catch (_) {
+    return {
+      info:       () => {},
+      warn:       () => {},
+      error:      () => {},
+      logInfo:    () => {},
+      logWarning: () => {},
+      logError:   () => {},
+    };
+  }
+}
+
 class FujiJobMakerFileWriter {
   /**
    * Write a complete Fuji JobMaker submission for one order.
@@ -45,6 +67,16 @@ class FujiJobMakerFileWriter {
    * @param {string} args.hotFolderPath     Absolute path to Frontier's watch folder.
    * @param {string} args.imageStagingRoot  Absolute path under which the per-order
    *                                        image folder is created.
+   * @param {string} [args.fujiImageRoot]   1.16.1 — the artwork root as the Fuji
+   *                                        JobMaker machine reaches it. When set
+   *                                        AND different from imageStagingRoot,
+   *                                        the writer runs a dispatch-time
+   *                                        reachability check between staging
+   *                                        and .txt write; see
+   *                                        `_verifyFujiReachability` for the
+   *                                        hard-vs-soft failure discrimination.
+   *                                        When absent OR equal to
+   *                                        imageStagingRoot, the check is a no-op.
    * @param {string} args.orderRef          Order number (used for the staging
    *                                        subfolder and the `.txt` filename stem).
    * @param {Array<{sourcePath:string, filename:string}>} args.imageFiles
@@ -55,6 +87,8 @@ class FujiJobMakerFileWriter {
    * @param {Array<{filename:string, contents:string}>} args.surfaceFiles
    *                                        Output of `generateFujiJobMakerFiles`.
    *                                        One entry per surface group.
+   * @param {object} [args.deps]            Optional dependency injection for tests.
+   *                                        { fs, logger }
    * @returns {Promise<{
    *   imageStagingFolder: string,
    *   copiedImages:       string[],
@@ -65,24 +99,50 @@ class FujiJobMakerFileWriter {
   async writeOrderFiles({
     hotFolderPath,
     imageStagingRoot,
+    fujiImageRoot,
     orderRef,
     imageFiles,
     surfaceFiles,
+    deps = {},
   }) {
     this._validateArgs({ hotFolderPath, imageStagingRoot, orderRef, imageFiles, surfaceFiles });
+    const fsMod  = deps.fs     || fs;
+    // Lazy-loaded no-op-safe default logger. The real service logger
+    // requires electron at load time so a bare `require('./logger')`
+    // throws in `node:test` runs; wrap the require in try/catch so the
+    // writer can be exercised headlessly without an injected logger.
+    const logger = deps.logger || _defaultLogger();
 
     // ── 1. Stage images ──────────────────────────────────────────────────
     const imageStagingFolder = path.join(imageStagingRoot, orderRef);
-    await fs.promises.mkdir(imageStagingFolder, { recursive: true });
+    await fsMod.promises.mkdir(imageStagingFolder, { recursive: true });
 
-    const copiedImages = await this._copyImages(imageFiles, imageStagingFolder);
+    const copiedImages = await this._copyImages(imageFiles, imageStagingFolder, fsMod);
+
+    // ── 1b. 1.16.1 — verify fujiImageRoot reachability (only when it
+    //     differs from imageStagingRoot). Hard-fail if the Fuji-view
+    //     path resolves the ROOT from OHD's side but not the order
+    //     subfolder — that is a real configuration bug (fujiImageRoot
+    //     points at a different folder than imageStagingRoot). Soft-warn
+    //     if OHD cannot see the root at all — OHD may legitimately be
+    //     unable to reach a share the Fuji machine can. See docstring
+    //     on _verifyFujiReachability.
+    if (fujiImageRoot && this._normalizeForCompare(fujiImageRoot) !== this._normalizeForCompare(imageStagingRoot)) {
+      await this._verifyFujiReachability({
+        fujiImageRoot,
+        imageStagingRoot,
+        orderRef,
+        fs: fsMod,
+        logger,
+      });
+    }
 
     // ── 2. Write surface .txt files (atomic rename) ──────────────────────
     // Hot folder must exist — we don't auto-create it because a missing hot
     // folder usually means the controller is misconfigured and we want to
     // surface that to the operator rather than silently creating an empty
     // folder Frontier isn't watching.
-    if (!fs.existsSync(hotFolderPath)) {
+    if (!fsMod.existsSync(hotFolderPath)) {
       throw new Error(`Fuji JobMaker hot folder does not exist: ${hotFolderPath}`);
     }
 
@@ -93,13 +153,111 @@ class FujiJobMakerFileWriter {
 
       // utf-8 is correct for ASCII printable + extended Windows characters
       // that Frontier accepts in CustomerName, BackPrint etc.
-      await fs.promises.writeFile(tmpPath, surfaceFile.contents, 'utf-8');
-      await fs.promises.rename(tmpPath, finalPath);
+      await fsMod.promises.writeFile(tmpPath, surfaceFile.contents, 'utf-8');
+      await fsMod.promises.rename(tmpPath, finalPath);
 
       writtenFiles.push(finalPath);
     }
 
     return { imageStagingFolder, copiedImages, writtenFiles };
+  }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // 1.16.1 dispatch-time reachability check for fujiImageRoot
+  // ───────────────────────────────────────────────────────────────────────
+
+  /**
+   * Verify the order's artwork folder resolves via the Fuji-view root
+   * (`fujiImageRoot`). Runs AFTER images have been staged into
+   * `imageStagingRoot/orderRef/`, BEFORE the `.txt` files land in the
+   * hot folder.
+   *
+   * The check discriminates two states so a working cross-machine
+   * config is never blocked by an OHD-side visibility gap:
+   *
+   *   1. Root RESOLVES from OHD but order subfolder is missing →
+   *      HARD FAIL. This is a real configuration bug: fujiImageRoot
+   *      points at a different folder than imageStagingRoot. Fuji
+   *      will read the emitted `.txt`'s `ImagePath=` line and look
+   *      for artwork that isn't there; the order would sit in the
+   *      hot folder until Frontier's failure timeout without ever
+   *      printing. Fail loudly at dispatch so the operator sees an
+   *      immediate red job with an actionable message, not a silent
+   *      30-minute stall.
+   *
+   *   2. Root does NOT resolve from OHD (any error — ENOENT,
+   *      EACCES, ETIMEDOUT, network unreachable) → SOFT WARN,
+   *      dispatch proceeds. OHD cannot tell "the operator's path
+   *      is wrong" from "OHD's machine legitimately cannot see a
+   *      share the Fuji machine reaches". Blocking here would kill
+   *      a working configuration in the latter case — the 1.15.1
+   *      mistake. Log a warning naming the path so a real bug still
+   *      leaves a trail, then let Fuji be the authoritative check.
+   *
+   * The same-machine case (fujiImageRoot === imageStagingRoot) is
+   * excluded by the caller — this method is only invoked when the
+   * two roots differ.
+   */
+  async _verifyFujiReachability({ fujiImageRoot, imageStagingRoot, orderRef, fs, logger }) {
+    const fujiOrderFolder = path.join(fujiImageRoot, orderRef);
+
+    // (2) can OHD see the root at all?
+    let rootResolvable = false;
+    try {
+      await fs.promises.stat(fujiImageRoot);
+      rootResolvable = true;
+    } catch (rootErr) {
+      // OHD can't resolve fujiImageRoot from its side. That may be
+      // a wrong path or a share OHD legitimately can't reach — we
+      // cannot tell. Warn and let dispatch proceed; Fuji is the
+      // authoritative check for the ImagePath value.
+      (logger.logWarning || logger.warn || (() => {})).call(logger,
+        `[fuji-jobmaker] fujiImageRoot not resolvable from OHD's side — dispatch proceeding without confirming the path. ` +
+        `fujiImageRoot: ${fujiImageRoot}. Underlying error: ${rootErr && rootErr.code} ${rootErr && rootErr.message}. ` +
+        `If the order does not print, check that fujiImageRoot on the controller points at the same folder as imageStagingRoot (${imageStagingRoot}) expressed as the Fuji JobMaker machine reaches it.`,
+      );
+      return;
+    }
+
+    // (1) root resolves. now the order subfolder MUST exist too.
+    try {
+      await fs.promises.stat(fujiOrderFolder);
+      return;
+    } catch (orderErr) {
+      if (orderErr && orderErr.code === 'ENOENT') {
+        // Root exists, subfolder missing — real configuration bug.
+        throw new Error(
+          `Fuji JobMaker dispatch stopped: the order's artwork folder is not visible via the configured fujiImageRoot. ` +
+          `OHD wrote the images to ${path.join(imageStagingRoot, orderRef)}, but ${fujiOrderFolder} does not exist. ` +
+          `This means fujiImageRoot on the controller does not point at the same folder as imageStagingRoot. ` +
+          `Fix: check that fujiImageRoot resolves to the same physical folder as imageStagingRoot, expressed as the Fuji JobMaker machine reaches it. ` +
+          `If both OHD and Fuji JobMaker run on the same machine, the two must be equal.`
+        );
+      }
+      // Any other error (EACCES / ETIMEDOUT / EBUSY / …) — same
+      // posture as an unreachable root: warn, let dispatch proceed.
+      (logger.logWarning || logger.warn || (() => {})).call(logger,
+        `[fuji-jobmaker] fujiImageRoot resolved but the order subfolder stat failed with a non-ENOENT error — dispatch proceeding. ` +
+        `fujiOrderFolder: ${fujiOrderFolder}. Underlying error: ${orderErr && orderErr.code} ${orderErr && orderErr.message}.`,
+      );
+    }
+  }
+
+  /**
+   * Normalise a path for comparison (same-volume same-folder detection
+   * before running the reachability check). Strips trailing separators
+   * and lowercases — the Fuji machine's Windows share is
+   * case-insensitive, and forward vs back slash difference is preserved
+   * by design (`_buildImagePath` in the generator does not convert).
+   *
+   * This is NOT full path equivalence — a mapped drive and its UNC
+   * source will normalise differently and the check will still run.
+   * That is the desired behaviour: the two roots are not literally
+   * equal, so verifying the extra reachability layer is cheap
+   * insurance.
+   */
+  _normalizeForCompare(p) {
+    return String(p || '').replace(/[\\/]+$/, '').toLowerCase();
   }
 
   // ───────────────────────────────────────────────────────────────────────
@@ -137,7 +295,7 @@ class FujiJobMakerFileWriter {
    * @returns {Promise<string[]>} absolute destination paths in input order
    *                              (with duplicates collapsed)
    */
-  async _copyImages(imageFiles, destFolder) {
+  async _copyImages(imageFiles, destFolder, fsMod = fs) {
     const seen = new Set();
     const copied = [];
 
@@ -146,7 +304,7 @@ class FujiJobMakerFileWriter {
       seen.add(img.filename);
 
       const destPath = path.join(destFolder, img.filename);
-      await fs.promises.copyFile(img.sourcePath, destPath);
+      await fsMod.promises.copyFile(img.sourcePath, destPath);
       copied.push(destPath);
     }
 

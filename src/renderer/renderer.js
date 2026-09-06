@@ -5768,6 +5768,11 @@ function updateOcTypeFields() {
   document.getElementById('ocPrinterNameGroup').style.display       = isFujiJobMaker ? '' : 'none';
   document.getElementById('ocAutoCorrectGroup').style.display       = isFujiJobMaker ? '' : 'none';
   document.getElementById('ocFailureTimeoutMsGroup').style.display  = isFujiJobMaker ? '' : 'none';
+  // 1.16.1 — fujiImageRoot is JobMaker-only. PIC Pro doesn't need it
+  // because its DIGIN Path IS the Fuji-machine-visible path already
+  // (OHD renames from imageStagingRoot into diginPath in a single
+  // same-volume atomic operation; DIGIN is where Fuji reads).
+  document.getElementById('ocFujiImageRootGroup').style.display     = isFujiJobMaker ? '' : 'none';
   // PIC Pro-only fields
   document.getElementById('ocOrderDataPathGroup').style.display           = isFujiPicPro ? '' : 'none';
   document.getElementById('ocDiginPathGroup').style.display               = isFujiPicPro ? '' : 'none';
@@ -5826,6 +5831,15 @@ function openOrderControllerModal(ctrl = null) {
   document.getElementById('ocBackPrint2').value = ctrl ? (ctrl.backPrint2 || '{jobId}  {filename}')       : '{jobId}  {filename}';
   // Fuji JobMaker fields — autoCorrect is null/true/false on the record; map to '' | 'on' | 'off'
   document.getElementById('ocImageStagingRoot').value = ctrl ? (ctrl.imageStagingRoot || '') : '';
+  // 1.16.1 fujiImageRoot: pre-fill from imageStagingRoot on
+  // pre-1.16.1 controllers so the field opens with a valid value
+  // (migration default; matches validateControllerConfig's default).
+  // For new controllers (ctrl === null) the field starts blank —
+  // there's no imageStagingRoot to inherit from yet, and the operator
+  // will fill both before saving.
+  document.getElementById('ocFujiImageRoot').value    = ctrl
+    ? (ctrl.fujiImageRoot || ctrl.imageStagingRoot || '')
+    : '';
   document.getElementById('ocPrinterName').value      = ctrl ? (ctrl.printerName      || '') : '';
   const fujiAutoCorrect = ctrl && ctrl.type === 'fujijobmaker' ? ctrl.autoCorrect : null;
   document.getElementById('ocAutoCorrect').value      =
@@ -6512,6 +6526,7 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
   }
   if (type === 'fujijobmaker') {
     const imageStagingRoot = document.getElementById('ocImageStagingRoot').value.trim();
+    const fujiImageRoot    = document.getElementById('ocFujiImageRoot').value.trim();
     const printerName      = document.getElementById('ocPrinterName').value.trim();
     const autoCorrectRaw   = document.getElementById('ocAutoCorrect').value;
     const backprintMode    = document.getElementById('ocBackprintMode').value || 'none';
@@ -6523,6 +6538,11 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
     // The validator runs again at the IPC boundary so a bad payload can't
     // slip past, but surfacing errors before IPC keeps the UX snappy.
     if (!imageStagingRoot)         { alert('Image Staging Root is required for Fuji JobMaker controllers.'); return; }
+    // 1.16.1 — fujiImageRoot required. Pre-1.16.1 controllers open
+    // with this field pre-filled from imageStagingRoot (see
+    // openOrderControllerModal), so a save without changing anything
+    // still passes this check.
+    if (!fujiImageRoot)            { alert('Image Path (Fuji JobMaker view) is required for Fuji JobMaker controllers. OHD needs to know how the Fuji JobMaker machine reaches the artwork folder — if both run on the same machine this is the same path as Image Staging Root.'); return; }
     if (backprintMode === 'text' && !backprintTemplate) {
       alert('Back Print Template is required when Back Print Mode is "Text".'); return;
     }
@@ -6530,8 +6550,33 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
       alert('Failure Timeout must be between 1 and 1440 minutes.'); return;
     }
 
+    // 1.16.1 — save-time advisory reachability check for fujiImageRoot.
+    // Advisory only: a path correct for the Fuji machine may
+    // legitimately be unreachable from the OHD machine, and a hard
+    // block here would reproduce the 1.15.1 mistake. Warn once, name
+    // the path, then let the save proceed. Skipped when fujiImageRoot
+    // === imageStagingRoot (the same-machine case — the local path
+    // has already been browsed and exists on this box).
+    if (fujiImageRoot !== imageStagingRoot) {
+      try {
+        const probe = await window.electronAPI.canReachPath(fujiImageRoot);
+        if (!probe || !probe.reachable) {
+          alert(
+            'Advisory: OHD cannot reach the Image Path (Fuji JobMaker view) you entered from this machine.\n\n' +
+            'Path: ' + fujiImageRoot + '\n' +
+            (probe && probe.code ? 'Reason: ' + probe.code + '\n\n' : '\n') +
+            'This is not always a problem — a path that is correct for the Fuji JobMaker machine may not be visible from the machine running OHD. ' +
+            'Saving anyway. Dispatch will check again at run time and fail loudly with a specific error if the path really is wrong.'
+          );
+        }
+      } catch (_) {
+        // If the reachability probe itself fails, don't block the save.
+      }
+    }
+
     controller.hotFolderPath     = outputPath; // The Output Path field IS the Frontier hot folder for Fuji.
     controller.imageStagingRoot  = imageStagingRoot;
+    controller.fujiImageRoot     = fujiImageRoot;
     controller.printerName       = printerName;
     controller.autoCorrect       = autoCorrectRaw === 'on' ? true : autoCorrectRaw === 'off' ? false : null;
     controller.backprintMode     = backprintMode;

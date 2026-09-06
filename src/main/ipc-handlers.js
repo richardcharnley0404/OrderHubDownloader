@@ -200,6 +200,28 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
     }
   });
 
+  // 1.16.1 — path reachability probe for the Fuji JobMaker
+  // fujiImageRoot save-time advisory. Returns {reachable, code} —
+  // advisory only; the renderer warns on unreachable but proceeds
+  // with the save (the field's whole reason to exist is that OHD may
+  // legitimately not see a share the Fuji machine reaches).
+  //
+  // No permissions issues: this is a read-only stat on a user-supplied
+  // path. Errors are mapped to `code` so the renderer can surface a
+  // useful message ("path does not exist" vs "access denied").
+  ipcMain.handle('ohd:util:can-reach-path', async (_event, p) => {
+    try {
+      if (typeof p !== 'string' || p.trim().length === 0) {
+        return { reachable: false, code: 'INVALID' };
+      }
+      const fsp = require('fs/promises');
+      await fsp.stat(p);
+      return { reachable: true };
+    } catch (err) {
+      return { reachable: false, code: (err && err.code) || 'UNKNOWN' };
+    }
+  });
+
   // CSV file picker (for channel mapping import)
   ipcMain.handle('dialog:selectCsvFile', async () => {
     try {
