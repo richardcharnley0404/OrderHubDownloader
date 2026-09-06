@@ -194,6 +194,79 @@ folder, settles the format question for good.
 
 **`dpof-generator.js` still emits `PRT PSL=` unvalidated.** M1 guards the reprint caller, but the three first-send callers (`print-service.js:319`, `:490`, `print-controller-service.js:37`) all rely on caller-side print-size guards. A generator-boundary throw would be defence-in-depth and align with the "fail loudly" spirit of v1.7.22, but needs its own audit across all five call sites before landing.
 
+**1.16.1 Fuji JobMaker dispatch check: known false-fail when
+`fujiImageRoot` is a drive-letter that resolves to unrelated content on
+OHD's machine.** The dispatch-time reachability check in
+`fuji-jobmaker-file-writer.js` `_verifyFujiReachability` discriminates
+"root resolves, order subfolder missing" (hard fail — real config bug)
+from "root does not resolve at all" (soft warn — OHD may legitimately
+not see the share the Fuji machine reaches). That discrimination is
+correct in the common cross-machine case where `fujiImageRoot` is a
+UNC share the OHD box has no route to. It gives a **false hard fail**
+in one specific configuration:
+
+- The Fuji JobMaker machine has a drive letter mapped, say
+  `Z:\Artwork`, pointing at `\\labserver1\Pixfizz\Artwork`.
+- The operator sets `fujiImageRoot` to `Z:\Artwork` because that is
+  what the Fuji machine sees.
+- The OHD machine has its own `Z:` drive too — for example, an
+  unrelated network drive, an SD card, or a personal folder the
+  operator mounted for something else. That drive does NOT contain
+  the Pixfizz artwork tree.
+- OHD's `stat('Z:\Artwork')` succeeds (SOME folder exists at that
+  path, just not the same one Fuji sees).
+- OHD's `stat('Z:\Artwork\{orderRef}')` fails with ENOENT (the
+  order subfolder OHD wrote is in `imageStagingRoot`, not on OHD's
+  own `Z:`).
+- The check falls into the "root resolves, subfolder missing → hard
+  fail" branch and refuses to dispatch a correct configuration.
+
+Uncommon in practice — mapped drives are per-user Windows state and
+labs typically don't have the same drive letters mapped to different
+things on the OHD box vs the Fuji box. Almost every cross-machine
+setup uses UNC paths for exactly this reason (a UNC on the OHD box
+either resolves to the same share the Fuji box sees, or does not
+resolve at all — falls into the soft-warn branch).
+
+**Accepted for 1.16.1, recorded here for the day it happens.** The
+mode fails LOUD, not silent — the message the writer throws already
+names both paths and the fix ("Fuji JobMaker dispatch stopped: the
+order's artwork folder is not visible via the configured
+fujiImageRoot. OHD wrote the images to `{imageStagingRoot}/{orderRef}`,
+but `{fujiImageRoot}/{orderRef}` does not exist. This means
+fujiImageRoot on the controller does not point at the same folder as
+imageStagingRoot. Fix: check that fujiImageRoot resolves to the same
+physical folder as imageStagingRoot, expressed as the Fuji JobMaker
+machine reaches it. If both OHD and Fuji JobMaker run on the same
+machine, the two must be equal."). A lab that reports "every
+JobMaker dispatch fails with 'dispatch stopped' but the config looks
+right" — check for a drive-letter collision on the OHD machine
+first. Also visible in the Activity Log via the `logError` call from
+`_stepDelivering`'s catch in the print-service call chain, and on the
+Jobs grid as a red job with the full message.
+
+Possible fixes if a lab does hit it:
+
+- Simplest — tell the lab to switch `fujiImageRoot` to the UNC form
+  (`\\labserver1\Pixfizz\Artwork` instead of `Z:\Artwork`). The
+  emitted `.txt` accepts either shape and Fuji resolves both; the
+  UNC avoids the drive-letter collision on OHD.
+- If a code fix is warranted: compare the order-folder contents
+  through `fujiImageRoot` against `imageStagingRoot` (e.g., stat the
+  first image file that OHD just wrote and confirm it exists at
+  both). If the two disagree on a file OHD KNOWS it wrote, the paths
+  are genuinely different physical folders → hard fail. If they
+  agree, the drive-letter overlap coincidentally landed on a folder
+  containing the right images — accept and dispatch. Costs one extra
+  stat per dispatch on a happy path; the current check runs
+  post-stage-images so the file we'd stat is already on disk.
+  Not worth doing preemptively; hold for a first customer report.
+
+Reference: `src/main/services/fuji-jobmaker-file-writer.js`
+`_verifyFujiReachability`. Test coverage for the hard-fail branch is
+in `src/main/services/__tests__/fuji-jobmaker-file-writer.test.js`
+under `1.16.1 reachability: root resolves, order subfolder MISSING`.
+
 **Settings polling-interval field on a fresh install shows editable until first check-in.**
 The Settings panel reads `ohd:server:get-capabilities` once when the panel opens (see
 `renderer.js` — `populateForm`), so the first time an operator installs OHD v1.9.0 and opens
