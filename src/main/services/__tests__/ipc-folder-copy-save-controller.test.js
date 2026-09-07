@@ -189,69 +189,149 @@ test('IPC rejects: destinationLayout other than "job" or "root"', async () => {
   assert.ok(warn, 'rejection must log at warn level with the controller context');
 });
 
-test('IPC rejects: root layout with blank template — error names the fix', async () => {
+test('1.16.2 IPC ADVISORY (was: reject): root layout with blank template → saves + warning', async () => {
+  // Pre-1.16.2 this test asserted a HARD BLOCK on Root+blank-template
+  // ("A filename template is required..."). 1.16.2 replaces the block
+  // with an advisory: dispatch's on-disk dedupe pass (see
+  // print-service._sendViaFolderCopyRouted → dedupeAgainstDisk)
+  // guarantees no overwrite regardless of the template shape, so the
+  // save-time block was a 1.15.0-shape mistake. The advisory still
+  // fires so the operator understands what shape they picked, but the
+  // save succeeds and the controller persists.
   resetState();
   const ctrl = makeFolderCopyCtrl({ destinationLayout: 'root', filenameTemplate: '' });
   const result = await saveController(null, ctrl);
-  assert.equal(result.success, false);
-  // Error names the fix, per §5.3 spec (M3a-narrowed set).
-  assert.match(result.error, /filename template is required/);
-  assert.match(result.error, /root of the copy-to folder/);
-  assert.match(result.error, /\{orderNumber\}/);
-  assert.match(result.error, /\{jobName\}/);
-  assert.match(result.error, /\{jobId\}/);
-  // The narrower set explicitly does NOT include per-image tokens.
-  assert.doesNotMatch(result.error, /\{filename\}/);
-  assert.doesNotMatch(result.error, /\{originalFilename\}/);
-  assert.equal(__controllers.length, 0);
+  assert.equal(result.success, true, '1.16.2 — save succeeds; the block became an advisory');
+  assert.equal(__controllers.length, 1, 'controller persists in 1.16.2');
+  assert.ok(Array.isArray(result.warnings), 'warnings array returned');
+  const w = result.warnings.find(w => w.kind === 'folder-copy-root-blank-template');
+  assert.ok(w, 'blank-template advisory MUST be in warnings');
+  assert.match(w.text, /Root layout with no filename template/);
+  assert.match(w.text, /_2\/_3 suffixes at write time/);
 });
 
-test('IPC rejects: root layout with template lacking any distinguishing token', async () => {
+test('1.16.2 IPC ADVISORY (was: reject): root layout with template lacking any job-distinguishing token → saves + warning', async () => {
+  // Pre-1.16.2 this rejected `{product}_{index}` under Root. 1.16.2:
+  // save succeeds, advisory fires. The never-overwrite dispatch guarantee
+  // covers the safety of cross-job collisions with _2/_3 suffixing.
   resetState();
-  // {product} + {index} — both resolve identically across dispatches that
-  // share the same product; would overwrite across jobs in a root layout.
   const ctrl = makeFolderCopyCtrl({
     destinationLayout: 'root',
     filenameTemplate:  '{product}_{index}',
   });
   const result = await saveController(null, ctrl);
-  assert.equal(result.success, false);
-  assert.match(result.error, /must include at least one of/);
-  assert.match(result.error, /overwrite each other/);
-  assert.equal(__controllers.length, 0);
+  assert.equal(result.success, true);
+  assert.equal(__controllers.length, 1);
+  const w = (result.warnings || []).find(w => w.kind === 'folder-copy-root-no-distinguisher');
+  assert.ok(w, 'no-distinguisher advisory MUST be in warnings');
+  assert.match(w.text, /does not include any of/);
+  assert.match(w.text, /\{orderNumber\}/);
+  assert.match(w.text, /\{jobName\}/);
+  assert.match(w.text, /\{jobId\}/);
 });
 
-test('IPC rejects: root layout + {filename} — per-image token does NOT count as job-distinguishing', async () => {
-  // M3a correction. {filename} resolves to a manifest basename like
-  // "5_IMG.jpg" — an index-prefixed customer filename. Camera filenames
-  // (IMG_0001.jpg) repeat across orders constantly, so two orders each
-  // carrying that name at the same slot resolve identically and would
-  // overwrite in root layout. The initial M3 accepted {filename} here
-  // and this test was originally a positive case — the reject flip is
-  // the fix.
+test('1.16.2 IPC ADVISORY (was: reject): root layout + {filename} → saves + warning (per-image token does not count as job-distinguishing)', async () => {
+  // M3a rationale still holds: {filename} resolves to a manifest basename
+  // ("5_IMG.jpg") and camera filenames repeat across orders. The
+  // pre-1.16.2 HARD BLOCK on this shape becomes a 1.16.2 advisory. The
+  // dispatch-time dedupe pass keeps files safe with suffixing.
   resetState();
   const ctrl = makeFolderCopyCtrl({
     destinationLayout: 'root',
     filenameTemplate:  '{filename}_{index}',
   });
   const result = await saveController(null, ctrl);
-  assert.equal(result.success, false, '{filename} does not distinguish jobs — cameras produce the same names');
-  assert.match(result.error, /\{orderNumber\}/);
-  assert.equal(__controllers.length, 0);
+  assert.equal(result.success, true, '1.16.2 — no hard block on {filename} under Root');
+  assert.equal(__controllers.length, 1);
+  const w = (result.warnings || []).find(w => w.kind === 'folder-copy-root-no-distinguisher');
+  assert.ok(w, 'no-distinguisher advisory fires because {filename} is not a job-distinguisher');
 });
 
-test('IPC rejects: root layout + {originalFilename} — same repeat problem, strictly weaker than {filename}', async () => {
-  // {originalFilename} is {filename} with the leading "N_" index prefix
-  // stripped, so it is strictly WEAKER at distinguishing across jobs.
-  // Also a reject after M3a.
+test('1.16.2 IPC ADVISORY (was: reject): root layout + {originalFilename} → saves + warning', async () => {
+  // {originalFilename} strictly weaker than {filename} for cross-job
+  // distinguishing (M3a rationale). Same 1.16.2 advisory shape.
   resetState();
   const ctrl = makeFolderCopyCtrl({
     destinationLayout: 'root',
     filenameTemplate:  '{originalFilename}',
   });
   const result = await saveController(null, ctrl);
-  assert.equal(result.success, false);
-  assert.equal(__controllers.length, 0);
+  assert.equal(result.success, true);
+  assert.equal(__controllers.length, 1);
+  const w = (result.warnings || []).find(w => w.kind === 'folder-copy-root-no-distinguisher');
+  assert.ok(w, '{originalFilename} triggers the no-distinguisher advisory');
+});
+
+test('1.16.2 IPC ADVISORY: omitJobId + per-job + template lacks per-image distinguisher → saves + warning', async () => {
+  // Item 5 of 1.16.2. omitJobId=true under Per-job layout means two jobs
+  // on the same order share the `{orderNumber}/` folder. If the template
+  // also produces the same set of resolved filenames per job, every image
+  // collides across jobs. Dispatch's dedupeAgainstDisk still saves it
+  // with _2 suffixes — advisory, not a block. This test locks the
+  // exact wording of the operator-visible message so future edits to
+  // the string trip the tripwire the first time they run.
+  resetState();
+  const ctrl = makeFolderCopyCtrl({
+    destinationLayout: 'job',
+    omitJobId:         true,
+    filenameTemplate:  '{product}',       // no {index}/{indexPadded}/{filename}/{jobName}/{jobId}
+  });
+  const result = await saveController(null, ctrl);
+  assert.equal(result.success, true, 'advisory, not a block');
+  assert.equal(__controllers.length, 1);
+  const w = (result.warnings || []).find(w => w.kind === 'folder-copy-omitjobid-no-image-distinguisher');
+  assert.ok(w, 'omitJobId + no per-image distinguisher MUST fire an advisory');
+  assert.match(w.text, /Omit OrderHub job Id/);
+  assert.match(w.text, /share the \{orderNumber\} folder/);
+  assert.match(w.text, /_2\/_3/);
+  assert.match(w.text, /\{index\} \/ \{indexPadded\}/);
+});
+
+test('1.16.2 IPC no advisory: omitJobId + per-job + template already has {index} → no per-image warning', async () => {
+  // {index} makes every filename unique per image within a job. Combined
+  // with omitJobId=true, two jobs on the same order will still land in
+  // `{orderNumber}/` but their images resolve to distinct names. No
+  // advisory needed. Locks the negative case so an overly-eager future
+  // widening of the regex trips a test.
+  resetState();
+  const ctrl = makeFolderCopyCtrl({
+    destinationLayout: 'job',
+    omitJobId:         true,
+    filenameTemplate:  '{product}_{index}',
+  });
+  const result = await saveController(null, ctrl);
+  assert.equal(result.success, true);
+  const w = (result.warnings || []).find(w => w.kind === 'folder-copy-omitjobid-no-image-distinguisher');
+  assert.equal(w, undefined, 'template with {index} MUST NOT trigger the omitJobId advisory');
+});
+
+test('1.16.2 IPC omitJobId strict === true migration at the IPC boundary', async () => {
+  // The IPC handler coerces omitJobId to a strict boolean (`=== true`).
+  // Any other input value MUST persist as false so a pre-1.16.2 controller
+  // resaved after upgrade keeps the pre-1.16.2 destination-folder shape.
+  // Pair to the read-side migration test in routing-folder-copy-fields.test.js.
+  for (const v of [undefined, 'true', 1, 0, null, false, 'yes', '']) {
+    resetState();
+    const overrides = { destinationLayout: 'job', filenameTemplate: '' };
+    if (v !== undefined) overrides.omitJobId = v;
+    const ctrl = makeFolderCopyCtrl(overrides);
+    const result = await saveController(null, ctrl);
+    assert.equal(result.success, true, `omitJobId=${JSON.stringify(v)} — save must succeed`);
+    assert.equal(__controllers[0].omitJobId, false,
+      `omitJobId=${JSON.stringify(v)} MUST persist as strict boolean false at the IPC boundary`);
+  }
+});
+
+test('1.16.2 IPC omitJobId strict === true migration: only the literal true persists as true', async () => {
+  resetState();
+  const ctrl = makeFolderCopyCtrl({
+    destinationLayout: 'job',
+    filenameTemplate:  '{orderNumber}_{index}',
+    omitJobId:         true,
+  });
+  const result = await saveController(null, ctrl);
+  assert.equal(result.success, true);
+  assert.equal(__controllers[0].omitJobId, true, 'literal true persists as true');
 });
 
 test('IPC rejects: filenameTemplate that is not a string', async () => {

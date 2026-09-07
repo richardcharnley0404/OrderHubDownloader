@@ -35,7 +35,7 @@ const { resolveManifestPath } = require('./manifest-path');
 const { resolveDispatchImageSource } = require('./dispatch-image-source');
 const logger = require('./logger');
 const { buildFolderName, applyOrderNumberPrefixRules, UNSAFE_CHARS } = require('../../shared/printUtils');
-const { buildCopyFilenames, buildDestFolder } = require('./folder-copy-filename');
+const { buildCopyFilenames, buildDestFolder, dedupeAgainstDisk } = require('./folder-copy-filename');
 
 // Manifest filename is {orderNumber}.json (e.g. PXDEMO-K9MYDG.json)
 
@@ -1476,13 +1476,37 @@ class PrintService {
 
     // Destination folder name = the reprint folder's own name (`…_{id}-r{n}`),
     // keeping it distinct from the parent's `…_{id}` folder in the output.
+    // 1.16.2 note on omitJobId: the reprint suffix (`-r1`, `-r2`, …) is
+    // ALREADY part of `reprintFolderName`, so the reprint folder is
+    // distinct from the parent job's folder regardless of omitJobId.
+    // Deliberately don't apply omitJobId here — it's a controller-side
+    // shape rule for main dispatch; a reprint's whole disambiguator is
+    // the `-r{n}` suffix, and dropping the id would collapse `-r1` /
+    // `-r2` under the same folder. Keep reprints out of scope.
     const reprintFolderName = path.basename(reprintJobPath);
     const destFolder        = path.join(route.outputPath, reprintFolderName);
 
+    // 1.16.2 item 1 — never-overwrite for reprints too. Reprints keep
+    // their original filenames (§8 note above) — that's exactly the case
+    // most likely to collide against a previously-written parent dispatch
+    // if the destination is a shared folder. Dedupe against on-disk state
+    // in destFolder before writing so the reprint never overwrites the
+    // parent job's file with the same basename. Same helper, same
+    // guarantee as the main dispatch path.
+    const planned = imageFiles.map(img => ({
+      sourcePath:   img.sourcePath,
+      destFilename: img.filename,
+    }));
+    const { files: dedupedFiles, stats: diskStats } = dedupeAgainstDisk(
+      planned,
+      (p) => fs.existsSync(p),
+      destFolder,
+    );
+
     try {
       fs.mkdirSync(destFolder, { recursive: true });
-      for (const img of imageFiles) {
-        fs.copyFileSync(img.sourcePath, path.join(destFolder, img.filename));
+      for (const f of dedupedFiles) {
+        fs.copyFileSync(f.sourcePath, path.join(destFolder, f.destFilename));
       }
     } catch (writeErr) {
       logger.logError('Folder-copy reprint write failed', writeErr, {
@@ -1494,12 +1518,13 @@ class PrintService {
     }
 
     logger.info('Reprint sent via folder copy (routed)', {
-      parentJobId:  parentJob.id,
+      parentJobId:      parentJob.id,
       reprintSuffix,
-      reprintJobId: reprintFolderName,
-      controller:   route.controllerName,
+      reprintJobId:     reprintFolderName,
+      controller:       route.controllerName,
       destFolder,
-      images:       imageFiles.length,
+      images:           dedupedFiles.length,
+      diskSuffixedCount: diskStats.diskSuffixed,
     });
 
     return {
@@ -2375,15 +2400,42 @@ class PrintService {
       jobId:       job.id,
       destinationLayout,
       prefixRules,
+      // 1.16.2 item 5 — thread omitJobId through. Strict === true on the
+      // route side (see routing-service.js) so any pre-1.16.2 controller
+      // arrives here as `false` and the buildDestFolder TRIPWIRE holds.
+      omitJobId: route && route.omitJobId === true,
     });
 
-    const { files, stats } = buildCopyFilenames(imageFiles, job, {
+    const planned = buildCopyFilenames(imageFiles, job, {
       template:    filenameTemplate,
       prefixRules,
       // opts.now is deliberately NOT threaded here — M4 must let the real
       // clock default. resolveTemplate throws on a non-Date opts.now, and
       // any value round-tripped through config would arrive as a string.
     });
+
+    // 1.16.2 item 1 — never-overwrite guarantee. Before ANY write, dedupe
+    // the planner's chosen destFilenames against on-disk state in destFolder.
+    // A dispatched filename that already exists gets _2/_3 suffixed until
+    // we find one that doesn't. This is the layer that guarantees
+    // "OHD never replaces a file in a Folder Copy destination", and it
+    // holds across dispatches (the within-call dedupe in buildCopyFilenames
+    // only covers ONE dispatch by design). Must run BEFORE mkdirSync so
+    // an unlucky race between mkdir and the exists checks can't split
+    // the guarantee: mkdirSync is idempotent on an existing folder, so
+    // running the check first then creating still gives us the safe
+    // ordering. Uses `fs.existsSync` — synchronous and stable against
+    // the surrounding fs.copyFileSync loop.
+    //
+    // NOTE: if destFolder does not yet exist, existsFn returns false for
+    // every candidate and the pass is a no-op (planner output passes
+    // through). No spurious suffixing on a fresh destination.
+    const { files, stats: diskStats } = dedupeAgainstDisk(
+      planned.files,
+      (p) => fs.existsSync(p),
+      destFolder,
+    );
+    const stats = { ...planned.stats, diskSuffixed: diskStats.diskSuffixed };
 
     try {
       // Single mkdirSync — recursive:true is a no-op if destFolder already
@@ -2404,19 +2456,23 @@ class PrintService {
     // every image and the planner auto-suffixed; a non-zero truncated
     // count means at least one stem hit the 120-char cap; a non-zero
     // fallbacks length means at least one template resolution ended up
-    // empty and reverted to the original basename. All three are
-    // "operator should look at the template" signals.
+    // empty and reverted to the original basename; a non-zero
+    // diskSuffixedCount (1.16.2) means the never-overwrite pass had to
+    // pick a new name because the planner's choice already existed on
+    // disk. All four are "operator should look at the template" signals.
     logger.info('Job sent to print via folder copy (routed)', {
       jobId:              job.id,
       controller:         route.controllerName,
       destFolder,
       destinationLayout,
+      omitJobId:          route && route.omitJobId === true,
       templateApplied:    Boolean(filenameTemplate),
       images:             files.length,
       suffixedCount:      stats.suffixed,
       truncatedCount:     stats.truncated,
       fallbacksCount:     stats.fallbacks.length,
       fallbackBasenames:  stats.fallbacks,
+      diskSuffixedCount:  stats.diskSuffixed,
     });
 
     await this._markCompleted(job.id);

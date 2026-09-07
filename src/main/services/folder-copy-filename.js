@@ -45,25 +45,39 @@ const { resolveTemplate } = require('./template-tokens');
  *                   value that has been through config or JSON arrives as a
  *                   string. Let the real clock default.
  *
- * ── Why no fs check (§4.4) ──────────────────────────────────────────────
+ * ── Collision handling: within-dispatch (buildCopyFilenames) + against disk (dedupeAgainstDisk, 1.16.2) ──
  *
- * Collision handling de-duplicates WITHIN THIS CALL ONLY, via a Set of
+ * `buildCopyFilenames` de-duplicates WITHIN THIS CALL ONLY, via a Set of
  * names already issued in this dispatch. On a repeat, `_2`, `_3`, … is
- * inserted before the extension.
+ * inserted before the extension. This stays pure — zero fs.
  *
- * It is TEMPTING to add an `fs.existsSync` check to also avoid overwriting
- * files that already sit in the destination from a previous dispatch. DO
- * NOT DO THIS. Re-sending or retrying a job today overwrites the same
- * filenames in the same folder — that is what makes a retry idempotent.
- * An fs-based no-overwrite rule would turn every retry into a folder full
- * of `_2`, `_3` duplicates: a strictly worse failure than the one being
- * fixed, and one the operator would find much later. The vanishing-images
- * failure this module exists to prevent is entirely *within* one dispatch,
- * so within-dispatch de-duplication solves all of it.
+ * 1.16.2 adds a SECOND stage, `dedupeAgainstDisk`, that runs AFTER
+ * `buildCopyFilenames` and dedupes the planner's output against
+ * whatever files already sit in the destination folder. Pure, but
+ * takes an injectable `existsFn` so tests never touch a real fs.
+ * Dispatch (`_sendViaFolderCopyRouted`) calls both in sequence.
  *
- * If you are looking at this comment because you think the module should
- * check the filesystem, read
- * docs/folder-copy-filename-templates-brief.md §4.4 first, then don't.
+ * The pre-1.16.2 module docstring warned in strong terms against ANY
+ * fs-based no-overwrite rule ("re-sending or retrying a job today
+ * overwrites the same filenames — that is what makes a retry
+ * idempotent"). The 1.16.2 spec explicitly chose the opposite trade:
+ * OHD must never replace an existing file in a Folder Copy
+ * destination, even at the cost of retries producing extra `_2`
+ * copies. Two reasons drove the reversal:
+ *
+ *   1. Item 5 (omitJobId) makes two jobs of one order share a folder.
+ *      Under omitJobId + a template without a job-distinguishing token,
+ *      the pre-1.16.2 within-dispatch dedup does NOT protect the
+ *      second job's files — the two dispatches are separate. Only a
+ *      dedupe-against-disk pass catches that.
+ *   2. A retry that lands `_2` copies is a visible signal (an extra
+ *      file the operator can see); a retry that silently overwrites is
+ *      invisible until the customer notices. The visible failure mode
+ *      is the right trade.
+ *
+ * The keep-the-module-pure discipline still holds: the fs interaction
+ * is confined to `dedupeAgainstDisk` and reaches the module only via
+ * a function argument (`existsFn`).
  *
  * ── Why no logger ───────────────────────────────────────────────────────
  *
@@ -329,6 +343,8 @@ function buildCopyFilenames(images, job = {}, opts = {}) {
  * Semantics:
  *   layout 'root' → `outputPath` verbatim (or '' if outputPath is blank)
  *   layout 'job'  → path.join(outputPath, `${stripped(orderNumber)}_${jobId}`)
+ *                   OR path.join(outputPath, `${stripped(orderNumber)}`)
+ *                   when omitJobId is true (1.16.2 — item 5).
  *
  * The blank-outputPath branch is deliberately shared with the preview
  * caller: on a new controller being edited before Save the preview
@@ -337,12 +353,15 @@ function buildCopyFilenames(images, job = {}, opts = {}) {
  * to save the controller) but the shared handling keeps preview and
  * dispatch honest to the same rule.
  *
- * ── The no-change lock (§6.2, §4.1) ─────────────────────────────────────
+ * ── The no-change lock (§6.2, §4.1, 1.16.2) ─────────────────────────────
  *
- * With destinationLayout='job' and no prefix rules this returns EXACTLY
+ * With destinationLayout='job', no prefix rules, and omitJobId absent /
+ * null / false this returns EXACTLY
  * `path.join(outputPath, `${orderNumber}_${jobId}`)`. That is the pre-M4
  * shape every existing installation depends on. The M4 test suite locks
- * it byte-for-byte at print-service-folder-copy-routed.test.js.
+ * it byte-for-byte at print-service-folder-copy-routed.test.js, and the
+ * 1.16.2 TRIPWIRE tests at folder-copy-filename.test.js lock the
+ * omitJobId dimension of the migration invariant.
  *
  * @param {object} args
  * @param {string} args.outputPath        — controller.outputPath; blank ok
@@ -355,9 +374,16 @@ function buildCopyFilenames(images, job = {}, opts = {}) {
  *   `to` = pure strip. The field is now `orderNumberPrefixRules` on
  *   controller records and the route literals read it via
  *   printUtils.readOrderNumberPrefixRules.
+ * @param {boolean} [args.omitJobId] — 1.16.2 (item 5). When TRUE, the
+ *   per-job segment is just `${transformedOrder}` — two jobs of the same
+ *   order share one folder. Default false: existing controllers keep the
+ *   `_${jobId}` disambiguator until an operator ticks the checkbox. Null
+ *   and undefined MUST behave identically to false — the migration
+ *   invariant, locked by the TRIPWIRE tests. Ignored under
+ *   destinationLayout='root' since root has no per-job segment.
  * @returns {string}
  */
-function buildDestFolder({ outputPath, orderNumber, jobId, destinationLayout, prefixRules }) {
+function buildDestFolder({ outputPath, orderNumber, jobId, destinationLayout, prefixRules, omitJobId }) {
   const layout   = destinationLayout === 'root' ? 'root' : 'job';
   const outRoot  = typeof outputPath === 'string' ? outputPath : '';
   if (layout === 'root') return outRoot;
@@ -366,8 +392,125 @@ function buildDestFolder({ outputPath, orderNumber, jobId, destinationLayout, pr
     orderNumber || '',
     Array.isArray(prefixRules) ? prefixRules : [],
   );
-  const destJobFolderName = `${transformedOrder}_${jobId}`;
+  // 1.16.2 item 5 — omitJobId strips the `_${jobId}` disambiguator so two
+  // jobs of the same order share a folder. Strictly `=== true`; null /
+  // undefined / false all fall through to the pre-1.16.2 shape. The
+  // strict-equals-true is the migration invariant — anything looser
+  // would risk a persisted-as-truthy shape (like the string "true"
+  // that could arrive from a round-trip via JSON on some legacy
+  // renderer path) silently changing a controller's folder name.
+  const destJobFolderName = omitJobId === true
+    ? transformedOrder
+    : `${transformedOrder}_${jobId}`;
   return outRoot ? path.join(outRoot, destJobFolderName) : destJobFolderName;
 }
 
-module.exports = { buildCopyFilenames, buildDestFolder };
+/**
+ * 1.16.2 — item 1 — never-overwrite guarantee.
+ *
+ * Take the planner's `files` (already deduped within-dispatch by
+ * `buildCopyFilenames`) and dedupe them AGAINST WHAT IS ACTUALLY ON DISK
+ * in the destination folder. Any planned `destFilename` whose target
+ * path already exists gets suffixed `_2`, `_3`, ... until an unused
+ * name is found — checked against both the on-disk state AND the running
+ * set of choices this call has already made, so a suffix never collides
+ * with itself.
+ *
+ * Pure: `existsFn` is injected so tests can drive the check without a
+ * real fs. Callers in production pass `p => fs.existsSync(p)` — see
+ * `_sendViaFolderCopyRouted` and `_sendReprintViaFolderCopy`.
+ *
+ * ── Why this reversed the pre-1.16.2 comment ──────────────────────────
+ *
+ * The pre-1.16.2 module docstring warned in strong terms against an
+ * fs-based no-overwrite rule ("re-sending or retrying a job today
+ * overwrites the same filenames — that is what makes a retry
+ * idempotent"). That reasoning trades one failure mode (silent
+ * cross-job overwrite, invisible to the operator) for another (a
+ * retry lands a full folder of `_2`, `_3` duplicates). The 1.16.2
+ * spec explicitly chose the second: OHD must never replace an
+ * existing file in a Folder Copy destination — and item 5's
+ * omitJobId setting makes cross-job collisions easy to configure,
+ * so the never-overwrite guarantee has to cover both the retry
+ * case and the omitJobId case. A retry now produces the extra
+ * files; that is a deliberate, operator-visible surprise, not a
+ * silent one. The user-facing signal (extra files with _2 suffix)
+ * is what tells the operator to stop retrying — which is what a
+ * silent overwrite would never have surfaced.
+ *
+ * @param {Array<{sourcePath:string, destFilename:string}>} files
+ *   Output of `buildCopyFilenames`. Order is preserved.
+ * @param {(absPath:string) => boolean} existsFn
+ *   Injected fs.existsSync equivalent — takes an absolute path,
+ *   returns true if a file already exists there.
+ * @param {string} [destFolder='']
+ *   The destination folder these files will be written into. Used to
+ *   build the absolute path each `existsFn` call receives. Blank ok —
+ *   the check then runs on the bare destFilename, matching how
+ *   dispatch treats a blank outputPath at the buildDestFolder level.
+ * @returns {{files: Array<{sourcePath, destFilename}>, stats: {diskSuffixed: number}}}
+ *   `stats.diskSuffixed` is the count of files that were renamed
+ *   because their planned name collided with on-disk state. Zero on
+ *   a fresh destination.
+ * @throws when SUFFIX_MAX is exhausted for any one file — the
+ *   filename is included in the error so the dispatch caller's
+ *   `_status:'error'` message points at the offending name.
+ */
+function dedupeAgainstDisk(files, existsFn, destFolder = '') {
+  if (!Array.isArray(files)) {
+    throw new TypeError('dedupeAgainstDisk: files must be an array');
+  }
+  if (typeof existsFn !== 'function') {
+    throw new TypeError('dedupeAgainstDisk: existsFn must be a function');
+  }
+  const stats = { diskSuffixed: 0 };
+  const issued = new Set();
+  const out = new Array(files.length);
+  for (let i = 0; i < files.length; i++) {
+    const orig = files[i];
+    let name = orig.destFilename;
+    const absOf = (n) => destFolder ? path.join(destFolder, n) : n;
+    // If the planned name is free both on disk AND in this call's issued
+    // set, take it as-is. Otherwise walk _2/_3/...
+    if (!existsFn(absOf(name)) && !issued.has(name)) {
+      issued.add(name);
+      out[i] = { sourcePath: orig.sourcePath, destFilename: name };
+      continue;
+    }
+    // sourceExt derived from the ORIGINAL source path, same rule the
+    // in-call planner uses — do NOT path.extname the destFilename, per
+    // the _stripSourceExt landmine at the top of this file.
+    const sourceExt = path.extname(orig.sourcePath);
+    // Build a candidate-generator that skips both on-disk hits and
+    // in-call issued names. _nextSuffixed only checks the issued set,
+    // so we augment it by walking until the returned name is also free
+    // on disk.
+    let candidate = null;
+    // Seed the loop by treating the current `name` as already issued
+    // — _nextSuffixed will skip it.
+    const tempIssued = new Set(issued);
+    tempIssued.add(name);
+    for (;;) {
+      const next = _nextSuffixed(name, sourceExt, tempIssued);
+      if (next === null) {
+        throw new Error(
+          `dedupeAgainstDisk: exceeded ${SUFFIX_MAX} suffix attempts for "${orig.destFilename}" ` +
+          `against destination folder ${destFolder || '(blank)'} — the destination may already contain that many _N variants of this filename`
+        );
+      }
+      if (!existsFn(absOf(next))) {
+        candidate = next;
+        break;
+      }
+      // Occupied on disk too — mark as issued so _nextSuffixed skips it
+      // on the next iteration and continues walking up.
+      tempIssued.add(next);
+    }
+    stats.diskSuffixed += 1;
+    issued.add(candidate);
+    out[i] = { sourcePath: orig.sourcePath, destFilename: candidate };
+  }
+  return { files: out, stats };
+}
+
+module.exports = { buildCopyFilenames, buildDestFolder, dedupeAgainstDisk };

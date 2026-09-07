@@ -5171,6 +5171,20 @@ const PHOTO_LINE_TOKENS = [
   '{originalFilename}',
 ];
 
+// 1.16.2 item 3 — default filename template seeded ONLY into the
+// New Controller form (openOrderControllerModal with ctrl === null).
+// An existing controller opens with its saved value, whatever that is
+// (including ''); the migration guarantee — no synthesis at read time
+// — is locked by the folder_copy defaults test in
+// routing-folder-copy-fields.test.js (blank template stays blank
+// through both route literals). If you change this string, also
+// update `docs/folder-copy-filename-templates-brief.md` §M-1.16.2
+// and the CHANGELOG. The single client of this constant is the
+// modal-populate branch below; kept as a top-level const so the
+// tripwire test can import + assert it.
+const DEFAULT_FOLDER_COPY_TEMPLATE_NEW_CONTROLLER =
+  '{lastName}_{jobName}_{category}_{productCode}_{quantity}_{indexPadded}';
+
 const FOLDER_COPY_TOKENS = [
   '{customerName}', '{firstName}', '{lastName}',
   '{orderNumber}', '{jobName}', '{jobId}',
@@ -5303,6 +5317,10 @@ async function _runFolderCopyPreview() {
     filenameTemplate:       document.getElementById('ocFilenameTemplate').value,
     destinationLayout:      document.getElementById('ocDestinationLayout').value,
     orderNumberPrefixRules: readPrefixRulesFromRows(),
+    // 1.16.2 item 5 — thread omitJobId through so the preview reflects
+    // the exact folder shape dispatch will produce (real engine over
+    // IPC via folder-copy-preview.js → buildDestFolder).
+    omitJobId:              document.getElementById('ocOmitJobId').checked === true,
   };
   try {
     const preview = await window.electronAPI.folderCopyPreview(payload);
@@ -5314,16 +5332,19 @@ async function _runFolderCopyPreview() {
   }
 }
 
-// M8 — insert `{option:<name>}` at the template input's current cursor
-// position. If no selection exists (or the input has never been focused
-// and selectionStart is null on older browsers), append at end. Fires an
-// `input` event afterwards so scheduleFolderCopyPreview picks up the
-// change and re-runs — otherwise the preview would only refresh on the
-// next keystroke and the operator would think the click did nothing.
-function _insertOptionToken(name) {
+// 1.16.2 item 2 (generalised from M8's _insertOptionToken): insert an
+// arbitrary template token at the template field's current cursor
+// position, replacing any selection, keeping focus, and firing an
+// `input` event so scheduleFolderCopyPreview + the save handler pick it
+// up on the next tick. If the field has never been focused, append at
+// end. Called by the FOLDER_COPY_TOKENS chips AND by _insertOptionToken.
+// One implementation of the cursor-insert rule — same landmine class as
+// buildDestFolder: a lookalike caller drifts silently. Deliberately no
+// clipboard fallback here; the pre-1.16.2 clipboard-copy behaviour was
+// what operators asked us to remove.
+function _insertTokenAtCursor(token) {
   const input = document.getElementById('ocFilenameTemplate');
   if (!input) return;
-  const token = `{option:${name}}`;
   const value = input.value || '';
   const start = typeof input.selectionStart === 'number' ? input.selectionStart : value.length;
   const end   = typeof input.selectionEnd   === 'number' ? input.selectionEnd   : value.length;
@@ -5332,6 +5353,10 @@ function _insertOptionToken(name) {
   input.focus();
   try { input.setSelectionRange(newPos, newPos); } catch (_) { /* not all input types support selection */ }
   input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function _insertOptionToken(name) {
+  _insertTokenAtCursor(`{option:${name}}`);
 }
 
 function renderFolderCopyPreview(preview) {
@@ -5580,16 +5605,13 @@ function renderFolderCopyTokens() {
     const chip = document.createElement('button');
     chip.type = 'button';
     chip.textContent = token;
-    chip.title = `Click to copy ${token}`;
+    // 1.16.2 item 2: chips now insert into the template field at the
+    // cursor rather than copying to the clipboard. Tooltip reflects the
+    // new behaviour so operators aren't looking for a copied string on
+    // the clipboard.
+    chip.title = `Insert ${token} at cursor`;
     chip.style.cssText = chipCss;
-    chip.addEventListener('click', async () => {
-      try {
-        await navigator.clipboard.writeText(token);
-        showToast(`Copied ${token}`, 'success', 1500);
-      } catch (err) {
-        showToast('Could not copy — select and copy manually', 'error', 3000);
-      }
-    });
+    chip.addEventListener('click', () => _insertTokenAtCursor(token));
     container.appendChild(chip);
   }
   // {option:NAME} is a placeholder, not a literal token — deliberately NOT
@@ -5757,6 +5779,12 @@ function updateOcTypeFields() {
   // — called from openOrderControllerModal on modal open.
   document.getElementById('ocDestinationLayoutGroup').style.display        = isFolderCopy ? '' : 'none';
   document.getElementById('ocFilenameTemplateGroup').style.display         = isFolderCopy ? '' : 'none';
+  // 1.16.2 item 5 — omitJobId is only meaningful under Per-job subfolder
+  // layout. Under Root there is no per-job segment to omit. This groups
+  // with the Destination layout <select>'s change handler which calls
+  // updateOcTypeFields() so the visibility tracks the chosen layout.
+  const folderCopyLayout = document.getElementById('ocDestinationLayout').value;
+  document.getElementById('ocOmitJobIdGroup').style.display                = (isFolderCopy && folderCopyLayout !== 'root') ? '' : 'none';
   // Frontline-specific fields
   document.getElementById('ocDeviceGroup').style.display     = type === 'frontline' ? '' : 'none';
   document.getElementById('ocBackPrint1Group').style.display = type === 'frontline' ? '' : 'none';
@@ -5936,14 +5964,34 @@ function openOrderControllerModal(ctrl = null) {
   // template '', layout 'job'. Matches the routing-service literals
   // (§5.1) so a controller that omits these keys behaves exactly like
   // today's Folder Copy: original filenames under a per-job subfolder.
+  // 1.16.2 item 3 — NEW folder_copy controller (ctrl === null and the
+  // operator has chosen or will choose type=folder_copy): seed the field
+  // with the new default template so the operator doesn't have to type
+  // the multi-token string from memory. An existing folder_copy
+  // controller opens with its saved value verbatim (including blank —
+  // "existing controllers untouched"). The type-switch path in
+  // updateOcTypeFields re-seeds if the operator switches TO folder_copy
+  // on the New Controller flow. See the tripwire in
+  // routing-folder-copy-fields.test.js for the read-side lock and
+  // docs/folder-copy-filename-templates-brief.md §M-1.16.2 for the rationale.
+  const isNewController = !ctrl;
   document.getElementById('ocFilenameTemplate').value =
     isFolderCopyCtrl && typeof ctrl.filenameTemplate === 'string'
       ? ctrl.filenameTemplate
-      : '';
+      : (isNewController ? DEFAULT_FOLDER_COPY_TEMPLATE_NEW_CONTROLLER : '');
   document.getElementById('ocDestinationLayout').value =
     isFolderCopyCtrl && ctrl.destinationLayout === 'root'
       ? 'root'
       : 'job';
+  // 1.16.2 item 5 — omitJobId checkbox. Strict === true migration on the
+  // read side too: an existing controller with no `omitJobId` key stays
+  // OFF (pre-1.16.2 shape); a NEW controller defaults ON so operators on
+  // fresh installs get the "just {orderNumber}/" folder shape they've
+  // been asking for. Show/hide is driven by updateOcTypeFields (Root
+  // layout hides the group — no per-job segment to omit).
+  document.getElementById('ocOmitJobId').checked = isFolderCopyCtrl
+    ? (ctrl.omitJobId === true)
+    : isNewController;
   renderFolderCopyTokens();
   // Kick a first preview render — synchronous invocation is fine; the
   // debounce inside scheduleFolderCopyPreview handles rapid re-opens.
@@ -6346,7 +6394,40 @@ for (const id of ['ocOutputPath', 'ocFilenameTemplate']) {
 }
 {
   const el = document.getElementById('ocDestinationLayout');
+  if (el) el.addEventListener('change', () => {
+    // 1.16.2 item 5 — Root layout hides the omitJobId group. Refresh
+    // the whole type-field visibility so the group disappears/reappears
+    // as the operator flips the <select>. updateOcTypeFields reads
+    // ocDestinationLayout.value directly, so no arg passing needed.
+    updateOcTypeFields();
+    scheduleFolderCopyPreview();
+  });
+}
+// 1.16.2 item 5 — omitJobId is a saved field that shapes the destination
+// folder, so preview must re-run when the operator toggles it.
+{
+  const el = document.getElementById('ocOmitJobId');
   if (el) el.addEventListener('change', scheduleFolderCopyPreview);
+}
+// 1.16.2 item 4 — filename template is a textarea (rows=2) but still
+// carries single-line semantics. Strip any newline from typed input OR
+// pasted content so a value with an embedded newline can never persist
+// to the store. Runs BEFORE scheduleFolderCopyPreview so the preview
+// sees the sanitised value on the same tick. Kept as a separate `input`
+// listener rather than folded into the preview listener so a future
+// change to preview debouncing doesn't accidentally skip the sanitise.
+{
+  const el = document.getElementById('ocFilenameTemplate');
+  if (el) el.addEventListener('input', () => {
+    if (el.value.includes('\n') || el.value.includes('\r')) {
+      const pos = typeof el.selectionStart === 'number' ? el.selectionStart : el.value.length;
+      const cleaned = el.value.replace(/[\r\n]+/g, '');
+      el.value = cleaned;
+      // Best-effort caret restore. If newlines were before the caret,
+      // subtract the count so the caret lands in roughly the same place.
+      try { el.setSelectionRange(pos, pos); } catch (_) {}
+    }
+  });
 }
 // A controller-type flip must also refresh — moving from any other type
 // TO folder_copy needs the preview to appear without a keystroke on the
@@ -6680,44 +6761,24 @@ document.getElementById('ocSaveBtn').addEventListener('click', async () => {
       alert('Destination layout must be either "Per-job subfolder" or "Files directly in the copy-to folder".');
       return;
     }
-    if (destinationLayout === 'root') {
-      if (!filenameTemplate) {
-        alert(
-          'A filename template is required when files go in the root of the copy-to folder, ' +
-          'and it must include at least one of {orderNumber}, {jobName} or {jobId} so files ' +
-          'from different jobs don\'t overwrite each other.'
-        );
-        return;
-      }
-      // At least one JOB-distinguishing token per §5.3 (corrected in M3a).
-      // Only {orderNumber}, {jobName} and {jobId} distinguish across jobs.
-      // Per-image tokens do NOT count and MUST NOT be added here even
-      // though resolveTemplate accepts them:
-      //   - {filename} resolves to a manifest basename like "5_IMG.jpg"
-      //     — an index-prefixed customer filename. Camera filenames
-      //     (IMG_0001.jpg) repeat across orders constantly, so two
-      //     orders each containing that name at the same index resolve
-      //     identically and would overwrite in root layout.
-      //   - {originalFilename} is the same value with the leading
-      //     "N_" index prefix stripped, so it's strictly WEAKER than
-      //     {filename} — same repeat problem.
-      //   - {index}/{indexPadded}/{quantity}/{product}/{options} etc.
-      //     are per-image or per-job-shape values that identify a slot
-      //     WITHIN a job, not the job itself.
-      // Within-dispatch de-dup (§4.4) cannot see across-dispatch
-      // collisions by design — the guard has to be here at save time
-      // where it can actually be explained.
-      if (!/\{(?:orderNumber|jobName|jobId)\}/.test(filenameTemplate)) {
-        alert(
-          'The filename template must include at least one of {orderNumber}, {jobName} ' +
-          'or {jobId} when files go in the root of the copy-to folder — otherwise files ' +
-          'from different jobs will overwrite each other.'
-        );
-        return;
-      }
-    }
+    // 1.16.2 item 1 — the pre-1.16.2 hard blocks for a Root layout with
+    // a blank / no-distinguishing-token template are REMOVED here.
+    // Dispatch (see print-service._sendViaFolderCopyRouted's dedupeAgainstDisk
+    // pass, wired in 1.16.2) now guarantees OHD never overwrites an
+    // existing file — same-name collisions get _2/_3 suffixes against
+    // whatever's already in the destination folder. That guarantee turns
+    // what used to be a save-time BLOCK into a save-time ADVISORY: the
+    // server-side handler (ipc-handlers.js `ohd:routing:save-controller`)
+    // still detects the same shape and returns a `warnings` entry, which
+    // the alert-per-warning branch below (~6821) surfaces before the
+    // modal closes. Do NOT reintroduce a `return;` on this validation
+    // path — the 1.15.0 mistake was a save-time block on a state that
+    // was actually safe at dispatch, and that block cost a lab a save.
     controller.filenameTemplate       = filenameTemplate;
     controller.destinationLayout      = destinationLayout;
+    // 1.16.2 item 5 — omitJobId. Strict boolean; the checkbox default is
+    // seeded by openOrderControllerModal (ON for new, OFF for existing).
+    controller.omitJobId              = document.getElementById('ocOmitJobId').checked === true;
     // M7b: pair array {from,to}. Both sides trimmed, empty-from dropped,
     // deduped case-insens on `from`.
     controller.orderNumberPrefixRules = readPrefixRulesFromRows();

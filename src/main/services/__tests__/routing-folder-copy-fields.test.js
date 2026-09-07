@@ -261,6 +261,7 @@ test('non-folder_copy controllers do NOT carry the three M3 fields on their rout
     filenameTemplate:       'should-not-leak',
     destinationLayout:      'root',
     orderNumberPrefixRules: [{ from: 'X-', to: '' }],
+    omitJobId:              true,
   };
   __seed({
     processControllerMappings: [{ process: 'Wide Format', controllerId: 'ctrl-dr' }],
@@ -277,4 +278,61 @@ test('non-folder_copy controllers do NOT carry the three M3 fields on their rout
   assert.equal(route.filenameTemplate,          undefined);
   assert.equal(route.destinationLayout,         undefined);
   assert.equal(route.orderNumberPrefixRules,    undefined);
+  assert.equal(route.omitJobId,                 undefined);
+});
+
+// ═════════════════════════════════════════════════════════════════════════
+// 1.16.2 item 5 — omitJobId parity + strict === true migration
+// ═════════════════════════════════════════════════════════════════════════
+//
+// The parity discipline that catches 1.12.0 PIC Pro / epson-batch-drop
+// class of bugs applies here too — both folder_copy route literals must
+// carry omitJobId. The migration invariant (strict === true) is the
+// 1.16.1 fujiImageRoot pattern: any other stored value MUST resolve to
+// false so pre-1.16.2 controllers keep their `${order}_${jobId}` shape
+// (locked at the planner level by the buildDestFolder TRIPWIREs in
+// folder-copy-filename.test.js). The parity test here catches the
+// second half of the class: a route literal that forgot the field.
+
+test('folder_copy omitJobId parity: both literals surface omitJobId with identical value', () => {
+  seedFolderCopy({ omitJobId: true });
+  const viaJob  = resolveRoute(JOB);
+  const viaCtrl = resolveRouteForController(JOB, FC_ID);
+  assert.equal(viaJob.omitJobId,  true, 'resolveRoute must carry omitJobId');
+  assert.equal(viaCtrl.omitJobId, true, 'resolveRouteForController must carry omitJobId');
+  assert.equal(viaJob.omitJobId, viaCtrl.omitJobId,
+    'both literals must produce the same omitJobId for the same controller');
+});
+
+test('folder_copy omitJobId migration: strict === true — every other value MUST resolve to false', () => {
+  // The buildDestFolder tripwire only holds if EVERY existing controller
+  // (which by definition has no omitJobId key) resolves to false at the
+  // route boundary. This test walks the same non-true values the planner
+  // tripwire walks — absent, false, null, undefined, "true" string,
+  // number, empty string — and locks the strict === true check at both
+  // literals. If either literal loosens this check (e.g., `!!` or
+  // truthy), a pre-1.16.2 controller can silently switch to omit-jobId
+  // mode and the destination-folder shape changes without operator
+  // consent. The 1.16.1 fujiImageRoot migration used the same pattern.
+  const nonTrue = [undefined, false, null, 'true', 1, 0, '', 'yes'];
+  for (const v of nonTrue) {
+    const overrides = v === undefined ? {} : { omitJobId: v };
+    seedFolderCopy(overrides);
+    for (const route of [resolveRoute(JOB), resolveRouteForController(JOB, FC_ID)]) {
+      assert.equal(route.omitJobId, false,
+        `omitJobId=${JSON.stringify(v)} MUST resolve to false (strict === true migration)`);
+    }
+  }
+});
+
+test('folder_copy omitJobId parity: still identical when field is absent (pre-1.16.2 controller)', () => {
+  // A controller record saved before 1.16.2 shipped has no omitJobId
+  // key. Both literals must surface `false` and they must agree. This
+  // is the "existing controllers keep working with no change" invariant
+  // at the route boundary — pair to the planner-side tripwire.
+  seedFolderCopy();
+  const viaJob  = resolveRoute(JOB);
+  const viaCtrl = resolveRouteForController(JOB, FC_ID);
+  assert.equal(viaJob.omitJobId,  false);
+  assert.equal(viaCtrl.omitJobId, false);
 });

@@ -457,6 +457,10 @@ function resolveRoute(job) {
       filenameTemplate:       (typeof controller.filenameTemplate === 'string') ? controller.filenameTemplate : '',
       destinationLayout:      controller.destinationLayout === 'root' ? 'root' : 'job',
       orderNumberPrefixRules: readOrderNumberPrefixRules(controller),
+      // 1.16.2 item 5: strict === true — any other value (absent, null,
+      // false, "true" string) MUST keep the pre-1.16.2 shape so the
+      // buildDestFolder TRIPWIRE holds for every existing controller.
+      omitJobId:              controller.omitJobId === true,
     };
   }
 
@@ -851,6 +855,8 @@ function resolveRouteForController(job, controllerId) {
       filenameTemplate:       (typeof controller.filenameTemplate === 'string') ? controller.filenameTemplate : '',
       destinationLayout:      controller.destinationLayout === 'root' ? 'root' : 'job',
       orderNumberPrefixRules: readOrderNumberPrefixRules(controller),
+      // 1.16.2 item 5: strict === true — see the twin literal above.
+      omitJobId:              controller.omitJobId === true,
     };
   }
 

@@ -1654,39 +1654,75 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
         if (typeof controller.stripOrderNumberPrefix === 'string') {
           controller.stripOrderNumberPrefix = controller.stripOrderNumberPrefix.trim();
         }
-        if (layout === 'root') {
-          const trimmed = trimmedTemplate;
-          if (!trimmed) {
-            const msg =
-              'A filename template is required when files go in the root of the copy-to folder, ' +
-              'and it must include at least one of {orderNumber}, {jobName} or {jobId} so files ' +
-              'from different jobs don\'t overwrite each other.';
-            logger.logWarning('[routing] save-controller rejected — root layout with blank template', {
-              controllerId: controller.id,
-              name:         controller.name,
-            });
-            return { success: false, error: msg };
-          }
-          // M3a: only {orderNumber}/{jobName}/{jobId} distinguish across
-          // jobs. Per-image tokens ({filename}/{originalFilename}) resolve
-          // to manifest basenames like "5_IMG.jpg" — camera filenames
-          // repeat across orders constantly, so two orders each carrying
-          // an IMG_0001.jpg at the same index resolve identically and
-          // would overwrite in root layout. Do NOT widen this regex —
-          // see the matching comment in renderer.js ocSaveBtn for the
-          // full reasoning and the token-by-token audit.
-          if (!/\{(?:orderNumber|jobName|jobId)\}/.test(trimmed)) {
-            const msg =
-              'The filename template must include at least one of {orderNumber}, {jobName} ' +
-              'or {jobId} when files go in the root of the copy-to folder — otherwise files ' +
-              'from different jobs will overwrite each other.';
-            logger.logWarning('[routing] save-controller rejected — root layout template lacks distinguishing token', {
-              controllerId: controller.id,
-              name:         controller.name,
-              filenameTemplate: rawTemplate,
-            });
-            return { success: false, error: msg };
-          }
+        // 1.16.2 item 5 — normalise omitJobId. Strict `=== true` matches
+        // the read side of both route literals in routing-service.js. Any
+        // other value coerces to `false` so a pre-1.16.2 controller
+        // resaved after upgrade keeps the pre-1.16.2 folder shape.
+        controller.omitJobId = controller.omitJobId === true;
+        // 1.16.2 item 1 — save-time ADVISORIES (never a block). The
+        // pre-1.16.2 hard blocks for "Root layout + blank/insufficient
+        // template" were the 1.15.0 shape of mistake: a save-time gate
+        // on a state that dispatch actually handles. Dispatch (see
+        // `_sendViaFolderCopyRouted` → `dedupeAgainstDisk`) guarantees
+        // OHD never overwrites an existing file — same-name collisions
+        // are suffixed _2/_3 against on-disk state. That guarantee
+        // means the same shape a hard block used to reject can now save
+        // safely; the advisories describe the SHAPE the operator picked
+        // so they understand what they'll see at dispatch, but neither
+        // stops the save. Alert-per-warning is surfaced in the renderer
+        // save handler (pattern shared with PIC Pro volume advisories).
+        //
+        // Root + blank template — safe under 1.16.2's dispatch dedupe,
+        // but the operator should know they're keeping original filenames
+        // in a shared folder (cross-job filename collisions get _2/_3).
+        if (layout === 'root' && !trimmedTemplate) {
+          warnings.push({
+            kind: 'folder-copy-root-blank-template',
+            text:
+              'Heads up — Root layout with no filename template means every job\'s files ' +
+              'land directly in the copy-to folder using their original names. Same-name ' +
+              'files from different jobs get _2/_3 suffixes at write time so nothing is ' +
+              'overwritten, but the destination will contain files whose origin is not ' +
+              'obvious from the filename. Add {orderNumber}, {jobName} or {jobId} to the ' +
+              'template if you want each job\'s files to be identifiable.',
+          });
+        } else if (layout === 'root' && trimmedTemplate &&
+                   !/\{(?:orderNumber|jobName|jobId)\}/.test(trimmedTemplate)) {
+          // Only {orderNumber}/{jobName}/{jobId} distinguish across jobs.
+          // Per-image tokens ({filename}/{originalFilename}/{index}) can
+          // repeat across jobs, so files from different jobs may resolve
+          // to the same name. 1.16.2 dispatch dedupe keeps this safe
+          // (suffixed at write time) — advisory, not a block.
+          warnings.push({
+            kind: 'folder-copy-root-no-distinguisher',
+            text:
+              'Heads up — under Root layout, this template can produce the same filename ' +
+              'for files from different jobs, because it does not include any of ' +
+              '{orderNumber}, {jobName} or {jobId}. Same-name files get _2/_3 suffixes ' +
+              'at write time (nothing is overwritten), but the file order in the ' +
+              'destination will not be obviously grouped by job. Add one of those tokens ' +
+              'to the template if you want per-job grouping in the filenames.',
+          });
+        }
+        // 1.16.2 item 5 — Per-job + omitJobId=true + template lacks any
+        // per-image distinguisher: two jobs on the same order share the
+        // `{orderNumber}/` folder AND their images will keep resolving to
+        // the same set of filenames. Suffix dedupe still saves the day —
+        // advisory, not a block.
+        if (layout !== 'root' && controller.omitJobId === true && trimmedTemplate &&
+            !/\{(?:index|indexPadded|filename|originalFilename|jobName|jobId)\}/.test(trimmedTemplate)) {
+          warnings.push({
+            kind: 'folder-copy-omitjobid-no-image-distinguisher',
+            text:
+              'Heads up — with "Omit OrderHub job Id" on, two jobs on the same order ' +
+              'share the {orderNumber} folder. This template does not include ' +
+              '{index}/{indexPadded}, {filename}, {jobName} or {jobId}, so image files ' +
+              'from a second job on the same order will collide with the first job\'s ' +
+              'and get _2/_3 suffixes at write time (nothing is overwritten, but the ' +
+              'suffixed names may not be what you expect). Add {index} / {indexPadded} ' +
+              'to keep every filename unique, or leave "Omit OrderHub job Id" off to ' +
+              'keep each job in its own subfolder.',
+          });
         }
       }
 

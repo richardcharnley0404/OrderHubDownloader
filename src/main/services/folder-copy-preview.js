@@ -274,6 +274,11 @@ async function buildFolderCopyPreview(input = {}, deps = {}) {
   const outputPath        = typeof input.outputPath === 'string' ? input.outputPath : '';
   const filenameTemplate  = typeof input.filenameTemplate === 'string' ? input.filenameTemplate.trim() : '';
   const destinationLayout = input.destinationLayout === 'root' ? 'root' : 'job';
+  // 1.16.2 item 5 — strict === true migration, same discipline as both
+  // route literals in routing-service.js. Any other value MUST coerce to
+  // false so the preview shape matches what dispatch will produce for an
+  // existing controller with no omitJobId key persisted.
+  const omitJobId         = input.omitJobId === true;
   // M7b: orderNumberPrefixRules is Array<{from,to}>. Coerce via the ONE
   // tolerant reader — so a modal that still has the M7 string[] or the
   // 1.13.0 single-string in an unsaved buffer is still previewable, and
@@ -324,6 +329,7 @@ async function buildFolderCopyPreview(input = {}, deps = {}) {
     jobId:       source.job.id,
     destinationLayout,
     prefixRules,
+    omitJobId,
   });
 
   const filesWithPaths = displayedFiles.map(f => ({

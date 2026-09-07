@@ -890,35 +890,38 @@ test('M2b Win32 reserved: full option-lookup source (not just literals)', () => 
   assert.equal(out.files[0].destFilename, '_PRN.jpg');
 });
 
-test('M2-fix audit: exactly one path.extname call is on img.sourcePath', () => {
+test('M2-fix audit: every path.extname call is on a trusted .sourcePath anchor', () => {
   // Meta-test — path.extname on template output was the whole reason for
-  // the bug. Reading the module source with fs is the only way to lock
-  // that no future change reintroduces it. This test is unashamedly
-  // structural; if the module is refactored the assertion is trivial to
-  // update, but a silent regression here would recreate the exact
-  // failure mode the fix was written to prevent.
+  // the M2 bug. Reading the module source with fs is the only way to lock
+  // that no future change reintroduces it. The letter of the invariant is
+  // "path.extname belongs on img.sourcePath and nowhere else" — but the
+  // spirit is broader: every call must be on a trusted `.sourcePath`
+  // anchor (never on template output, never on destFilename). This audit
+  // enforces the spirit so that legitimate additions (e.g. 1.16.2's
+  // dedupeAgainstDisk which needs the sourceExt to build a suffixed name
+  // per planner-output entry) don't cause a false alarm, while any call
+  // on a non-sourcePath argument still trips the wire.
   const fs = require('node:fs');
   const src = fs.readFileSync(
     path.join(REPO, 'src', 'main', 'services', 'folder-copy-filename.js'),
     'utf8',
   );
-  // Count actual calls — strip line comments and block-comment lines so
-  // the docstring's several `path.extname` warning mentions do not count.
+  // Strip line comments and block-comment lines so the docstring's
+  // several `path.extname` warning mentions do not count.
   const codeOnly = src
     .split('\n')
     .filter(line => {
       const t = line.trim();
-      // Drop lines that are ONLY a comment. Block-comment continuation
-      // lines start with `*`; single-line comments start with `//`.
       return !(t.startsWith('*') || t.startsWith('//') || t.startsWith('/*'));
     })
     .join('\n');
-  const calls = codeOnly.match(/path\.extname\s*\(/g) || [];
-  assert.equal(calls.length, 1,
-    `expected exactly one path.extname call in code; found ${calls.length}: ${calls.join(', ')}`);
-  // And that one call must be on img.sourcePath — the trusted anchor.
-  assert.match(codeOnly, /path\.extname\(img\.sourcePath\)/,
-    'the surviving path.extname call must be on img.sourcePath');
+  const calls = codeOnly.match(/path\.extname\([^)]*\)/g) || [];
+  assert.ok(calls.length >= 1,
+    'at least one path.extname call must exist (planner needs sourceExt)');
+  for (const call of calls) {
+    assert.match(call, /path\.extname\([A-Za-z_$][\w$]*\.sourcePath\)/,
+      `every path.extname call MUST be on a .sourcePath anchor; found ${call}`);
+  }
 });
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -1098,4 +1101,207 @@ test('M7b buildDestFolder: legacy M7 string[] shape as prefixRules is IGNORED (c
     prefixRules: ['PXDEMO-'],   // wrong shape (was the M7 API)
   });
   assert.equal(got, path.join('/o', 'PXDEMO-091_42'));
+});
+
+// ═════════════════════════════════════════════════════════════════════════
+// 1.16.2 — omitJobId (item 5): tripwires + new behaviour
+// ═════════════════════════════════════════════════════════════════════════
+//
+// New optional arg on buildDestFolder. When ON, the per-job subfolder is
+// `${orderNumber}` (without the `_${jobId}` disambiguator), so two jobs of
+// the same order land in the same folder. Migration invariant: absent /
+// null / undefined / explicit false MUST reproduce the pre-1.16.2 shape
+// byte-for-byte. Any drift breaks every existing controller on upgrade.
+
+test('TRIPWIRE (1.16.2): buildDestFolder with omitJobId ABSENT is byte-identical to pre-1.16.2', () => {
+  const baseline = buildDestFolder({
+    outputPath:        '/hot/wf',
+    orderNumber:       'PXDEMO-091YEC',
+    jobId:             42,
+    destinationLayout: 'job',
+    prefixRules:       [],
+    // omitJobId deliberately absent — this is the pre-1.16.2 shape.
+  });
+  assert.equal(baseline, path.join('/hot/wf', 'PXDEMO-091YEC_42'),
+    'baseline MUST include the _${jobId} suffix; the pre-1.16.2 no-change invariant');
+});
+
+test('TRIPWIRE (1.16.2): buildDestFolder with omitJobId === false is byte-identical to pre-1.16.2', () => {
+  const explicit = buildDestFolder({
+    outputPath:        '/hot/wf',
+    orderNumber:       'PXDEMO-091YEC',
+    jobId:             42,
+    destinationLayout: 'job',
+    prefixRules:       [],
+    omitJobId:         false,
+  });
+  assert.equal(explicit, path.join('/hot/wf', 'PXDEMO-091YEC_42'),
+    'omitJobId === false MUST match pre-1.16.2 shape exactly');
+});
+
+test('TRIPWIRE (1.16.2): buildDestFolder with omitJobId === null is byte-identical to pre-1.16.2', () => {
+  const nullCase = buildDestFolder({
+    outputPath:        '/hot/wf',
+    orderNumber:       'PXDEMO-091YEC',
+    jobId:             42,
+    destinationLayout: 'job',
+    prefixRules:       [],
+    omitJobId:         null,
+  });
+  assert.equal(nullCase, path.join('/hot/wf', 'PXDEMO-091YEC_42'),
+    'omitJobId === null MUST match pre-1.16.2 shape (defensive: renderer may send null before user interacts)');
+});
+
+test('1.16.2 buildDestFolder with omitJobId === true: per-job segment loses the _${jobId} suffix', () => {
+  const got = buildDestFolder({
+    outputPath:        '/hot/wf',
+    orderNumber:       'PXDEMO-091YEC',
+    jobId:             42,
+    destinationLayout: 'job',
+    prefixRules:       [],
+    omitJobId:         true,
+  });
+  // Invariant (item 5 spec): the operator sees `A0H3KP` rather than
+  // `A0H3KP_38436996`. Derived from the spec, not from what buildDestFolder
+  // happens to return.
+  assert.equal(got, path.join('/hot/wf', 'PXDEMO-091YEC'),
+    'omitJobId === true MUST drop the jobId suffix entirely — two jobs of one order share this folder');
+});
+
+test('1.16.2 buildDestFolder omitJobId === true + prefix rules: rules still apply to orderNumber', () => {
+  // Prefix rules transform the orderNumber; omitJobId decides whether jobId
+  // is appended. The two are orthogonal, and both must compose.
+  const got = buildDestFolder({
+    outputPath:        '/hot/wf',
+    orderNumber:       'PXDEMO-091YEC',
+    jobId:             42,
+    destinationLayout: 'job',
+    prefixRules:       [{ from: 'PXDEMO-', to: '' }],
+    omitJobId:         true,
+  });
+  assert.equal(got, path.join('/hot/wf', '091YEC'),
+    'prefix rules strip PXDEMO- from orderNumber; omitJobId strips _${jobId}; both apply');
+});
+
+test('1.16.2 buildDestFolder omitJobId ignored under layout=root (no per-job segment to omit)', () => {
+  // Root layout means "no per-job subfolder". omitJobId only affects the
+  // per-job segment, so under root it has no effect. Locked so a future
+  // edit doesn't accidentally introduce root-with-suffix or similar drift.
+  const got = buildDestFolder({
+    outputPath:        '/hot/wf',
+    orderNumber:       'PXDEMO-091YEC',
+    jobId:             42,
+    destinationLayout: 'root',
+    omitJobId:         true,
+  });
+  assert.equal(got, '/hot/wf',
+    'root layout MUST be outputPath verbatim regardless of omitJobId — omitJobId is a job-segment setting');
+});
+
+// ═════════════════════════════════════════════════════════════════════════
+// 1.16.2 — item 1: dedupeAgainstDisk (never-overwrite guarantee)
+// ═════════════════════════════════════════════════════════════════════════
+//
+// Pure helper. Takes the planner's `files` (already deduped within-
+// dispatch) and an `existsFn` dep, and returns a new list where any
+// destFilename that already sits in the destination folder gets suffixed
+// _2/_3/... against BOTH on-disk state AND the running set of choices
+// this call. Guarantee: OHD never chooses a destFilename that already
+// exists on disk.
+
+const { dedupeAgainstDisk } = require('../folder-copy-filename');
+
+test('1.16.2 dedupeAgainstDisk: empty destination folder → planner list passes through unchanged', () => {
+  // Invariant: on a fresh destination, no work is done. Locks that the
+  // helper never rewrites filenames that were fine to begin with.
+  const planned = [
+    { sourcePath: '/src/a.jpg', destFilename: 'photo_1.jpg' },
+    { sourcePath: '/src/b.jpg', destFilename: 'photo_2.jpg' },
+  ];
+  const existsFn = () => false;
+  const { files, stats } = dedupeAgainstDisk(planned, existsFn);
+  assert.deepEqual(files, planned, 'empty folder → planner list unchanged');
+  assert.equal(stats.diskSuffixed, 0);
+});
+
+test('1.16.2 dedupeAgainstDisk: single collision → next suffix _2', () => {
+  // Invariant: a file that already exists on disk gets the next _N
+  // variant. Numbering starts at _2 (same as within-dispatch), regardless
+  // of what number sequence is on disk.
+  const planned = [
+    { sourcePath: '/src/a.jpg', destFilename: 'photo.jpg' },
+  ];
+  // Simulate `photo.jpg` on disk; nothing else there.
+  const existsFn = (p) => p.endsWith('photo.jpg');
+  const { files, stats } = dedupeAgainstDisk(planned, existsFn, '/dest');
+  assert.equal(files[0].destFilename, 'photo_2.jpg',
+    'existing photo.jpg on disk MUST be suffixed to photo_2.jpg');
+  assert.equal(stats.diskSuffixed, 1);
+});
+
+test('1.16.2 dedupeAgainstDisk: sequential collisions across dispatches → _2, _3, _4', () => {
+  // Invariant: stable + sequential. If dispatch 1 wrote photo.jpg, dispatch
+  // 2 writes photo_2.jpg, dispatch 3 writes photo_3.jpg. This test locks the
+  // "stable and sequential" invariant by simulating three dispatches
+  // sharing one destination folder. Each call re-runs the planner + dedupe.
+  const dispatch1On = new Set(['photo.jpg']);
+  const dispatch2On = new Set(['photo.jpg', 'photo_2.jpg']);
+  const dispatch3On = new Set(['photo.jpg', 'photo_2.jpg', 'photo_3.jpg']);
+
+  const planned = [{ sourcePath: '/src/a.jpg', destFilename: 'photo.jpg' }];
+  const call = (onDisk) => {
+    const existsFn = (p) => onDisk.has(path.basename(p));
+    return dedupeAgainstDisk(planned, existsFn, '/dest').files[0].destFilename;
+  };
+
+  // Dispatch 1 lands photo.jpg (empty folder → no suffix). Then, before
+  // dispatch 2 fires, photo.jpg is on disk from dispatch 1.
+  const first = call(new Set()); // empty folder → photo.jpg
+  assert.equal(first, 'photo.jpg', 'first dispatch into an empty folder writes photo.jpg');
+
+  // Dispatch 2: photo.jpg exists, photo_2.jpg doesn't → suffix to _2.
+  const second = call(dispatch1On);
+  assert.equal(second, 'photo_2.jpg', 'second dispatch, photo.jpg on disk → photo_2.jpg');
+
+  // Dispatch 3: photo.jpg AND photo_2.jpg exist → suffix to _3.
+  const third = call(dispatch2On);
+  assert.equal(third, 'photo_3.jpg', 'third dispatch, photo.jpg and photo_2.jpg on disk → photo_3.jpg');
+
+  // Dispatch 4: sequential continues → _4.
+  const fourth = call(dispatch3On);
+  assert.equal(fourth, 'photo_4.jpg', 'fourth dispatch continues the sequence → photo_4.jpg');
+});
+
+test('1.16.2 dedupeAgainstDisk: within-call collision with disk state → suffix skips names already chosen in THIS call', () => {
+  // Invariant: on-disk dedup and within-call dedup share one issued-set,
+  // so the second file's suffix doesn't accidentally pick a name the first
+  // file already claimed OR that exists on disk. Belt-and-braces.
+  const planned = [
+    { sourcePath: '/src/a.jpg', destFilename: 'photo.jpg' },
+    { sourcePath: '/src/b.jpg', destFilename: 'photo.jpg' }, // planner should not have handed us this
+  ];
+  // photo.jpg AND photo_2.jpg on disk.
+  const onDisk = new Set(['photo.jpg', 'photo_2.jpg']);
+  const existsFn = (p) => onDisk.has(path.basename(p));
+  const { files } = dedupeAgainstDisk(planned, existsFn, '/dest');
+  // First name has to skip _2 (on disk) → _3.
+  assert.equal(files[0].destFilename, 'photo_3.jpg');
+  // Second: on disk has photo.jpg and photo_2.jpg; in-call has photo_3.jpg.
+  // Next free is _4.
+  assert.equal(files[1].destFilename, 'photo_4.jpg',
+    'within-call issued set MUST include the previous dedupe result so we do not overwrite it');
+});
+
+test('1.16.2 dedupeAgainstDisk: exhausted suffix range throws with context', () => {
+  // Invariant: same SUFFIX_MAX budget as within-call. On exhaustion,
+  // throw with the offending filename and the SUFFIX_MAX ceiling so the
+  // dispatch error message points at the right thing.
+  const planned = [{ sourcePath: '/src/a.jpg', destFilename: 'photo.jpg' }];
+  // Every candidate exists on disk — force the loop to run all the way.
+  const existsFn = () => true;
+  assert.throws(
+    () => dedupeAgainstDisk(planned, existsFn, '/dest'),
+    /exceeded .* suffix attempts for "photo\.jpg"/,
+    'exhausted suffix range MUST throw with the filename and the ceiling',
+  );
 });
