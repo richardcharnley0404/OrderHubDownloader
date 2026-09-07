@@ -241,6 +241,50 @@ with no visible change, check `git diff --ignore-cr-at-eol` before believing it.
   check whether the async terminal-failure path calls
   `updateJobLocally({_status:'error'})` with a specific message, or
   whether it just logs and drops.
+- **Frontier parses the Fuji JobMaker `ImagePath=` line literally
+  — do NOT "normalise" the path.** The exact byte pattern that
+  goes on the wire matters. Every one of these must survive
+  round-trip through the generator unchanged:
+    - The **single trailing backslash** — Frontier resolves
+      `{ImagePath}\{ImageFile}` by string concatenation; a
+      missing trailing `\` produces `\\MASTER\Pixfizz\ArtworkPXDEMO-A61HQG-1\file.jpg`
+      and Frontier can't find the file. `_buildImagePath` in
+      `src/main/services/fuji-jobmaker-generator.js` strips any
+      existing trailing separator and appends exactly one `\`.
+    - The **doubled leading backslashes** of a UNC root
+      (`\\server\share\...`) — the doubled `\\` is what makes it
+      a UNC. If a "normaliser" collapses it to a single `\`, the
+      path becomes `\server\share\...` which resolves against the
+      current drive rather than the network share and Frontier
+      opens the wrong (usually nonexistent) folder.
+    - **No forward-slash-to-backslash conversion** — `_buildImagePath`
+      leaves forward slashes IN THE MIDDLE of the input alone
+      (`Z:/Artwork/` becomes `Z:/Artwork\X1\`, not `Z:\Artwork\X1\`).
+      Frontier accepts both; converting silently changes what the
+      operator sees vs. what OHD emits, which is worse than either
+      convention alone.
+    - **No case normalisation** on any part of the path — Windows
+      is case-insensitive but Frontier's own comparisons might not
+      be, and a case change is invisible in most diffs so the
+      operator sees the wrong value only when it silently breaks
+      something else downstream.
+    - **No whitespace trimming beyond surrounding whitespace.**
+      Internal whitespace in a folder name (`Fuji Jobmaker\Artwork`)
+      is part of the identity; a "clean the string" helper that
+      collapses internal spaces would break the exact BALLY-style
+      production sample.
+  1.16.1 added a `fujiImageRoot` field so the emitted string can
+  differ from OHD's local write path, but the emission rule is
+  UNCHANGED — the new field is fed through the same `_buildImagePath`
+  helper as the old one, so all the invariants above transfer.
+  Locked byte-for-byte by the tripwire test
+  `TRIPWIRE (1.16.1): when fujiImageRoot equals imageStagingRoot
+  (or is absent / null / empty), the emitted .txt is byte-identical
+  to the pre-1.16.1 shape` in
+  `src/main/services/__tests__/fuji-jobmaker-generator.test.js`.
+  DO NOT delete that test as noise; the class of bug it prevents
+  is Frontier silently not finding the artwork with no in-band
+  error signal, and the Failure Timeout being the only surface.
 
 ## Misnamed / dead code — don't be misled
 

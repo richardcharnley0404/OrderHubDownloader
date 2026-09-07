@@ -127,7 +127,7 @@ Surface=Lustre
 | Field | Required | Example | Source in OHD | Description |
 |-------|----------|---------|---------------|-------------|
 | `Order_ID` | **Yes** | `L-BALLY-Q7F39E` | Generated per-file via [Order_ID generation](#order_id-generation) | Unique Order ID for this surface file. The spec recommends 6–10 digits but Frontier accepts non-numeric strings — OHD treats it as opaque. |
-| `ImagePath` | **Yes** | `\\MASTER\Pixfizz\Artwork\BALLY-Q7F39E\` | Per-order staging folder created by `FujiJobMakerFileWriter` | UNC path or local path to the folder Frontier reads images from. **Trailing backslash present** to match production example. |
+| `ImagePath` | **Yes** | `\\MASTER\Pixfizz\Artwork\BALLY-Q7F39E\` | `{controller.fujiImageRoot}\{orderRef}\` (falls back to `imageStagingRoot` for pre-1.16.1 controllers not yet re-saved) | UNC path or local path to the folder **the Fuji JobMaker machine** reads images from. Since 1.16.1 this is a separate field from where OHD writes the images (`imageStagingRoot`) so the two paths can differ when OHD and Fuji JobMaker run on different machines. **Trailing backslash present** to match production example. See [ImagePath: local vs Fuji-view](#imagepath-local-vs-fuji-view). |
 | `Printer` | Optional | `DL650-A1` | Controller config `printerName` | Frontier Panda printer logical name. Routes the surface's prints to a specific physical Frontier. Omit if controller config has none. |
 | `Surface` | Optional (per spec) — **always written** by OHD | `Lustre` | Channel config `surface` (the grouping key for this file) | Frontier surface preference. One per file (the file is the unit of surface grouping). Must match a value in Frontier's `paperinfo.ini` exactly (case-sensitive). |
 | `CustomerName` | Optional | `Jersey Smith` | `job.customer_name` | Customer's full name. |
@@ -141,6 +141,40 @@ Surface=Lustre
 > - Always emit `Surface=` (it's the grouping key — leaving it blank would let Frontier fall back to the IC's default and break per-paper routing).
 > - Always emit `ImagePath=` with a trailing backslash to match the production example.
 > - Treat the spec's "6–10 digits" Order_ID rule as advisory — Pixfizz Frontier accepts arbitrary strings. Document but don't enforce.
+
+### ImagePath: local vs Fuji-view
+
+Introduced in 1.16.1. The value written into `ImagePath=` and the folder OHD actually writes images to are two separate controller fields:
+
+- **`controller.imageStagingRoot`** — where OHD writes the per-order image folder. OHD's own view.
+- **`controller.fujiImageRoot`** — what OHD writes into `ImagePath=`. The same folder as `imageStagingRoot` **but expressed as the Fuji JobMaker machine reaches it**. Pre-filled from `imageStagingRoot` on migration for controllers that predate 1.16.1, so a same-machine setup needs no operator action to upgrade.
+
+The generator (`fuji-jobmaker-generator.js` `_buildSurfaceFile`) reads `controller.fujiImageRoot || controller.imageStagingRoot` — the fallback is what keeps pre-migration controllers producing a valid `.txt`. Once the controller is re-saved, the two are two separate persisted fields.
+
+**Emitted `ImagePath=` for the two cases:**
+
+Same-machine setup (OHD and Fuji JobMaker on the same box, `fujiImageRoot === imageStagingRoot === C:\Users\op\Documents\OrderHub Controllers\Fuji Jobmaker\Artwork`), order `PXDEMO-A61HQG-1`:
+
+```
+ImagePath=C:\Users\op\Documents\OrderHub Controllers\Fuji Jobmaker\Artwork\PXDEMO-A61HQG-1\
+```
+
+Byte-identical to what pre-1.16.1 produced from an equivalent controller. Locked by the tripwire test in `src/main/services/__tests__/fuji-jobmaker-generator.test.js` — see the [Frontier parses ImagePath literally](../../CLAUDE.md#landmines) landmine.
+
+Cross-machine setup (OHD on Machine A writes to a local mapped drive; Fuji JobMaker on Machine B reads via UNC), `imageStagingRoot: Z:\Artwork`, `fujiImageRoot: \\labserver1\Pixfizz\Artwork`, order `PXDEMO-A61HQG-1`:
+
+```
+ImagePath=\\labserver1\Pixfizz\Artwork\PXDEMO-A61HQG-1\
+```
+
+Doubled leading `\\` preserved; single trailing `\` preserved; no case or slash conversion — Frontier parses this line literally, hence the landmine referenced above.
+
+**Dispatch-time reachability check.** When `fujiImageRoot` differs from `imageStagingRoot`, `FujiJobMakerFileWriter._verifyFujiReachability` runs between stage-images and .txt-write. It discriminates:
+
+- Root resolves from OHD but order subfolder missing → hard fail with a specific message naming both paths. Real config bug — turns a silent 30-minute stall into an immediate red job.
+- Root does not resolve at all → soft warn, dispatch proceeds. OHD cannot tell "operator's path is wrong" from "OHD legitimately can't see the share Fuji reaches"; Fuji becomes the authoritative check.
+
+Same-machine setups short-circuit the check (both values equal, no reachability probe runs). Known false-fail case where OHD has a same-letter drive mapped to unrelated content is recorded in `docs/BACKLOG.md`.
 
 ### Order_ID generation
 
@@ -244,7 +278,7 @@ PrintQty=1
 |-----------------|------------|-------|
 | Filename | `{orderNumber}_{Surface}.txt` | Lowercase `.txt`. Surface taken from the channel grouping key. |
 | `Order_ID` | `{surfaceCode}-{orderNumber}` | Surface code from channel config; falls back to first letter of `surface`. |
-| `ImagePath` | `{controller.imageStagingRoot}\{orderNumber}\` *(trailing slash)* | OHD writes/copies images into this folder before emitting the file. |
+| `ImagePath` | `{controller.fujiImageRoot}\{orderNumber}\` *(trailing slash)* — pre-1.16.1 controllers fall back to `imageStagingRoot`. | The Fuji-machine view of the artwork folder. OHD writes images to `imageStagingRoot` separately; see [ImagePath: local vs Fuji-view](#imagepath-local-vs-fuji-view). |
 | `Printer` | Controller config `printerName` | Omitted if blank. |
 | `Surface` | Channel config `surface` | The per-file grouping key; same value for every image in the file. |
 | `CustomerName` | `job.customer_name` | |

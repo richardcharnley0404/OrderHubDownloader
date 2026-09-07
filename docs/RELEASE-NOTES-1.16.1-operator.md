@@ -63,21 +63,38 @@ immediately with no changes and the controller keeps working.
 
 If OHD and Fuji JobMaker run on **different machines**, set
 **Image Path (Fuji JobMaker view)** to whatever the Fuji machine
-sees the same folder as — typically a UNC share
-(`\\labserver1\Pixfizz\Artwork\`) or a mapped drive letter as
-configured on the Fuji machine. **Image Staging Root** stays as
-OHD's local write path.
+sees the same folder as. **Image Staging Root** stays as OHD's
+local write path.
+
+**Prefer a UNC share (`\\server\share\...`) over a mapped drive
+letter (`Z:\...`).** Both work when they're right, but a UNC path
+is safer against a specific configuration accident: mapped drive
+letters are per-Windows-user state, and if the OHD machine happens
+to have its own `Z:` mapped to something unrelated, OHD's
+dispatch-time reachability check can misinterpret it as a broken
+config and fail every dispatch until the mapping is fixed. A UNC
+path either resolves to the same physical share on both machines
+or does not resolve at all on OHD — and OHD handles both cases
+correctly (see the two safety checks below). If your only option
+is a mapped drive letter because that's what the Fuji machine is
+configured with, that's still supported — just double-check the
+OHD machine doesn't have a different `Z:` (or whichever letter)
+mapped to something else.
 
 Worked example. OHD sits on Machine A; Fuji JobMaker runs on
 Machine B. Both see the same physical share `\\labserver1\Artwork`.
 
-- OHD's view of the share: `Z:\Artwork` (Machine A has it mapped
-  as drive Z).
-- Fuji JobMaker's view of the share: `\\labserver1\Artwork` (via
-  UNC directly).
-- Set **Image Staging Root** to `Z:\Artwork` (OHD writes here).
+- Fuji JobMaker's view of the share: `\\labserver1\Artwork`
+  (Machine B accesses it via UNC directly).
+- OHD's view of the share: `Z:\Artwork` (Machine A happens to
+  have it mapped as drive Z — but OHD can also reach it as UNC).
+- Set **Image Staging Root** to `Z:\Artwork` (OHD writes here —
+  the local mapped drive is fine because this field never leaves
+  Machine A).
 - Set **Image Path (Fuji JobMaker view)** to
-  `\\labserver1\Artwork` (this is what goes into `ImagePath=`).
+  `\\labserver1\Artwork` — the UNC form — because this string is
+  what goes into `ImagePath=` and gets read on Machine B, where a
+  mapped drive letter might mean something different.
 
 The emitted `.txt` will read:
 `ImagePath=\\labserver1\Artwork\{orderRef}\`. Fuji JobMaker
