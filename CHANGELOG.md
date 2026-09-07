@@ -1,4 +1,108 @@
-## v1.16.1 - 2026-09-06
+## v1.16.2 - 2026-09-07
+
+Folder Copy release. Five items — one dispatch-level safety guarantee,
+four operator-ergonomics changes. Existing controllers are byte-
+identical on save-then-open with no config changes: the migration is
+strict-`=== true` on the one new saved field (`omitJobId`), so any pre-
+1.16.2 record without the key keeps the pre-1.16.2 destination-folder
+shape.
+
+**1.16.1 was built and tagged but never uploaded to S3**, so labs
+receive 1.16.1's changes as part of 1.16.2. Marked in `docs/RELEASE.md`
+as `[BUILT NOT DISTRIBUTED — 1.16.1's changes reach labs via 1.16.2]`
+in the same shape as 1.15.1 → 1.15.2. The v1.16.1 tag stays exactly
+where it is.
+
+**Added: never-overwrite guarantee on Folder Copy dispatch.** OHD now
+guarantees that a Folder Copy dispatch **never** replaces an existing
+file in the destination folder. Before writing, dispatch checks each
+planned filename against on-disk state in the destination and, if it
+finds a collision, walks `_2` / `_3` / … until it lands on a free
+name. This runs in addition to the pre-1.16.2 within-dispatch dedupe
+(which only saw one dispatch at a time), so an operator who dispatches
+the same job twice, dispatches two jobs from the same order into a
+shared folder, or lands a reprint into a folder that already carries
+the parent's basenames will now see suffixed copies rather than a
+silent overwrite. Reflected on the dispatch log as `diskSuffixedCount`
+alongside the existing `suffixedCount`. See the "never-overwrite" test
+suite in `src/main/services/__tests__/print-service-folder-copy-routed.test.js`
+for the two-jobs-one-order + colliding-template + reprint cases.
+
+This changes the pre-1.16.2 idempotence-on-retry behaviour: a
+re-dispatch of the same job now adds `_2` variants instead of silently
+producing identical output for the second time. The tension between
+"retry is idempotent" and "retry never overwrites" was resolved in
+favour of safety — the pre-1.16.2 idempotence-lock test (§4.4) has
+been reversed to lock the new never-overwrite invariant. See the
+detailed reasoning in the test comment at
+`print-service-folder-copy-routed.test.js` — "1.16.2 retry:
+dispatching the same job twice adds _2 variants".
+
+**Changed: save-time hard blocks become advisories.** The Root-layout
+"blank template" and "template without a job-distinguishing token"
+hard blocks (added in M3, tightened in M3a) are softened to warnings.
+The 1.15.0 lesson was that a save-time block on a state that is
+actually safe at dispatch is worse than no block — one lab lost hours
+to a block that flagged a config the dispatch would have handled
+correctly. Now that dispatch guarantees no-overwrite, the block became
+the same class of mistake. Both cases now save and surface an alert-
+per-warning through the same alert channel PIC Pro volume advisories
+use. Wording locked by tests.
+
+**Added: `omitJobId` on Folder Copy controllers.** New checkbox under
+Destination layout, visible only when Per-job subfolder is selected.
+When on, the per-job segment loses the `_{jobId}` suffix — folders
+become `{orderNumber}/` instead of `{orderNumber}_{jobId}/`. Two jobs
+on the same order now share the folder; the never-overwrite guarantee
+above stops any file being replaced. Default ON for a new controller
+(what operators asked for) and OFF for existing controllers (strict-
+`=== true` migration, so a pre-1.16.2 record without the key stays
+in the pre-1.16.2 folder shape). A save-time advisory fires when
+`omitJobId` is on and the template lacks any per-image distinguisher
+(`{index}`/`{indexPadded}`/`{filename}`/`{jobName}`/`{jobId}`) —
+suggests adding `{index}`/`{indexPadded}` so filenames stay unique
+per image. Wired through both route literals in
+`routing-service.js`; parity locked by
+`src/main/services/__tests__/routing-folder-copy-fields.test.js`.
+
+**Added: default filename template on new Folder Copy controllers.**
+When the operator clicks "Add Controller" and picks Folder Copy, the
+Filename template field is now pre-filled with
+`{lastName}_{jobName}_{category}_{productCode}_{quantity}_{indexPadded}`.
+Existing controllers open with their saved value verbatim — the
+routing service's read-time defaults still resolve a missing template
+to `""`, so pre-1.16.2 controllers are unchanged.
+
+**Changed: token chips insert at the template cursor** instead of
+copying to the clipboard. Clicking a chip inserts the token at the
+current cursor position (or replaces the selected text), keeps focus
+on the field, and re-runs the preview. The tooltip reads "Insert
+`{token}` at cursor" so the new behaviour is discoverable. Photo
+Lines chips (Darkroom Pro) still use clipboard-copy — that's a
+different modal with a different workflow.
+
+**Changed: filename template field is roughly double the previous
+height** to give the operator a more comfortable typing area for long
+multi-token templates. Still single-line semantics — pasted or typed
+newlines are stripped at the input handler so a value with an embedded
+newline can never persist.
+
+### Standing rules held
+- **`buildDestFolder` single implementation.** The `omitJobId`
+  parameter goes on the one existing helper; no lookalike caller.
+- **Both route literals carry `omitJobId` with the identical strict-
+  `=== true` migration.** Parity test locks it (`routing-folder-copy-
+  fields.test.js`).
+- **Preview runs the real engine over IPC.** `folder-copy-preview.js`
+  threads `omitJobId` through so preview and dispatch never disagree.
+- **Never-overwrite pure helper.** `dedupeAgainstDisk` in
+  `folder-copy-filename.js` takes an `existsFn` dep and is exercised
+  by dispatch, tests, and the future call sites. Pure, no fs.
+- **Assertions from invariants.** Every new test title states the
+  invariant; the assertion is derived from it. The pre-1.16.2 §4.4
+  idempotence test's reversal is explicit about the invariant swap.
+
+## v1.16.1 - 2026-09-06 [BUILT NOT DISTRIBUTED — 1.16.1's changes reach labs via 1.16.2]
 
 **Added: Fuji JobMaker controllers can now have a different artwork
 path for OHD and for the Fuji JobMaker machine.** Until now the
