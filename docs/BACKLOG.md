@@ -114,6 +114,35 @@ parent's `_status` — a design choice). Not release-blocking; the
 same class of defect existed before 1.15.3 and was masked by the
 broader silent-stall bug that 1.15.3 fixed for real jobs.
 
+**No operator-visible signal when a Folder Copy dispatch suffixes
+files against existing on-disk state.** 1.16.2's never-overwrite
+guarantee walks `_2`/`_3` when a planned filename collides with a
+file already in the destination — and reports the count on
+`stats.diskSuffixed` (surfaced on the dispatch result and on the
+`Job sent to print via folder copy (routed)` Winston log line as
+`diskSuffixedCount`). That's the only signal today. It lands
+inside the JSON meta blob of a log line the Activity Log tab
+renders as text — visible if the operator searches for it, invisible
+otherwise. No badge, no toast, no per-job indicator, no distinction
+in `_status` between a clean write and a write that produced N
+duplicates. An operator whose Retry duplicated files has nothing
+linking the extra `_2` files in the destination back to the retry.
+
+Why this matters: the retry-semantics investigation
+(`docs/folder-copy-retry-semantics.md`) recommends leaving the
+1.16.2 tradeoff as-is, and names a lab report of duplicate-file
+pain as the primary trigger for revisiting that decision. Without
+a visible signal that duplication happened, the report is unlikely
+to ever reach us — the operator sees `_status: completed` and moves
+on; the extras sit in the destination folder attributed to nothing.
+
+Small change: surface `diskSuffixedCount` on the Jobs grid row
+(a badge / column entry when non-zero) or as a completion toast
+("Job N sent — 4 files suffixed against existing destination
+files"). Either would be enough to close the feedback loop.
+Details of the signal path and the "no consumer of diskSuffixed"
+grep in `docs/folder-copy-retry-semantics.md` §4.
+
 **Flaky test — RESOLVED 2026-08-19.** `perfectlyClearClient.test.js`
 "stability polling" (`:482` / `:487`) was a scheduling race: the test's
 25 ms poll interval + 30 ms rewrite delay put the rewrite ~5 ms AFTER
