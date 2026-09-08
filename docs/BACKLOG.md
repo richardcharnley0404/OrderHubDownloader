@@ -228,8 +228,10 @@ setup uses UNC paths for exactly this reason (a UNC on the OHD box
 either resolves to the same share the Fuji box sees, or does not
 resolve at all — falls into the soft-warn branch).
 
-**Accepted for 1.16.1, recorded here for the day it happens.** The
-mode fails LOUD, not silent — the message the writer throws already
+**Accepted for 1.16.1, recorded here for the day it happens.** (1.16.1
+was built but never distributed; labs first receive this code as part
+of 1.16.2, so the "day it happens" would come from a 1.16.2-installed
+lab.) The mode fails LOUD, not silent — the message the writer throws already
 names both paths and the fix ("Fuji JobMaker dispatch stopped: the
 order's artwork folder is not visible via the configured
 fujiImageRoot. OHD wrote the images to `{imageStagingRoot}/{orderRef}`,

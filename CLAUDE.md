@@ -158,9 +158,74 @@ with no visible change, check `git diff --ignore-cr-at-eol` before believing it.
   is not a filename. It truncated `"8.5x11 Canvas"` (a Wide Format product
   name) to `"8"` and silently dropped the `_2` from `"photo.jpg_2"`,
   losing an image count. Locked by the audit meta-test in
-  `folder-copy-filename.test.js` (`M2-fix audit: exactly one path.extname
-  call is on img.sourcePath`) which reads the module source and counts
-  the calls — do NOT delete that test as noise; it is the tripwire.
+  `folder-copy-filename.test.js` (`M2-fix audit: every path.extname call
+  is on a trusted .sourcePath anchor`) which reads the module source and
+  requires every `path.extname(X)` call to have `X` matching a `.sourcePath`
+  anchor — do NOT delete that test as noise, and do NOT loosen the
+  anchor pattern to accept a non-`.sourcePath` argument; it is the
+  tripwire, and the class of bug it prevents is silent stem truncation
+  on any template output shape.
+- **`dedupeAgainstDisk` in `folder-copy-filename.js` is what prevents
+  file loss at Folder Copy dispatch, and the three save-time advisories
+  in `ipc-handlers.js` were softened from hard blocks BECAUSE it does.
+  These two changes are a pair — do not remove either half without
+  understanding the other.** Before 1.16.2, dispatch could silently
+  overwrite an existing file in the destination if the planner produced
+  a colliding name; the save-time hard blocks
+  (`folder-copy-root-blank-template`,
+  `folder-copy-root-no-distinguisher`,
+  `folder-copy-omitjobid-no-image-distinguisher`) existed to prevent
+  configurations that made silent overwrite likely. 1.16.2 fixes the
+  destructive half at dispatch: `dedupeAgainstDisk(files, existsFn,
+  destFolder)` runs BEFORE any write in both `_sendViaFolderCopyRouted`
+  and `_sendReprintViaFolderCopy` (`src/main/services/print-service.js`)
+  and walks `_2`/`_3`/… against on-disk state in `destFolder` — NOT
+  just against the within-dispatch running set the planner already
+  covers. Because dispatch now guarantees no overwrite regardless of
+  template shape, the three save-time gates became advisory warnings
+  (via `warnings.push({kind, text})` in the `ohd:routing:save-
+  controller` handler) rather than hard blocks — the block was there
+  to prevent a destructive state, and the state is no longer
+  destructive; a poorly-chosen template is now messy (files carry
+  `_2`/`_3` suffixes) rather than losing data. That is the 1.15.0
+  lesson from PIC Pro's volume check applied here: a save-time block
+  on a state that dispatch handles correctly is worse than no block.
+  Do NOT remove `dedupeAgainstDisk` as "redundant since the advisories
+  catch it" — the advisories are advisory precisely because dispatch
+  covers the safety; take away the dispatch pass and silent overwrite
+  returns immediately. Do NOT re-harden the advisories back into hard
+  blocks — you would be re-imposing 1.15.0's blocking mistake on a
+  state that is safe by construction, AND turning a documented
+  operator-visible signal (`diskSuffixedCount` on the dispatch log)
+  into a save-time refusal on a config that would have worked. Locked
+  by `dedupeAgainstDisk`'s five unit tests in
+  `folder-copy-filename.test.js` (`1.16.2 dedupeAgainstDisk: empty
+  destination folder → planner list passes through unchanged`,
+  `single collision → next suffix _2`, `sequential collisions across
+  dispatches → _2, _3, _4`, `within-call collision with disk state →
+  suffix skips names already chosen in THIS call`, `exhausted suffix
+  range throws with context`); by the dispatch-level integration
+  tests in `print-service-folder-copy-routed.test.js` (`1.16.2 never-
+  overwrite: two jobs on same order + omitJobId + colliding template
+  → all files preserved with _2/_3`, `1.16.2 reprint never-overwrite:
+  re-dispatching into a non-empty reprint folder suffixes rather than
+  overwriting`, and `1.16.2 retry: dispatching the same job twice
+  adds _2 variants — the never-overwrite guarantee wins over
+  idempotence`, which is the deliberate reversal of the pre-1.16.2
+  §4.4 idempotence-on-retry lock — do NOT flip it back); and by the
+  advisory-shape tests in `ipc-folder-copy-save-controller.test.js`
+  (`1.16.2 IPC ADVISORY (was: reject): root layout with blank
+  template → saves + warning`, `1.16.2 IPC ADVISORY (was: reject):
+  root layout with template lacking any job-distinguishing token →
+  saves + warning`, `1.16.2 IPC ADVISORY (was: reject): root layout
+  + {filename} → saves + warning`, `1.16.2 IPC ADVISORY (was:
+  reject): root layout + {originalFilename} → saves + warning`,
+  `1.16.2 IPC ADVISORY: omitJobId + per-job + template lacks per-
+  image distinguisher → saves + warning`). Every advisory test title
+  begins `1.16.2 IPC ADVISORY (was: reject)` on purpose — the
+  parenthetical is the audit trail from the pre-1.16.2 block, and
+  a reader who wants to re-add a block sees the reason it was
+  removed first.
 - **Duplex back positions mirror about the SHEET centreline, never the
   usable-area centre.** The two formulas produce identical positions when
   margins are symmetric, so a regression from `sheetW - front.x - cellW`
