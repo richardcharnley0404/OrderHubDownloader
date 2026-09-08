@@ -176,6 +176,12 @@ Doubled leading `\\` preserved; single trailing `\` preserved; no case or slash 
 
 Same-machine setups short-circuit the check (both values equal, no reachability probe runs). Known false-fail case where OHD has a same-letter drive mapped to unrelated content is recorded in `docs/BACKLOG.md`.
 
+**Field report (2026-09-08).** A Fuji JobMaker lab is running 1.16.2 in production with the split configuration this field was built for — images written to one machine, `.txt` job files consumed on another. They installed 1.16.2 and reported that JobMaker dispatch is working; no problems have been reported since. 1.16.2 is the first release to carry the `fujiImageRoot` code to any lab (1.16.1 was built but never distributed — see `docs/RELEASE.md`), so this is the first real-world exposure for the split-path feature.
+
+What is NOT known: we do not have a detailed test report from the lab, we have not verified the error paths at their installation (dispatch-time reachability hard-fail on a missing order subfolder, soft-warn on an unreachable root, save-time reachability advisory), and we do not have confirmation of which specific checks fired during setup. "No problems reported" is an absence of complaints, not a positive verification. Treat this as a working same-lab, same-config data point rather than as feature verification — the class of failure the reachability checks defend against is not one that would necessarily surface on a happy-path install.
+
+Not to be conflated with the Fuji PIC Pro cross-volume hypotheses (a different lab, still on 1.15.3, no report). Those remain unconfirmed and are tracked separately in `docs/picpro-cross-volume-investigation.md`.
+
 ### Order_ID generation
 
 OHD generates a per-file Order_ID by combining a single-letter **surface code** with the order number:

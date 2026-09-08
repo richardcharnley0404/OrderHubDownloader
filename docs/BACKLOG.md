@@ -298,6 +298,31 @@ Reference: `src/main/services/fuji-jobmaker-file-writer.js`
 in `src/main/services/__tests__/fuji-jobmaker-file-writer.test.js`
 under `1.16.1 reachability: root resolves, order subfolder MISSING`.
 
+**Field report (2026-09-08).** A Fuji JobMaker lab is now running
+1.16.2 in production with the split configuration this feature was
+built for — images on one machine, `.txt` job files consumed on
+another. They installed 1.16.2 and reported that JobMaker dispatch
+is working; no problems have been reported since. 1.16.2 is the
+first release to carry the `fujiImageRoot` code to any lab (1.16.1
+was built but never distributed).
+
+What is NOT known: we do not have a detailed test report, we have
+not verified the error paths at their installation (dispatch-time
+hard-fail on a missing order subfolder, soft-warn on an
+unreachable root, save-time reachability advisory), and we do not
+have confirmation of which specific checks fired during setup.
+"No problems reported" is an absence of complaints, not a positive
+verification. This is a working same-lab, same-config data point,
+not feature verification — the drive-letter false-fail described
+above is a specific configuration that a happy-path install would
+not necessarily reveal. If this lab or another one hits the
+false-fail, the "possible fixes" list above still stands. Do not
+close the false-fail entry on the strength of this field report.
+
+Not to be conflated with the Fuji PIC Pro cross-volume hypotheses
+in the entry above (a different lab, still on 1.15.3, no report).
+Those remain unconfirmed.
+
 **Settings polling-interval field on a fresh install shows editable until first check-in.**
 The Settings panel reads `ohd:server:get-capabilities` once when the panel opens (see
 `renderer.js` — `populateForm`), so the first time an operator installs OHD v1.9.0 and opens
