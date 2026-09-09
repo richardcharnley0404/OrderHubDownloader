@@ -393,10 +393,53 @@ test('openModal enforcement: every .pm-modal-overlay id in index.html is reveale
   // 'hidden') instead of openModal() silently loses the dirty guard
   // (isDirty fails open on a missing snapshot). Derive the overlay-id
   // list from the HTML so a new modal is covered automatically.
+  //
+  // Two invariants asserted here:
+  //
+  //   A — Strict count: openModal(...) CALL SITES (excluding the
+  //       function declaration and any mention in a comment) equals
+  //       overlayIds.size EXACTLY. A `>=` slack would let two call
+  //       sites be deleted without failing, and would fail to catch a
+  //       new overlay added without an openModal reveal (14 overlays
+  //       but still 13 calls). Not the shape of guard we want.
+  //
+  //   B — Per-id capture-form scan: for every `getElementById('<id>')`
+  //       call in renderer.js, we walk forward through its enclosing
+  //       block (brace-counted) and assert that IF a
+  //       `.classList.remove('hidden')` appears in that window, an
+  //       `openModal(` appears BEFORE it. This is what catches the
+  //       common captured-variable house style
+  //           const modal = document.getElementById('X');
+  //           …
+  //           modal.classList.remove('hidden');   ← would BAD
+  //       which the previous version of this test missed because it
+  //       only looked at the chained
+  //       `getElementById('X').classList.remove('hidden')` form.
+  //       Eleven of the thirteen open sites in renderer.js use the
+  //       captured-variable form.
+  //
+  // Both are needed. Strict count catches "overlay added, no reveal
+  // at all" (count mismatch). Per-id capture-form scan catches
+  // "overlay reveal reverted to a bare classList.remove('hidden')"
+  // in either the chained OR captured-variable form.
+
   const html = fs.readFileSync(INDEX_HTML, 'utf8');
-  // Match every element carrying class="… pm-modal-overlay …" and
-  // capture its id attribute. Both attribute orders (id before class,
-  // class before id) exist in the file, so the regex handles both.
+  const rendererSrcRaw = fs.readFileSync(RENDERER_JS, 'utf8');
+
+  // Strip block and line comments so a mention like
+  //   // openModal() would throw
+  // doesn't count as either a live call site or a violation. Order
+  // matters: block comments first (they can contain `//`), then line
+  // comments. Not a full JS lexer — string literals containing "//"
+  // could be over-eaten, but the file has none of that shape near
+  // the wiring in question and a false pass would be caught by the
+  // adjacent count assertion.
+  const rendererSrc = rendererSrcRaw
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
+
+  // Discover overlay ids from HTML — both attribute orders (id before
+  // class, class before id) exist in the file.
   const overlayIds = new Set();
   const tagRe = /<[^>]*\bclass=(["'])[^"']*\bpm-modal-overlay\b[^"']*\1[^>]*>/g;
   const idRe  = /\bid=(["'])([^"']+)\1/;
@@ -409,63 +452,61 @@ test('openModal enforcement: every .pm-modal-overlay id in index.html is reveale
   assert.ok(overlayIds.size > 0,
     'sanity: index.html must have at least one .pm-modal-overlay element with an id');
 
-  const rendererSrc = fs.readFileSync(RENDERER_JS, 'utf8');
+  // Invariant A — strict count.
+  // Neutralise the declaration ("function openModal(") so it doesn't
+  // count as a call site. Everything else matching \bopenModal\s*\( is
+  // a live invocation.
+  const rendererMinusDecl = rendererSrc.replace(/function\s+openModal\s*\(/, 'FN_DECL_openModal(');
+  const openModalCalls = (rendererMinusDecl.match(/\bopenModal\s*\(/g) || []).length;
+  assert.equal(openModalCalls, overlayIds.size,
+    `openModal(...) is called ${openModalCalls} times across ${overlayIds.size} ` +
+    `.pm-modal-overlay ids — must match EXACTLY. A mismatch means either an ` +
+    `overlay was added without an openModal reveal, or an openModal call was ` +
+    `deleted, or a new overlay was opened with a bare classList.remove('hidden')`);
+
+  // Invariant B — per-id capture-form scan.
+  // For each overlay id, walk each of its `getElementById('<id>')`
+  // occurrences to the end of the enclosing block (brace-counted) and
+  // check that `openModal(` appears strictly before the first
+  // `.classList.remove('hidden')` (if any).
   const violations = [];
   for (const id of overlayIds) {
-    // Pattern 1 — the common case: an `id` reference inside a
-    // `classList.remove('hidden')` call by grepping getElementById.
-    // e.g. `document.getElementById('paperSizeModal').classList.remove('hidden')`.
     const escId = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const directIdRemove = new RegExp(
-      `getElementById\\(\\s*['"]${escId}['"]\\s*\\)\\s*\\.classList\\.remove\\(\\s*['"]hidden['"]\\s*\\)`,
-    );
-    if (directIdRemove.test(rendererSrc)) {
-      violations.push(
-        `${id}: found direct .classList.remove('hidden') via getElementById('${id}') — ` +
-        `must use openModal(document.getElementById('${id}')) instead`,
-      );
-    }
-    // Pattern 2 — an initModal-style function grabs the element once
-    // (const modal = document.getElementById('X')) then opens it via
-    // a bare `modal.classList.remove('hidden')` later. This is harder
-    // to prove absent by regex because the intermediate variable may
-    // be anywhere. As a heuristic tripwire, assert the id appears in
-    // an openModal(...) reference somewhere in renderer.js — either
-    // as `openModal(document.getElementById('id'))` OR the id was
-    // grabbed via getElementById and openModal(modal) is called on
-    // that reference. If neither pattern is present, flag the id as
-    // uninstrumented. Backup-confirmation-style overlays that carry
-    // no form inputs (backupCollisionModal, backupRelaunchModal) are
-    // still reached by openModal in the current tree — no exceptions
-    // needed.
-    const hasOpenModalById = new RegExp(
-      `openModal\\(\\s*document\\.getElementById\\(\\s*['"]${escId}['"]\\s*\\)`,
-    ).test(rendererSrc);
-    const hasGetById = new RegExp(
-      `getElementById\\(\\s*['"]${escId}['"]\\s*\\)`,
-    ).test(rendererSrc);
-    if (!hasOpenModalById && hasGetById) {
-      // The overlay is referenced but not opened via the ById form.
-      // It must be opened via `openModal(modal)` where `modal` is the
-      // captured reference. Assert `openModal(` appears in renderer.js
-      // at all — the per-id proof is that no direct classList.remove
-      // slipped through (violation added above), plus that the wiring
-      // uses openModal somewhere.
-      // Nothing to add here beyond the direct-remove check.
+    const getByIdRe = new RegExp(`getElementById\\(\\s*['"]${escId}['"]\\s*\\)`, 'g');
+    let mg;
+    while ((mg = getByIdRe.exec(rendererSrc))) {
+      const start = mg.index;
+      const end   = _findEnclosingBlockEnd(rendererSrc, start);
+      const body  = rendererSrc.slice(start, end);
+      const openIdx   = body.search(/\bopenModal\s*\(/);
+      const removeIdx = body.search(/\.classList\.remove\(\s*['"]hidden['"]\s*\)/);
+      if (removeIdx !== -1 && (openIdx === -1 || removeIdx < openIdx)) {
+        violations.push(
+          `${id}: getElementById('${id}') at renderer.js offset ${start} — enclosing ` +
+          `block contains .classList.remove('hidden') without a preceding openModal(...). ` +
+          `Use openModal(modal) instead of modal.classList.remove('hidden') for the reveal.`,
+        );
+      }
     }
   }
-
-  // Global sanity: openModal(...) must be called at least once per
-  // discovered overlay id. If openModal itself was accidentally
-  // deleted, the aggregate count would drop to zero and the direct-
-  // remove check above would still pass. Guard against that.
-  const openModalCalls = (rendererSrc.match(/\bopenModal\s*\(/g) || []).length;
-  assert.ok(openModalCalls >= overlayIds.size,
-    `openModal(...) is called ${openModalCalls} times but there are ${overlayIds.size} ` +
-    `.pm-modal-overlay ids — every overlay must go through openModal, not a bare ` +
-    `classList.remove('hidden')`);
-
   assert.deepEqual(violations, [],
     'every .pm-modal-overlay id must be revealed via openModal(...) so its ' +
     'open-time snapshot is taken and the dirty guard is armed');
 });
+
+// Bounded brace-counting helper for the per-id scan. Starting from
+// `from`, walk forward until we hit a `}` unmatched by a `{` seen
+// after `from` — that's the close of the enclosing block. String and
+// regex literals containing `{` / `}` could throw this off in the
+// general case; renderer.js's modal setup code has none of that
+// shape, and the test file's comment-stripping already removed the
+// most common source of false positives.
+function _findEnclosingBlockEnd(src, from) {
+  let depth = 0;
+  for (let i = from; i < src.length; i++) {
+    const c = src.charAt(i);
+    if      (c === '{') depth++;
+    else if (c === '}') { depth--; if (depth < 0) return i; }
+  }
+  return src.length;
+}
