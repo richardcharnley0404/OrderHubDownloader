@@ -2613,11 +2613,16 @@ function populateForm(config) {
   const reviewRadio = document.getElementById('filmScanReviewMode_' + reviewMode);
   if (reviewRadio) reviewRadio.checked = true;
   // Film Development Auto Assignment Mode — independent of AI Rotation:
-  // works even with rotation off (a minimal roll record is stamped at the
-  // hold step). Default false; loading a legacy config yields false too.
+  // works even with rotation off. Default false; loading a legacy config
+  // yields false too.
+  //
+  // Post-decoupling (1.16.3): Review Mode is also independent of AI Rotation,
+  // so the old updateFilmScanRotationEnableState() gating call is gone. The
+  // radios are always enabled; the save path never force-overrides the
+  // selection back to 'never' when AI is off. All three modes are valid
+  // with rotation off — see the per-mode help text.
   const autoAssignEl = document.getElementById('filmScanAutoAssignEnabled');
   if (autoAssignEl) autoAssignEl.checked = !!config.filmScanAutoAssignEnabled;
-  updateFilmScanRotationEnableState();
 
   // AI Quality Gate (v1.2.0)
   const aiQEnabled = document.getElementById('aiQualityEnabled');
@@ -2756,14 +2761,13 @@ function getFormData() {
       const v = parseInt(document.getElementById('filmScansRetentionDays').value, 10);
       return Number.isFinite(v) && v >= 0 ? v : 30; // 0 allowed = keep forever
     })(),
-    // Film Scans — AI Rotation + Review Mode (M7-8 + M9). When AI is off we
-    // force review mode back to 'never' — Smart/Always are meaningless without
-    // AI metadata to review. The UI disables the radios in that state, but
-    // defensive code here keeps the IPC boundary clean.
+    // Film Scans — AI Rotation + Review Mode. Post-decoupling (1.16.3):
+    // Review Mode is independent of AI Rotation. Manual Check holds every
+    // roll regardless; Smart Check with rotation off + PC off has no
+    // signals and degrades to Auto (see the per-mode help text). No AI-off
+    // override at save time.
     filmScanRotationEnabled: document.getElementById('filmScanRotationEnabled').checked,
     filmScanReviewMode: (() => {
-      const aiOn = document.getElementById('filmScanRotationEnabled').checked;
-      if (!aiOn) return 'never';
       const checked = document.querySelector('input[name="filmScanReviewMode"]:checked');
       const v = checked ? checked.value : 'never';
       return (v === 'smart' || v === 'always') ? v : 'never';
@@ -3641,14 +3645,10 @@ selectFileUploadsStorageBtn.addEventListener('click', async () => {
 });
 selectProcessFolderBtn.addEventListener('click', () => selectDirectoryFor('processFolderPath'));
 
-// M7-8: keep Manual Rotation Check coupled to Enable AI Rotation. Defensive
-// optional chaining — these elements only exist on builds that include the
-// Film Scans tab markup (they always do today, but render order during
-// reload could fire this before the DOM is ready).
-const aiRotationCheckbox = document.getElementById('filmScanRotationEnabled');
-if (aiRotationCheckbox) {
-  aiRotationCheckbox.addEventListener('change', updateFilmScanRotationEnableState);
-}
+// Post-decoupling (1.16.3): Review Mode is no longer coupled to AI Rotation.
+// The change-event listener that used to disable Smart/Manual radios when AI
+// was unticked (and the updateFilmScanRotationEnableState function itself)
+// were removed as part of that change.
 
 const aiQualityEnabledCheckbox = document.getElementById('aiQualityEnabled');
 if (aiQualityEnabledCheckbox) {
@@ -3670,25 +3670,13 @@ function updateFilmScansEnableState() {
   }
 }
 
-/**
- * M7-8 + M9: Review Mode is meaningless without AI Rotation, since there's
- * nothing to review. When AI is off we disable all three radio options + grey
- * the group, and force the selection back to 'never' so a save in the AI-off
- * state can't persist Smart/Always.
- */
-function updateFilmScanRotationEnableState() {
-  const aiEl  = document.getElementById('filmScanRotationEnabled');
-  const grp   = document.getElementById('filmScanReviewModeGroup');
-  if (!aiEl || !grp) return;
-  const aiOn = aiEl.checked;
-  const radios = grp.querySelectorAll('input[name="filmScanReviewMode"]');
-  radios.forEach((r) => { r.disabled = !aiOn; });
-  grp.style.opacity = aiOn ? '' : '0.5';
-  if (!aiOn) {
-    const neverEl = document.getElementById('filmScanReviewMode_never');
-    if (neverEl) neverEl.checked = true;
-  }
-}
+// updateFilmScanRotationEnableState removed (1.16.3 rotation-decoupling):
+// used to disable the Review Mode radios + grey the group + force selection
+// back to 'never' when AI Rotation was unticked, on the premise that "there
+// is nothing to review with AI off". Post-decoupling every roll IS reviewable
+// with AI off — thumbnails, frame records, and the Film Review panel all
+// work — so the gating was actively wrong and prevented labs from choosing
+// a valid Manual Check configuration.
 
 function updateAiQualityEnableState() {
   const enabledEl = document.getElementById('aiQualityEnabled');

@@ -531,7 +531,10 @@
                   <span>Enable AI Rotation</span>
                 </label>
                 <small class="field-hint">
-                  When off, scans upload to S3 as-is with no orientation step.
+                  Toggles the AI orientation pass. Rotation is the only thing
+                  this flag controls — scans are still copied to storage,
+                  thumbnailed, and appear in Film Review either way. Review
+                  Mode and Auto Assignment work whether this is on or off.
                 </small>
               </div>
 
@@ -539,19 +542,16 @@
                 <label class="form-group__label">Review Mode</label>
                 <label class="radio-row">
                   <input type="radio" name="filmScanReviewMode" value="never" id="filmScanReviewMode_never">
-                  <span><strong>Auto</strong> — upload all rolls immediately after AI rotation.</span>
+                  <span><strong>Auto</strong> — upload every roll immediately, no review step.</span>
                 </label>
                 <label class="radio-row">
                   <input type="radio" name="filmScanReviewMode" value="smart" id="filmScanReviewMode_smart">
-                  <span><strong>Smart Check</strong> — only hold rolls with at least one low-confidence frame or rotation error. Confident rolls upload automatically.</span>
+                  <span><strong>Smart Check</strong> — hold rolls with a low-confidence frame, a rotation error, or a Perfectly Clear rejection; upload the rest automatically. With AI Rotation off AND Perfectly Clear off, Smart Check has no signals to act on and uploads every roll (behaves the same as Auto).</span>
                 </label>
                 <label class="radio-row">
                   <input type="radio" name="filmScanReviewMode" value="always" id="filmScanReviewMode_always">
-                  <span><strong>Manual Check</strong> — every roll waits in the Film tab for operator approval before uploading.</span>
+                  <span><strong>Manual Check</strong> — every roll waits in the Film tab for operator approval before uploading, whether AI Rotation is on or off.</span>
                 </label>
-                <small class="field-hint">
-                  Requires AI Rotation to be enabled. With AI off, rolls always upload as-is.
-                </small>
               </div>
 
               <div class="form-group checkbox-group">
