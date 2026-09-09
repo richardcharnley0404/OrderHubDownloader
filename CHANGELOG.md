@@ -1,4 +1,4 @@
-## Unreleased
+## v1.16.3 - 2026-09-09
 
 **READ THIS SECTION BEFORE UPGRADING IF YOU RUN OHD AT MULTIPLE
 LOCATIONS**, or if you had a Default Folder configured under
