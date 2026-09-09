@@ -774,6 +774,52 @@ class FolderWatchService {
               } catch (outerErr) {
                 logger.logError('filmScans: rotation step failed outright - continuing without rotation', outerErr);
               }
+            } else {
+              // Rotation-off thumbnail generation. Mirrors the rotation-on
+              // thumbnail step above (same sharp constructor options, same
+              // resize args, same jpeg quality) so OHD's
+              // userData/thumbnails/{rollId}/{frameId}.jpg is populated for
+              // every film scan frame, not only rotation-on ones. Runs BEFORE
+              // Step 2b (TIFF→JPEG) so TIFF rolls still get a thumb; sharp
+              // reads the TIFF and writes a JPG thumb, then Step 2b converts
+              // the storage TIFF separately.
+              //
+              // Thumbnail-only on purpose: this path does NOT write a frame
+              // or roll record. The existing frame/roll records are coupled
+              // to the AI rotation pass; wiring them up for rotation-off
+              // installs is a separate concern that would also need Film
+              // Review panel surfacing decisions.
+              try {
+                const { app } = require('electron');
+                const sharpThumb = require('sharp');
+                const rollId = path.basename(storagePath);
+                const thumbnailDir = path.join(app.getPath('userData'), 'thumbnails', rollId);
+                try { fs.mkdirSync(thumbnailDir, { recursive: true }); } catch (_) { /* best-effort */ }
+
+                const imageFiles = fs.readdirSync(storagePath)
+                  .filter(f => {
+                    const ext = path.extname(f).toLowerCase();
+                    return ext === '.tif' || ext === '.tiff' || ext === '.jpg' || ext === '.jpeg';
+                  })
+                  .sort();
+
+                for (let frameIndex = 0; frameIndex < imageFiles.length; frameIndex++) {
+                  const imageFile = imageFiles[frameIndex];
+                  const imagePath = path.join(storagePath, imageFile);
+                  const frameId   = `${rollId}_${frameIndex}`;
+                  const thumbnailPath = path.join(thumbnailDir, `${frameId}.jpg`);
+                  try {
+                    await sharpThumb(imagePath, { limitInputPixels: false, failOn: 'none' })
+                      .resize(512, null, { withoutEnlargement: true, fit: 'inside' })
+                      .jpeg({ quality: 85 })
+                      .toFile(thumbnailPath);
+                  } catch (thumbErr) {
+                    logger.logError(`filmScans: failed to generate thumbnail for ${imageFile} - continuing`, thumbErr);
+                  }
+                }
+              } catch (thumbOuterErr) {
+                logger.logError('filmScans: rotation-off thumbnail step failed outright - continuing', thumbOuterErr);
+              }
             }
 
             // Step 2b: Convert any TIFF files in storage to JPEG (quality 90).

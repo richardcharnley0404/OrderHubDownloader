@@ -575,6 +575,39 @@ case (a bad code never imports; a bad email just misroutes to an
 addressable customer). Revisit if a lab reports mis-matched customer
 records tracing back to a Settings typo.
 
+**Push Film Scan thumbnails to S3 alongside the originals.** OHD generates
+a 512px q85 JPEG thumbnail per frame under
+`userData/thumbnails/{rollId}/{frameId}.jpg` at ingest — since this change,
+whether or not AI rotation is enabled. Today those thumbs stay local; the
+S3 upload step deliberately leaves them out of `storagePath` to save
+upload bandwidth. OrderHub currently generates its own gallery-tile /
+customer-email thumbnails from the full uploaded scans via an
+edge-function thumbnailer, which has three real problems: a 5 MB decode
+cap that rejects large scans, no TIFF decode support at all, and a race
+with the outbound notification email (the email can send before the
+thumb is ready, and the customer gets a broken image). OHD's sharp-based
+pipeline has none of those limits — TIFF in, JPEG out, no per-file size
+ceiling — so pushing OHD's thumbs to S3 alongside the originals would let
+OrderHub replace the edge function with a static-asset fetch, eliminating
+all three failure modes in one move.
+
+Rough cost: 512px q85 is ~40-80 KB/frame → ~2-3 MB extra per 36-frame
+roll. The "keep thumbs out of `storagePath`" decision predates this
+use case and will need revisiting when the S3 push is built (either
+upload thumbs from `userData/thumbnails/{rollId}/` directly, or stage
+them into `{storagePath}/thumbnails/` at generation time and let the
+existing folder-uploader carry them). Two additional decisions the
+S3 push work will need to make: (a) the naming convention — thumbnail
+filenames today are `{rollId}_{frameIndex}.jpg`, which does NOT encode
+the source image filename, so OrderHub can't map thumb → source from
+the S3 key alone; either rename on upload to include the source stem,
+publish a mapping manifest alongside, or place thumbs at an S3 key
+mirroring the source; (b) frame/roll records are currently coupled to
+the AI rotation pass and are NOT written on rotation-off installs, so
+uploading thumbs alone won't give OrderHub any per-frame context —
+either record frame/roll for the rotation-off case too, or accept that
+rotation-off deployments push thumbs without accompanying metadata.
+
 ---
 
 Older items from before 1.8.0 — the working-set divergence Phase 2, the FTP 550 noise on
