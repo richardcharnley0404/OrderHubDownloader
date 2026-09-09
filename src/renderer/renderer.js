@@ -15,7 +15,6 @@ const selectFilmScansSourceBtn = document.getElementById('selectFilmScansSourceB
 const clearFilmScansSourceBtn = document.getElementById('clearFilmScansSourceBtn');
 const selectFileUploadsWatchBtn = document.getElementById('selectFileUploadsWatchBtn');
 const selectFileUploadsStorageBtn = document.getElementById('selectFileUploadsStorageBtn');
-const selectProcessFolderBtn = document.getElementById('selectProcessFolderBtn');
 const printControllersList = document.getElementById('printControllersList');
 const addControllerBtn = document.getElementById('addControllerBtn');
 const statusMessage = document.getElementById('statusMessage');
@@ -983,7 +982,7 @@ function renderJobTable(jobs) {
           actionHtml = `${reviewBtn}${resolveBtn}${maybeDisable(assignBtn)}`;
         } else {
           // No controller AND no default folder configured
-          actionHtml = `${reviewBtn}${resolveBtn}<span class="route-unassigned-msg">No default folder — configure in Settings → Process Folders</span>`;
+          actionHtml = `${reviewBtn}${resolveBtn}<span class="route-unassigned-msg">No routing — assign a controller for this process in Settings → Routing</span>`;
         }
       } else {
         // Routed (controller / default-folder / process-folder) or not yet resolved — normal Send to Print
@@ -1003,7 +1002,7 @@ function renderJobTable(jobs) {
           actionHtml = `${reviewBtn}${resolveBtn}${maybeDisable(assignBtn)}`;
         } else {
           // No controller AND no default folder configured
-          actionHtml = `${reviewBtn}${resolveBtn}<span class="route-unassigned-msg">No default folder — configure in Settings → Process Folders</span>`;
+          actionHtml = `${reviewBtn}${resolveBtn}<span class="route-unassigned-msg">No routing — assign a controller for this process in Settings → Routing</span>`;
         }
       } else if (route && route.type !== 'unrouted') {
         // Valid route — show Review + Send to Print (same as received)
@@ -2705,8 +2704,9 @@ function populateForm(config) {
     }
   }).catch(() => { /* IPC failure — leave the operator-editable default */ });
 
-  // Process folder
-  document.getElementById('processFolderPath').value = config.processFolderPath || '';
+  // processFolderPath (global "Default Folder") REMOVED — no load wire.
+  // The Settings section is gone; per-process folder exceptions live in
+  // Routing (Layer 1) and are managed there.
 
 
   // AI Enhancement
@@ -2815,8 +2815,8 @@ function getFormData() {
     orderXmlCustomers: readOrderXmlCustomersFromUI(),
     // Shared
     pollingInterval: parseInt(document.getElementById('pollingInterval').value, 10) || 60,
-    // Process folder
-    processFolderPath: document.getElementById('processFolderPath').value.trim(),
+    // processFolderPath REMOVED — no save wire. Any stale value in
+    // config.json is left as an ignored orphan.
     // AI Enhancement
     enhancementProvider: document.getElementById('enhancementProvider').value,
     topazApiKey: document.getElementById('topazApiKey').value,
@@ -3673,7 +3673,6 @@ selectFileUploadsStorageBtn.addEventListener('click', async () => {
   await selectDirectoryFor('fileUploadsStorageFolder');
   updateFileUploadsEnableState();
 });
-selectProcessFolderBtn.addEventListener('click', () => selectDirectoryFor('processFolderPath'));
 
 // Post-decoupling (1.16.3): Review Mode is no longer coupled to AI Rotation.
 // The change-event listener that used to disable Smart/Manual radios when AI

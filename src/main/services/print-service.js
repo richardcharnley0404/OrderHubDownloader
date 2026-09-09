@@ -4935,7 +4935,7 @@ class PrintService {
 
   async _sendViaCopy(job, processFolderPath) {
     if (!processFolderPath) {
-      throw new Error('Process folder is not configured. Please set a default folder or add a mapping for "' + (job.process || 'unknown') + '" in Settings > Downloads.');
+      throw new Error('No routing configured for process "' + (job.process || 'unknown') + '". Assign a controller for this process in Settings → Routing.');
     }
 
     const downloadDirectory = configService.get('downloadDirectory');

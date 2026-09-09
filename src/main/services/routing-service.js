@@ -10,7 +10,10 @@ const { readOrderNumberPrefixRules } = require('../../shared/printUtils');
 // Store instance (which shares config.json) cannot inadvertently overwrite
 // routing keys when the user saves settings.  All routing-specific keys
 // (orderControllers, processControllerMappings, channelMappings,
-// processFolderExceptions, processFolderPath, _migrated_v1) are written here.
+// processFolderExceptions, _migrated_v1) are written here. The old
+// `processFolderPath` (global "Default Folder") was removed — the
+// LEGACY_ROUTING_KEYS array below no longer lists it, so it will not
+// migrate again. Any stale value already in routing.json is ignored.
 const store = new Store({ name: 'routing' });
 
 /**
@@ -381,15 +384,16 @@ function resolveRoute(job) {
 
   console.log('[resolveRoute] processMapping found:', processMapping ? 'YES' : 'NO');
 
-  // Helper: resolve to the default folder if one is configured, or mark truly unrouted.
-  const defaultFolderFallback = () => {
-    const defaultFolder = (store.get('processFolderPath') || '').trim();
-    if (defaultFolder) return { type: 'default-folder', folderPath: defaultFolder };
-    return { type: 'unrouted', reason: 'no-default-folder' };
-  };
-
+  // No mapping, or mapping points at a controller that no longer exists
+  // → unrouted. The prior branch returned `default-folder` when a global
+  // Default Folder (processFolderPath) was configured; that fallback was
+  // removed because it actively hid the deleted-controller defect —
+  // routing failures were silently copied to a folder no printer watched
+  // and jobs were marked Completed. See docs/BACKLOG.md for the removal
+  // decision. The stale processFolderPath value is left in the store as
+  // an ignored orphan (no migration).
   if (!processMapping) {
-    return defaultFolderFallback();
+    return { type: 'unrouted', reason: 'no-controller' };
   }
 
   const controllers = store.get('orderControllers', []);
@@ -399,7 +403,7 @@ function resolveRoute(job) {
   console.log('[resolveRoute] controller found:', controller ? 'YES' : 'NO');
 
   if (!controller) {
-    return defaultFolderFallback();
+    return { type: 'unrouted', reason: 'no-controller' };
   }
 
   // ── PDF-copy controllers skip Layer 3 (no channel mapping needed) ────────
@@ -1205,7 +1209,10 @@ const LEGACY_ROUTING_KEYS = [
   'processControllerMappings',
   'channelMappings',
   'processFolderExceptions',
-  'processFolderPath',
+  // 'processFolderPath' — REMOVED. The global "Default Folder" feature
+  // is gone (see resolveRoute above for the rationale). Any stale value
+  // in config.json is left as an ignored orphan per the removal
+  // decision (option a: no migration flag added to delete it).
   '_migrated_v1',
 ];
 

@@ -567,11 +567,13 @@ const schema = {
     minimum: 10,
     maximum: 600
   },
-  // Process folder for Send to Print (default fallback)
-  processFolderPath: {
-    type: 'string',
-    default: ''
-  },
+  // processFolderPath (global "Default Folder") REMOVED. Any stale value
+  // in config.json is left as an ignored orphan per the removal decision
+  // (see docs/BACKLOG.md and routing-service.js resolveRoute for the
+  // rationale — the fallback was actively hiding the deleted-controller
+  // defect). electron-store ignores keys not in the schema; no migration
+  // flag was added to strip it.
+  //
   // Process folder mappings: { "Print": "C:\\Print", "Cut": "C:\\Cut" }
   processFolderMappings: {
     type: 'object',
@@ -921,8 +923,8 @@ class ConfigService {
       // Shared
       fileStabilityMinutes: this.store.get('fileStabilityMinutes'),
       pollingInterval: this.store.get('pollingInterval'),
-      // Process folder
-      processFolderPath: this.store.get('processFolderPath'),
+      // Process folder mappings (per-process explicit mappings; the
+      // global processFolderPath fallback was removed).
       processFolderMappings: this.store.get('processFolderMappings'),
       // AI Enhancement
       enhancementProvider: this.store.get('enhancementProvider'),
@@ -1147,8 +1149,8 @@ class ConfigService {
       this.store.set('pollingInterval', pollingInterval);
     }
 
-    // Save process folder (default)
-    this.store.set('processFolderPath', (config.processFolderPath || '').trim());
+    // processFolderPath (global "Default Folder") REMOVED — no write.
+    // Any stale key in config.json is left as an ignored orphan.
 
 
     // Save process folder mappings
@@ -1346,9 +1348,11 @@ class ConfigService {
       }
       return mapping;
     }
-    // Default: use the default process folder, no controller
-    const defaultPath = this.store.get('processFolderPath') || '';
-    return { folderPath: defaultPath };
+    // No explicit mapping AND no controller. The global processFolderPath
+    // fallback was removed; return an empty folderPath so the legacy
+    // sendToPrint / _sendViaCopy path surfaces a visible error to the
+    // operator rather than silently copying to a stale default.
+    return { folderPath: '' };
   }
 
   /**

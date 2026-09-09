@@ -416,19 +416,17 @@
               <div id="downloadProgress" class="download-progress"></div>
             </fieldset>
 
-            <fieldset class="panel-section">
-              <legend>Process Folders</legend>
-              <p class="section-desc">Jobs whose process type is not assigned to a controller in Routing are automatically copied here. No warning — just copy and mark as sent.</p>
-
-              <div class="form-group">
-                <label for="processFolderPath">Default Folder</label>
-                <div class="input-with-button">
-                  <input type="text" id="processFolderPath" name="processFolderPath"
-                    placeholder="C:\Print\Process" readonly>
-                  <button type="button" id="selectProcessFolderBtn" class="btn-browse">Browse...</button>
-                </div>
-              </div>
-            </fieldset>
+            <!-- "Process Folders" fieldset REMOVED. The global Default
+                 Folder (processFolderPath) actively hid the deleted-
+                 controller defect — jobs whose controller had been
+                 deleted from Routing were silently copied to the
+                 default folder and marked Completed, with no printer
+                 actually printing anything. Removed in favour of the
+                 job surfacing as unrouted with actionable text in the
+                 Jobs grid ("No routing — assign a controller for this
+                 process in Settings → Routing"). Per-process folder
+                 exceptions (Layer 1) are unaffected — they live in
+                 Routing and are managed there. -->
 
             <fieldset class="panel-section">
               <legend>Order Artwork Downloads (Mode 1)</legend>

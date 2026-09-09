@@ -4531,14 +4531,17 @@ async function runAutoPrint() {
         continue;
       }
 
-      // --- NEW: default-folder / process-folder dispatch ---
-      if (route.type === 'default-folder' || route.type === 'process-folder') {
-        const labelName = route.type === 'default-folder' ? 'Default Folder' : 'Process Folder';
+      // --- process-folder dispatch (Layer 1 exception → per-process folder).
+      // The prior 'default-folder' branch was removed alongside the global
+      // "Default Folder" feature — resolveRoute no longer returns that
+      // type. Only the productCode/options-matched Layer 1 exceptions
+      // reach this branch now.
+      if (route.type === 'process-folder') {
         let result;
         try {
           result = await printService._sendViaFolderCopyRouted(job, {
             outputPath:     route.folderPath,
-            controllerName: labelName,
+            controllerName: 'Process Folder',
           });
         } catch (err) {
           // Manifest missing at dispatch (re-push blip outlasting the
@@ -4558,7 +4561,7 @@ async function runAutoPrint() {
           continue;
         }
         if (result.success) {
-          logger.info(`[auto-print] No controller for process "${job.process}" — copied to ${labelName}: ${route.folderPath}`, { jobId: job.id });
+          logger.info(`[auto-print] Process-folder exception for "${job.process}" — copied to: ${route.folderPath}`, { jobId: job.id });
           if (_autoPrintWindowManager) {
             const mainWindow = _autoPrintWindowManager.getWindow();
             if (mainWindow && !mainWindow.isDestroyed()) {
