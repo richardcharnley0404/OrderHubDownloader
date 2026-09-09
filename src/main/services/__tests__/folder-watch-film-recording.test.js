@@ -89,8 +89,17 @@ stubViaCache(path.join(SVC, 'config-service.js'), {
   getAll() { return { ...__config }; },
 });
 
+// __s3Calls captures every uploadFolder invocation so the "single-upload
+// invariant" tests below can count how many times a rotation-off roll
+// hit S3 in a single _processFilmScans cycle. __s3Result lets a test
+// simulate partial-fail / all-fail results to exercise the retry path.
+let __s3Calls  = [];
+let __s3Result = { uploaded: 1, failed: 0, total: 1 };
 stubViaCache(path.join(SVC, 's3-service.js'), {
-  async uploadFolder() { return { uploaded: 0, failed: 0, total: 0 }; },
+  async uploadFolder(localFolderPath, s3Prefix, s3Config, _onProgress, manifestExtra) {
+    __s3Calls.push({ localFolderPath, s3Prefix, manifestExtra });
+    return __s3Result;
+  },
 });
 
 // Orientation service — behaviour per-test via __orient.
@@ -132,6 +141,8 @@ const frameMetadataStore = require(path.join(SVC, 'frame-metadata-store.js'));
 function resetSharedState() {
   __config = {};
   __toFileImpl = null;
+  __s3Calls = [];
+  __s3Result = { uploaded: 1, failed: 0, total: 1 };
   __orient = {
     ready: true,
     modelVersion: 'stub-orient-v1',
@@ -697,4 +708,207 @@ test('rotation configured on but orientation service NOT ready → frames record
   assert.equal(rot.skipped, true, 'unready orientation → state C, not a synthetic error');
   assert.equal(typeof rot.reason, 'string');
   assert.ok(/not.?ready/i.test(rot.reason), 'reason mentions not-ready state');
+});
+
+// ── Single-upload invariant (rotation-off) ──────────────────────────────────
+//
+// Once frame + roll recording is unconditional, rotation-off rolls flow
+// through the same uploadFolder call sites as rotation-on rolls. There are
+// three sites in folder-watch-service.js: (A) inline Step 3 in
+// _processFilmScans, (B) inside _uploadRollFromStorage — which is called by
+// (i) _resumeInterruptedUploads on every tick, (ii) the auto-assign matcher
+// on match, (iii) the operator "upload-unmatched" / "approve-roll" IPCs.
+//
+// The invariant: a rotation-off roll must hit S3 EXACTLY ONCE per outcome
+// in a single _processFilmScans cycle — the same as rotation-on. If a
+// future refactor lets Site A AND a Site B caller both fire in the same
+// tick for the same roll, that's a double upload to the lab's bucket.
+//
+// These tests count uploadFolder invocations via the __s3Calls capture on
+// the s3-service stub and lock the count for each config combination.
+
+test('single-upload invariant: rotation-off + AA off + never mode + s3 configured → EXACTLY ONE uploadFolder call', async () => {
+  resetSharedState();
+  const { watch, storage } = makeWorkspace();
+  __config = baseFilmConfig(watch, storage, {
+    filmScanRotationEnabled: false,
+    filmScanReviewMode:      'never',
+    // Give _buildS3Config something to return truthy so Step 3 actually
+    // enters the uploadFolder branch (rather than the "no s3Config → skip"
+    // branch that would give a misleading zero-count pass).
+    s3BucketName:            'fake-bucket',
+    s3Provider:              'pixfizz',
+  });
+  seedRoll(watch, 'ROLL-SINGLE-A', { 'a.jpg': Buffer.from('A') });
+
+  await folderWatchService._processFilmScans(__config);
+
+  assert.equal(__s3Calls.length, 1,
+    'Site A fired exactly once — no matcher, no resume, no operator IPC picked it up');
+  assert.equal(frameMetadataStore.getRoll('ROLL-SINGLE-A').uploadStatus, 'uploaded');
+});
+
+test('single-upload invariant: rotation-off + AA off + reviewMode="always" → ZERO uploadFolder calls (held for operator)', async () => {
+  resetSharedState();
+  const { watch, storage } = makeWorkspace();
+  __config = baseFilmConfig(watch, storage, {
+    filmScanRotationEnabled: false,
+    filmScanReviewMode:      'always',
+    s3BucketName:            'fake-bucket',
+    s3Provider:              'pixfizz',
+  });
+  seedRoll(watch, 'ROLL-SINGLE-ALWAYS', { 'a.jpg': Buffer.from('A') });
+
+  await folderWatchService._processFilmScans(__config);
+
+  assert.equal(__s3Calls.length, 0,
+    'always mode holds the roll for operator approval; no auto-upload from Site A or Site B');
+  assert.equal(frameMetadataStore.getRoll('ROLL-SINGLE-ALWAYS').uploadStatus, 'pending',
+    'roll is held pending, not uploaded');
+});
+
+test('single-upload invariant: rotation-off + AA on → ZERO uploadFolder calls in the ingest cycle (waits for matcher)', async () => {
+  resetSharedState();
+  const { watch, storage } = makeWorkspace();
+  __config = baseFilmConfig(watch, storage, {
+    filmScanRotationEnabled:   false,
+    filmScanAutoAssignEnabled: true,
+    s3BucketName:              'fake-bucket',
+    s3Provider:                'pixfizz',
+  });
+  seedRoll(watch, 'ROLL-SINGLE-AA', { 'a.jpg': Buffer.from('A') });
+
+  await folderWatchService._processFilmScans(__config);
+
+  assert.equal(__s3Calls.length, 0,
+    'auto-assign holds Gate B open; ingest cycle never fires Site A, matcher fires Site B once matched');
+  const rec = frameMetadataStore.getRoll('ROLL-SINGLE-AA');
+  assert.equal(rec.uploadStatus,       'pending');
+  assert.equal(rec.awaitingAssignment, true);
+});
+
+test('single-upload invariant: rotation-off self-heal — resume path retries a "failed" roll via Site B exactly once per tick', async () => {
+  // Locks that resume (Site B) picks up a rotation-off roll left at
+  // uploadStatus='failed' — same self-heal path rotation-on uses.
+  // Site A's own retry loop uses real setTimeout backoffs, so we plant
+  // the 'failed' state directly rather than running Site A to failure
+  // (which would take 120s on real wall-clock waits). The invariant
+  // this locks: (a) resume WILL now touch rotation-off rolls
+  // post-decoupling (the guard we removed) and (b) it fires uploadFolder
+  // for the resumed roll exactly once per tick, not multiple times.
+  resetSharedState();
+  const { watch, storage } = makeWorkspace();
+  __config = baseFilmConfig(watch, storage, {
+    filmScanRotationEnabled: false,
+    filmScanReviewMode:      'never',
+    s3BucketName:            'fake-bucket',
+    s3Provider:              'pixfizz',
+  });
+
+  // Plant a rotation-off roll in the 'failed' state, with a real
+  // storagePath resume can uploadFolder from, and a frame record so
+  // listRollsWithSummary surfaces it (that method iterates the frames
+  // dict, then merges roll records — a roll with no frames only shows
+  // up when it has a processingStatus, which a 'failed' upload doesn't).
+  const rollId = 'ROLL-SELFHEAL';
+  const dateSub = folderWatchService._getDateSubfolder();
+  const rollStorage = path.join(storage, dateSub, rollId);
+  fs.mkdirSync(rollStorage, { recursive: true });
+  fs.writeFileSync(path.join(rollStorage, 'a.jpg'), Buffer.from('A'));
+  frameMetadataStore.record(`${rollId}_0`, {
+    rollId, frameIndex: 0, fileName: 'a.jpg',
+    originalPath: path.join(rollStorage, 'a.jpg'),
+    thumbnailPath: null, thumbnailError: null,
+    rotation: { skipped: true, reason: 'rotation-disabled' },
+    operatorFlags: [],
+  });
+  frameMetadataStore.recordRoll(rollId, {
+    storagePath:      rollStorage,
+    locationId:       'loc-1',
+    s3Prefix:         'film-scans/loc-1/',
+    uploadStatus:     'failed',
+    uploadError:      'simulated prior failure',
+    processingStatus: null,
+  });
+
+  // Empty watch folder → Step 3 (Site A) can't fire for a new roll.
+  // The only S3 activity in this tick must come from resume → Site B.
+  const beforeCalls = __s3Calls.length;
+  await folderWatchService._processFilmScans(__config);
+  const totalCalls = __s3Calls.length - beforeCalls;
+
+  assert.equal(totalCalls, 1,
+    'resume fires Site B EXACTLY once for the failed rotation-off roll — no double upload');
+  assert.equal(frameMetadataStore.getRoll(rollId).uploadStatus, 'uploaded',
+    'Site B retry succeeded');
+});
+
+test('single-upload invariant: an "uploaded" rotation-off roll is NEVER re-picked-up by resume across successive ticks', async () => {
+  // The strictest tripwire against "resume touches uploaded rolls":
+  // seed an already-uploaded rotation-off roll and run resume repeatedly.
+  // Filter is uploadStatus ∈ {'uploading','failed'}; 'uploaded' must
+  // never enter the resume candidates list.
+  resetSharedState();
+  const { watch, storage } = makeWorkspace();
+  __config = baseFilmConfig(watch, storage, {
+    filmScanRotationEnabled: false,
+    s3BucketName:            'fake-bucket',
+    s3Provider:              'pixfizz',
+  });
+
+  const rollId = 'ROLL-ALREADY-UPLOADED';
+  const dateSub = folderWatchService._getDateSubfolder();
+  const rollStorage = path.join(storage, dateSub, rollId);
+  fs.mkdirSync(rollStorage, { recursive: true });
+  fs.writeFileSync(path.join(rollStorage, 'a.jpg'), Buffer.from('A'));
+  // Frame record must exist so listRollsWithSummary surfaces the roll —
+  // otherwise this test passes trivially (invisible ≠ filter working).
+  frameMetadataStore.record(`${rollId}_0`, {
+    rollId, frameIndex: 0, fileName: 'a.jpg',
+    originalPath: path.join(rollStorage, 'a.jpg'),
+    thumbnailPath: null, thumbnailError: null,
+    rotation: { skipped: true, reason: 'rotation-disabled' },
+    operatorFlags: [],
+  });
+  frameMetadataStore.recordRoll(rollId, {
+    storagePath:  rollStorage,
+    locationId:   'loc-1',
+    s3Prefix:     'film-scans/loc-1/',
+    uploadStatus: 'uploaded',
+    uploadedAt:   new Date().toISOString(),
+  });
+
+  await folderWatchService._processFilmScans(__config);
+  await folderWatchService._processFilmScans(__config);
+  await folderWatchService._processFilmScans(__config);
+
+  assert.equal(__s3Calls.length, 0,
+    'resume must never re-upload a roll already at uploadStatus="uploaded"');
+});
+
+test('single-upload invariant: successive ticks do NOT re-fire uploadFolder on a completed rotation-off roll', async () => {
+  // The clearest tripwire against "resume picks up an already-uploaded
+  // roll". Site A succeeds in tick 1; ticks 2 and 3 must not call
+  // uploadFolder for the same roll again — resume's filter is
+  // uploadStatus ∈ {'uploading','failed'} which must exclude 'uploaded'.
+  resetSharedState();
+  const { watch, storage } = makeWorkspace();
+  __config = baseFilmConfig(watch, storage, {
+    filmScanRotationEnabled: false,
+    filmScanReviewMode:      'never',
+    s3BucketName:            'fake-bucket',
+    s3Provider:              'pixfizz',
+  });
+  seedRoll(watch, 'ROLL-DONE', { 'a.jpg': Buffer.from('A') });
+
+  await folderWatchService._processFilmScans(__config);   // tick 1: Site A uploads
+  const afterTick1 = __s3Calls.length;
+  assert.equal(afterTick1, 1, 'tick 1: one Site A upload');
+  assert.equal(frameMetadataStore.getRoll('ROLL-DONE').uploadStatus, 'uploaded');
+
+  await folderWatchService._processFilmScans(__config);   // tick 2: nothing to do
+  await folderWatchService._processFilmScans(__config);   // tick 3: nothing to do
+
+  assert.equal(__s3Calls.length, afterTick1,
+    'uploaded rolls are NEVER re-uploaded by resume — filter excludes uploadStatus="uploaded"');
 });
