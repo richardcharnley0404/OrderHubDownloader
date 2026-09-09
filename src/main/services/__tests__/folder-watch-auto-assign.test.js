@@ -289,7 +289,12 @@ test('feature ON + rotation OFF: minimal roll record stamped (uploadStatus pendi
   assert.equal(__s3Calls.length, 0, 'no S3 upload while held');
 });
 
-test('feature OFF + rotation OFF: no minimal roll record written (pre-feature behaviour)', async () => {
+test('feature OFF + rotation OFF: roll record IS written (post-decoupling), but has no auto-assign gate fields', async () => {
+  // Invariant: rotation-decoupling (2026-...) made frame+roll recording
+  // unconditional. Every roll gets a roll record regardless of feature
+  // flags. Auto-assign gate fields (awaitingAssignment / reviewPassed /
+  // matched*) are the ONLY roll-record fields still gated on
+  // filmScanAutoAssignEnabled — feature-off installs must not see them.
   resetSharedState();
   const { watch, storage } = makeWorkspace();
   __config = baseFilmConfig(watch, storage, {
@@ -304,7 +309,16 @@ test('feature OFF + rotation OFF: no minimal roll record written (pre-feature be
   await folderWatchService._processFilmScans(__config);
 
   const rec = frameMetadataStore.getRoll(rollName);
-  // getRoll returns null (not undefined) when the roll doesn't exist.
-  assert.equal(rec, null,
-    'no roll record with rotation off + auto-assign off — matches pre-feature semantics');
+  assert.ok(rec, 'post-decoupling: rotation-off roll gets a roll record');
+  // Base shape present
+  assert.ok(rec.storagePath, 'storagePath captured');
+  assert.equal(rec.locationId, 'loc-1');
+  assert.equal(rec.uploadStatus, undefined,
+    'never mode + no signals + no auto-assign → no defer');
+  // Auto-assign gate fields absent when auto-assign is off
+  assert.equal(rec.awaitingAssignment, undefined,
+    'auto-assign gate fields absent when feature is off');
+  assert.equal(rec.reviewPassed,       undefined);
+  assert.equal(rec.matchedJobId,       undefined);
+  assert.equal(rec.matchedOrderId,     undefined);
 });

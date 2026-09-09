@@ -226,27 +226,25 @@ class FolderWatchService {
           // M8-3: provisional roll record. Surfaces the folder in the Film
           // Review panel as "Watching" while the watchguard timer ticks down,
           // so operators can see their scan was detected even before
-          // processing begins. Only emit when AI rotation is enabled — that's
-          // the only mode where the panel is meaningful (Off mode hides the
-          // panel entirely; Auto mode users typically don't open it).
-          // recordRoll is idempotent (it overwrites), but we only want to
-          // create a record if no real one exists yet — otherwise we'd
-          // clobber upload state on a roll the operator is mid-review on.
-          if (config.filmScanRotationEnabled) {
-            try {
-              const frameMetadataStore = require('./frame-metadata-store');
-              const existing = frameMetadataStore.getRoll(folder.name);
-              if (!existing) {
-                frameMetadataStore.recordRoll(folder.name, {
-                  processingStatus: 'detected',
-                  detectedAt: new Date().toISOString(),
-                  watchPath,
-                });
-                emitRollUpdate(folder.name);
-              }
-            } catch (provErr) {
-              logger.logWarning(`filmScans: failed to write provisional roll record for ${folder.name}`, { error: provErr.message });
+          // processing begins. Unconditional as of the rotation-decoupling
+          // change — the Film Review panel now works whether or not AI
+          // rotation is enabled, so the provisional pill is meaningful in
+          // both modes. recordRoll is idempotent (it overwrites), but we
+          // only create a record if no real one exists yet — otherwise
+          // we'd clobber upload state on a roll the operator is mid-review on.
+          try {
+            const frameMetadataStore = require('./frame-metadata-store');
+            const existing = frameMetadataStore.getRoll(folder.name);
+            if (!existing) {
+              frameMetadataStore.recordRoll(folder.name, {
+                processingStatus: 'detected',
+                detectedAt: new Date().toISOString(),
+                watchPath,
+              });
+              emitRollUpdate(folder.name);
             }
+          } catch (provErr) {
+            logger.logWarning(`filmScans: failed to write provisional roll record for ${folder.name}`, { error: provErr.message });
           }
 
           if (!this._isFolderStable(watchPath, stabilityMinutes)) {
@@ -266,18 +264,18 @@ class FolderWatchService {
 
           // M8-3: stability passed — flip the provisional record to
           // 'processing' so the panel pill changes from Watching → Processing.
-          if (config.filmScanRotationEnabled) {
-            try {
-              const frameMetadataStore = require('./frame-metadata-store');
-              const existing = frameMetadataStore.getRoll(folder.name);
-              if (existing) tDetectedIso = existing.detectedAt || null;
-              if (existing && existing.processingStatus === 'detected') {
-                frameMetadataStore.updateRoll(folder.name, { processingStatus: 'processing' });
-                emitRollUpdate(folder.name);
-              }
-            } catch (procErr) {
-              logger.logWarning(`filmScans: failed to mark ${folder.name} as processing`, { error: procErr.message });
+          // Unconditional as of the rotation-decoupling change (see the
+          // provisional-record block above for rationale).
+          try {
+            const frameMetadataStore = require('./frame-metadata-store');
+            const existing = frameMetadataStore.getRoll(folder.name);
+            if (existing) tDetectedIso = existing.detectedAt || null;
+            if (existing && existing.processingStatus === 'detected') {
+              frameMetadataStore.updateRoll(folder.name, { processingStatus: 'processing' });
+              emitRollUpdate(folder.name);
             }
+          } catch (procErr) {
+            logger.logWarning(`filmScans: failed to mark ${folder.name} as processing`, { error: procErr.message });
           }
 
           try {
@@ -296,52 +294,79 @@ class FolderWatchService {
             this._deleteFolderRecursive(watchPath);
             logger.info(`filmScans: deleted ${folder.name} from watch folder`);
 
-            // Step 2a.5: Film Scan AI Rotation (PW-007 Phase 1, feature-flag gated).
-            // Uses ONNX EfficientNetV2-S orientation model; only rotates when confidence
-            // >= threshold. Wrapped in try/catch so failures never break the pipeline.
+            // ── Step 2a.5: AI rotation + thumbnails + frame/roll recording ─
+            //
+            // Architecture (rotation-decoupling):
+            //   1. Setup (rollId, thumbnailDir, imageFiles) always runs.
+            //   2. AI rotation loop runs ONLY when the flag is on AND the
+            //      orientation service is ready. It accumulates per-frame
+            //      rotation data into a Map and Smart Check counters. When
+            //      it doesn't run, the Map stays empty and counters stay 0.
+            //   3. Thumbnail + frame recording loop ALWAYS runs. Every
+            //      frame lands in frameMetadataStore with rotation set to
+            //      one of three shapes (see _buildCompletedRollRecord's
+            //      docblock and the three-state predicate documented in
+            //      the tests):
+            //        A) ran + prediction OK: {applied,predictedClass,…,error:null}
+            //        B) ran + failed:        {applied:false,modelVersion?,error:'…'}
+            //        C) did NOT run:         {skipped:true,reason:'rotation-disabled'|'orientation-service-not-ready'}
+            //   4. Perfectly Clear (still gated by its own flag + rotation
+            //      having run — decoupling PC from rotation is a separate
+            //      concern outside this change's scope).
+            //   5. Roll record is written via the ONE writer
+            //      (_writeCompletedRollRecord) — the previous duplicated
+            //      rotation-on and rotation-off + auto-assign writers are
+            //      gone. See that helper's landmine comment.
+            //
+            // Thumbnail sharp pipeline is byte-identical to pre-decoupling
+            // (same constructor options, same resize, same jpeg quality) —
+            // locked by folder-watch-thumbnail.test.js tripwires.
+            const rollId = path.basename(storagePath);
+            const frameMetadataStore = require('./frame-metadata-store');
+            const { app } = require('electron');
+            const thumbnailDir = path.join(app.getPath('userData'), 'thumbnails', rollId);
+            try { fs.mkdirSync(thumbnailDir, { recursive: true }); } catch (_) { /* best-effort */ }
+
+            // Broadened in M7 to accept JPG inputs alongside TIF. Both
+            // formats flow through orientation + thumbnails + Film Review.
+            const imageFiles = fs.readdirSync(storagePath)
+              .filter(f => {
+                const ext = path.extname(f).toLowerCase();
+                return ext === '.tif' || ext === '.tiff' || ext === '.jpg' || ext === '.jpeg';
+              })
+              .sort();
+
+            // AI rotation — accumulates into perFrameRotation. When
+            // rotation is off, or orientation isn't ready, or the outer
+            // step throws, this Map stays empty and the recording loop
+            // below records state C for every frame using
+            // rotationSkipReason.
+            let rotationRan = false;
+            let modelVersion = null;
+            // Default reason if we never entered the rotation branch at all.
+            // Narrowed to 'orientation-service-not-ready' once we get past
+            // the config gate (i.e., the flag is on but init/pipeline
+            // failed), so state C carries the reason that best describes why.
+            let rotationSkipReason = 'rotation-disabled';
+            const perFrameRotation = new Map();
+            let lowConfCount = 0;
+            let rotErrorCount = 0;
+            let tRotationPassIso = null;
+
             if (config.filmScanRotationEnabled) {
+              rotationSkipReason = 'orientation-service-not-ready';
               try {
                 const orientationService = require('./orientation-service');
-                const frameMetadataStore = require('./frame-metadata-store');
                 const sharpRot = require('sharp');
-
                 const ready = await orientationService.init();
                 if (!ready) {
                   logger.info('filmScans: orientation service not ready - skipping rotation step for this folder');
                 } else {
-                  const rollId    = path.basename(storagePath);
+                  rotationRan = true;
+                  modelVersion = orientationService.getModelVersion();
                   const threshold = typeof config.filmScanRotationConfidenceThreshold === 'number'
                     ? config.filmScanRotationConfidenceThreshold
                     : 0.9;
-                  const modelVersion = orientationService.getModelVersion();
-
-                  // Thumbnails for the Film Review panel live in OHD's userData, not
-                  // in the shared storage folder — they are a display cache regenerable
-                  // from the TIFFs at any time, and keeping them out of storagePath
-                  // means the S3 upload step doesn't waste bandwidth on them.
-                  const { app } = require('electron');
-                  const thumbnailDir = path.join(app.getPath('userData'), 'thumbnails', rollId);
-                  try { fs.mkdirSync(thumbnailDir, { recursive: true }); } catch (_) { /* best-effort */ }
-
-                  // Broadened in M7 to also accept JPG inputs — most film scanner
-                  // output is JPG-only (TIF rolls are the exception, paid-for by
-                  // the customer). Both formats flow through the orientation pass
-                  // and are eligible for AI rotation + Film Review.
-                  const imageFiles = fs.readdirSync(storagePath)
-                    .filter(f => {
-                      const ext = path.extname(f).toLowerCase();
-                      return ext === '.tif' || ext === '.tiff' || ext === '.jpg' || ext === '.jpeg';
-                    })
-                    .sort();
-
-                  // M9 — Smart Check counters. Tracked across the frame loop so
-                  // the per-roll uploadStatus decision below knows whether any
-                  // frame had a low-confidence prediction or a rotation error.
-                  // Both are operator-actionable signals: low conf may need a
-                  // manual rotate, rot errors mean a file would otherwise upload
-                  // un-rotated. Used only when filmScanReviewMode === 'smart'.
-                  let lowConfCount = 0;
-                  let rotErrorCount = 0;
 
                   for (let frameIndex = 0; frameIndex < imageFiles.length; frameIndex++) {
                     const imageFile = imageFiles[frameIndex];
@@ -352,7 +377,6 @@ class FolderWatchService {
 
                     try {
                       const prediction = await orientationService.predictOrientation(imagePath);
-
                       let applied = false;
                       let rotationError = prediction.error;
 
@@ -361,10 +385,9 @@ class FolderWatchService {
                           && prediction.confidence >= threshold) {
                         const tmpPath = imagePath + '.rot.tmp';
                         try {
-                          // Format-preserving rotation. TIF: lossless LZW + horizontal
-                          // predictor (full fidelity for the customer's deliverable).
-                          // JPG: q90 re-encode (lossy but typical for one-off rotations;
-                          // operators rarely rotate the same JPG more than once).
+                          // Format-preserving rotation. TIF: lossless LZW +
+                          // horizontal predictor (full fidelity for the
+                          // customer's deliverable). JPG: q90 re-encode.
                           const pipeline = sharpRot(imagePath, { limitInputPixels: false, failOn: 'none' })
                             .rotate(prediction.predictedAngle);
                           if (isTiff) {
@@ -385,441 +408,339 @@ class FolderWatchService {
                         }
                       }
 
-                      // Thumbnail generation — runs after any rotation so the thumb
-                      // reflects the final orientation. Failure does not break the
-                      // pipeline; thumbnailPath is left null and the UI will fall back.
-                      const thumbnailPath = path.join(thumbnailDir, `${frameId}.jpg`);
-                      let thumbnailError = null;
-                      try {
-                        await sharpRot(imagePath, { limitInputPixels: false, failOn: 'none' })
-                          .resize(512, null, { withoutEnlargement: true, fit: 'inside' })
-                          .jpeg({ quality: 85 })
-                          .toFile(thumbnailPath);
-                      } catch (thumbErr) {
-                        thumbnailError = thumbErr.message || String(thumbErr);
-                        logger.logError(`filmScans: failed to generate thumbnail for ${imageFile} - continuing`, thumbErr);
-                      }
-
-                      // M9 Smart Check tally. Mirrors the UI's count buckets
-                      // (frame-metadata-store.js uses the same thresholds for
-                      // its lowConfidenceCount / rotationErrorCount summary).
-                      // Counted here so the per-roll uploadStatus decision
-                      // below can branch without re-reading the store.
+                      // Smart Check tally — same thresholds as the UI's
+                      // frame-metadata-store summary. Counted here so the
+                      // per-roll uploadStatus decision below can branch
+                      // without re-reading the store.
                       if (rotationError) {
                         rotErrorCount += 1;
                       } else if (typeof prediction.confidence === 'number' && prediction.confidence < 0.75) {
                         lowConfCount += 1;
                       }
 
-                      frameMetadataStore.record(frameId, {
-                        rollId,
-                        frameIndex,
-                        fileName: imageFile,
-                        originalPath: imagePath,
-                        thumbnailPath: thumbnailError ? null : thumbnailPath,
-                        thumbnailError,
-                        rotation: {
-                          applied,
-                          predictedClass: prediction.predictedClass,
-                          predictedAngle: prediction.predictedAngle,
-                          confidence: prediction.confidence,
-                          classScores: prediction.classScores,
-                          confidenceThreshold: threshold,
-                          modelVersion,
-                          inferenceMs: prediction.inferenceMs,
-                          error: rotationError,
-                        },
-                        operatorFlags: [],
+                      perFrameRotation.set(frameId, {
+                        applied,
+                        predictedClass: prediction.predictedClass,
+                        predictedAngle: prediction.predictedAngle,
+                        confidence: prediction.confidence,
+                        classScores: prediction.classScores,
+                        confidenceThreshold: threshold,
+                        modelVersion,
+                        inferenceMs: prediction.inferenceMs,
+                        error: rotationError,
                       });
 
                       if (config.filmScanRotationDebugLog) {
                         logger.info(`filmScans: frame ${frameId} -> class ${prediction.predictedClass} angle ${prediction.predictedAngle} conf ${prediction.confidence.toFixed(3)} applied=${applied}`);
                       }
                     } catch (frameErr) {
-                      // Whole-pipeline failure for this frame — counts as a
-                      // rotation error for Smart Check trigger purposes.
+                      // Per-frame pipeline failure — counts as a rotation
+                      // error for Smart Check. Frame still gets a record
+                      // (state B) in the recording loop below.
                       rotErrorCount += 1;
                       logger.logError(`filmScans: orientation pipeline failed for ${imageFile} - continuing`, frameErr);
-                      try {
-                        frameMetadataStore.record(frameId, {
-                          rollId,
-                          frameIndex,
-                          fileName: imageFile,
-                          originalPath: imagePath,
-                          thumbnailPath: null,
-                          thumbnailError: null,
-                          rotation: {
-                            applied: false,
-                            modelVersion,
-                            error: frameErr.message || String(frameErr),
-                          },
-                          operatorFlags: [],
-                        });
-                      } catch (_) { /* ignored */ }
-                    }
-                  }
-
-                  // ── M4: Perfectly Clear auto-apply (Film Scans) ─────────
-                  // Runs AFTER rotation/thumbnails and BEFORE the review-gate
-                  // decision below. When enabled + autoApplyConfigId is set,
-                  // batches the roll's storage files through one QuickServer
-                  // channel via the shared perfectlyClearClient. Enhanced
-                  // frames get their storage file replaced in-place (client
-                  // uses temp+rename) and their thumbnail regenerated;
-                  // rejected/timeout frames keep their original.
-                  //
-                  // Pre-enhance backups live under `{storagePath}/pre-enhance/`
-                  // (first-enhancement-wins) so per-frame Revert restores the
-                  // exact rotation-output that PC saw.
-                  //
-                  // Timeout / cancel treated as review-escalation signals so a
-                  // dead QuickServer can never wedge the pipeline: the roll
-                  // enters review with whatever enhanced frames landed.
-                  let pcRejectedCount = 0;
-                  let pcTimedOut      = false;
-                  let pcEnhancedCount = 0;
-                  let pcEnhanceStartedIso = null;
-                  let pcEnhancedIso       = null;
-                  const pcCfg = (() => {
-                    const pc = config.perfectlyClear && config.perfectlyClear.filmScans;
-                    if (!pc || !pc.enabled || !pc.autoApplyConfigId) return null;
-                    const configs = Array.isArray(pc.configs) ? pc.configs : [];
-                    return configs.find(c => c && c.id === pc.autoApplyConfigId) || null;
-                  })();
-                  if (pcCfg && imageFiles.length > 0) {
-                    pcEnhanceStartedIso = new Date().toISOString();
-                    try {
-                      frameMetadataStore.updateRoll(rollId, {
-                        processingStatus: 'enhancing',
-                        timeline: { ...(frameMetadataStore.getRoll(rollId)?.timeline || {}), pcEnhanceStartedAt: pcEnhanceStartedIso },
+                      perFrameRotation.set(frameId, {
+                        applied: false,
+                        modelVersion,
+                        error: frameErr.message || String(frameErr),
                       });
-                      emitRollUpdate(rollId);
-                    } catch (_) { /* best-effort */ }
-
-                    // Stage pre-enhance/ backups (first-enhancement-wins).
-                    const preEnhanceDir = path.join(storagePath, 'pre-enhance');
-                    try { fs.mkdirSync(preEnhanceDir, { recursive: true }); } catch (_) { /* best-effort */ }
-                    const files = [];
-                    for (const imageFile of imageFiles) {
-                      const src = path.join(storagePath, imageFile);
-                      const pre = path.join(preEnhanceDir, imageFile);
-                      try {
-                        if (!fs.existsSync(pre)) fs.copyFileSync(src, pre);
-                      } catch (backupErr) {
-                        // If we can't backup, don't send this frame — revert
-                        // would be impossible. Log and skip.
-                        logger.logError(`filmScans: PC pre-enhance backup failed for ${imageFile} — skipping enhancement for this frame`, backupErr);
-                        continue;
-                      }
-                      // TIF in, TIF out — QuickServer preserves the extension,
-                      // so sourcePath == destPath == storage file.
-                      files.push({ sourcePath: src, destPath: src });
-                    }
-
-                    if (files.length === 0) {
-                      // Nothing stageable → skip enhancement entirely.
-                      try {
-                        frameMetadataStore.updateRoll(rollId, { processingStatus: null });
-                        emitRollUpdate(rollId);
-                      } catch (_) { /* best-effort */ }
-                    } else {
-                      // 2026-07-23 — timeout is configurable. When
-                      // `perfectlyClearFilmScanTimeoutMs` is a positive
-                      // number, use it verbatim; otherwise fall back to
-                      // the M4 derived formula max(5 min, 30 s × frames).
-                      // Same for per-op cap — configurable, defaults to
-                      // the client's DEFAULT_PER_OP_TIMEOUT_MS. A
-                      // legitimately slow but working QuickServer can
-                      // raise the ceiling; the point is that it can never
-                      // hang forever, not that it must be short.
-                      const cfgTimeoutMs = Number(config.perfectlyClearFilmScanTimeoutMs);
-                      const timeoutMs    = Number.isFinite(cfgTimeoutMs) && cfgTimeoutMs > 0
-                        ? cfgTimeoutMs
-                        : Math.max(5 * 60 * 1000, 30 * 1000 * files.length);
-                      const cfgPerOpMs   = Number(config.perfectlyClearFilmScanPerOpTimeoutMs);
-                      const perOpTimeoutMs = Number.isFinite(cfgPerOpMs) && cfgPerOpMs > 0
-                        ? cfgPerOpMs
-                        : undefined; // client picks its default
-                      logger.info(`filmScans: ${rollId} PC enhance starting (config="${pcCfg.friendlyName}", files=${files.length}, timeoutMs=${timeoutMs}${perOpTimeoutMs ? `, perOpMs=${perOpTimeoutMs}` : ''})`);
-
-                      // 2026-07-23 — register this batch so a startup
-                      // sweep or an operator "Reset enhancement" IPC can
-                      // abort it via signal rather than clobbering a
-                      // genuine in-flight enhance. Cleared in finally
-                      // regardless of outcome (throw, success, cancel).
-                      const abortController = new AbortController();
-                      this._activeFilmScanBatch = {
-                        rollId,
-                        abortController,
-                        startedAt: Date.now(),
-                      };
-
-                      let pcResults = [];
-                      try {
-                        const perfectlyClearClient = require('../enhancement/perfectlyClearClient');
-                        pcResults = await perfectlyClearClient.processBatch({
-                          config: pcCfg,
-                          files,
-                          timeoutMs,
-                          perOpTimeoutMs,
-                          signal: abortController.signal,
-                        });
-                      } catch (pcErr) {
-                        // Client-level throw — treat every file as errored so
-                        // we still fall through to review gate + defer.
-                        logger.logError(`filmScans: PC processBatch threw for ${rollId} — continuing with originals`, pcErr);
-                        pcResults = files.map(f => ({ sourcePath: f.sourcePath, destPath: f.destPath, status: 'timeout', error: pcErr.message }));
-                        pcTimedOut = true;
-                      } finally {
-                        // Clear registry BEFORE the per-file loop below so a
-                        // concurrent reset for this roll (edge case) sees
-                        // "not live" and takes the phantom-cleanup path.
-                        if (this._activeFilmScanBatch && this._activeFilmScanBatch.rollId === rollId) {
-                          this._activeFilmScanBatch = null;
-                        }
-                      }
-
-                      // Per-file: enhanced → regen thumbnail + stamp metadata;
-                      // rejected/timeout → keep original + stamp pcRejected.
-                      const sharpForPc = require('sharp');
-                      for (const r of pcResults) {
-                        const imageFile = path.basename(r.sourcePath);
-                        const frameIdx  = imageFiles.indexOf(imageFile);
-                        if (frameIdx < 0) continue;
-                        const frameId = `${rollId}_${frameIdx}`;
-                        if (r.status === 'enhanced') {
-                          pcEnhancedCount += 1;
-                          const rec = frameMetadataStore.get(frameId);
-                          if (rec && rec.thumbnailPath) {
-                            try {
-                              await sharpForPc(r.destPath, { limitInputPixels: false, failOn: 'none' })
-                                .resize(512, null, { withoutEnlargement: true, fit: 'inside' })
-                                .jpeg({ quality: 85 })
-                                .toFile(rec.thumbnailPath);
-                            } catch (thumbErr) {
-                              logger.logError(`filmScans: PC thumbnail regen failed for ${imageFile}`, thumbErr);
-                            }
-                          }
-                          frameMetadataStore.update(frameId, {
-                            pcEnhanced:     true,
-                            pcConfigName:   pcCfg.friendlyName || null,
-                            pcConfigId:     pcCfg.id,
-                            pcEnhancedAt:   new Date().toISOString(),
-                            pcRejected:     false,
-                            pcRejectReason: null,
-                          });
-                        } else {
-                          pcRejectedCount += 1;
-                          if (r.status === 'timeout' || r.status === 'cancelled') pcTimedOut = true;
-                          frameMetadataStore.update(frameId, {
-                            pcEnhanced:     false,
-                            pcRejected:     true,
-                            pcRejectReason: r.status,
-                            pcRejectError:  r.error || null,
-                          });
-                          // Per-frame operator-readable line so a mixed
-                          // batch is diagnosable from the Activity Log
-                          // without opening Film Review. The summary line
-                          // below still gives the aggregate counts.
-                          logger.logWarning(
-                            `filmScans: ${rollId} PC ${r.status} for ${imageFile} — kept original` +
-                            (r.error ? ` (${r.error})` : '')
-                          );
-                        }
-                      }
-
-                      pcEnhancedIso = new Date().toISOString();
-                      try {
-                        // Clear 'enhancing' immediately so the UI reflects the
-                        // batch end even before recordRoll below writes the
-                        // full record. recordRoll is a full-replace, so the
-                        // pcEnhancedAt stamp itself is added into the timeline
-                        // block passed to recordRoll (a few lines further down).
-                        frameMetadataStore.updateRoll(rollId, {
-                          processingStatus: null,
-                          timeline: { ...(frameMetadataStore.getRoll(rollId)?.timeline || {}), pcEnhancedAt: pcEnhancedIso },
-                        });
-                        emitRollUpdate(rollId);
-                      } catch (_) { /* best-effort */ }
-                      logger.info(`filmScans: ${rollId} PC enhance complete — enhanced=${pcEnhancedCount}, rejected=${pcRejectedCount}, timedOut=${pcTimedOut}`);
-                      if (pcTimedOut) {
-                        logger.logWarning(`filmScans: ${rollId} PC timeout/cancel — escalating to review regardless of review mode`);
-                      }
-                      // 2026-07-23 — when the whole batch produced ZERO
-                      // enhanced results and at least one file was sent,
-                      // that's a strong signal that QuickServer isn't
-                      // watching this input folder, isn't running, or is
-                      // configured for a different channel. Naming the
-                      // folder in the log gives the operator (or Claude
-                      // in a next session) an actionable diagnostic
-                      // without needing to open PC's own logs.
-                      if (pcEnhancedCount === 0 && files.length > 0) {
-                        logger.logWarning(
-                          `filmScans: ${rollId} PC batch produced zero enhanced frames ` +
-                          `(files=${files.length}, rejected=${pcRejectedCount}). ` +
-                          `Check QuickServer is watching "${pcCfg.inputFolder}" and hasn't stalled or misrouted this channel.`
-                        );
-                      }
                     }
                   }
-
-                  // M7: write a roll-level record so the Film Review panel and
-                  // the deferred-upload IPC have the upload context they need.
-                  //
-                  // M9: review mode is now tri-state (filmScanReviewMode):
-                  //   'always' — every roll starts 'pending' (Manual).
-                  //   'smart'  — pending only if any frame is low-confidence or
-                  //              had a rotation error; otherwise upload as in
-                  //              Auto. Confident rolls fall through.
-                  //   'never'  — Auto: uploadStatus left unset; Step 3 below
-                  //              stamps 'uploaded'/'failed'.
-                  //
-                  // M4: PC additions — pcTimedOut forces review escalation
-                  // regardless of mode (dead QuickServer can never wedge the
-                  // pipeline); pcRejectedCount participates in Smart Check
-                  // like lowConfCount / rotErrorCount so mixed batches surface
-                  // to the operator.
-                  //
-                  // M8-3: the provisional record (created at detection) was
-                  // keyed by folder.name (the watch-folder basename). The real
-                  // rollId is path.basename(storagePath) — usually identical,
-                  // but _resolveStoragePath may append `_1` if the date folder
-                  // already had a same-named roll. recordRoll() overwrites the
-                  // record at `rollId`; if `rollId !== folder.name` we delete
-                  // the provisional one so it doesn't linger as a ghost
-                  // "processing" card forever.
-                  const reviewMode = config.filmScanReviewMode || 'never';
-                  const smartTriggered = reviewMode === 'smart' && (lowConfCount > 0 || rotErrorCount > 0 || pcRejectedCount > 0);
-                  // Film Development Auto Assignment (M3) — two-gate model.
-                  // Gate A (reviewPassed): trivially true when the review mode
-                  // wouldn't have held the roll AND PC didn't time out; false
-                  // when the roll would otherwise be held for operator review.
-                  // Gate B (matchedJobId): filled in later by the matcher.
-                  // A roll defers at Step 3 when EITHER gate is still open —
-                  // review hold or auto-assign hold. Both gates must pass
-                  // before upload fires.
-                  const reviewHold  = reviewMode === 'always' || smartTriggered || pcTimedOut;
-                  const autoAssignOn = Boolean(config.filmScanAutoAssignEnabled);
-                  const deferUpload = reviewHold || autoAssignOn;
-                  const reviewPassed = !reviewHold;
-                  if (reviewMode === 'smart') {
-                    logger.info(
-                      `filmScans: ${rollId} smart-check — lowConf=${lowConfCount} rotErr=${rotErrorCount} pcRej=${pcRejectedCount} → ${deferUpload ? 'pending review' : 'auto upload'}`
-                    );
-                  }
-                  // Rotation + thumbnail pass complete — stamp it for the timeline.
-                  tRotatedIso = new Date().toISOString();
-                  try {
-                    frameMetadataStore.recordRoll(rollId, {
-                      storagePath,
-                      locationId,
-                      s3Prefix,
-                      uploadStatus: deferUpload ? 'pending' : undefined,
-                      uploadError: null,
-                      uploadedAt: null,
-                      processingStatus: null,
-                      // M3: two-gate stamps. Only present when auto-assign
-                      // is enabled — feature-off installs never see them,
-                      // preserving byte-for-byte behaviour for legacy
-                      // deployments. Gate A (reviewPassed) is set from the
-                      // review-hold branch above; Gate B (matchedJobId)
-                      // starts null and is filled in by the matcher.
-                      ...(autoAssignOn ? {
-                        awaitingAssignment: true,
-                        reviewPassed,
-                        matchedJobId:       null,
-                        matchedJobNumber:   null,
-                        matchedOrderId:     null,
-                        matchedOrderNumber: null,
-                        matchedTwinCheck:   null,
-                        matchedAt:          null,
-                      } : {}),
-                      timeline: {
-                        detectedAt: tDetectedIso,
-                        stableAt:   tStableIso,
-                        copiedAt:   tCopiedIso,
-                        rotatedAt:  tRotatedIso,
-                        // M4: PC stamps only present when PC ran on this roll.
-                        // recordRoll is a full-replace, so we must fold them
-                        // into the same timeline object rather than relying on
-                        // the earlier updateRoll's write to survive.
-                        ...(pcEnhanceStartedIso ? { pcEnhanceStartedAt: pcEnhanceStartedIso } : {}),
-                        ...(pcEnhancedIso       ? { pcEnhancedAt:       pcEnhancedIso       } : {}),
-                      },
-                    });
-                    if (rollId !== folder.name) {
-                      frameMetadataStore.deleteRoll(folder.name);
-                    }
-                  } catch (rollErr) {
-                    logger.logError(`filmScans: failed to write roll record for ${rollId}`, rollErr);
-                  }
-
-                  // Notify the Film Review panel that a new roll has landed.
-                  // Emitting after the rotation+thumbnail loop (not after S3 upload)
-                  // so the UI can show the roll as soon as frame metadata exists —
-                  // the S3 step is orthogonal to review. Best-effort: if no window
-                  // is open the event simply has no listener.
-                  try {
-                    const { BrowserWindow } = require('electron');
-                    const wins = BrowserWindow.getAllWindows();
-                    for (const w of wins) {
-                      if (w && !w.isDestroyed()) {
-                        w.webContents.send('ohd:filmReview:roll-processed', { rollId });
-                      }
-                    }
-                  } catch (emitErr) {
-                    logger.logWarning('filmScans: failed to emit roll-processed event', { error: emitErr.message });
-                  }
+                  tRotationPassIso = new Date().toISOString();
                 }
               } catch (outerErr) {
                 logger.logError('filmScans: rotation step failed outright - continuing without rotation', outerErr);
+                // Outer failure — recording loop records state C with the
+                // "orientation-service-not-ready" reason we already set above.
+                rotationRan = false;
               }
-            } else {
-              // Rotation-off thumbnail generation. Mirrors the rotation-on
-              // thumbnail step above (same sharp constructor options, same
-              // resize args, same jpeg quality) so OHD's
-              // userData/thumbnails/{rollId}/{frameId}.jpg is populated for
-              // every film scan frame, not only rotation-on ones. Runs BEFORE
-              // Step 2b (TIFF→JPEG) so TIFF rolls still get a thumb; sharp
-              // reads the TIFF and writes a JPG thumb, then Step 2b converts
-              // the storage TIFF separately.
-              //
-              // Thumbnail-only on purpose: this path does NOT write a frame
-              // or roll record. The existing frame/roll records are coupled
-              // to the AI rotation pass; wiring them up for rotation-off
-              // installs is a separate concern that would also need Film
-              // Review panel surfacing decisions.
-              try {
-                const { app } = require('electron');
-                const sharpThumb = require('sharp');
-                const rollId = path.basename(storagePath);
-                const thumbnailDir = path.join(app.getPath('userData'), 'thumbnails', rollId);
-                try { fs.mkdirSync(thumbnailDir, { recursive: true }); } catch (_) { /* best-effort */ }
+            }
 
-                const imageFiles = fs.readdirSync(storagePath)
-                  .filter(f => {
-                    const ext = path.extname(f).toLowerCase();
-                    return ext === '.tif' || ext === '.tiff' || ext === '.jpg' || ext === '.jpeg';
-                  })
-                  .sort();
+            // ── Thumbnail + frame recording loop — ALWAYS runs ─────────
+            // Same sharp pipeline shape (constructor opts, resize args,
+            // jpeg quality) as pre-decoupling so byte output is unchanged
+            // — locked by folder-watch-thumbnail.test.js tripwires.
+            // Rotation happened in-place above (rename over source), so
+            // reading imagePath here picks up the rotated file when
+            // rotation ran.
+            try {
+              const sharpThumb = require('sharp');
+              for (let frameIndex = 0; frameIndex < imageFiles.length; frameIndex++) {
+                const imageFile = imageFiles[frameIndex];
+                const imagePath = path.join(storagePath, imageFile);
+                const frameId   = `${rollId}_${frameIndex}`;
+                const thumbnailPath = path.join(thumbnailDir, `${frameId}.jpg`);
+                let thumbnailError = null;
+                try {
+                  await sharpThumb(imagePath, { limitInputPixels: false, failOn: 'none' })
+                    .resize(512, null, { withoutEnlargement: true, fit: 'inside' })
+                    .jpeg({ quality: 85 })
+                    .toFile(thumbnailPath);
+                } catch (thumbErr) {
+                  thumbnailError = thumbErr.message || String(thumbErr);
+                  logger.logError(`filmScans: failed to generate thumbnail for ${imageFile} - continuing`, thumbErr);
+                }
 
-                for (let frameIndex = 0; frameIndex < imageFiles.length; frameIndex++) {
-                  const imageFile = imageFiles[frameIndex];
-                  const imagePath = path.join(storagePath, imageFile);
-                  const frameId   = `${rollId}_${frameIndex}`;
-                  const thumbnailPath = path.join(thumbnailDir, `${frameId}.jpg`);
+                // Rotation field: state A/B from perFrameRotation, else C.
+                const rotationField = perFrameRotation.has(frameId)
+                  ? perFrameRotation.get(frameId)
+                  : { skipped: true, reason: rotationSkipReason };
+
+                try {
+                  frameMetadataStore.record(frameId, {
+                    rollId,
+                    frameIndex,
+                    fileName: imageFile,
+                    originalPath: imagePath,
+                    thumbnailPath: thumbnailError ? null : thumbnailPath,
+                    thumbnailError,
+                    rotation: rotationField,
+                    operatorFlags: [],
+                  });
+                } catch (recErr) {
+                  logger.logError(`filmScans: failed to record frame ${frameId}`, recErr);
+                }
+              }
+            } catch (recordOuterErr) {
+              logger.logError('filmScans: thumbnail/record step failed outright - continuing', recordOuterErr);
+            }
+
+            // ── M4: Perfectly Clear auto-apply (Film Scans) ─────────────
+            // Runs AFTER frame recording (so PC's per-frame update finds
+            // the record) and BEFORE the review-gate decision. Timeout /
+            // cancel treated as review escalation regardless of mode so a
+            // dead QuickServer can never wedge the pipeline.
+            //
+            // Still gated on rotation having run — decoupling PC from
+            // rotation is a separate concern (see BACKLOG). Rotation-off
+            // rolls skip PC today; that matches pre-decoupling behaviour.
+            let pcRejectedCount = 0;
+            let pcTimedOut      = false;
+            let pcEnhancedCount = 0;
+            let pcEnhanceStartedIso = null;
+            let pcEnhancedIso       = null;
+
+            if (rotationRan) {
+              const pcCfg = (() => {
+                const pc = config.perfectlyClear && config.perfectlyClear.filmScans;
+                if (!pc || !pc.enabled || !pc.autoApplyConfigId) return null;
+                const configs = Array.isArray(pc.configs) ? pc.configs : [];
+                return configs.find(c => c && c.id === pc.autoApplyConfigId) || null;
+              })();
+              if (pcCfg && imageFiles.length > 0) {
+                pcEnhanceStartedIso = new Date().toISOString();
+                try {
+                  frameMetadataStore.updateRoll(rollId, {
+                    processingStatus: 'enhancing',
+                    timeline: { ...(frameMetadataStore.getRoll(rollId)?.timeline || {}), pcEnhanceStartedAt: pcEnhanceStartedIso },
+                  });
+                  emitRollUpdate(rollId);
+                } catch (_) { /* best-effort */ }
+
+                // Stage pre-enhance/ backups (first-enhancement-wins).
+                const preEnhanceDir = path.join(storagePath, 'pre-enhance');
+                try { fs.mkdirSync(preEnhanceDir, { recursive: true }); } catch (_) { /* best-effort */ }
+                const files = [];
+                for (const imageFile of imageFiles) {
+                  const src = path.join(storagePath, imageFile);
+                  const pre = path.join(preEnhanceDir, imageFile);
                   try {
-                    await sharpThumb(imagePath, { limitInputPixels: false, failOn: 'none' })
-                      .resize(512, null, { withoutEnlargement: true, fit: 'inside' })
-                      .jpeg({ quality: 85 })
-                      .toFile(thumbnailPath);
-                  } catch (thumbErr) {
-                    logger.logError(`filmScans: failed to generate thumbnail for ${imageFile} - continuing`, thumbErr);
+                    if (!fs.existsSync(pre)) fs.copyFileSync(src, pre);
+                  } catch (backupErr) {
+                    logger.logError(`filmScans: PC pre-enhance backup failed for ${imageFile} — skipping enhancement for this frame`, backupErr);
+                    continue;
+                  }
+                  files.push({ sourcePath: src, destPath: src });
+                }
+
+                if (files.length === 0) {
+                  try {
+                    frameMetadataStore.updateRoll(rollId, { processingStatus: null });
+                    emitRollUpdate(rollId);
+                  } catch (_) { /* best-effort */ }
+                } else {
+                  // Timeout configurable. When perfectlyClearFilmScanTimeoutMs
+                  // is a positive number, use it verbatim; otherwise fall
+                  // back to max(5 min, 30 s × frames). Same for per-op cap.
+                  const cfgTimeoutMs = Number(config.perfectlyClearFilmScanTimeoutMs);
+                  const timeoutMs    = Number.isFinite(cfgTimeoutMs) && cfgTimeoutMs > 0
+                    ? cfgTimeoutMs
+                    : Math.max(5 * 60 * 1000, 30 * 1000 * files.length);
+                  const cfgPerOpMs   = Number(config.perfectlyClearFilmScanPerOpTimeoutMs);
+                  const perOpTimeoutMs = Number.isFinite(cfgPerOpMs) && cfgPerOpMs > 0
+                    ? cfgPerOpMs
+                    : undefined;
+                  logger.info(`filmScans: ${rollId} PC enhance starting (config="${pcCfg.friendlyName}", files=${files.length}, timeoutMs=${timeoutMs}${perOpTimeoutMs ? `, perOpMs=${perOpTimeoutMs}` : ''})`);
+
+                  const abortController = new AbortController();
+                  this._activeFilmScanBatch = {
+                    rollId,
+                    abortController,
+                    startedAt: Date.now(),
+                  };
+
+                  let pcResults = [];
+                  try {
+                    const perfectlyClearClient = require('../enhancement/perfectlyClearClient');
+                    pcResults = await perfectlyClearClient.processBatch({
+                      config: pcCfg,
+                      files,
+                      timeoutMs,
+                      perOpTimeoutMs,
+                      signal: abortController.signal,
+                    });
+                  } catch (pcErr) {
+                    logger.logError(`filmScans: PC processBatch threw for ${rollId} — continuing with originals`, pcErr);
+                    pcResults = files.map(f => ({ sourcePath: f.sourcePath, destPath: f.destPath, status: 'timeout', error: pcErr.message }));
+                    pcTimedOut = true;
+                  } finally {
+                    if (this._activeFilmScanBatch && this._activeFilmScanBatch.rollId === rollId) {
+                      this._activeFilmScanBatch = null;
+                    }
+                  }
+
+                  const sharpForPc = require('sharp');
+                  for (const r of pcResults) {
+                    const imageFile = path.basename(r.sourcePath);
+                    const frameIdx  = imageFiles.indexOf(imageFile);
+                    if (frameIdx < 0) continue;
+                    const frameId = `${rollId}_${frameIdx}`;
+                    if (r.status === 'enhanced') {
+                      pcEnhancedCount += 1;
+                      const rec = frameMetadataStore.get(frameId);
+                      if (rec && rec.thumbnailPath) {
+                        try {
+                          await sharpForPc(r.destPath, { limitInputPixels: false, failOn: 'none' })
+                            .resize(512, null, { withoutEnlargement: true, fit: 'inside' })
+                            .jpeg({ quality: 85 })
+                            .toFile(rec.thumbnailPath);
+                        } catch (thumbErr) {
+                          logger.logError(`filmScans: PC thumbnail regen failed for ${imageFile}`, thumbErr);
+                        }
+                      }
+                      frameMetadataStore.update(frameId, {
+                        pcEnhanced:     true,
+                        pcConfigName:   pcCfg.friendlyName || null,
+                        pcConfigId:     pcCfg.id,
+                        pcEnhancedAt:   new Date().toISOString(),
+                        pcRejected:     false,
+                        pcRejectReason: null,
+                      });
+                    } else {
+                      pcRejectedCount += 1;
+                      if (r.status === 'timeout' || r.status === 'cancelled') pcTimedOut = true;
+                      frameMetadataStore.update(frameId, {
+                        pcEnhanced:     false,
+                        pcRejected:     true,
+                        pcRejectReason: r.status,
+                        pcRejectError:  r.error || null,
+                      });
+                      logger.logWarning(
+                        `filmScans: ${rollId} PC ${r.status} for ${imageFile} — kept original` +
+                        (r.error ? ` (${r.error})` : '')
+                      );
+                    }
+                  }
+
+                  pcEnhancedIso = new Date().toISOString();
+                  try {
+                    frameMetadataStore.updateRoll(rollId, {
+                      processingStatus: null,
+                      timeline: { ...(frameMetadataStore.getRoll(rollId)?.timeline || {}), pcEnhancedAt: pcEnhancedIso },
+                    });
+                    emitRollUpdate(rollId);
+                  } catch (_) { /* best-effort */ }
+                  logger.info(`filmScans: ${rollId} PC enhance complete — enhanced=${pcEnhancedCount}, rejected=${pcRejectedCount}, timedOut=${pcTimedOut}`);
+                  if (pcTimedOut) {
+                    logger.logWarning(`filmScans: ${rollId} PC timeout/cancel — escalating to review regardless of review mode`);
+                  }
+                  if (pcEnhancedCount === 0 && files.length > 0) {
+                    logger.logWarning(
+                      `filmScans: ${rollId} PC batch produced zero enhanced frames ` +
+                      `(files=${files.length}, rejected=${pcRejectedCount}). ` +
+                      `Check QuickServer is watching "${pcCfg.inputFolder}" and hasn't stalled or misrouted this channel.`
+                    );
                   }
                 }
-              } catch (thumbOuterErr) {
-                logger.logError('filmScans: rotation-off thumbnail step failed outright - continuing', thumbOuterErr);
               }
+            }
+
+            // ── Review-hold + auto-assign + roll-record write ───────────
+            // Runs whether or not rotation ran. With rotation off,
+            // lowConfCount and rotErrorCount are both 0 (no rotation
+            // loop produced signals), so smart mode has no AI signals to
+            // reason about and consults pcRejectedCount + pcTimedOut only
+            // (see the smart-check log line below). This is intentional:
+            // smart mode's contract is "hold on evidence of problems";
+            // with no evidence, don't hold. A lab that wants
+            // held-every-time with rotation off uses reviewMode='always'.
+            //
+            // Auto-assign forces defer regardless of review-hold — Gate B
+            // (matchedJobId) must pass before the upload fires.
+            const reviewMode     = config.filmScanReviewMode || 'never';
+            const smartTriggered = reviewMode === 'smart' && (lowConfCount > 0 || rotErrorCount > 0 || pcRejectedCount > 0);
+            const reviewHold     = reviewMode === 'always' || smartTriggered || pcTimedOut;
+            const autoAssignOn   = Boolean(config.filmScanAutoAssignEnabled);
+            const deferUpload    = reviewHold || autoAssignOn;
+            const reviewPassed   = !reviewHold;
+            if (reviewMode === 'smart') {
+              logger.info(
+                `filmScans: ${rollId} smart-check — lowConf=${lowConfCount} rotErr=${rotErrorCount} pcRej=${pcRejectedCount}` +
+                (rotationRan ? '' : ' (rotation off — no AI signals)') +
+                ` → ${deferUpload ? 'pending review' : 'auto upload'}`
+              );
+            }
+            // Rotation pass timestamp — real ISO when rotation ran,
+            // undefined otherwise so `rotatedAt` is absent from the
+            // timeline for rotation-off rolls (rather than a misleading
+            // null value that would look like a failure).
+            tRotatedIso = tRotationPassIso;
+
+            // Roll record — SINGLE writer (_writeCompletedRollRecord).
+            // Do NOT add an inline recordRoll call at a new site; see
+            // the helper's landmine comment.
+            try {
+              this._writeCompletedRollRecord(rollId, {
+                storagePath,
+                locationId,
+                s3Prefix,
+                deferUpload,
+                autoAssignOn,
+                reviewPassed,
+                timeline: {
+                  detectedAt: tDetectedIso,
+                  stableAt:   tStableIso,
+                  copiedAt:   tCopiedIso,
+                  ...(tRotatedIso ? { rotatedAt: tRotatedIso } : {}),
+                  ...(pcEnhanceStartedIso ? { pcEnhanceStartedAt: pcEnhanceStartedIso } : {}),
+                  ...(pcEnhancedIso       ? { pcEnhancedAt:       pcEnhancedIso       } : {}),
+                },
+              });
+              // M8-3: the provisional record was keyed by folder.name
+              // (the watch-folder basename). The real rollId is
+              // path.basename(storagePath) — usually identical, but
+              // _resolveStoragePath may append `_1` if the date folder
+              // already had a same-named roll. Delete the provisional
+              // one so it doesn't linger as a ghost "processing" card.
+              if (rollId !== folder.name) {
+                frameMetadataStore.deleteRoll(folder.name);
+              }
+            } catch (rollErr) {
+              logger.logError(`filmScans: failed to write roll record for ${rollId}`, rollErr);
+            }
+
+            // Notify the Film Review panel that a new roll has landed.
+            // Fires whether or not rotation ran — the panel now surfaces
+            // rotation-off rolls too.
+            try {
+              const { BrowserWindow } = require('electron');
+              for (const w of BrowserWindow.getAllWindows()) {
+                if (w && !w.isDestroyed()) {
+                  w.webContents.send('ohd:filmReview:roll-processed', { rollId });
+                }
+              }
+            } catch (emitErr) {
+              logger.logWarning('filmScans: failed to emit roll-processed event', { error: emitErr.message });
             }
 
             // Step 2b: Convert any TIFF files in storage to JPEG (quality 90).
@@ -830,12 +751,13 @@ class FolderWatchService {
                 return ext === '.tif' || ext === '.tiff';
               });
               const convRollId  = path.basename(storagePath);
-              // TIFF→JPEG is the heaviest non-upload step and only happens on
-              // TIFF rolls. Surface it as a distinct live phase ("Converting…"
-              // on the card) and time it on its own so the "TIFF→JPEG" stat
-              // measures just this work. Only meaningful when rotation is on
-              // (that's when a roll record exists); JPEG-only rolls skip it.
-              const trackConvert = config.filmScanRotationEnabled && tiffFiles.length > 0;
+              // TIFF→JPEG is the heaviest non-upload step and only
+              // happens on TIFF rolls. Surface it as a distinct live
+              // phase ("Converting…" on the card) and time it on its
+              // own so the "TIFF→JPEG" stat measures just this work.
+              // Post-decoupling: roll records always exist, so the
+              // gate is just "did we get any TIFFs".
+              const trackConvert = tiffFiles.length > 0;
 
               if (trackConvert) {
                 try {
@@ -884,77 +806,26 @@ class FolderWatchService {
 
             // Step 3: Upload from storage to S3.
             //
-            // M7+M9: skip this step when the roll has been deferred for review.
-            // 'always' mode defers every roll; 'smart' mode defers only rolls
-            // with at least one low-conf or rotation-error frame; 'never' (and
-            // Off mode, where AI is disabled and no roll record exists) always
-            // uploads here. The decision was made above when writing the roll
-            // record — re-derive it here so this branch can also handle the AI-
-            // off case (no `deferUpload` in scope unless rotation ran).
-            //
-            // M3 (Film Development Auto Assignment): when auto-assign is on,
-            // every roll defers at Step 3 regardless of review mode — the
-            // matcher (Gate B) or a subsequent operator approval (Gate A)
-            // will trigger the actual upload via _uploadRollFromStorage.
-            // With rotation OFF there is no roll record yet, so we write a
-            // minimal one here so the matcher can find it in listRollsWithSummary.
-            // Legacy paths (auto-assign off) are unchanged byte-for-byte.
+            // Post-decoupling: uploadStatus on the roll record is
+            // authoritative regardless of rotation — the unified writer
+            // (_writeCompletedRollRecord) stamps 'pending' when the roll
+            // should defer (reviewMode='always', smart-triggered, PC
+            // timeout, or auto-assign) and leaves it undefined otherwise.
+            // Reading the record here is the single decision point;
+            // fail-open (upload) if the record read throws so a rogue
+            // store error can never lose files.
+            const rollIdStep3 = path.basename(storagePath);
             let shouldDefer = false;
-            const autoAssignOnStep3 = Boolean(config.filmScanAutoAssignEnabled);
-            if (config.filmScanRotationEnabled) {
-              const rm = config.filmScanReviewMode || 'never';
-              if (rm === 'always') {
-                shouldDefer = true;
-              } else if (rm === 'smart') {
-                // Re-read the roll record we just wrote — its uploadStatus
-                // reflects the smart decision (pending vs undefined). If the
-                // recordRoll write failed for any reason we fall through to
-                // upload (fail-open, since the file would be lost otherwise).
-                try {
-                  const rec = require('./frame-metadata-store').getRoll(path.basename(storagePath));
-                  shouldDefer = !!(rec && rec.uploadStatus === 'pending');
-                } catch (_) { /* fail-open */ }
-              }
-              // Auto-assign forces defer even when the review mode wouldn't —
-              // Gate B has to pass before we upload.
-              if (autoAssignOnStep3) shouldDefer = true;
-            } else if (autoAssignOnStep3) {
-              // Rotation-off + auto-assign-on: no roll record exists yet.
-              // Write a minimal one so the matcher can enumerate this roll
-              // via listRollsWithSummary + trigger _uploadRollFromStorage
-              // on match. There is no review surface here, so Gate A
-              // (reviewPassed) is trivially true.
-              const rollId = path.basename(storagePath);
-              try {
-                require('./frame-metadata-store').recordRoll(rollId, {
-                  storagePath,
-                  locationId,
-                  s3Prefix,
-                  uploadStatus:       'pending',
-                  uploadError:        null,
-                  uploadedAt:         null,
-                  processingStatus:   null,
-                  awaitingAssignment: true,
-                  reviewPassed:       true,
-                  matchedJobId:       null,
-                  matchedJobNumber:   null,
-                  matchedOrderId:     null,
-                  matchedOrderNumber: null,
-                  matchedTwinCheck:   null,
-                  matchedAt:          null,
-                  timeline: { detectedAt: tDetectedIso, stableAt: tStableIso, copiedAt: tCopiedIso },
-                });
-              } catch (recErr) {
-                logger.logError(`filmScans: failed to write minimal roll record for auto-assign hold ${rollId}`, recErr);
-              }
-              // Nudge the Film Review panel so the held-for-match roll
-              // appears immediately rather than after the next scan tick.
-              this._emitFilmReviewRoll(rollId);
-              shouldDefer = true;
-            }
+            try {
+              const rec = require('./frame-metadata-store').getRoll(rollIdStep3);
+              shouldDefer = !!(rec && rec.uploadStatus === 'pending');
+            } catch (_) { /* fail-open — upload rather than lose */ }
 
             if (shouldDefer) {
               logger.info(`filmScans: ${folder.name} held for review (upload deferred)`);
+              // Nudge the Film Review panel so the held roll appears
+              // immediately rather than after the next scan tick.
+              try { this._emitFilmReviewRoll(rollIdStep3); } catch (_) { /* best-effort */ }
               summary.processed++;
             } else {
               const s3Config = this._buildS3Config(config, locationId);
@@ -968,26 +839,24 @@ class FolderWatchService {
                 // hiccup, brief throttling) without burning operator time.
                 // Stamp 'uploading' up-front so the panel shows the live
                 // state during the (potentially multi-minute) retry chain.
-                const rollId = path.basename(storagePath);
-                if (config.filmScanRotationEnabled) {
-                  try {
-                    const frameMetadataStore = require('./frame-metadata-store');
-                    const _rec = frameMetadataStore.getRoll(rollId);
-                    frameMetadataStore.updateRoll(rollId, {
-                      uploadStatus: 'uploading',
-                      uploadError: null,
-                      timeline: { ...((_rec && _rec.timeline) || {}), uploadStartedAt: new Date().toISOString() },
-                    });
-                  } catch (_) { /* best-effort */ }
-                  try {
-                    const { BrowserWindow } = require('electron');
-                    for (const w of BrowserWindow.getAllWindows()) {
-                      if (w && !w.isDestroyed()) {
-                        w.webContents.send('ohd:filmReview:roll-processed', { rollId });
-                      }
+                const rollId = rollIdStep3;
+                try {
+                  const frameMetadataStore = require('./frame-metadata-store');
+                  const _rec = frameMetadataStore.getRoll(rollId);
+                  frameMetadataStore.updateRoll(rollId, {
+                    uploadStatus: 'uploading',
+                    uploadError: null,
+                    timeline: { ...((_rec && _rec.timeline) || {}), uploadStartedAt: new Date().toISOString() },
+                  });
+                } catch (_) { /* best-effort */ }
+                try {
+                  const { BrowserWindow } = require('electron');
+                  for (const w of BrowserWindow.getAllWindows()) {
+                    if (w && !w.isDestroyed()) {
+                      w.webContents.send('ohd:filmReview:roll-processed', { rollId });
                     }
-                  } catch (_) { /* best-effort */ }
-                }
+                  }
+                } catch (_) { /* best-effort */ }
 
                 const MAX_ATTEMPTS = 3;
                 const BACKOFFS_MS = [30_000, 90_000]; // gap between attempts
@@ -1018,71 +887,66 @@ class FolderWatchService {
                   logger.logWarning(`filmScans: ${msg}`, result);
                   summary.failed++;
                   summary.errors.push(msg);
-                  // Stamp the roll record so the panel can hide it (Auto mode)
-                  // or let the operator retry. Best-effort only — no roll
-                  // record exists in Off mode (no AI rotation = no metadata).
-                  if (config.filmScanRotationEnabled) {
-                    try {
-                      const frameMetadataStore = require('./frame-metadata-store');
-                      frameMetadataStore.updateRoll(rollId, {
-                        uploadStatus: 'failed',
-                        uploadError: msg,
-                      });
-                    } catch (_) { /* best-effort */ }
-                    // Refresh the panel so the card flips to "Upload failed"
-                    // without operator navigation.
-                    try {
-                      const { BrowserWindow } = require('electron');
-                      const wins = BrowserWindow.getAllWindows();
-                      for (const w of wins) {
-                        if (w && !w.isDestroyed()) {
-                          w.webContents.send('ohd:filmReview:roll-processed', { rollId });
-                        }
+                  // Stamp the roll record so the panel can hide it (Auto
+                  // mode) or let the operator retry. Roll record always
+                  // exists post-decoupling; the gate is best-effort in
+                  // case of store errors, not for record existence.
+                  try {
+                    const frameMetadataStore = require('./frame-metadata-store');
+                    frameMetadataStore.updateRoll(rollId, {
+                      uploadStatus: 'failed',
+                      uploadError: msg,
+                    });
+                  } catch (_) { /* best-effort */ }
+                  // Refresh the panel so the card flips to "Upload failed"
+                  // without operator navigation.
+                  try {
+                    const { BrowserWindow } = require('electron');
+                    for (const w of BrowserWindow.getAllWindows()) {
+                      if (w && !w.isDestroyed()) {
+                        w.webContents.send('ohd:filmReview:roll-processed', { rollId });
                       }
-                    } catch (emitErr) {
-                      logger.logWarning('filmScans: failed to emit roll-processed event after upload failure', { error: emitErr.message });
                     }
+                  } catch (emitErr) {
+                    logger.logWarning('filmScans: failed to emit roll-processed event after upload failure', { error: emitErr.message });
                   }
                 } else {
                   logger.info(`filmScans: S3 upload complete for ${folder.name} (attempt ${attempt}/${MAX_ATTEMPTS})`, result);
                   summary.processed++;
-                  if (config.filmScanRotationEnabled) {
+                  try {
+                    const frameMetadataStore = require('./frame-metadata-store');
+                    const _rec = frameMetadataStore.getRoll(rollId);
+                    const _now = new Date().toISOString();
+                    frameMetadataStore.updateRoll(rollId, {
+                      uploadStatus: 'uploaded',
+                      uploadError: null,
+                      uploadedAt: _now,
+                      timeline: { ...((_rec && _rec.timeline) || {}), uploadedAt: _now },
+                    });
+                    // M9: Auto and Smart-confident rolls bypass the operator
+                    // panel entirely. Once the auto-upload succeeds the roll
+                    // is, by definition, "done" — flip every frame to
+                    // reviewed so the existing status filter naturally hides
+                    // it from "Ready to review". Mirrors the same call the
+                    // approve-roll IPC makes for Manual mode.
                     try {
-                      const frameMetadataStore = require('./frame-metadata-store');
-                      const _rec = frameMetadataStore.getRoll(rollId);
-                      const _now = new Date().toISOString();
-                      frameMetadataStore.updateRoll(rollId, {
-                        uploadStatus: 'uploaded',
-                        uploadError: null,
-                        uploadedAt: _now,
-                        timeline: { ...((_rec && _rec.timeline) || {}), uploadedAt: _now },
-                      });
-                      // M9: Auto and Smart-confident rolls bypass the operator
-                      // panel entirely. Once the auto-upload succeeds the roll
-                      // is, by definition, "done" — flip every frame to
-                      // reviewed so the existing status filter naturally hides
-                      // it from "Ready to review". Mirrors the same call the
-                      // approve-roll IPC makes for Manual mode.
-                      try {
-                        frameMetadataStore.markRollReviewed(rollId);
-                      } catch (markErr) {
-                        logger.logWarning(`filmScans: ${rollId} markRollReviewed failed (non-fatal)`, { error: markErr.message });
-                      }
-                    } catch (_) { /* best-effort */ }
-                    // Nudge the renderer so the rolls list refreshes — the
-                    // card should disappear from Ready and reappear under
-                    // Reviewed/Uploaded without manual navigation.
-                    try {
-                      const { BrowserWindow } = require('electron');
-                      const wins = BrowserWindow.getAllWindows();
-                      for (const w of wins) {
-                        if (w && !w.isDestroyed()) {
-                          w.webContents.send('ohd:filmReview:roll-processed', { rollId });
-                        }
-                      }
-                    } catch (emitErr) {
-                      logger.logWarning('filmScans: failed to emit roll-processed event after upload', { error: emitErr.message });
+                      frameMetadataStore.markRollReviewed(rollId);
+                    } catch (markErr) {
+                      logger.logWarning(`filmScans: ${rollId} markRollReviewed failed (non-fatal)`, { error: markErr.message });
                     }
+                  } catch (_) { /* best-effort */ }
+                  // Nudge the renderer so the rolls list refreshes — the
+                  // card should disappear from Ready and reappear under
+                  // Reviewed/Uploaded without manual navigation.
+                  try {
+                    const { BrowserWindow } = require('electron');
+                    for (const w of BrowserWindow.getAllWindows()) {
+                      if (w && !w.isDestroyed()) {
+                        w.webContents.send('ohd:filmReview:roll-processed', { rollId });
+                      }
+                    }
+                  } catch (emitErr) {
+                    logger.logWarning('filmScans: failed to emit roll-processed event after upload', { error: emitErr.message });
                   }
                 }
               } else {
@@ -1094,19 +958,19 @@ class FolderWatchService {
             summary.errors.push(`${folder.name}: ${error.message}`);
             logger.logError(`filmScans: error processing ${folder.name}`, error);
 
-            // M8-3: don't leave the provisional "processing" record stuck if
-            // the outer block threw before the AI rotation step had a chance
-            // to write the real roll record. Best-effort cleanup.
-            if (config.filmScanRotationEnabled) {
-              try {
-                const frameMetadataStore = require('./frame-metadata-store');
-                const stillProvisional = frameMetadataStore.getRoll(folder.name);
-                if (stillProvisional && stillProvisional.processingStatus) {
-                  frameMetadataStore.deleteRoll(folder.name);
-                  emitRollUpdate(folder.name);
-                }
-              } catch (_) { /* best-effort */ }
-            }
+            // M8-3: don't leave the provisional "processing" record stuck
+            // if the outer block threw before the recording step had a
+            // chance to write the real roll record. Best-effort cleanup;
+            // unconditional post-decoupling because provisional records
+            // exist for every roll now, not just rotation-on ones.
+            try {
+              const frameMetadataStore = require('./frame-metadata-store');
+              const stillProvisional = frameMetadataStore.getRoll(folder.name);
+              if (stillProvisional && stillProvisional.processingStatus) {
+                frameMetadataStore.deleteRoll(folder.name);
+                emitRollUpdate(folder.name);
+              }
+            } catch (_) { /* best-effort */ }
           }
 
           // Throughput fix (2026-06-24): this loop previously `break`-ed here,
@@ -1631,7 +1495,9 @@ class FolderWatchService {
    * Called on startup AND on every film-scans polling cycle.
    */
   async _resumeInterruptedUploads(config) {
-    if (!config.filmScanRotationEnabled) return; // roll records only exist then
+    // Post-decoupling: roll records exist for every film scan roll, so
+    // this sweep no longer needs a rotation-on guard. Auto-resume any
+    // roll left mid-upload regardless of rotation flag.
     const frameMetadataStore = require('./frame-metadata-store');
     const FAILED_RETRY_MIN_INTERVAL_MS = 10 * 60 * 1000; // 10 min rate-limit for 'failed' rolls
     const nowMs = Date.now();
@@ -1666,6 +1532,68 @@ class FolderWatchService {
         logger.logError(`filmScans: resume upload threw for ${r.rollId}`, err);
       }
     }
+  }
+
+  /**
+   * Build the roll-record payload for a completed roll. Kept as a pure
+   * helper so the ONE writer (_writeCompletedRollRecord) can be called
+   * unchanged from any future site (rotation-on, rotation-off, sweep
+   * recovery, tests). Shape must stay in sync with what
+   * frame-metadata-store.listRollsWithSummary + the Film Review renderer
+   * expect — see comments below.
+   *
+   * LANDMINE (2026-... rotation-decoupling):
+   * There used to be TWO roll-record writers — the main one at the end
+   * of the rotation-on block, and a minimal one in the rotation-off +
+   * auto-assign branch of Step 3. They drifted independently; the
+   * minimal one didn't carry the same field shape as the main one and
+   * relied on subtle downstream tolerance. Both are gone; this helper
+   * is the ONLY roll-completion writer. Do NOT add an inline recordRoll
+   * call at a new site "for clarity" — call this. Same class of
+   * discipline as `buildDestFolder` (folder-copy) and `deriveTrim`
+   * (imposition-compose). If you need to change the shape, change it
+   * here.
+   */
+  _buildCompletedRollRecord(opts) {
+    const {
+      storagePath,
+      locationId,
+      s3Prefix,
+      deferUpload,
+      autoAssignOn,
+      reviewPassed,
+      timeline,
+    } = opts;
+    return {
+      storagePath,
+      locationId,
+      s3Prefix,
+      uploadStatus: deferUpload ? 'pending' : undefined,
+      uploadError: null,
+      uploadedAt: null,
+      processingStatus: null,
+      // M3: two-gate stamps. Only present when auto-assign is enabled —
+      // feature-off installs never see them, preserving byte-for-byte
+      // behaviour for legacy deployments. Gate A (reviewPassed) is set
+      // by the caller from the review-hold decision; Gate B
+      // (matchedJobId) starts null and is filled in by the matcher.
+      ...(autoAssignOn ? {
+        awaitingAssignment: true,
+        reviewPassed,
+        matchedJobId:       null,
+        matchedJobNumber:   null,
+        matchedOrderId:     null,
+        matchedOrderNumber: null,
+        matchedTwinCheck:   null,
+        matchedAt:          null,
+      } : {}),
+      timeline,
+    };
+  }
+
+  _writeCompletedRollRecord(rollId, opts) {
+    const frameMetadataStore = require('./frame-metadata-store');
+    frameMetadataStore.recordRoll(rollId, this._buildCompletedRollRecord(opts));
   }
 
   /**
