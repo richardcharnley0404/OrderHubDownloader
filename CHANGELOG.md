@@ -1,3 +1,36 @@
+## Unreleased
+
+**Field-confirmed: 1.15.3's two cross-volume PIC Pro safety
+hypotheses.** The lab whose 1.15.2 stall triggered the cross-volume
+investigation upgraded to 1.15.3 and successfully dispatched a
+real cross-volume test order on **2026-09-09**. The order
+delivered end-to-end and no phantom / blank duplicate appeared.
+This single production dispatch confirms both hypotheses 1.15.3
+shipped resting on: (a) PIC Pro's DIGIN watcher ignores the
+`.ohd-inbox-{controller}-{instance}-{ts}-{rand}` folder name
+during the cross-volume copy window (evidenced by the absence
+of a phantom order), and (b) OrderGateway waits for the DIGIN
+folder to appear after consuming the `.txt` (evidenced by the
+delivery completing at all).
+
+Deliberately narrow claim — one lab, one working happy-path
+delivery. The following are NOT verified in the field: the
+mid-copy failure branch and its cleanup, the startup sweep for
+leftover `.ohd-inbox-*` folders (nothing was left over to
+clean), the 1.16.1 Fuji reachability check (different feature
+entirely, not exercised), and OrderGateway's actual timeout
+value (we know it exceeded this order's copy duration at this
+lab, nothing more). Full write-up of what was and was not
+observed in `docs/picpro-cross-volume-investigation.md` under
+the "Field result — 2026-09-09" section.
+
+The 1.15.3 CHANGELOG entry itself is unchanged — it correctly
+recorded what was known at the time and stays as it is. The
+"hypotheses confirmed" note lives here, in the next release's
+entry, per the "do NOT retro-edit released notes" discipline.
+
+---
+
 ## v1.16.2 - 2026-09-07
 
 Folder Copy release. Five items — one dispatch-level safety guarantee,

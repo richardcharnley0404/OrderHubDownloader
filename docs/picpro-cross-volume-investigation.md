@@ -1,6 +1,8 @@
 # Fuji PIC Pro cross-volume delivery — investigation and design
 
-**Status.** Investigation and design only. No code changes in this pass.
+**Status.** Design phase complete. Delivered as v1.15.3 (N-lite). Two
+underlying hypotheses **CONFIRMED by field observation on 2026-09-09**
+— see the "Field result" section immediately below.
 
 **Trigger.** A PIC Pro lab reported that after upgrading to v1.15.2, save
 succeeds but per-order subfolders never move from staging into DIGIN. Their
@@ -19,6 +21,68 @@ commit un-blocked the save, but did nothing about delivery. Every dispatched
 order today reaches `_stepDelivering`, throws EXDEV, resolves silently as
 `failed`, and leaves the staged folder in Image Staging Root. The operator
 sees nothing on the Jobs grid — the job stays "in production".
+
+---
+
+## Field result — 2026-09-09
+
+**Source.** The PIC Pro lab whose 1.15.2 stall triggered this
+investigation (four separate UNC shares on one server — see the
+Trigger table above) upgraded to v1.15.3 and dispatched a real test
+order across their cross-volume configuration.
+
+**Observed.**
+
+- The order delivered end-to-end. The DIGIN subfolder appeared, PIC
+  Pro consumed it, and the print completed successfully.
+- **No blank / phantom duplicate order appeared.** The `.ohd-inbox-*`
+  folder existed inside DIGIN for the duration of the cross-volume
+  copy window; PIC Pro's DIGIN watcher did not ingest it as an order.
+
+**Hypotheses this confirms (both marked CONFIRMED as of 2026-09-09).**
+
+1. **Name hypothesis — CONFIRMED.** PIC Pro's DIGIN watcher ignores a
+   folder whose name does not match an order or container id. The
+   `.ohd-inbox-{controller}-{instance}-{ts}-{rand}` shape was present
+   in DIGIN during the copy and was not ingested. Evidence: absence
+   of a phantom duplicate order for the dispatched order.
+2. **OrderGateway patience — CONFIRMED.** OrderGateway waits for the
+   `{orderId}` folder to appear in DIGIN after consuming
+   `{orderId}.txt` from Order Data. Evidence: delivery completed
+   end-to-end, which is the outcome the N-lite design predicted
+   would only be possible under this hypothesis (see "The deciding
+   question — does OrderGateway time out?" below for the pre-ship
+   reasoning).
+
+**What this does NOT tell us.** Precisely and only what a single
+successful happy-path delivery at one lab tells us:
+
+- **OrderGateway's actual timeout value.** We know it exceeded the
+  copy duration for this order at this lab. We do not know by how
+  much. A larger cross-volume order — or a slower share — could
+  still exhaust the timeout on a different install. Only the
+  patient-enough-for-this-order condition is proven.
+- **Error paths in the cross-volume writer.** Only the healthy copy
+  ran. The mid-copy failure branch (network drop, disk full during
+  copy) and its cleanup path have not been exercised in the field.
+- **The startup sweep for leftover `.ohd-inbox-*` folders.** The
+  healthy dispatch left no leftover for the sweep to clean, so the
+  sweep path has not been exercised in the field.
+- **The 1.16.1 Fuji reachability check** (`_verifyFujiReachability`
+  in `fuji-jobmaker-file-writer.js`) — different feature entirely,
+  not touched by this test.
+- **The controlled Tests 1 and 2 from the "Assumption to test at the
+  lab" section below.** Those isolated the name hypothesis by
+  creating `.ohd-inbox-*` and `TEST-ORDER-9999` folders in an empty
+  DIGIN with no ambient container or `.txt`. What actually happened
+  is a natural-experiment variant: the ambient state was normal
+  (`.txt` present in Order Data, container in Merge Data,
+  `.ohd-inbox-*` in DIGIN during the copy). This proves the name
+  hypothesis for the operational condition N-lite ships into, which
+  is what matters; it does not settle the more general claim that
+  PIC Pro ignores `.ohd-inbox-*` names in *any* ambient state.
+- **Other labs.** One lab, one delivery. The design is validated for
+  the trigger-lab's configuration.
 
 ---
 
@@ -473,7 +537,7 @@ difference lives entirely in when the cross-volume copy runs.
 
 | Axis | N (pre-`.txt` copy) | N-lite (post-`.txt` copy) |
 |---|---|---|
-| Unverified assumptions | **Two**: (a) PIC Pro DIGIN watcher is gated on matching-container presence, so a folder existing before its container is ignored; (b) `.ohd-inbox-*` name does not match any ingest rule. | **One**: `.ohd-inbox-*` name does not match any ingest rule. Same single hypothesis as pre-M7b `.ohdtmp` implicitly rested on. |
+| Underlying assumptions | **Two**: (a) PIC Pro DIGIN watcher is gated on matching-container presence, so a folder existing before its container is ignored; (b) `.ohd-inbox-*` name does not match any ingest rule. | **One**: `.ohd-inbox-*` name does not match any ingest rule. Same single hypothesis as pre-M7b `.ohdtmp` implicitly rested on. Assumption (b) here — the one N-lite ships on — **CONFIRMED 2026-09-09** (see the Field result section above). Assumption (a) was never tested because N-lite doesn't rest on it. |
 | Exposure window (folder present in DIGIN) | Copy duration + `writeOrderFile` + OrderGateway poll latency + up to `gatewayTimeoutMs` (default 120s). Typically seconds to two minutes; in one to two orders of magnitude MORE than the `.ohdtmp` bug had. | Copy duration only — the folder is created and renamed away entirely within `_stepDelivering`. **Numerically equivalent to the pre-M7b `.ohdtmp` window** (same code phase, same physical operation). |
 | Dispatch wall-clock latency | Slow — synchronous copy blocks the dispatch call. On a large order over a slow SMB share, dispatch could block for many seconds. `runAutoPrint` is sequential, so this stalls the entire batch. | Fast — dispatch returns immediately after atomic `.txt` write, same as today. Copy runs asynchronously in the monitor. |
 | Time from `.txt` consumed to DIGIN folder visible | Milliseconds (just the intra-DIGIN rename). PIC Pro sees the folder essentially the moment OrderGateway is ready to look. | Full copy duration. PIC Pro will not see the DIGIN folder until the copy completes. |

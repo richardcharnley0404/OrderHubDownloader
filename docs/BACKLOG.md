@@ -123,43 +123,30 @@ like `ORD-O4YK5Z-1`; the spec says IDs are "normally defined with numbers"), whe
 OrderGateway deletes a file it *can't* parse, text encoding (we write UTF-8 + CRLF), and
 handshake timing.
 
-**Confirm 1.15.3's two cross-volume safety hypotheses when the lab reports back.**
-1.15.3 shipped with cross-volume delivery restored via the N-lite path, resting on two
-hypotheses about PIC Pro / OrderGateway that were named as unverified in the shipped
-CHANGELOG and operator notes: (a) PIC Pro's DIGIN watcher ignores a folder whose name
-does not match an order/container id (i.e., `.ohd-inbox-{controller}-{instance}-{ts}-{rand}`
-is invisible to the watcher), and (b) OrderGateway waits indefinitely for the DIGIN
-folder to appear after consuming the `.txt`. The lab is now testing on 1.15.3; a
-successful test order confirms both. Handling when their report arrives:
+**~~Confirm 1.15.3's two cross-volume safety hypotheses when the lab reports back.~~
+CLOSED 2026-09-09 — both CONFIRMED by successful field dispatch at the trigger lab.**
+The lab whose 1.15.2 stall triggered the whole cross-volume investigation upgraded
+to 1.15.3 and dispatched a real cross-volume test order. The order delivered
+end-to-end and no phantom / blank duplicate appeared. That single dispatch
+confirms both underlying hypotheses simultaneously: (a) PIC Pro's DIGIN watcher
+ignores the `.ohd-inbox-{controller}-{instance}-{ts}-{rand}` name — evidenced
+by the absence of a phantom during the copy window; (b) OrderGateway waits for
+the DIGIN folder to appear after consuming the `.txt` — evidenced by the
+delivery completing at all (a cross-volume copy is non-trivial). Full write-up
+of what was and was not observed in `docs/picpro-cross-volume-investigation.md`
+under the "Field result — 2026-09-09" section. Confirmation folded into the
+1.16.3 CHANGELOG under the current Unreleased section per the "do NOT retro-
+edit 1.15.3's released notes" discipline (that entry correctly recorded what
+was known at the time and stays as-is).
 
-- **Success** (test order delivers and prints normally) — confirms both hypotheses.
-  Update `docs/picpro-cross-volume-investigation.md` with the observation date and what
-  was seen (which order id, timings, any surprises). Fold the confirmation into the
-  1.16.0 CHANGELOG entry — **do NOT retro-edit 1.15.3's released notes**. The shipped
-  wording said "unverified" and rewriting history there would create the exact "docs
-  assert as fact what was actually expectation" trap the CLAUDE.md "never document
-  unrun tests as fact" convention exists to prevent. The confirmation belongs in the
-  next release's notes as "1.15.3's hypotheses confirmed by the lab on {date}", not
-  back-patched into the release that shipped unverified.
-
-- **Blank duplicate order** (the .ohdtmp shape from 1.14.x returns) — falsifies the
-  name hypothesis. The `.ohd-inbox-` prefix is not sufficient discrimination for
-  PIC Pro's DIGIN watcher. Rework: try a name built entirely from random hex with no
-  OHD-branded prefix (`.{16-byte-hex}` or similar) so PIC Pro has nothing to
-  pattern-match on. If PIC Pro ingests THAT too, cross-volume delivery has to go back
-  to a design conversation — the design's discriminator was the name shape, and if
-  the watcher ignores name shape entirely, N-lite is bankrupt. Update the
-  investigation doc with the observed symptom and the ruled-out design.
-
-- **Order stalls on PIC Pro's side** (container generated in Merge Data, DIGIN folder
-  eventually rejected or timed out) — falsifies the OrderGateway-patience hypothesis.
-  Cross-volume orders whose copy time exceeds OrderGateway's internal timeout would
-  need to switch to Option N (pre-`.txt` copy — dispatch pays the copy latency, but
-  OrderGateway sees the DIGIN folder within milliseconds of consuming the `.txt`).
-  Option N is fully spec'd in `docs/picpro-cross-volume-investigation.md` as a
-  fallback design; the reason N-lite was chosen over N was the empirical prediction
-  that OrderGateway would be patient. Update the investigation doc with the observed
-  OrderGateway timeout value (if measurable), then plan Option N as the 1.16.x fix.
+**Not confirmed by this test — carry as separate open items if they matter.**
+Only the healthy happy-path delivery ran. What we still have no field data on:
+the mid-copy failure branch and its cleanup; the startup sweep for leftover
+`.ohd-inbox-*` folders (nothing was left over); the 1.16.1 Fuji reachability
+check (unrelated feature, not touched); OrderGateway's actual timeout value
+(we only know it exceeded this order's copy duration at this lab). See the
+Field result section of the investigation doc for the full "does not tell us"
+list.
 
 **Release upload.** `dist\OrderHub Desktop Setup 1.8.0.exe` → S3 → link into OrderHub. See
 `docs/RELEASE.md`.
