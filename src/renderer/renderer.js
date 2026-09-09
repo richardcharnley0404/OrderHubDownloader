@@ -2579,6 +2579,14 @@ function populateForm(config) {
   // Copy mode default: false (delete = today's behaviour, migration-safe).
   // A missing key or an existing config predating the field yields false too.
   document.getElementById('ftpKeepFilesOnServer').checked = !!config.ftpKeepFilesOnServer;
+  // Retention sweep — three fields, off by default. Migration discipline:
+  // an existing config without any of these keys behaves exactly as before
+  // (sweep disabled, no listing walk, no deletes).
+  document.getElementById('ftpRetentionSweepEnabled').checked = !!config.ftpRetentionSweepEnabled;
+  const ftpSweepDaysRaw = Number(config.ftpRetentionSweepDays);
+  document.getElementById('ftpRetentionSweepDays').value =
+    Number.isFinite(ftpSweepDaysRaw) && ftpSweepDaysRaw >= 1 ? ftpSweepDaysRaw : 7;
+  document.getElementById('ftpRetentionSweepDryRun').checked = !!config.ftpRetentionSweepDryRun;
   document.getElementById('downloadDirectory').value = config.downloadDirectory || '';
   downloadDirectory = config.downloadDirectory || '';
   document.getElementById('pollingEnabled').checked = config.pollingEnabled || false;
@@ -2745,6 +2753,14 @@ function getFormData() {
     ftpPassword: document.getElementById('ftpPassword').value,
     ftpRemotePath: document.getElementById('ftpRemotePath').value.trim() || '/',
     ftpKeepFilesOnServer: document.getElementById('ftpKeepFilesOnServer').checked,
+    ftpRetentionSweepEnabled: document.getElementById('ftpRetentionSweepEnabled').checked,
+    // parseInt fallback to 7 covers both empty input and non-numeric input;
+    // config-service also normalises on load via the loader above.
+    ftpRetentionSweepDays: (() => {
+      const v = parseInt(document.getElementById('ftpRetentionSweepDays').value, 10);
+      return Number.isFinite(v) && v >= 1 ? v : 7;
+    })(),
+    ftpRetentionSweepDryRun: document.getElementById('ftpRetentionSweepDryRun').checked,
     downloadDirectory: document.getElementById('downloadDirectory').value.trim(),
     pollingEnabled: document.getElementById('pollingEnabled').checked,
     launchOnStartup: document.getElementById('launchOnStartup').checked,

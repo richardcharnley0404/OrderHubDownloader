@@ -479,6 +479,17 @@ class PollingService {
       // effect at the next poll without an app restart.
       const keepFilesOnServer = !!configService.get('ftpKeepFilesOnServer');
 
+      // Retention sweep settings. All read fresh per scan for the same
+      // reason. lastSweepAt is the persisted 24h-throttle marker;
+      // ftp-service returns a new timestamp only on a successful
+      // sweep-ran (refusals return no timestamp so they re-fire every
+      // cycle until fixed).
+      const sweepEnabled = !!configService.get('ftpRetentionSweepEnabled');
+      const sweepAgeDaysRaw = Number(configService.get('ftpRetentionSweepDays'));
+      const sweepAgeDays = Number.isFinite(sweepAgeDaysRaw) && sweepAgeDaysRaw > 0 ? sweepAgeDaysRaw : 7;
+      const sweepDryRun = !!configService.get('ftpRetentionSweepDryRun');
+      const lastSweepAt = configService.get('ftpLastSweepAt');
+
       const summary = await ftpService.scanAndDownload(
         credentials,
         remotePath,
@@ -486,8 +497,21 @@ class PollingService {
         (progress) => {
           logger.info('Polling progress: ' + progress.message);
         },
-        { keepFilesOnServer }
+        { keepFilesOnServer, sweepEnabled, sweepAgeDays, sweepDryRun, lastSweepAt }
       );
+
+      // Persist the sweep completion timestamp so the 24h throttle
+      // survives an OHD restart. Only stamp on a successful ran=true
+      // outcome — a refusal or a throttle-skip must not stamp, so the
+      // next polling cycle either re-attempts (refusal) or continues
+      // to skip on the old stamp (throttle).
+      if (summary && summary.sweep && summary.sweep.ran && summary.sweep.at) {
+        try {
+          configService.set('ftpLastSweepAt', summary.sweep.at);
+        } catch (setErr) {
+          logger.logWarning('Polling: failed to persist ftpLastSweepAt', { error: setErr.message });
+        }
+      }
 
       this.lastSummary = summary;
       logger.info('Polling: scan complete', summary);

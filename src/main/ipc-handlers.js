@@ -320,11 +320,18 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
       logger.info('Starting FTP scan and download', { remotePath, localBasePath });
 
       const sender = event.sender;
-      // Copy mode: leave files on the FTP server so other locations can
-      // download the same order. Read fresh so a manual scan reflects
-      // the latest Settings save. Manual and scheduled scans must
-      // behave identically.
+      // Copy mode + retention sweep settings. All read fresh so a
+      // manual scan reflects the latest Settings save. Manual and
+      // scheduled scans MUST behave identically — same read pattern
+      // as polling-service.scanFtp, including the lastSweepAt
+      // persist-on-success step below.
       const keepFilesOnServer = !!configService.get('ftpKeepFilesOnServer');
+      const sweepEnabled = !!configService.get('ftpRetentionSweepEnabled');
+      const sweepAgeDaysRaw = Number(configService.get('ftpRetentionSweepDays'));
+      const sweepAgeDays = Number.isFinite(sweepAgeDaysRaw) && sweepAgeDaysRaw > 0 ? sweepAgeDaysRaw : 7;
+      const sweepDryRun = !!configService.get('ftpRetentionSweepDryRun');
+      const lastSweepAt = configService.get('ftpLastSweepAt');
+
       const summary = await ftpService.scanAndDownload(
         credentials,
         remotePath,
@@ -332,8 +339,19 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
         (progress) => {
           sender.send('ftp:downloadProgress', progress);
         },
-        { keepFilesOnServer }
+        { keepFilesOnServer, sweepEnabled, sweepAgeDays, sweepDryRun, lastSweepAt }
       );
+
+      // Same persist-on-success discipline as polling-service.scanFtp.
+      // Refusal / throttle outcomes carry no `at`, so the next scan
+      // either re-attempts (refusal) or continues to skip (throttle).
+      if (summary && summary.sweep && summary.sweep.ran && summary.sweep.at) {
+        try {
+          configService.set('ftpLastSweepAt', summary.sweep.at);
+        } catch (setErr) {
+          logger.logWarning('FTP manual scan: failed to persist ftpLastSweepAt', { error: setErr.message });
+        }
+      }
 
       logger.info('FTP scan and download complete', summary);
       return { success: true, summary };

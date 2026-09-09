@@ -361,6 +361,18 @@ class FtpService {
       // stays close to the call.
       await this._downloadDirectory(client, remotePath, localBasePath, onProgress, summary, false, options);
 
+      // Retention sweep — runs once per polling cycle over the same
+      // session. Throttle (once per 24h) + safety guards live inside
+      // _sweepOldFiles; scanAndDownload just wires options through and
+      // surfaces the outcome on the summary so the caller can persist
+      // the completion timestamp for the throttle.
+      summary.sweep = await this._sweepOldFiles(client, remotePath, localBasePath, {
+        enabled:     !!options.sweepEnabled,
+        ageDays:     options.sweepAgeDays,
+        dryRun:      !!options.sweepDryRun,
+        lastSweepAt: options.lastSweepAt,
+      });
+
       onProgress({
         status: 'complete',
         message: `Complete - ${summary.downloaded} files downloaded, ${summary.skipped} skipped`,
@@ -544,6 +556,218 @@ class FtpService {
   }
 
   /**
+   * FTP retention sweep — delete files on the FTP server older than
+   * `options.ageDays` (default 7). Called at the end of scanAndDownload
+   * when `options.sweepEnabled` is true. Pure w.r.t. persistence: the
+   * caller passes in `lastSweepAt` and, on a successful run, receives
+   * `{ ran: true, at: '<ISO>' }` in the return value which the caller
+   * persists via configService.
+   *
+   * SAFETY GUARDS (spec §"SAFETY REQUIREMENTS"):
+   *   1. Refuses when remotePath is "/" or empty — sweeping the FTP root
+   *      could delete files belonging to Pixfizz Core or other systems.
+   *      Refusal is logged at WARN every polling cycle until fixed and
+   *      does NOT stamp lastSweepAt (so it re-fires each cycle).
+   *   2. Never traverses outside remotePath — item names of ".", "..",
+   *      "" or anything containing `/` `\` are skipped with a WARN log.
+   *   3. Age from remote mtime (item.modifiedAt, or item.date as fallback
+   *      on older basic-ftp), not from when OHD downloaded. A file no
+   *      location has fetched still ages out.
+   *   4. Never deletes a file OHD hasn't itself successfully downloaded
+   *      and verified locally — size-match against the local copy is the
+   *      per-file guard.
+   *   5. Off by default (`options.sweepEnabled === true` required).
+   *   6. Every deletion logged with path, parsed mtime, and age in days.
+   *   7. `options.dryRun === true` logs "would delete" candidates without
+   *      calling client.remove. Default false — root-refusal + local-verify
+   *      already bound the damage, so the worst a mis-set threshold does
+   *      is shorten the window for other locations (documented hazard,
+   *      not local data loss); against that, silently neutering the sweep
+   *      by defaulting dry-run to true would let the folder grow with no
+   *      operator-visible signal why. Dry-run stays available as an
+   *      opt-in preview.
+   *
+   * THROTTLE: 24h since last successful sweep. Reads `options.lastSweepAt`
+   * (ISO string from configService), skips the entire walk if inside the
+   * window. Persistence-agnostic — the throttle window survives an OHD
+   * restart because it lives in configService, not in memory.
+   *
+   * @returns {Promise<object>}  One of:
+   *   { ran: true,  at: '<ISO>', deleted, wouldDelete, skipped, errors: [] }
+   *   { ran: false, reason: 'disabled' | 'root-path' | 'throttled' }
+   */
+  async _sweepOldFiles(client, remotePath, localBasePath, options) {
+    const opts = options || {};
+    // Sweep-scoped option names (`enabled`, `ageDays`, `dryRun`,
+    // `lastSweepAt`). scanAndDownload maps its download-scope names
+    // (`sweepEnabled`, `sweepAgeDays`, `sweepDryRun`) to these when
+    // calling — the sweep-prefix only exists at the download boundary
+    // where several sub-features coexist.
+    //
+    // Off by default: any falsy `enabled` short-circuits.
+    if (!opts.enabled) {
+      return { ran: false, reason: 'disabled' };
+    }
+
+    // Throttle: skip if the last successful sweep is within the last
+    // 24 hours. Invalid / missing / non-string values treated as
+    // "never run" — the string constraint matters because Date.parse
+    // coerces non-string arguments to strings (Date.parse(12345)
+    // becomes year-12345, which is finite and in the future) and would
+    // silently throttle every scan with no operator-visible signal.
+    const MIN_INTERVAL_MS = 24 * 60 * 60 * 1000;
+    if (typeof opts.lastSweepAt === 'string' && opts.lastSweepAt) {
+      const lastMs = Date.parse(opts.lastSweepAt);
+      if (Number.isFinite(lastMs) && lastMs > 0 && lastMs <= Date.now() && (Date.now() - lastMs) < MIN_INTERVAL_MS) {
+        return { ran: false, reason: 'throttled' };
+      }
+    }
+
+    // SAFETY 1: refuse at root or empty. Exact wording locked by test.
+    const normRemote = typeof remotePath === 'string' ? remotePath.trim() : '';
+    if (!normRemote || normRemote.replace(/\/+$/, '') === '') {
+      logger.logWarning(
+        'FTP retention sweep refused: Remote Path is "/" (root). ' +
+        'Configure a specific remote folder in FTP Server settings (e.g. "/orders") ' +
+        'to enable the sweep. Sweeping the FTP root could delete files belonging ' +
+        'to Pixfizz Core or other systems.',
+      );
+      return { ran: false, reason: 'root-path' };
+    }
+
+    const ageDays = typeof opts.ageDays === 'number' && opts.ageDays > 0 ? opts.ageDays : 7;
+    const cutoffMs = Date.now() - ageDays * MIN_INTERVAL_MS;
+    const dryRun = !!opts.dryRun;
+    const stats = { deleted: 0, wouldDelete: 0, skipped: 0, errors: [] };
+
+    await this._sweepDirectory(client, normRemote, localBasePath, cutoffMs, dryRun, stats);
+
+    const at = new Date().toISOString();
+    logger.info('FTP retention sweep complete', {
+      remotePath: normRemote, ageDays, dryRun,
+      deleted: stats.deleted, wouldDelete: stats.wouldDelete,
+      skipped: stats.skipped, errors: stats.errors.length,
+      at,
+    });
+    return { ran: true, at, ...stats };
+  }
+
+  /**
+   * Recursive helper for _sweepOldFiles. See that method's docblock for
+   * the safety contract. Kept private (underscore prefix) but exposed on
+   * the service export solely so callers can compose their own sweep if
+   * they need to (e.g., an operator-triggered one-off).
+   */
+  async _sweepDirectory(client, remotePath, localBasePath, cutoffMs, dryRun, stats) {
+    let items;
+    try {
+      items = await client.list(remotePath);
+    } catch (listErr) {
+      logger.logError('FTP retention sweep: list failed', listErr, { remotePath });
+      stats.errors.push({ remotePath, error: listErr.message });
+      return;
+    }
+
+    for (const item of items) {
+      // SAFETY 2: never traverse outside — reject anything that could
+      // escape or is otherwise malformed. Empty names, path separators,
+      // and the two dot-forms are the whole set of items that could
+      // move us off the configured subtree.
+      if (!item.name || item.name === '.' || item.name === '..' || /[/\\]/.test(item.name)) {
+        logger.logWarning('FTP retention sweep: skipping suspicious item name',
+          { remotePath, name: item.name });
+        stats.skipped++;
+        continue;
+      }
+
+      const remoteItemPath = remotePath.replace(/\/+$/, '') + '/' + item.name;
+
+      if (item.isDirectory) {
+        await this._sweepDirectory(client, remoteItemPath,
+          path.join(localBasePath, item.name), cutoffMs, dryRun, stats);
+        continue;
+      }
+
+      // SAFETY 3: age from remote mtime. basic-ftp exposes modifiedAt
+      // (Date) on servers that support MLSD; falls back to `date` on
+      // LIST-only servers. Skip items with neither — we cannot safely
+      // age them.
+      const rawMtime = item.modifiedAt || item.date;
+      if (!rawMtime) {
+        logger.logDebug('FTP retention sweep: no mtime on item, skipping',
+          { remoteItemPath });
+        stats.skipped++;
+        continue;
+      }
+      const mtimeMs = rawMtime instanceof Date
+        ? rawMtime.getTime()
+        : Date.parse(rawMtime);
+      if (!Number.isFinite(mtimeMs)) {
+        logger.logDebug('FTP retention sweep: unparseable mtime, skipping',
+          { remoteItemPath, rawMtime });
+        stats.skipped++;
+        continue;
+      }
+
+      if (mtimeMs >= cutoffMs) {
+        // Not old enough — leave it alone.
+        continue;
+      }
+
+      // SAFETY 4: never delete a file OHD hasn't itself downloaded +
+      // verified. Local path is built with the same Windows-basename
+      // sanitiser the download loop uses so we look at the actual file
+      // OHD wrote (see _sanitiseWindowsBasename docblock for the
+      // Pixfizz-Core-escapes-parens case).
+      const localItemPath = path.join(localBasePath, _sanitiseWindowsBasename(item.name));
+      if (!fs.existsSync(localItemPath)) {
+        logger.logDebug('FTP retention sweep: no local copy, skipping',
+          { remoteItemPath, localItemPath });
+        stats.skipped++;
+        continue;
+      }
+      let localSize;
+      try {
+        localSize = fs.statSync(localItemPath).size;
+      } catch (statErr) {
+        logger.logDebug('FTP retention sweep: local stat failed, skipping',
+          { remoteItemPath, error: statErr.message });
+        stats.skipped++;
+        continue;
+      }
+      if (localSize !== item.size) {
+        logger.logDebug('FTP retention sweep: local size mismatch, skipping',
+          { remoteItemPath, localSize, remoteSize: item.size });
+        stats.skipped++;
+        continue;
+      }
+
+      // Candidate. Age computed once here so both the dry-run log and
+      // the real-delete log carry the same value.
+      const ageInDays = Math.floor((Date.now() - mtimeMs) / (24 * 60 * 60 * 1000));
+      const mtimeIso  = new Date(mtimeMs).toISOString();
+
+      if (dryRun) {
+        logger.info('FTP retention sweep [dry-run]: would delete',
+          { remoteItemPath, ageDays: ageInDays, mtime: mtimeIso });
+        stats.wouldDelete++;
+        continue;
+      }
+
+      try {
+        await client.remove(remoteItemPath);
+        logger.info('FTP retention sweep: deleted',
+          { remoteItemPath, ageDays: ageInDays, mtime: mtimeIso });
+        stats.deleted++;
+      } catch (delErr) {
+        logger.logError('FTP retention sweep: delete failed', delErr,
+          { remoteItemPath, ageDays: ageInDays, mtime: mtimeIso });
+        stats.errors.push({ remoteItemPath, error: delErr.message });
+      }
+    }
+  }
+
+  /**
    * List files in directory
    */
   async listFiles(credentials, remotePath = '/') {
@@ -580,5 +804,9 @@ ftpService._INTEGRITY_CHECK_EXTENSIONS = INTEGRITY_CHECK_EXTENSIONS;
 ftpService._isExpected550OnOriginalFiles = _isExpected550OnOriginalFiles;
 ftpService._handleFtpDeleteFailure = _handleFtpDeleteFailure;
 ftpService._sanitiseWindowsBasename = _sanitiseWindowsBasename;
+
+// _sweepOldFiles + _sweepDirectory are already instance methods; no need
+// to re-export them here. They ARE the retention sweep's public surface
+// for tests.
 
 module.exports = ftpService;

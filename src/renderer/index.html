@@ -288,6 +288,62 @@
                 </small>
               </div>
 
+              <div class="form-group checkbox-group">
+                <label>
+                  <input type="checkbox" id="ftpRetentionSweepEnabled" name="ftpRetentionSweepEnabled">
+                  <span>Delete old files from the server (retention sweep)</span>
+                </label>
+                <small class="field-hint">
+                  Delete files from the FTP server after they exceed the
+                  age below. Turn this on if you use "Keep files on the
+                  server" above and no other system is cleaning the FTP
+                  folder — otherwise files accumulate forever.
+
+                  Only enable at ONE location per install. Multiple
+                  locations running the sweep is harmless but pointless —
+                  pick the location most likely to be online every day.
+
+                  REQUIRED: set Remote Path above to a specific folder
+                  (not "/"). The sweep refuses to run at the FTP root
+                  because it could delete files belonging to Pixfizz Core
+                  or other systems.
+
+                  KNOWN LIMITATION: any location whose OHD is offline
+                  longer than the retention window will permanently miss
+                  those orders' artwork. The failure is visible — the
+                  job stalls rather than printing wrong — but raise the
+                  window above the longest outage any site could
+                  reasonably have.
+                </small>
+              </div>
+
+              <div class="form-group">
+                <label for="ftpRetentionSweepDays">Retention window (days)</label>
+                <input type="number" id="ftpRetentionSweepDays" name="ftpRetentionSweepDays" min="1" value="7">
+                <small class="field-hint">
+                  Files older than this on the FTP server will be deleted.
+                  Default 7 — a lab is typically closed for two or three
+                  days and OHD runs continuously, so a week gives
+                  comfortable headroom while still bounding growth.
+                  Raise if any location could be offline longer than a
+                  week.
+                </small>
+              </div>
+
+              <div class="form-group checkbox-group">
+                <label>
+                  <input type="checkbox" id="ftpRetentionSweepDryRun" name="ftpRetentionSweepDryRun">
+                  <span>Dry run — log what would be deleted, but don't delete</span>
+                </label>
+                <small class="field-hint">
+                  Tick this first if you want to check what would be
+                  deleted before it happens. When on, the sweep logs
+                  "would delete" for each candidate but doesn't remove
+                  anything. Untick it once the Activity Log shows the
+                  sweep is picking the right files.
+                </small>
+              </div>
+
               <div class="test-row">
                 <button type="button" id="testFtpBtn" class="btn-secondary">Test Connection</button>
                 <span id="ftpTestStatus" class="test-status"></span>
