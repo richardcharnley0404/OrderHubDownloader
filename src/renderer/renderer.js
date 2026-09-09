@@ -3594,7 +3594,17 @@ form.addEventListener('submit', async (e) => {
     saveBtn.disabled = true;
     saveBtn.textContent = 'Saving...';
 
-    await window.electronAPI.saveConfig(config);
+    const saveResult = await window.electronAPI.saveConfig(config);
+    // Save-time advisories (return shape: { config, warnings }). Same
+    // pattern as the routing save-controller handler at ~:6813 — alert()
+    // per warning is load-bearing (a toast fades; these describe a state
+    // where a control looks on but the runtime refuses it). Currently
+    // the only source is ftp-retention-sweep-root-path.
+    if (saveResult && Array.isArray(saveResult.warnings) && saveResult.warnings.length > 0) {
+      for (const w of saveResult.warnings) {
+        alert(w.text || String(w));
+      }
+    }
     downloadDirectory = config.downloadDirectory || '';
     // Default folder change may unblock previously-warning jobs — re-evaluate immediately
     resolveRoutesForReceivedJobs(allJobs).then(() => renderJobTable(getFilteredJobs()));

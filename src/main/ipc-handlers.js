@@ -149,6 +149,15 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
     try {
       logger.info('Saving configuration');
 
+      // Compute save-time ADVISORIES on the incoming config BEFORE the
+      // save. Same shape/discipline as the folder-copy advisories in
+      // ohd:routing:save-controller and the PIC Pro volume-cross
+      // advisory: warn, name the problem, let the save proceed. The
+      // renderer surfaces each entry via alert() so the operator must
+      // acknowledge before Settings closes. Extend by adding more
+      // computation helpers here — never inline warning shapes.
+      const warnings = ftpService._computeFtpSweepSaveWarnings(config);
+
       // Save configuration
       const savedConfig = configService.save(config);
 
@@ -175,7 +184,10 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
       logger.info('Configuration saved successfully');
       // A changed default folder may unblock previously-unrouted jobs
       runAutoPrint().catch(err => logger.logError('[auto-print] post-config-save check failed', err));
-      return savedConfig;
+      // Return shape changed from bare savedConfig to { config, warnings }.
+      // No existing caller inspected the return; the renderer's saveConfig
+      // handler now reads `.warnings` alongside close-modal.
+      return { config: savedConfig, warnings };
     } catch (error) {
       logger.logError('Error saving config', error);
       throw error;

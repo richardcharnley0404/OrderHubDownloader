@@ -553,6 +553,124 @@ test('wiring (source-inspection): polling-service reads all four ftpRetentionSwe
   );
 });
 
+// ── Save-time advisory (config:save) ─────────────────────────────────────
+//
+// Same shape as the folder-copy advisories at ipc-handlers.js:1702-1750
+// and the PIC Pro volume-cross advisory at :1512 — warn, name the
+// problem, let the save proceed. Reason: an operator enabling the
+// retention sweep with a root Remote Path currently gets no feedback
+// in Settings and would have to read the Activity Log to discover
+// the sweep never runs. Same "control that looks on but does nothing"
+// failure we avoided by defaulting dry-run to false.
+
+test('save-time advisory: sweep enabled + rootPath "/" → single warning with locked kind and text', () => {
+  const warnings = ftpService._computeFtpSweepSaveWarnings({
+    ftpRetentionSweepEnabled: true,
+    ftpRemotePath: '/',
+  });
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0].kind, 'ftp-retention-sweep-root-path');
+  // Locked verbatim per spec ("Lock the exact string with a test"). If
+  // any word of the operator-facing string drifts, this assertion fails.
+  assert.equal(
+    warnings[0].text,
+    'Heads up — FTP retention sweep is enabled, but Remote Path is "/" (root). ' +
+    'The sweep refuses to run at the FTP root because it could delete files ' +
+    'belonging to Pixfizz Core or other systems, so nothing will be deleted. ' +
+    'Set Remote Path above to a specific folder (e.g. "/orders") to make the ' +
+    'sweep active.',
+  );
+});
+
+test('save-time advisory: sweep enabled + rootPath "" → same warning', () => {
+  const warnings = ftpService._computeFtpSweepSaveWarnings({
+    ftpRetentionSweepEnabled: true,
+    ftpRemotePath: '',
+  });
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0].kind, 'ftp-retention-sweep-root-path');
+});
+
+test('save-time advisory: sweep enabled + rootPath missing key → treated as root, warning fires', () => {
+  // A hand-edited config or a fresh install pre-Settings-save could
+  // have no ftpRemotePath at all. Runtime defaults it to "/", so the
+  // advisory must fire on the missing case too.
+  const warnings = ftpService._computeFtpSweepSaveWarnings({
+    ftpRetentionSweepEnabled: true,
+    // ftpRemotePath deliberately absent
+  });
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0].kind, 'ftp-retention-sweep-root-path');
+});
+
+test('save-time advisory: sweep enabled + rootPath "//" or "///" → warning (trailing-slash-only normalises to root)', () => {
+  for (const rp of ['//', '///', '  /  ']) {
+    const warnings = ftpService._computeFtpSweepSaveWarnings({
+      ftpRetentionSweepEnabled: true,
+      ftpRemotePath: rp,
+    });
+    assert.equal(warnings.length, 1, `"${rp}" must be treated as root`);
+    assert.equal(warnings[0].kind, 'ftp-retention-sweep-root-path');
+  }
+});
+
+test('save-time advisory: sweep enabled + rootPath "/orders" → no warning', () => {
+  const warnings = ftpService._computeFtpSweepSaveWarnings({
+    ftpRetentionSweepEnabled: true,
+    ftpRemotePath: '/orders',
+  });
+  assert.deepEqual(warnings, [], 'non-root path silences the advisory');
+});
+
+test('save-time advisory: sweep DISABLED at root path → no warning (do not nag when sweep is off)', () => {
+  const warnings = ftpService._computeFtpSweepSaveWarnings({
+    ftpRetentionSweepEnabled: false,
+    ftpRemotePath: '/',
+  });
+  assert.deepEqual(warnings, [], 'sweep off → root path is not the operator\'s problem');
+});
+
+test('save-time advisory: garbage inputs (null, non-object, undefined) → no warnings, does not throw', () => {
+  for (const bad of [null, undefined, 'string', 123, [], true]) {
+    const warnings = ftpService._computeFtpSweepSaveWarnings(bad);
+    assert.deepEqual(warnings, [], `${JSON.stringify(bad)} → empty warnings`);
+  }
+});
+
+test('save-time advisory: sweep enabled with truthy-but-not-strictly-true value → no warning (matches runtime gate)', () => {
+  // The runtime gate in _sweepOldFiles uses `if (!opts.enabled)` which
+  // treats 1/'yes'/{} as truthy. The advisory uses `=== true` for
+  // consistency with folder-copy's `omitJobId === true` normalisation
+  // — a hand-edited config field that isn't strictly `true` should
+  // not surface an operator alert. Config-service normalises the
+  // renderer save path to boolean; this only comes up on hand-edits.
+  for (const truthy of [1, 'yes', {}]) {
+    const warnings = ftpService._computeFtpSweepSaveWarnings({
+      ftpRetentionSweepEnabled: truthy,
+      ftpRemotePath: '/',
+    });
+    assert.deepEqual(warnings, [],
+      `${JSON.stringify(truthy)} is not strictly true → no advisory`);
+  }
+});
+
+test('wiring (source-inspection): config:save handler calls _computeFtpSweepSaveWarnings and returns warnings alongside the saved config', () => {
+  const MAIN = path.join(REPO, 'src', 'main');
+  const src  = fs.readFileSync(path.join(MAIN, 'ipc-handlers.js'), 'utf8');
+  const start = src.indexOf("ipcMain.handle('config:save'");
+  assert.notEqual(start, -1, 'config:save handler must exist');
+  const slice = src.slice(start, start + 3000);
+
+  assert.ok(
+    /_computeFtpSweepSaveWarnings\s*\(/.test(slice),
+    'config:save must call ftpService._computeFtpSweepSaveWarnings on the incoming config',
+  );
+  assert.ok(
+    /return\s+\{[^}]*warnings/.test(slice),
+    'config:save must return warnings alongside the saved config so the renderer can surface them',
+  );
+});
+
 test('wiring (source-inspection): ipc-handlers.js manual handler reads all four ftpRetentionSweep* fields and persists lastSweepAt', () => {
   const MAIN = path.join(REPO, 'src', 'main');
   const src  = fs.readFileSync(path.join(MAIN, 'ipc-handlers.js'), 'utf8');

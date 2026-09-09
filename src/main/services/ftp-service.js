@@ -97,6 +97,51 @@ function _sanitiseWindowsBasename(name) {
   return name.replace(_WINDOWS_RESERVED_CHARS_RE, '_');
 }
 
+/**
+ * Save-time ADVISORY (never a block) for the FTP retention sweep.
+ * Same shape as the folder-copy advisories in ipc-handlers.js
+ * (`folder-copy-root-blank-template` et al.) and the PIC Pro volume-cross
+ * advisory (`picpro-volume-cross`): return an array of `{ kind, text }`,
+ * let the save proceed regardless. The renderer surfaces each entry via
+ * a modal `alert()` so the operator MUST acknowledge before Settings
+ * closes.
+ *
+ * Currently one warning kind:
+ *   `ftp-retention-sweep-root-path` — sweep enabled while Remote Path is
+ *   "/" or empty. The runtime refuses at root (see _sweepOldFiles
+ *   SAFETY 1), so without this advisory the operator would enable
+ *   "Delete old files from the server", never see anything deleted,
+ *   and have to read the Activity Log to find out why. That is the
+ *   same "control that looks on but does nothing" failure we avoided
+ *   by defaulting dry-run to false.
+ *
+ * Pure function — no I/O, no side effects. Takes the config object the
+ * operator is trying to save. Called from ipc-handlers.js `config:save`.
+ * Uses strict `=== true` on the enabled flag (matches the folder-copy
+ * `omitJobId === true` normalisation): a hand-edited config with a
+ * truthy-but-not-boolean value doesn't surface an alert the operator
+ * didn't cause via the UI.
+ */
+function _computeFtpSweepSaveWarnings(config) {
+  const warnings = [];
+  if (!config || typeof config !== 'object' || Array.isArray(config)) return warnings;
+  if (config.ftpRetentionSweepEnabled !== true) return warnings;
+  const rp = typeof config.ftpRemotePath === 'string' ? config.ftpRemotePath.trim() : '';
+  const isRoot = !rp || rp.replace(/\/+$/, '') === '';
+  if (isRoot) {
+    warnings.push({
+      kind: 'ftp-retention-sweep-root-path',
+      text:
+        'Heads up — FTP retention sweep is enabled, but Remote Path is "/" (root). ' +
+        'The sweep refuses to run at the FTP root because it could delete files ' +
+        'belonging to Pixfizz Core or other systems, so nothing will be deleted. ' +
+        'Set Remote Path above to a specific folder (e.g. "/orders") to make the ' +
+        'sweep active.',
+    });
+  }
+  return warnings;
+}
+
 function _handleFtpDeleteFailure(delError, remoteItemPath) {
   if (_isExpected550OnOriginalFiles(delError, remoteItemPath)) {
     logger.logDebug(
@@ -804,6 +849,7 @@ ftpService._INTEGRITY_CHECK_EXTENSIONS = INTEGRITY_CHECK_EXTENSIONS;
 ftpService._isExpected550OnOriginalFiles = _isExpected550OnOriginalFiles;
 ftpService._handleFtpDeleteFailure = _handleFtpDeleteFailure;
 ftpService._sanitiseWindowsBasename = _sanitiseWindowsBasename;
+ftpService._computeFtpSweepSaveWarnings = _computeFtpSweepSaveWarnings;
 
 // _sweepOldFiles + _sweepDirectory are already instance methods; no need
 // to re-export them here. They ARE the retention sweep's public surface
