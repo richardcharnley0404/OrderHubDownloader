@@ -56,8 +56,16 @@ If matched → `{ type: 'process-folder', folderPath }`.
 `processControllerMappings[]` — one entry per job process
 (`"Print"`, `"Cut"`, …) mapping to a controller id.
 
-- Unknown process → default folder fallback (`processFolderPath`);
-  if that's blank → `unrouted { reason: 'no-default-folder' }`.
+- Unknown process (no mapping) OR mapping points at a controller
+  that no longer exists → `unrouted { reason: 'no-controller' }`.
+  The job surfaces in the Jobs grid ("No routing — assign a
+  controller for this process in Settings → Routing"); nothing is
+  copied anywhere. The prior global default-folder fallback
+  (`processFolderPath`, formerly Settings → Downloads → Process
+  Folders) was removed in d18f73b because it actively hid the
+  deleted-controller case — auto-print silently copied the job to
+  a folder no printer watched and marked it Completed, leaving
+  jobs green in the grid with nothing actually printed.
 - Mapped process with `hold: true` → route resolves normally but
   the job is marked "held for manual release"; auto-print stops
   before dispatch (see [Routing hold](#routing-hold-v178-forward)).
