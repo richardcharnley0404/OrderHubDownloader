@@ -307,6 +307,25 @@ document.querySelectorAll('.settings-subtab').forEach(tab => {
 // The existing Cancel/Save button click handlers (e.g. ocCancelBtn,
 // ocSaveBtn) are untouched — those add explicit `.hidden` themselves.
 function wirePmModalDismiss() {
+  // Fail-loudly presence check. Absent the modal-dismiss.js script tag
+  // (see index.html:2415), window.OhdModalDismiss is undefined and the
+  // wiring below would degrade in three different silent directions —
+  // openModal() would throw, backdrop dismiss would die, Escape would
+  // short-circuit past the dirty check. Log the specific cause here so
+  // the next person sees the reason instead of chasing a downstream
+  // TypeError. Guarded by the source-scan tripwire in
+  // src/renderer/__tests__/modal-dismiss.test.js against the tag
+  // being removed unnoticed.
+  if (!window.OhdModalDismiss) {
+    console.error(
+      '[wirePmModalDismiss] window.OhdModalDismiss is missing — the ' +
+      '<script src="modal-dismiss.js"></script> tag in index.html is ' +
+      'not loading before renderer.js. Modal dismiss guards are inert. ' +
+      'Check that the tag exists at index.html and is positioned before ' +
+      '<script src="renderer.js">.',
+    );
+    return;
+  }
   document.querySelectorAll('.pm-modal-overlay').forEach((overlay) => {
     // Per-overlay press/release tracking. Reset on every new mousedown
     // and after every click. Between fresh events the values are null,
@@ -365,11 +384,7 @@ function requestPmModalDismiss(overlay) {
   const snapshot = overlay.__ohdOpenSnapshot;
   const dirty = snapshot != null && window.OhdModalDismiss.isDirty(overlay, snapshot);
   if (dirty) {
-    // Exact string locked by test in ../renderer/__tests__/modal-dismiss.test.js
-    // — well, actually the test asserts the predicate, not the string;
-    // the string lives here because it's operator-facing at the wiring
-    // layer, not part of the pure predicate.
-    if (!window.confirm('Discard unsaved changes in this form?')) {
+    if (!window.confirm(window.OhdModalDismiss.DISCARD_CHANGES_CONFIRM)) {
       return;
     }
   }

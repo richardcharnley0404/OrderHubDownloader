@@ -117,7 +117,17 @@ function () {
     return snapshotState(overlay) !== snapshot;
   }
 
+  // Operator-facing confirm message shown when a dirty modal is being
+  // dismissed via backdrop click or Escape. Exported as a constant
+  // (rather than inlined at the call site) so its exact value is
+  // test-asserted — the standing rule that exact operator-facing
+  // strings are locked by a test. Do not change this string without
+  // also updating the assertion in
+  // src/renderer/__tests__/modal-dismiss.test.js.
+  const DISCARD_CHANGES_CONFIRM = 'Discard unsaved changes in this form?';
+
   return {
+    DISCARD_CHANGES_CONFIRM,
     shouldDismissBackdrop,
     snapshotState,
     isDirty,
