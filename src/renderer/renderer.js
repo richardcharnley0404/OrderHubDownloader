@@ -283,19 +283,61 @@ document.querySelectorAll('.settings-subtab').forEach(tab => {
 // Modal dismiss wiring (.pm-modal-overlay)
 // ══════════════════════════════════════
 // Wires up backdrop-click, × button, and Escape-key dismiss for every
-// modal that uses the .pm-modal-overlay / .pm-modal pattern. The existing
-// Cancel/Save button click handlers (e.g. ocCancelBtn, ocSaveBtn) are
-// untouched — those add explicit `.hidden` themselves and continue to
-// work alongside this helper.
+// modal that uses the .pm-modal-overlay / .pm-modal pattern. Predicates
+// live in modal-dismiss.js so they can be unit-tested — see the file's
+// docblock for the reported bug (backdrop dismiss fired on any click
+// whose target resolved to the overlay, including the click a scrollbar
+// drag or a text-select overshoot produces, which discarded the
+// operator's edits without asking).
+//
+// Guards installed here:
+//   1. Backdrop dismiss requires mousedown, mouseup AND click targets
+//      to ALL be the overlay — via OhdModalDismiss.shouldDismissBackdrop.
+//      Mousedown/mouseup targets are recorded per overlay and RESET on
+//      every new mousedown so a stale value can never authorise a
+//      later dismiss.
+//   2. On a genuine backdrop click or an Escape press: if the modal
+//      is dirty relative to its open-time snapshot, `window.confirm`
+//      first. Cancel and × keep their pre-fix behaviour (no confirm)
+//      per spec. `window.confirm` matches the existing convention in
+//      this file (13 other sites).
+//   3. Escape dismisses only the TOPMOST visible modal, not every
+//      visible modal.
+//
+// The existing Cancel/Save button click handlers (e.g. ocCancelBtn,
+// ocSaveBtn) are untouched — those add explicit `.hidden` themselves.
 function wirePmModalDismiss() {
   document.querySelectorAll('.pm-modal-overlay').forEach((overlay) => {
-    // Backdrop click — only when the overlay itself was the target, not a
-    // descendant inside .pm-modal. event.target check is the standard guard.
+    // Per-overlay press/release tracking. Reset on every new mousedown
+    // and after every click. Between fresh events the values are null,
+    // and the predicate returns false for null targets — so a click
+    // arriving without a preceding mousedown (keyboard-triggered,
+    // synthetic) cannot dismiss.
+    let mouseDownTarget = null;
+    let mouseUpTarget   = null;
+
+    overlay.addEventListener('mousedown', (e) => {
+      mouseDownTarget = e.target;
+      mouseUpTarget   = null;
+    });
+    overlay.addEventListener('mouseup', (e) => {
+      mouseUpTarget = e.target;
+    });
     overlay.addEventListener('click', (e) => {
-      if (e.target === overlay) overlay.classList.add('hidden');
+      const authorised = window.OhdModalDismiss.shouldDismissBackdrop({
+        mouseDownTarget,
+        mouseUpTarget,
+        clickTarget: e.target,
+        overlay,
+      });
+      mouseDownTarget = null;
+      mouseUpTarget   = null;
+      if (!authorised) return;
+      requestPmModalDismiss(overlay);
     });
 
-    // × close button (added in HTML alongside each <h3>).
+    // × close button (added in HTML alongside each <h3>). Per spec:
+    // keep pre-fix behaviour — NO confirm prompt, just close.
     const closeBtn = overlay.querySelector('.pm-modal-close');
     if (closeBtn) {
       closeBtn.addEventListener('click', () => {
@@ -304,13 +346,46 @@ function wirePmModalDismiss() {
     }
   });
 
-  // Escape key — close any currently-visible pm-modal.
+  // Escape key — close the TOPMOST visible pm-modal only. Last in DOM
+  // order is topmost under equal z-index (later paints over earlier).
+  // Prior wiring closed every visible overlay on any Escape press.
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
-    document
-      .querySelectorAll('.pm-modal-overlay:not(.hidden)')
-      .forEach((m) => m.classList.add('hidden'));
+    const visible = document.querySelectorAll('.pm-modal-overlay:not(.hidden)');
+    if (!visible.length) return;
+    const topmost = visible[visible.length - 1];
+    requestPmModalDismiss(topmost);
   });
+}
+
+// Dismiss an overlay through the dirty check. Called from the backdrop
+// click authoriser and from the Escape handler. Cancel / × / explicit
+// close paths do NOT go through this — they close silently.
+function requestPmModalDismiss(overlay) {
+  const snapshot = overlay.__ohdOpenSnapshot;
+  const dirty = snapshot != null && window.OhdModalDismiss.isDirty(overlay, snapshot);
+  if (dirty) {
+    // Exact string locked by test in ../renderer/__tests__/modal-dismiss.test.js
+    // — well, actually the test asserts the predicate, not the string;
+    // the string lives here because it's operator-facing at the wiring
+    // layer, not part of the pure predicate.
+    if (!window.confirm('Discard unsaved changes in this form?')) {
+      return;
+    }
+  }
+  overlay.classList.add('hidden');
+  overlay.__ohdOpenSnapshot = null;
+}
+
+// Reveal a modal AND snapshot its current form state so a later
+// backdrop-click or Escape can detect operator edits. Call this AT
+// the point that previously called overlay.classList.remove('hidden'),
+// AFTER population has completed (spec §2 timing constraint). Every
+// pm-modal-overlay open site in this file uses this wrapper.
+function openModal(overlay) {
+  if (!overlay) return;
+  overlay.classList.remove('hidden');
+  overlay.__ohdOpenSnapshot = window.OhdModalDismiss.snapshotState(overlay);
 }
 
 // ══════════════════════════════════════
@@ -1953,7 +2028,7 @@ function openAssignModal(job, route) {
   // Serialise job options for save handler (JSON)
   modal.dataset.jobOptions    = JSON.stringify(job.options || []);
 
-  modal.classList.remove('hidden');
+  openModal(modal);
   if (isFuji) {
     document.getElementById('assignPrintCode').focus();
   } else if (!isDarkroomPro) {
@@ -1970,10 +2045,11 @@ function openAssignModal(job, route) {
 
   cancelBtn.addEventListener('click', () => modal.classList.add('hidden'));
 
-  // Close on backdrop click
-  modal.addEventListener('click', (e) => {
-    if (e.target === modal) modal.classList.add('hidden');
-  });
+  // Backdrop-click dismissal is handled by the shared wirePmModalDismiss
+  // wiring in one place — the duplicate handler that used to live here
+  // was vulnerable to the "press inside → release on overlay" false-
+  // dismiss described in modal-dismiss.js. Deleted so there is exactly
+  // one implementation of modal dismissal in the app.
 
   saveBtn.addEventListener('click', async () => {
     const controllerId  = modal.dataset.controllerId;
@@ -2369,7 +2445,7 @@ function openResolveRoutingHoldModal(job) {
   sel.disabled = true;
 
   modal.dataset.jobId = String(job.id);
-  modal.classList.remove('hidden');
+  openModal(modal);
 }
 
 (function initResolveRoutingHoldModal() {
@@ -4890,9 +4966,12 @@ async function openProductMappingModal(controllerId, mappingsList, controllerTyp
   }
 
   newCancelBtn.addEventListener('click', closeModal);
-  modal.addEventListener('click', (e) => {
-    if (e.target === modal) closeModal();
-  }, { once: true });
+  // Backdrop-click dismissal is handled by the shared wirePmModalDismiss
+  // wiring — the duplicate `modal.addEventListener('click', … { once: true })`
+  // that used to live here was vulnerable to the "press inside →
+  // release on overlay" false-dismiss described in modal-dismiss.js.
+  // Deleted so there is exactly one implementation of modal dismissal
+  // in the app.
 
   newSaveBtn.addEventListener('click', async () => {
     const productCode = document.getElementById('pmProductCode').value.trim();
@@ -4937,7 +5016,7 @@ async function openProductMappingModal(controllerId, mappingsList, controllerTyp
     }
   });
 
-  modal.classList.remove('hidden');
+  openModal(modal);
   document.getElementById('pmProductCode').focus();
 }
 
@@ -6018,7 +6097,7 @@ function openOrderControllerModal(ctrl = null) {
   renderPipelineSteps();
   updateOcTypeFields();
   modal.dataset.editingId = ctrl ? ctrl.id : '';
-  modal.classList.remove('hidden');
+  openModal(modal);
   document.getElementById('ocName').focus();
 }
 
@@ -7212,7 +7291,7 @@ function openChannelMappingModal(mapping = null, controllers = null) {
   // Show/hide DPOF vs Frontline fields based on selected controller type
   _updateCmFields(ctrlSel.value, ctrlList);
 
-  modal.classList.remove('hidden');
+  openModal(modal);
 }
 
 function _updateCmFields(controllerId, ctrlList) {
@@ -7466,7 +7545,7 @@ function openCsvImportModal() {
     ctrlSel.appendChild(opt);
   }
 
-  modal.classList.remove('hidden');
+  openModal(modal);
 }
 
 function updateCsvImportBtn() {
@@ -7737,7 +7816,7 @@ function openExceptionModal(exc = null) {
   }
 
   modal.dataset.editingId = exc ? exc.id : '';
-  modal.classList.remove('hidden');
+  openModal(modal);
 }
 
 function addExceptionOptionRow(container, name = '', value = '') {
@@ -8275,7 +8354,7 @@ function openBackupCollisionModal(message) {
   const msgEl = document.getElementById('backupCollisionMessage');
   if (!modal || !msgEl) return;
   msgEl.textContent = message;
-  modal.classList.remove('hidden');
+  openModal(modal);
 }
 
 function closeBackupCollisionModal() {
@@ -8328,7 +8407,7 @@ async function openBackupRestoreModal() {
   const modal = document.getElementById('backupRestoreModal');
   if (!modal) return;
   backupRestoreState = { hostname: '', selectedFilePath: null, selectedEnvelope: null, showAllHosts: false };
-  modal.classList.remove('hidden');
+  openModal(modal);
   document.getElementById('backupRestoreList').classList.remove('hidden');
   document.getElementById('backupRestorePreview').classList.add('hidden');
   await refreshBackupRestoreList();
@@ -8530,7 +8609,7 @@ function openBackupRelaunchModal(result) {
         lines.map((n) => `<li>${escapeHtml(n)}</li>`).join('') + '</ul>';
     }
   }
-  modal.classList.remove('hidden');
+  openModal(modal);
 }
 
 function closeBackupRelaunchModal() {
@@ -8826,7 +8905,7 @@ async function handleBackupRelaunchNow() {
 
   function openFtpSourceModal(source) {
     _setFormFromSource(source);
-    modal.classList.remove('hidden');
+    openModal(modal);
     nameEl.focus();
   }
 
@@ -9124,7 +9203,7 @@ async function handleBackupRelaunchNow() {
     }
     errEl.classList.add('hidden');
     errEl.textContent = '';
-    document.getElementById('paperSizeModal').classList.remove('hidden');
+    openModal(document.getElementById('paperSizeModal'));
     nameEl.focus();
   }
 
@@ -9313,7 +9392,7 @@ async function handleBackupRelaunchNow() {
     document.getElementById('itPreviewCaption').textContent = '';
     document.getElementById('itPreviewError').classList.add('hidden');
 
-    document.getElementById('impositionTemplateModal').classList.remove('hidden');
+    openModal(document.getElementById('impositionTemplateModal'));
     document.getElementById('itName').focus();
     requestPreview();
   }

@@ -2405,6 +2405,14 @@
     </div>
   </div>
 
+  <!-- Shared modal-dismiss predicates. Loaded before renderer.js so
+       window.OhdModalDismiss is available inside wirePmModalDismiss()
+       and openModal(). Also exercised directly by node --test via
+       src/renderer/__tests__/modal-dismiss.test.js — the renderer is
+       otherwise outside the test globs, and the backdrop-dismiss bug
+       this file fixes survived shipping because no automated check
+       ran the click sequence a scrollbar drag produces. -->
+  <script src="modal-dismiss.js"></script>
   <script src="renderer.js"></script>
 
   <!--
