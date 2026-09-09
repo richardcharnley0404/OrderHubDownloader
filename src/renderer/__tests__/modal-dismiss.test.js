@@ -464,11 +464,43 @@ test('openModal enforcement: every .pm-modal-overlay id in index.html is reveale
     `overlay was added without an openModal reveal, or an openModal call was ` +
     `deleted, or a new overlay was opened with a bare classList.remove('hidden')`);
 
-  // Invariant B — per-id capture-form scan.
+  // Invariant B — per-id, receiver-pinned scan.
+  //
   // For each overlay id, walk each of its `getElementById('<id>')`
-  // occurrences to the end of the enclosing block (brace-counted) and
-  // check that `openModal(` appears strictly before the first
-  // `.classList.remove('hidden')` (if any).
+  // occurrences and check for a bare `.classList.remove('hidden')`
+  // applied specifically to THE OVERLAY, in two shapes:
+  //
+  //   a) Chained form:
+  //        document.getElementById('<id>').classList.remove('hidden')
+  //   b) Captured-variable form:
+  //        const|let|var NAME = document.getElementById('<id>');
+  //        ... NAME.classList.remove('hidden');
+  //      The variable name is captured from the declaration in the
+  //      surrounding source (`preWindow` looks 200 chars back and
+  //      forward from the getElementById position), so a maintainer
+  //      calling it `overlay`, `dialog`, `theModal` etc. is covered —
+  //      not hardcoded to `modal`.
+  //
+  // Any `.classList.remove('hidden')` applied to any OTHER receiver
+  // (an inner element like `backupRestoreList`, an error label, a
+  // preview panel) is ignored. A concrete precedent for the false-
+  // positive this pins away is openBackupRestoreModal at
+  // renderer.js:8421 — it legitimately calls
+  //     openModal(modal);
+  //     document.getElementById('backupRestoreList').classList.remove('hidden');
+  // and the pre-fix invariant B flagged that as a violation only
+  // because openModal happened to appear one line earlier. Swap the
+  // two lines and the pre-fix test reports a violation that doesn't
+  // exist.
+  //
+  // The "openModal must appear before .classList.remove" ordering
+  // rule is dropped — pinning the receiver subsumes it. If a bare
+  // remove appears on the overlay variable anywhere in the enclosing
+  // block, that's a violation regardless of position. A harmless
+  // `openModal(modal); modal.classList.remove('hidden');` leftover
+  // ALSO trips this (the second remove is redundant since openModal
+  // already removed `hidden` — worth flagging as a cleanliness
+  // failure, not just tolerated because it works by accident).
   const violations = [];
   for (const id of overlayIds) {
     const escId = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -478,14 +510,48 @@ test('openModal enforcement: every .pm-modal-overlay id in index.html is reveale
       const start = mg.index;
       const end   = _findEnclosingBlockEnd(rendererSrc, start);
       const body  = rendererSrc.slice(start, end);
-      const openIdx   = body.search(/\bopenModal\s*\(/);
-      const removeIdx = body.search(/\.classList\.remove\(\s*['"]hidden['"]\s*\)/);
-      if (removeIdx !== -1 && (openIdx === -1 || removeIdx < openIdx)) {
+
+      // (a) Chained-form direct-remove on the getElementById expression.
+      const chainedRemoveRe = new RegExp(
+        `getElementById\\(\\s*['"]${escId}['"]\\s*\\)\\s*\\.classList\\.remove\\(\\s*['"]hidden['"]\\s*\\)`,
+      );
+      if (chainedRemoveRe.test(body)) {
         violations.push(
-          `${id}: getElementById('${id}') at renderer.js offset ${start} — enclosing ` +
-          `block contains .classList.remove('hidden') without a preceding openModal(...). ` +
-          `Use openModal(modal) instead of modal.classList.remove('hidden') for the reveal.`,
+          `${id}: chained-form direct reveal — ` +
+          `getElementById('${id}').classList.remove('hidden'). ` +
+          `Use openModal(document.getElementById('${id}')) instead.`,
         );
+        continue;
+      }
+
+      // (b) Captured-variable form. Find the assignment declaration
+      // around the getElementById position (looks 200 chars back so
+      // the `const|let|var NAME = document.getElementById('<id>')`
+      // shape is discoverable even when the declaration spans several
+      // tokens). The captured NAME is then the ONLY variable whose
+      // .classList.remove('hidden') counts against this id — a
+      // .classList.remove('hidden') on any other identifier in the
+      // enclosing block (an inner list, a warn label, a preview) is
+      // legitimate and ignored.
+      const preWindow = rendererSrc.slice(Math.max(0, start - 200), start + 200);
+      const assignRe = new RegExp(
+        `(?:const|let|var)\\s+(\\w+)\\s*=\\s*document\\.getElementById\\(\\s*['"]${escId}['"]\\s*\\)`,
+      );
+      const assignMatch = assignRe.exec(preWindow);
+      if (assignMatch) {
+        const varName = assignMatch[1];
+        const escVar  = varName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const varRemoveRe = new RegExp(
+          `\\b${escVar}\\.classList\\.remove\\(\\s*['"]hidden['"]\\s*\\)`,
+        );
+        if (varRemoveRe.test(body)) {
+          violations.push(
+            `${id}: captured-variable form direct reveal — ` +
+            `${varName}.classList.remove('hidden') where ${varName} was ` +
+            `assigned from getElementById('${id}'). ` +
+            `Use openModal(${varName}) instead.`,
+          );
+        }
       }
     }
   }
