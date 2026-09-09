@@ -1,3 +1,86 @@
+## v1.16.4 - 2026-09-09
+
+**READ THIS IF YOU INSTALLED 1.16.3.** 1.16.3 shipped the four new FTP
+settings (Keep files on the server, Delete old files retention sweep,
+Retention window days, Dry run) with the UI, the runtime, and the
+tests all in place — but the persistence layer in `config-service.js`
+was never updated to include them. Ticking any of the checkboxes in
+Settings reported "saved successfully" but the values were silently
+dropped: `getAll()` returned undefined for them, and the runtime read
+the fallback default (false for Copy mode). Result: 1.16.3 installs
+appear to accept the new settings and behave exactly like 1.16.2 —
+copy mode is off, the retention sweep has never run.
+
+**Fixed: the four 1.16.3 FTP settings now round-trip through Settings.**
+All four keys (`ftpKeepFilesOnServer`, `ftpRetentionSweepEnabled`,
+`ftpRetentionSweepDays`, `ftpRetentionSweepDryRun`) are added to
+`config-service.js`'s schema, `getAll()`, and `save()`. Booleans wrap
+through `Boolean(...)` so explicit `false` survives as `false` (not
+lost to a truthiness fallback). Days is validated as an integer ≥ 1
+with the default (7) restored on any non-parseable / out-of-range
+input — same shape as the existing `fileStabilityMinutes` handling.
+The `ftpLastSweepAt` internal-state marker also gets a schema entry
+so its persistence doesn't depend on electron-store's
+no-`additionalProperties: false` default.
+
+**Upgrade action.** Install 1.16.4 in place. On first launch, open
+Settings → FTP Server, tick the checkboxes you wanted on 1.16.3, and
+save. This time the values will persist. No config-file surgery
+needed if the settings were merely lost — 1.16.3 never wrote them
+to `config.json`, so 1.16.4 starts from a clean slate for those
+keys.
+
+**Interim workaround (hand-editing `config.json` on a 1.16.3 install
+that cannot upgrade immediately).** Adding
+`"ftpKeepFilesOnServer": true` (etc.) directly to
+`%APPDATA%\OrderHub Downloader\config.json` DOES work at runtime
+— electron-store's schema does not set `additionalProperties: false`,
+so the hand-added key persists on disk and `configService.get(...)`
+returns it. A subsequent in-app Settings save on 1.16.3 does NOT
+wipe the hand-added value (because 1.16.3's `save()` has no
+`.set('ftpKeepFilesOnServer', ...)` line, so it never touches the
+key on disk). Caveat: the Settings UI on 1.16.3 will keep showing
+the checkbox as unticked because `getAll()` doesn't return the
+value; the operator will see the runtime behave correctly (copy
+mode on) but the UI misrepresent the state. Preferred fix is the
+1.16.4 upgrade.
+
+**Also fixed: the class of defect.** The 1.16.3 gap survived
+shipping because nothing tested that a Settings value survives a
+save-then-reload — the existing tests passed `options.keepFilesOnServer`
+straight into `_downloadDirectory`, which works but bypasses
+`config-service.save()` entirely. Two new tests in
+`src/main/services/__tests__/config-service-settings-round-trip.test.js`:
+
+- **Round-trip.** Each of the four FTP keys is round-tripped through
+  `save()` and `getAll()`. Explicit coverage that `false` survives as
+  `false` and that garbage `ftpRetentionSweepDays` (NaN, negative,
+  zero, string, object, null) restores the default (7) rather than
+  persisting an invalid value.
+- **Source-scan tripwire.** Reads `index.html`, extracts every
+  `name="…"` input inside `#settingsForm`, and asserts each name
+  appears in BOTH `save()` (as `this.store.set('<name>', …)`) AND
+  `getAll()` (as `<name>: this.store.get('<name>')`) in
+  `config-service.js`. Field list is derived from the HTML so a
+  new settings input added in a future release is covered
+  automatically without editing the test. A curated
+  `NON_PERSISTED` list carries the six known UI-checkbox-to-
+  storage-mapping fields (`aiQualityHoldAutoPrint` → `aiQualityMode`
+  enum; five `pc*` checkboxes → nested `perfectlyClear` object) with
+  a one-line justification each so future maintainers don't add
+  exceptions carelessly.
+
+Audit of every config-level setting added since 1.16.0: the four
+1.16.3 FTP keys are the only additions to `config.json`. The
+per-controller settings added over the same period (`omitJobId`,
+`fujiImageRoot`) live in `routing.json`, where `saveController()`
+spreads the whole controller object into `orderControllers[]`
+rather than using a per-key list — so the "forgot to add to the
+enumerated save list" gap doesn't exist there. Read-side
+projections into route shapes are locked by the existing per-type
+parity tests (`routing-folder-copy-fields.test.js`,
+`routing-override-fujijobmaker.test.js`).
+
 ## v1.16.3 - 2026-09-09
 
 **READ THIS SECTION BEFORE UPGRADING IF YOU RUN OHD AT MULTIPLE

@@ -214,6 +214,41 @@ const schema = {
     type: 'string',
     default: '/'
   },
+  // Multi-location FTP settings (added 1.16.3; schema/save/get wiring
+  // repaired 1.16.4 — the initial commit added the renderer inputs and
+  // the runtime readers but not the persistence layer, so the four keys
+  // never round-tripped through Settings). Every one of these must
+  // stay listed in the schema, in `getAll()` around :868, AND in the
+  // save-time write list around :1039. The source-scan tripwire in
+  // src/renderer/__tests__/settings-round-trip.test.js locks the
+  // invariant by deriving the field list from index.html.
+  ftpKeepFilesOnServer: {
+    type: 'boolean',
+    default: false
+  },
+  ftpRetentionSweepEnabled: {
+    type: 'boolean',
+    default: false
+  },
+  ftpRetentionSweepDays: {
+    type: 'number',
+    default: 7,
+    minimum: 1
+  },
+  ftpRetentionSweepDryRun: {
+    type: 'boolean',
+    default: false
+  },
+  // Internal state — persisted 24h throttle marker for the retention
+  // sweep, written by polling-service and ipc-handlers on successful
+  // sweep completion, read on the next scan. Not user-editable and
+  // not surfaced in getAll(); declared in schema so it's discoverable
+  // and doesn't rely on electron-store's no-additionalProperties-false
+  // default forever.
+  ftpLastSweepAt: {
+    type: 'string',
+    default: ''
+  },
   downloadDirectory: {
     type: 'string',
     default: ''
@@ -866,6 +901,11 @@ class ConfigService {
       ftpUsername: this.store.get('ftpUsername'),
       ftpPassword: this.store.get('ftpPassword'),
       ftpRemotePath: this.store.get('ftpRemotePath'),
+      // Multi-location FTP settings (1.16.3, wiring repaired 1.16.4)
+      ftpKeepFilesOnServer: this.store.get('ftpKeepFilesOnServer'),
+      ftpRetentionSweepEnabled: this.store.get('ftpRetentionSweepEnabled'),
+      ftpRetentionSweepDays: this.store.get('ftpRetentionSweepDays'),
+      ftpRetentionSweepDryRun: this.store.get('ftpRetentionSweepDryRun'),
       downloadDirectory: this.store.get('downloadDirectory'),
       pollingEnabled: this.store.get('pollingEnabled'),
       launchOnStartup: this.store.get('launchOnStartup'),
@@ -1037,6 +1077,19 @@ class ConfigService {
     this.store.set('ftpUsername', (config.ftpUsername || '').trim());
     this.store.set('ftpPassword', config.ftpPassword || '');
     this.store.set('ftpRemotePath', (config.ftpRemotePath || '/').trim());
+    // Multi-location FTP settings (1.16.3, wiring repaired 1.16.4).
+    // Boolean(...) so `false` explicitly survives as false (not lost to
+    // a truthiness fallback). Days is clamped to integer ≥ 1 with the
+    // default (7) restored on any non-parseable / out-of-range input —
+    // same shape as fileStabilityMinutes / filmScansAutoSyncMinutes.
+    this.store.set('ftpKeepFilesOnServer', Boolean(config.ftpKeepFilesOnServer));
+    this.store.set('ftpRetentionSweepEnabled', Boolean(config.ftpRetentionSweepEnabled));
+    const sweepDaysParsed = parseInt(config.ftpRetentionSweepDays, 10);
+    this.store.set(
+      'ftpRetentionSweepDays',
+      Number.isFinite(sweepDaysParsed) && sweepDaysParsed >= 1 ? sweepDaysParsed : 7,
+    );
+    this.store.set('ftpRetentionSweepDryRun', Boolean(config.ftpRetentionSweepDryRun));
     this.store.set('downloadDirectory', (config.downloadDirectory || '').trim());
     this.store.set('pollingEnabled', Boolean(config.pollingEnabled));
     this.store.set('launchOnStartup', Boolean(config.launchOnStartup));
