@@ -441,6 +441,56 @@ local test data is all Pixfizz. Needs a manual-source job to confirm.
 
 ## Decisions parked
 
+**FTP retention sweep — DELIBERATELY NOT BUILT.** Copy mode
+(`ftpKeepFilesOnServer`, shipped alongside the multi-location
+FTP fix) leaves files on the server for every location to
+fetch. The natural follow-up question is whether OHD should
+run its own retention sweep to remove files older than N days
+so the FTP folder doesn't grow forever.
+
+**Decision, recorded so it is not revisited from scratch: no,
+OHD does NOT run a retention sweep on the FTP order-download
+path.** Reasoning:
+
+- Pixfizz Core already removes files from the FTP on its own
+  schedule. OHD's cleanup would be a second delete authority
+  on the same tree, and the whole reason copy mode exists is
+  that a bug in OHD's delete-everything-after-download logic
+  broke multi-location labs. Running a delete timer over a
+  lab's assets is the same class of risk as the bug we just
+  fixed — a mis-configured retention window, a bug in the
+  age computation, a stale mtime that fires the sweep on a
+  file the operator still needs, and a lab loses artwork.
+- Every additional "must exceed the longest offline window;
+  a site down longer permanently misses" caveat we would need
+  to put on the UI is a knob we would rather not offer at
+  all. The failure mode (a location down for 8 days when the
+  window is 7 permanently loses those orders, silently) is
+  not something an operator setting a number in Settings can
+  reason about correctly.
+- The dedup path is what actually keeps download volumes
+  bounded per-location. Copy mode doesn't cause re-downloads
+  — `_downloadDirectory` skips any local file whose size
+  matches the FTP listing (plus the magic-byte integrity
+  check for images), so a location that has already fetched
+  the order fetches it exactly once regardless of how long
+  the file stays on the server.
+
+**If Pixfizz Core's retention changes** — becomes unreliable,
+window becomes materially longer, or Core stops running
+cleanup altogether — revisit. Any future sweep design must
+never delete a file OHD did not itself successfully download
+(protects against the "OHD as second delete authority"
+failure mode), and the UI must make the offline-window
+caveat plain. Until then, this stays off.
+
+Same-class discipline as the 1.15.0 lesson from PIC Pro's
+save-time volume check (recorded in CLAUDE.md's Landmines
+section under the `dedupeAgainstDisk` entry): a save-time
+block on a state that dispatch handles correctly is worse
+than no block. Here: a scheduled delete on a state that
+upstream handles correctly is worse than no delete.
+
 **Tmp-in-watched-folder writers: audit and move out of the watched directory.**
 Two writers still create a tmp artefact inside a folder a third-party product
 watches. Both share the shape of the M7b DIGIN bug — the DIGIN case is confirmed
