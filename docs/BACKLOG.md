@@ -441,55 +441,128 @@ local test data is all Pixfizz. Needs a manual-source job to confirm.
 
 ## Decisions parked
 
-**FTP retention sweep — DELIBERATELY NOT BUILT.** Copy mode
-(`ftpKeepFilesOnServer`, shipped alongside the multi-location
-FTP fix) leaves files on the server for every location to
-fetch. The natural follow-up question is whether OHD should
-run its own retention sweep to remove files older than N days
-so the FTP folder doesn't grow forever.
+**FTP retention sweep — deliberately built.** Ships alongside
+copy mode (`ftpKeepFilesOnServer`). The earlier version of
+this entry (commit `403f146`) recorded a decision NOT to build
+this sweep, resting on the assumption that Pixfizz Core's own
+FTP cleanup was reliable enough to depend on. Richard has
+reversed that decision: Core's cleanup runs on roughly a
+10-day cadence per his own report, unverified by us and
+outside OHD's control. Depending on another system's cleanup
+behaviour for a lab's FTP retention is not something OHD
+should do; the prior wording is superseded.
 
-**Decision, recorded so it is not revisited from scratch: no,
-OHD does NOT run a retention sweep on the FTP order-download
-path.** Reasoning:
+**Design as shipped:**
 
-- Pixfizz Core already removes files from the FTP on its own
-  schedule. OHD's cleanup would be a second delete authority
-  on the same tree, and the whole reason copy mode exists is
-  that a bug in OHD's delete-everything-after-download logic
-  broke multi-location labs. Running a delete timer over a
-  lab's assets is the same class of risk as the bug we just
-  fixed — a mis-configured retention window, a bug in the
-  age computation, a stale mtime that fires the sweep on a
-  file the operator still needs, and a lab loses artwork.
-- Every additional "must exceed the longest offline window;
-  a site down longer permanently misses" caveat we would need
-  to put on the UI is a knob we would rather not offer at
-  all. The failure mode (a location down for 8 days when the
-  window is 7 permanently loses those orders, silently) is
-  not something an operator setting a number in Settings can
-  reason about correctly.
-- The dedup path is what actually keeps download volumes
-  bounded per-location. Copy mode doesn't cause re-downloads
-  — `_downloadDirectory` skips any local file whose size
-  matches the FTP listing (plus the magic-byte integrity
-  check for images), so a location that has already fetched
-  the order fetches it exactly once regardless of how long
-  the file stays on the server.
+- Off by default per install (`ftpRetentionSweepEnabled:
+  false`). Only ONE location per install should enable it —
+  multiple locations running the sweep is harmless but
+  pointless.
+- 7-day default window (`ftpRetentionSweepDays: 7`). Richard's
+  rationale: a lab is typically closed for two or three days,
+  OHD runs continuously, 7 gives comfortable headroom while
+  still bounding the folder's growth. It is a default, not a
+  limit — a lab needing longer raises it.
+- Dry-run toggle (`ftpRetentionSweepDryRun`, default false).
+  The safety guards below already bound the damage, so
+  defaulting dry-run to TRUE would mean an operator enables
+  "Delete old files from the server", nothing gets deleted,
+  the folder keeps growing, and nothing tells them why. Dry-run
+  stays available as an opt-in preview ("tick this first if
+  you want to check what would be deleted"), not as a default
+  state that silently neuters the control next to it.
+- Once-per-24h throttle. A full recursive FTP listing on every
+  polling cycle would be roughly 2,880 tree walks per day at
+  a 30-second poll, multiplied by every location — over eleven
+  thousand listings a day against a shared server for a
+  threshold measured in days. Persisted via
+  `ftpLastSweepAt` in config so the throttle survives an OHD
+  restart; a second scan within the window performs no
+  listing and no deletes (locked by test).
+- Runs at the end of `scanAndDownload`, reusing the same FTP
+  session. Both callers thread the four config fields:
+  `polling-service.scanFtp` (scheduled) and
+  `ipc-handlers.js` `ftp:scanAndDownload` (manual). Manual
+  and scheduled scans behave identically.
 
-**If Pixfizz Core's retention changes** — becomes unreliable,
-window becomes materially longer, or Core stops running
-cleanup altogether — revisit. Any future sweep design must
-never delete a file OHD did not itself successfully download
-(protects against the "OHD as second delete authority"
-failure mode), and the UI must make the offline-window
-caveat plain. Until then, this stays off.
+**Safety guards (spec §"SAFETY REQUIREMENTS"):**
 
-Same-class discipline as the 1.15.0 lesson from PIC Pro's
-save-time volume check (recorded in CLAUDE.md's Landmines
-section under the `dedupeAgainstDisk` entry): a save-time
-block on a state that dispatch handles correctly is worse
-than no block. Here: a scheduled delete on a state that
-upstream handles correctly is worse than no delete.
+1. **Refuses at "/" or empty remote path.** Sweeping the FTP
+   root could delete files belonging to Pixfizz Core or to
+   other systems entirely unrelated to OHD. The refusal is
+   logged at WARN every polling cycle until fixed and does
+   NOT stamp `ftpLastSweepAt`, so the operator keeps seeing
+   the log line every scan (throttle only applies to
+   sweeps that actually ran). The refusal string is locked
+   verbatim by test — see the "refuses at remotePath '/'"
+   assertion in
+   `src/main/services/__tests__/ftp-service-retention-sweep.test.js`.
+2. **Never traverses outside the configured path.** Item
+   names of `.`, `..`, empty string, or anything containing
+   `/` or `\` are skipped with a WARN log — no path
+   construction can produce a target above `remotePath`.
+3. **Age from remote mtime**, not from when OHD downloaded.
+   Reads `item.modifiedAt` (basic-ftp on MLSD-capable
+   servers), falls back to `item.date` (LIST-only servers).
+   Files with neither are skipped. A file no location has
+   fetched still ages out; a file recently touched on the
+   server is preserved.
+4. **Never deletes a file OHD hasn't itself successfully
+   downloaded and verified locally.** Per-file guard: local
+   path (via the same `_sanitiseWindowsBasename` the download
+   loop uses) must exist AND `fs.statSync().size` must match
+   the FTP listing's size. Missing local, mismatched size,
+   stat failure — all skip. This does NOT protect other
+   locations (they might not have downloaded it) — see the
+   known hazard below.
+5. **Off by default.**
+6. **Every deletion logged** at INFO with path, parsed mtime
+   (ISO string), and computed age in days. This is the audit
+   trail for when a lab asks where a file went.
+7. **Dry-run** available (see above).
+
+**Known hazard, in both UI help text and this entry:** a
+location whose OHD is offline longer than the retention
+window will permanently miss those orders' assets — the
+sweep-enabling location will delete them from the shared FTP
+folder before the offline location comes back to pick them
+up. The failure mode is BENIGN in that it's visible (the job
+stalls at the offline location rather than printing something
+wrong) and no data is destroyed (every OTHER location holds
+its own local copy of the artwork). An operator changing the
+window must understand it has to exceed the longest outage
+any site could reasonably have.
+
+Guards #1 and #4 mean the worst a mis-set threshold can
+produce is this documented hazard — not local data loss on
+the OHD that runs the sweep, and not deletion of anything
+OHD hasn't verified is safely stored locally. That framing
+is why dry-run defaults to false: the damage is bounded to
+"other locations' window is now shorter than it needed to
+be", which is preferable to "nothing deletes, folder grows,
+no operator-visible signal".
+
+**Same-class discipline as the 1.15.0 lesson from PIC Pro's
+save-time volume check** (recorded in CLAUDE.md's Landmines
+section under the `dedupeAgainstDisk` entry): guard the
+dangerous state at the point where the damage happens
+(here: dispatch-time guards inside `_sweepOldFiles`), not
+by refusing configurations that would have been safe under
+the guards. The three UI knobs are unopinionated on their
+own; the safety comes from the runtime guards.
+
+**Follow-ups to revisit if the sweep is used at multiple
+labs:**
+
+- Sweep frequency: the 24h throttle is a fixed constant.
+  If a lab wants a different cadence (e.g. every 12h, or
+  weekly), that becomes another knob to add or a follow-up
+  design conversation.
+- Cross-location coordination: today the "only one location
+  should enable it" instruction is UI-only. If two labs
+  both enable it, the sweep runs on both — harmless but
+  pointless. Making this mechanically-enforced (e.g. via
+  an OrderHub API check) is not in this milestone.
 
 **Tmp-in-watched-folder writers: audit and move out of the watched directory.**
 Two writers still create a tmp artefact inside a folder a third-party product
