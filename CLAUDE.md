@@ -350,6 +350,90 @@ with no visible change, check `git diff --ignore-cr-at-eol` before believing it.
   DO NOT delete that test as noise; the class of bug it prevents
   is Frontier silently not finding the artwork with no in-band
   error signal, and the Failure Timeout being the only surface.
+- **The `rotation` field on a frame record has THREE distinguishable
+  states, and state C must NOT collapse into state B or state A.**
+  State A (rotation ran, prediction OK): `rotation.skipped !== true`
+  AND `rotation.error === null`, full nine-field shape
+  (`applied`, `predictedClass`, `predictedAngle`, `confidence`,
+  `classScores`, `confidenceThreshold`, `modelVersion`,
+  `inferenceMs`, `error`). State B (rotation ran and failed):
+  `rotation.skipped !== true` AND `typeof rotation.error === 'string'`
+  non-empty. State C (rotation did NOT run — feature flag off, or
+  orientation service not ready, or the outer step threw):
+  `rotation.skipped === true` AND `rotation.reason` is
+  `'rotation-disabled'` or `'orientation-service-not-ready'`.
+
+  The load-bearing property is that state C carries NO `applied`,
+  NO `error`, NO `confidence` field, so the three guards in
+  `frame-metadata-store.listRollsWithSummary` (`if (rot.applied
+  === true)`, `if (rot.error)`, `if (typeof rot.confidence ===
+  'number' && rot.confidence < 0.75)`) ALL fall through cleanly
+  — state C is neither an auto-rotated frame nor an error nor
+  low-confidence. Anyone "simplifying" this by setting
+  `rotation.error = 'rotation disabled'` for the rotation-off
+  case would make every rotation-off frame count as a rotation
+  error, feeding `rotErrorCount` in `folder-watch-service.js`,
+  feeding the per-roll uploadStatus decision — rolls would
+  start deferring for review that should not. Same downstream
+  failure mode applies to setting a fake `confidence: 0` for
+  state C: every frame becomes low-conf, Smart mode triggers on
+  every rotation-off roll. Do NOT collapse the three states
+  into two "for uniform reader code"; the shape difference IS
+  the signal.
+
+  Locked by two tests in
+  `src/main/services/__tests__/folder-watch-film-recording.test.js`:
+  `three states are pairwise distinguishable via a single
+  predicate over rotation shape` (proves the classify predicate
+  yields A / B / C for the three input configurations) and
+  `three-state predicate: existing frame-metadata-store summary
+  counters treat state C as neither error nor low-conf` (proves
+  the load-bearing counter-guard invariant against the real
+  summariser). Do NOT delete either as noise — the counter-guard
+  test in particular is what catches the "collapse C into B"
+  refactor before it silently defers every rotation-off roll for
+  review.
+- **`_writeCompletedRollRecord` / `_buildCompletedRollRecord` in
+  `folder-watch-service.js` is the ONLY roll-completion writer.**
+  Two previous writers existed — the "real" one inline at the
+  end of the rotation-on block (~lines 700-750 pre-1.16.3) and
+  a minimal duplicate in the rotation-off + auto-assign branch
+  of Step 3 (~lines 875-908 pre-1.16.3) — and they drifted. The
+  minimal one lacked fields the main one carried, relied on
+  downstream tolerance to survive, and its "no roll record at
+  all when rotation is off and auto-assign is off" gap was what
+  kept rotation-off rolls invisible to Film Review before the
+  1.16.3 rotation-decoupling change. Both are gone; the helper
+  is the ONLY completion writer.
+
+  Do NOT add an inline `recordRoll(rollId, {…})` call at a new
+  site "for clarity" or because "this case is special" — call
+  the helper. If you need to change the shape (add a new field
+  to the roll record, alter the auto-assign gate fields), change
+  it in the helper. Same class of tripwire as `buildDestFolder`
+  (folder-copy) and `deriveTrim` (imposition-compose): a
+  duplicated implementation drifts and one of the copies wins
+  in production while the other wins in the preview or on the
+  rotation-off path or wherever, and the disagreement is silent
+  until an operator hits a config that exercises both. In this
+  case the concrete pre-1.16.3 divergence was that
+  auto-assign-on rotation-off rolls had a `reviewPassed=true`
+  stamp regardless of reviewMode — the minimal writer set it
+  unconditionally where the real writer would have derived it
+  from the review-hold decision — so `filmScanReviewMode='always'`
+  was silently ignored for that configuration.
+
+  Locked by two tests in
+  `src/main/services/__tests__/folder-watch-film-recording.test.js`:
+  `rotation-off + auto-assign: EXACTLY ONE roll record with the
+  auto-assign gate fields (no duplicate writers)` (proves only
+  one recordRoll call reaches the store for that config) and
+  `rotation-off + auto-assign roll record shape agrees with
+  rotation-on + auto-assign on the gate fields` (proves the
+  two entry points produce shape-equivalent records). Also
+  locked implicitly by every rotation-off record-shape test in
+  the same file — a second writer would produce different
+  shapes for the same input.
 
 ## Misnamed / dead code — don't be misled
 

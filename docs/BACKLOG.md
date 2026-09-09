@@ -5,6 +5,90 @@ these. Order is roughly "most likely to need attention first".
 
 ---
 
+## REQUIRED for the 1.16.3 operator release notes
+
+The rotation-decoupling change (2026-... 1.16.3) makes
+`filmScanReviewMode` honoured for rotation-off labs for the
+FIRST time. Two lab-visible behaviour changes flow from that
+and both need TOP-BILLING in the 1.16.3 operator release notes
+— NOT a bullet buried under the thumbnail / Film Review
+changes. A lab in either configuration will see their pipeline
+silently stop producing S3 uploads on upgrade until they change
+the setting or approve each roll manually. That is the shape
+of issue that generates a support call within a business day
+of rolling out, and the release notes are the single lever we
+have to prevent it.
+
+**Change 1 — reviewMode='always' (Manual) with rotation off.**
+
+- BEFORE (up to 1.16.2): the setting was silently ignored for
+  rotation-off installs. There was no Film Review panel presence
+  at all for those rolls, and Step 3 ran the inline S3 upload
+  (Site A) unconditionally. Rolls uploaded automatically.
+- AFTER (1.16.3): the setting is honoured. The roll lands at
+  `uploadStatus='pending'` and holds in the Film Review panel
+  until an operator uses "Approve & Upload". No automatic
+  upload happens.
+- Operator-visible symptom on upgrade: film scans stop flowing
+  to S3 without warning. The Film Review panel fills up with
+  pending rolls.
+- Recovery: either flip the setting from Manual to Auto in Film
+  Scans settings (restores pre-1.16.3 behaviour), or start
+  approving rolls in the panel.
+
+**Change 2 — Auto Assignment on with reviewMode='always' and
+rotation off.**
+
+- BEFORE: the auto-assign matcher stamped `reviewPassed=true`
+  regardless of reviewMode (since no review surface existed for
+  rotation-off rolls), so as soon as a match was found the roll
+  uploaded via `_uploadRollFromStorage` (Site B).
+- AFTER: `reviewPassed` correctly reflects the review-hold
+  decision. `filmScanReviewMode='always'` sets
+  `reviewPassed=false`; the matcher stamps the match but does
+  NOT queue the upload (see `film-scan-auto-assign.js:196` —
+  the queue push is gated on `roll.reviewPassed === true`).
+  Operator approval is required before upload fires.
+- Operator-visible symptom on upgrade: rolls appear as
+  "Matched — awaiting review" in Film Review; they do not
+  auto-upload even when the matcher finds the right job.
+
+**Change 3 — Smart mode with rotation off AND Perfectly Clear
+off.** Same rotation-decoupling work, adjacent gap. Not a
+behaviour change against 1.16.2 (Smart didn't fire for
+rotation-off there either — no panel), but a configuration
+that reads confusingly in the new world:
+
+- Smart mode's contract is "hold on evidence of problems".
+- With rotation off, `lowConfCount` and `rotErrorCount` are
+  both 0 (no rotation loop produces signals).
+- With Perfectly Clear off, `pcRejectedCount` is 0.
+- Net: nothing to defer on → Smart behaves identically to Auto
+  (never mode). No holds.
+- Symptom: a lab that thinks "I've enabled review, so my rolls
+  will be held for check" sees them auto-upload. The
+  `smart-check` log line spells this out
+  (`... (rotation off — no AI signals) → auto upload`) but
+  operators don't read logs.
+- Recovery for a lab that wanted rolls held: switch reviewMode
+  to Manual (Always). Smart requires at least one of the
+  signal sources — AI rotation OR Perfectly Clear — to have
+  anything to reason about.
+
+**What to write in the release notes.** Lead with Changes 1
+and 2 before any other Film Review content, in the operator's
+own language ("Manual review mode", "Auto Assignment", not
+`filmScanReviewMode`). Tell labs to either flip the mode back
+to Auto if they didn't intend the change, or budget operator
+time for the review step. Include the config path — Film
+Scans settings → Review Mode — so an operator can locate the
+setting without searching. Change 3 belongs as a follow-up
+note under Smart mode ("Smart needs at least one signal
+source to hold anything") so a lab in that config doesn't
+mistake silence for a bug.
+
+---
+
 ## Waiting on someone else
 
 **Fuji PIC Pro lab test.** v1.8.0 ships PIC Pro support that has never run against real
@@ -596,17 +680,78 @@ roll. The "keep thumbs out of `storagePath`" decision predates this
 use case and will need revisiting when the S3 push is built (either
 upload thumbs from `userData/thumbnails/{rollId}/` directly, or stage
 them into `{storagePath}/thumbnails/` at generation time and let the
-existing folder-uploader carry them). Two additional decisions the
-S3 push work will need to make: (a) the naming convention — thumbnail
-filenames today are `{rollId}_{frameIndex}.jpg`, which does NOT encode
-the source image filename, so OrderHub can't map thumb → source from
-the S3 key alone; either rename on upload to include the source stem,
-publish a mapping manifest alongside, or place thumbs at an S3 key
-mirroring the source; (b) frame/roll records are currently coupled to
-the AI rotation pass and are NOT written on rotation-off installs, so
-uploading thumbs alone won't give OrderHub any per-frame context —
-either record frame/roll for the rotation-off case too, or accept that
-rotation-off deployments push thumbs without accompanying metadata.
+existing folder-uploader carry them).
+
+**Open naming decision — required before the S3 push ships.**
+Thumbnail filenames today are `{rollId}_{frameIndex}.jpg`, which
+does NOT encode the source image filename. `frameIndex` is the
+position in a `readdirSync + sort` over the storage folder — stable
+within a given roll but meaningless outside it. OrderHub cannot map
+a thumbnail S3 key back to its source image from the key alone. The
+source filename is stored only on the frame record
+(`fileName: imageFile`). Three options for the S3 push, none
+picked yet: (a) rename on upload to `${originalStem}.thumb.jpg`
+so the S3 key mirrors the source; (b) publish a `frameIndex →
+filename` manifest alongside the thumbs; (c) place the thumb at
+an S3 key that mirrors the source key exactly (e.g.
+`.../thumbs/{originalFilename}.jpg` next to the original). Pick
+one BEFORE the S3 push ships — retrofitting a naming scheme
+after OrderHub is already consuming a live convention becomes a
+migration.
+
+**Metadata is no longer a gap.** The rotation-decoupling change
+(2026-... 1.16.3) made frame + roll records unconditional, so
+rotation-off installs now carry the same per-frame context
+(`fileName`, `rotation.skipped`, `rotation.reason`, etc.) as
+rotation-on installs. The S3 push work can rely on per-frame
+metadata being present regardless of the rotation flag. Prior
+version of this entry noted this as an open concern; superseded.
+
+**Perfectly Clear auto-apply is still gated on AI rotation having
+actually run.** In `folder-watch-service.js` the PC block sits
+under `if (rotationRan) { … }`, so PC's own feature flag
+(`config.perfectlyClear.filmScans.enabled` +
+`autoApplyConfigId`) does NOT fire when
+`filmScanRotationEnabled === false` or when the orientation
+service failed to init. Pre-decoupling this was
+`if (config.filmScanRotationEnabled)`; the rotation-decoupling
+change moved it to the runtime `rotationRan` flag — same effect,
+but this is now the ONE remaining rotation gate in the film-scans
+path (frame recording, roll recording, provisional pill,
+Step 3 upload status updates all lost their rotation gates).
+
+The gap: a lab that has Perfectly Clear enabled for film scans
+but AI rotation off gets no enhancement at all. This is the
+same shape of gap as the frame/roll recording one the
+rotation-decoupling change closed. Leaving it as a code comment
+(`// Still gated on rotation having run — decoupling PC from
+rotation is a separate concern outside this change's scope`)
+keeps it invisible until someone hits it.
+
+Decoupling scope, when this is picked up:
+- Hoist the PC block out of `if (rotationRan)` in
+  `folder-watch-service.js`. Keep its own `pcCfg` gate — a
+  PC-off install must be unaffected.
+- Audit that the per-frame PC update path
+  (`frameMetadataStore.update(frameId, { pcEnhanced, … })`)
+  works when the frame's `rotation` is state C
+  (`{ skipped: true, reason: … }`). Should be fine because PC
+  only reads/writes its own `pcEnhanced` / `pcRejected` fields,
+  but worth locking with a test.
+- Confirm `pcRejectedCount` continues to feed Smart Check's
+  rotation-off signal path — today it already does (the smart
+  triggered check reads `pcRejectedCount` regardless of
+  rotation state), which naturally becomes the correct answer
+  once PC runs there.
+- Consider whether the "Enhancing…" processingStatus pill in
+  the Film Review panel needs a rotation-off variant (today
+  it appears for rotation-on rolls only, but that's because
+  rotation-off rolls didn't reach PC).
+
+No lab has reported this because rotation-off + PC-on has been
+a rare configuration to date; revisit if one turns up or when
+the rotation-off Film Review path picks up more users after
+1.16.3.
 
 ---
 
