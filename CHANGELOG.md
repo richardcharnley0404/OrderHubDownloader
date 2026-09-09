@@ -1,5 +1,13 @@
 ## Unreleased
 
+**READ THIS SECTION BEFORE UPGRADING IF YOU RUN OHD AT MULTIPLE
+LOCATIONS**, or if you had a Default Folder configured under
+Settings → Downloads. Two of the entries below (FTP Copy mode
+and the Default Folder removal) change what a lab that hasn't
+opted into new settings will see. Neither is destructive — jobs
+surface visibly in the grid rather than going missing — but
+both need a look at Settings on the first launch after upgrade.
+
 **Field-confirmed: 1.15.3's two cross-volume PIC Pro safety
 hypotheses.** The lab whose 1.15.2 stall triggered the cross-volume
 investigation upgraded to 1.15.3 and successfully dispatched a
@@ -28,6 +36,132 @@ The 1.15.3 CHANGELOG entry itself is unchanged — it correctly
 recorded what was known at the time and stays as it is. The
 "hypotheses confirmed" note lives here, in the next release's
 entry, per the "do NOT retro-edit released notes" discipline.
+
+**Added: FTP Copy mode — leave order artwork on the server for other
+locations to fetch.** Multi-location labs that share one FTP folder
+now have a supported way to keep every location's orders reachable.
+Before this change OHD deleted each downloaded file from the FTP
+server (a "move" semantics), so whichever location polled first took
+the files and no other location could ever download that order. New
+checkbox under **Settings → FTP Server**: **Keep files on the server
+after downloading**. When on, no per-file delete after download, no
+delete on the skip path, no removal of empty parent folders. Files
+you already have locally are still skipped by size + magic-byte
+check, so leaving Copy mode on does not cause repeat downloads.
+
+**Off by default.** A single-location lab upgrading sees no change —
+the delete-after-download behaviour is preserved. Turn Copy mode on
+only if you run OHD at more than one location that shares the same
+FTP folder.
+
+**Optional companion: FTP retention sweep.** The natural follow-up
+to Copy mode is "if OHD stops deleting, what removes old files from
+the FTP folder?" Second checkbox in the same section, also off by
+default: **Delete old files from the server (retention sweep)**.
+When on, OHD deletes files older than a configurable window (default
+**7 days** — a lab is typically closed for two or three days, OHD
+runs continuously, so a week gives comfortable headroom while still
+bounding growth). Related fields: **Retention window (days)** (default
+7, minimum 1) and **Dry run — log what would be deleted, but don't
+delete** (default off; tick it first if you want to see what would
+be removed in the Activity Log before turning it off).
+
+**Only enable the sweep at ONE location per install.** Multiple
+locations running it is harmless but pointless. The location most
+likely to be online every day is the one to enable it on. The sweep
+refuses to run if **Remote Path** is `/` (root) — sweeping the FTP
+root could delete files belonging to Pixfizz Core or other systems;
+set Remote Path to a specific folder (e.g. `/orders`) to enable the
+sweep, and Settings shows an advisory alert on save if you enable
+the sweep with Remote Path still on root.
+
+Safety guards you can rely on: OHD only deletes a file it has itself
+successfully downloaded (size-match against the local copy is checked
+per file); the sweep will not touch anything outside the configured
+Remote Path; and it runs at most once every 24 hours per install even
+if the polling cycle is faster, so a saturated poll timer cannot turn
+into thousands of listing walks per day. Every deletion is logged with
+the file path, its mtime, and its age.
+
+**Known limitation, must be understood before turning the sweep on:**
+a location whose OHD is offline longer than the retention window will
+permanently miss those orders' artwork — the sweep-enabling location
+will delete them from the shared FTP folder before the offline
+location comes back. The failure is visible (the offline location's
+job stalls rather than printing something wrong) and no local data is
+destroyed (every other location holds its own local copy), but the
+retention window must exceed the longest outage any site could
+reasonably have. Raise it above 7 days if that number is longer at
+your labs.
+
+**Removed: the global "Default Folder" under Settings → Downloads.**
+The old "Process Folders" section (a single "Default Folder" input)
+is gone. The fallback it powered — jobs whose process type had no
+controller mapping being copied to that folder and marked Completed —
+was actively hiding a defect: when a controller in Routing was
+deleted (or the mapping was left pointing at an id that no longer
+existed), the same fallback fired, so those jobs went green in the
+grid without any printer ever printing anything. Files piled up in
+the Default Folder with nothing attributing them to the routing
+failure.
+
+**What labs on the upgrade will see in the Jobs grid.** Jobs whose
+process type has no controller mapping — or whose mapping points at
+a controller you have deleted — now surface with the text
+**"No routing — assign a controller for this process in Settings →
+Routing"** in place of the Process button. There is no Process
+button to click for these jobs; the text is the whole affordance,
+and the operator's next step is to go to Settings → Routing and
+assign a controller for that process type. Auto-print skips these
+jobs silently (they never dispatch); nothing is copied anywhere,
+nothing is marked Completed, and no local files are destroyed.
+
+Also updated: the note under Settings → Routing above the process
+list. It previously read "Processes not listed here will be copied
+to the default folder", which after the removal was factually wrong
+in a way that told operators unmapped process types were being
+handled when nothing was. Rewritten to match the Jobs-grid
+behaviour above.
+
+**What to do on upgrade.** If your lab had a Default Folder
+configured, go to Settings → Routing on first launch and confirm
+every process type your lab receives has a controller mapping. Any
+jobs that show "No routing …" in the grid after upgrade need a
+controller assigned for that process type. If you were relying on
+the Default Folder as a real destination (a printer that watched
+it), assign that folder as a Folder Copy controller in Routing and
+map the relevant process type to it — the routing pipeline handles
+it the same way, and the grid surfaces failures instead of hiding
+them. A per-process folder exception (Layer 1 in Routing) is a
+separate feature and is unaffected.
+
+**Fixed: configuration modals no longer close mid-edit and discard
+what you've typed.** Labs setting up an Order Controller or an
+Imposition Template were reporting that the modal "just closes" on
+its own, wiping everything they had entered. Two everyday actions
+were triggering it — dragging the modal's own scrollbar (release
+lands a few pixels off the panel), and drag-selecting text in a
+field to retype it and overshooting the panel edge. Both of those
+now do nothing to the modal.
+
+**What changed for operators.**
+
+- **A genuine backdrop click** (click and release cleanly on the
+  darkened area outside the modal) now asks first if you have unsaved
+  changes: **Discard unsaved changes in this form?** Answer No to
+  keep the modal open with your edits intact; Yes to close and lose
+  them. If the modal is clean (nothing edited), it closes silently
+  as before.
+- **The Escape key** now uses the same confirm — and closes only the
+  topmost modal, not every visible modal. Before, pressing Escape
+  with two modals open closed both.
+- **The Cancel button and the ×** are unchanged — they close
+  immediately without asking. Use those when you deliberately want
+  to abandon your changes.
+
+Applies to every configuration modal in the app, not just Order
+Controller and Imposition Template — the fix is at the shared
+dismissal layer, not per-modal.
 
 ---
 
