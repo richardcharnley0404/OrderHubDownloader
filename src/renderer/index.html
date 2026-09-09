@@ -273,6 +273,21 @@
                 <input type="text" id="ftpRemotePath" name="ftpRemotePath" placeholder="/the-root" value="/">
               </div>
 
+              <div class="form-group checkbox-group">
+                <label>
+                  <input type="checkbox" id="ftpKeepFilesOnServer" name="ftpKeepFilesOnServer">
+                  <span>Keep files on the server after downloading</span>
+                </label>
+                <small class="field-hint">
+                  Leave files on the FTP server instead of deleting them.
+                  Turn this on if you run OHD at more than one location —
+                  each location needs its own copy, and with this off the
+                  first location to poll takes the files and no other
+                  location can ever download that order. Files you already
+                  have are skipped, so this doesn't cause repeat downloads.
+                </small>
+              </div>
+
               <div class="test-row">
                 <button type="button" id="testFtpBtn" class="btn-secondary">Test Connection</button>
                 <span id="ftpTestStatus" class="test-status"></span>

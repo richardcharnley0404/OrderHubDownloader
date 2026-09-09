@@ -320,13 +320,19 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
       logger.info('Starting FTP scan and download', { remotePath, localBasePath });
 
       const sender = event.sender;
+      // Copy mode: leave files on the FTP server so other locations can
+      // download the same order. Read fresh so a manual scan reflects
+      // the latest Settings save. Manual and scheduled scans must
+      // behave identically.
+      const keepFilesOnServer = !!configService.get('ftpKeepFilesOnServer');
       const summary = await ftpService.scanAndDownload(
         credentials,
         remotePath,
         localBasePath,
         (progress) => {
           sender.send('ftp:downloadProgress', progress);
-        }
+        },
+        { keepFilesOnServer }
       );
 
       logger.info('FTP scan and download complete', summary);

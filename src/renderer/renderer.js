@@ -2576,6 +2576,9 @@ function populateForm(config) {
   document.getElementById('ftpUsername').value = config.ftpUsername || '';
   document.getElementById('ftpPassword').value = config.ftpPassword || '';
   document.getElementById('ftpRemotePath').value = config.ftpRemotePath || '/';
+  // Copy mode default: false (delete = today's behaviour, migration-safe).
+  // A missing key or an existing config predating the field yields false too.
+  document.getElementById('ftpKeepFilesOnServer').checked = !!config.ftpKeepFilesOnServer;
   document.getElementById('downloadDirectory').value = config.downloadDirectory || '';
   downloadDirectory = config.downloadDirectory || '';
   document.getElementById('pollingEnabled').checked = config.pollingEnabled || false;
@@ -2741,6 +2744,7 @@ function getFormData() {
     ftpUsername: document.getElementById('ftpUsername').value.trim(),
     ftpPassword: document.getElementById('ftpPassword').value,
     ftpRemotePath: document.getElementById('ftpRemotePath').value.trim() || '/',
+    ftpKeepFilesOnServer: document.getElementById('ftpKeepFilesOnServer').checked,
     downloadDirectory: document.getElementById('downloadDirectory').value.trim(),
     pollingEnabled: document.getElementById('pollingEnabled').checked,
     launchOnStartup: document.getElementById('launchOnStartup').checked,

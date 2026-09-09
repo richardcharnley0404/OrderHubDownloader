@@ -318,7 +318,25 @@ class FtpService {
   /**
    * Scan FTP directory and download all folders/files recursively
    */
-  async scanAndDownload(credentials, remotePath, localBasePath, onProgress) {
+  /**
+   * Recursively scan `remotePath` and download every file into
+   * `localBasePath`. Options (all fields optional):
+   *
+   *   options.keepFilesOnServer  — when truthy, suppress every FTP-side
+   *     mutation: no per-file DELE after download, no DELE on the skip
+   *     path, no parent-folder RMD. Everything else about the download
+   *     is unchanged. Default false (delete = today's behaviour;
+   *     migration-safe for single-location labs).
+   *
+   * Copy mode exists because in a multi-location lab, Pixfizz Core pushes
+   * an order's artwork to ONE FTP folder — whichever location polls first
+   * takes the files and deletes them, and every other location is then
+   * permanently unable to download that order. Copy mode leaves the files
+   * for every location to fetch. Pixfizz Core removes them on its own
+   * schedule; OHD does NOT run a retention sweep (see docs/BACKLOG.md
+   * under "Decisions parked" for the reasoning).
+   */
+  async scanAndDownload(credentials, remotePath, localBasePath, onProgress, options = {}) {
     const client = new ftp.Client();
     client.ftp.verbose = false;
 
@@ -337,8 +355,11 @@ class FtpService {
 
       onProgress({ status: 'scanning', message: `Scanning ${remotePath}...` });
 
-      // Recursively download directory contents.
-      await this._downloadDirectory(client, remotePath, localBasePath, onProgress, summary, false);
+      // Recursively download directory contents. `options` threads
+      // through unchanged — the copy-mode gate lives inside
+      // _downloadDirectory so a single check per FTP-mutating call
+      // stays close to the call.
+      await this._downloadDirectory(client, remotePath, localBasePath, onProgress, summary, false, options);
 
       onProgress({
         status: 'complete',
@@ -357,9 +378,20 @@ class FtpService {
   }
 
   /**
-   * Recursively download a directory's contents
+   * Recursively download a directory's contents.
+   *
+   * `options.keepFilesOnServer` (copy mode) suppresses all THREE FTP-side
+   * mutation points: the post-download DELE (site A), the skip-path DELE
+   * (site B), and the parent-folder RMD block (site C). Everything else —
+   * dedup by size + magic-byte integrity check, size-mismatch re-download,
+   * per-file diagnostic logging — is unchanged. See scanAndDownload's
+   * docblock for the multi-location rationale.
+   *
+   * Options is forwarded verbatim through recursive calls so subfolder
+   * dispatches inherit the mode.
    */
-  async _downloadDirectory(client, remotePath, localPath, onProgress, summary, isSubfolder = false) {
+  async _downloadDirectory(client, remotePath, localPath, onProgress, summary, isSubfolder = false, options = {}) {
+    const keepFilesOnServer = !!(options && options.keepFilesOnServer);
     // Ensure local directory exists
     if (!fs.existsSync(localPath)) {
       fs.mkdirSync(localPath, { recursive: true });
@@ -388,7 +420,7 @@ class FtpService {
           status: 'downloading',
           message: `Scanning folder: ${item.name}`
         });
-        await this._downloadDirectory(client, remoteItemPath, localItemPath, onProgress, summary, true);
+        await this._downloadDirectory(client, remoteItemPath, localItemPath, onProgress, summary, true, options);
       } else {
         // Skip if file already exists with same size — but for known image
         // formats also verify magic bytes first. A size-match on a corrupt
@@ -412,15 +444,19 @@ class FtpService {
               }
             }
             summary.skipped++;
-            // Still delete from FTP since we already have it
-            try {
-              await client.remove(remoteItemPath);
-              logger.info('Deleted already-downloaded file from FTP', { remoteItemPath });
-            } catch (delError) {
-              // Expected 550 against /original-files/ (Pixfizz read-only
-              // subfolder) → debug-level, treated as success. Any other
-              // failure stays error-level. No retry change.
-              _handleFtpDeleteFailure(delError, remoteItemPath);
+            // Copy mode leaves the file on the server so other locations
+            // can still fetch it. Otherwise the historical behaviour:
+            // delete on skip (site B) since we already have a local copy.
+            if (!keepFilesOnServer) {
+              try {
+                await client.remove(remoteItemPath);
+                logger.info('Deleted already-downloaded file from FTP', { remoteItemPath });
+              } catch (delError) {
+                // Expected 550 against /original-files/ (Pixfizz read-only
+                // subfolder) → debug-level, treated as success. Any other
+                // failure stays error-level. No retry change.
+                _handleFtpDeleteFailure(delError, remoteItemPath);
+              }
             }
             continue;
           }
@@ -463,18 +499,20 @@ class FtpService {
                   await markIntegritySuspect(localItemPath, remoteItemPath, integrity, item.size);
                 }
               }
-              try {
-                await client.remove(remoteItemPath);
-                logger.info('Deleted file from FTP after successful download', { remoteItemPath });
-              } catch (delError) {
-                // Expected 550 against /original-files/ keeps
-                // allFilesSucceeded=true so the parent-folder cleanup
-                // branch at the bottom of this function is still entered
-                // (it will short-circuit naturally when list() shows the
-                // undeletable file still present). All other failures
-                // still trip allFilesSucceeded as before.
-                const { expected } = _handleFtpDeleteFailure(delError, remoteItemPath);
-                if (!expected) allFilesSucceeded = false;
+              if (!keepFilesOnServer) {
+                try {
+                  await client.remove(remoteItemPath);
+                  logger.info('Deleted file from FTP after successful download', { remoteItemPath });
+                } catch (delError) {
+                  // Expected 550 against /original-files/ keeps
+                  // allFilesSucceeded=true so the parent-folder cleanup
+                  // branch at the bottom of this function is still entered
+                  // (it will short-circuit naturally when list() shows the
+                  // undeletable file still present). All other failures
+                  // still trip allFilesSucceeded as before.
+                  const { expected } = _handleFtpDeleteFailure(delError, remoteItemPath);
+                  if (!expected) allFilesSucceeded = false;
+                }
               }
             }
           }
@@ -487,8 +525,12 @@ class FtpService {
       }
     }
 
-    // If this is a subfolder and all files succeeded, try to remove the empty folder
-    if (isSubfolder && allFilesSucceeded) {
+    // If this is a subfolder and all files succeeded, try to remove the
+    // empty folder. Suppressed in copy mode — the whole point is to
+    // leave the tree intact for other locations. Extra `client.list()`
+    // and `client.removeDir()` roundtrips avoided too, not just the
+    // mutation.
+    if (!keepFilesOnServer && isSubfolder && allFilesSucceeded) {
       try {
         const remaining = await client.list(remotePath);
         if (remaining.length === 0) {

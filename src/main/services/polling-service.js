@@ -474,13 +474,19 @@ class PollingService {
         return;
       }
 
+      // Copy mode: leave files on the FTP server for other locations
+      // to fetch. Read fresh on every scan so a Settings save takes
+      // effect at the next poll without an app restart.
+      const keepFilesOnServer = !!configService.get('ftpKeepFilesOnServer');
+
       const summary = await ftpService.scanAndDownload(
         credentials,
         remotePath,
         localBasePath,
         (progress) => {
           logger.info('Polling progress: ' + progress.message);
-        }
+        },
+        { keepFilesOnServer }
       );
 
       this.lastSummary = summary;
