@@ -7,85 +7,107 @@ these. Order is roughly "most likely to need attention first".
 
 ## REQUIRED for the 1.16.3 operator release notes
 
-The rotation-decoupling change (2026-... 1.16.3) makes
-`filmScanReviewMode` honoured for rotation-off labs for the
-FIRST time. Two lab-visible behaviour changes flow from that
-and both need TOP-BILLING in the 1.16.3 operator release notes
-— NOT a bullet buried under the thumbnail / Film Review
-changes. A lab in either configuration will see their pipeline
-silently stop producing S3 uploads on upgrade until they change
-the setting or approve each roll manually. That is the shape
-of issue that generates a support call within a business day
-of rolling out, and the release notes are the single lever we
-have to prevent it.
+The 1.16.3 rotation-decoupling change opens Review Mode and
+Auto Assignment to labs running with Enable AI Rotation off.
+This is a **new capability**, not a silent behaviour change:
+Smart Check and Manual Check were previously unreachable in
+that configuration — the radios were disabled and greyed at
+50 % opacity, force-reset to Auto on every AI-off toggle, and
+the save path overwrote `filmScanReviewMode` back to `'never'`
+regardless of any user selection. So no lab running through
+the UI can be in "AI off + Manual selected" today; the state
+was mechanically unreachable. The release notes should sell
+this as an unlock, not warn labs that their pipeline will
+stop.
 
-**Change 1 — reviewMode='always' (Manual) with rotation off.**
+**The one residual case that IS a behaviour change** — call
+this out so a lab that hits it can identify what happened:
 
-- BEFORE (up to 1.16.2): the setting was silently ignored for
-  rotation-off installs. There was no Film Review panel presence
-  at all for those rolls, and Step 3 ran the inline S3 upload
-  (Site A) unconditionally. Rolls uploaded automatically.
-- AFTER (1.16.3): the setting is honoured. The roll lands at
-  `uploadStatus='pending'` and holds in the Film Review panel
-  until an operator uses "Approve & Upload". No automatic
-  upload happens.
-- Operator-visible symptom on upgrade: film scans stop flowing
-  to S3 without warning. The Film Review panel fills up with
-  pending rolls.
-- Recovery: either flip the setting from Manual to Auto in Film
-  Scans settings (restores pre-1.16.3 behaviour), or start
-  approving rolls in the panel.
+- A `config.json` written **before** the AI-off gating was
+  introduced (or written by a hand-edit / an import from an
+  older config) can hold `filmScanReviewMode: 'always'` or
+  `'smart'` with `filmScanRotationEnabled: false` on disk.
+- Pre-1.16.3, the load path displayed Auto in Settings for
+  that config (the disabler forced the radio) and the runtime
+  ignored the persisted value (the save path would have
+  overwritten it back to `'never'` on the next save; the
+  pipeline had no rotation-off review surface anyway). Rolls
+  uploaded automatically.
+- Post-1.16.3, the load path shows the on-disk value as it
+  really is (Manual / Smart Check selected) AND the runtime
+  honours it: Manual Check holds every roll for operator
+  approval; Smart Check holds rolls with a low-confidence
+  frame, rotation error, or Perfectly Clear rejection.
+- Symptom on upgrade for this narrow case: film scans stop
+  flowing to S3 automatically; the Film Review panel fills
+  with pending rolls.
+- Recovery: flip Review Mode to Auto in Film Scans settings
+  (matches how the UI displayed it pre-upgrade), or start
+  approving rolls in the panel if the persisted value was
+  actually the intent.
 
-**Change 2 — Auto Assignment on with reviewMode='always' and
-rotation off.**
+**Change 2 — Auto Assignment + Manual Check + rotation off.**
+Same story as above, restricted to labs using Auto Assignment.
+Pre-1.16.3 the same UI gating prevented reaching this state
+through Settings; a hand-edited or pre-gating config could
+persist `filmScanReviewMode: 'always'` + `filmScanAutoAssignEnabled: true`
++ `filmScanRotationEnabled: false`. Pre-upgrade, the matcher
+stamped `reviewPassed=true` regardless (no review surface
+existed), so matched rolls uploaded immediately. Post-upgrade,
+`reviewPassed` reflects the review-hold decision:
+`filmScanReviewMode='always'` sets `reviewPassed=false`; the
+matcher stamps the match but does NOT queue the upload
+(`film-scan-auto-assign.js:196` gates the upload queue push on
+`roll.reviewPassed === true`). Symptom: rolls appear as
+"Matched — awaiting review" without auto-uploading. Recovery
+same as above.
 
-- BEFORE: the auto-assign matcher stamped `reviewPassed=true`
-  regardless of reviewMode (since no review surface existed for
-  rotation-off rolls), so as soon as a match was found the roll
-  uploaded via `_uploadRollFromStorage` (Site B).
-- AFTER: `reviewPassed` correctly reflects the review-hold
-  decision. `filmScanReviewMode='always'` sets
-  `reviewPassed=false`; the matcher stamps the match but does
-  NOT queue the upload (see `film-scan-auto-assign.js:196` —
-  the queue push is gated on `roll.reviewPassed === true`).
-  Operator approval is required before upload fires.
-- Operator-visible symptom on upgrade: rolls appear as
-  "Matched — awaiting review" in Film Review; they do not
-  auto-upload even when the matcher finds the right job.
+**Change 3 — Smart Check with rotation off AND Perfectly Clear
+off is a valid selection now, but has no signals to hold on.**
+Not a behaviour change (the pre-1.16.3 UI gating made this
+combination unreachable too), but a new configuration that
+reads confusingly in the unlocked world:
 
-**Change 3 — Smart mode with rotation off AND Perfectly Clear
-off.** Same rotation-decoupling work, adjacent gap. Not a
-behaviour change against 1.16.2 (Smart didn't fire for
-rotation-off there either — no panel), but a configuration
-that reads confusingly in the new world:
-
-- Smart mode's contract is "hold on evidence of problems".
+- Smart Check's contract is "hold on evidence of problems".
 - With rotation off, `lowConfCount` and `rotErrorCount` are
   both 0 (no rotation loop produces signals).
 - With Perfectly Clear off, `pcRejectedCount` is 0.
-- Net: nothing to defer on → Smart behaves identically to Auto
-  (never mode). No holds.
-- Symptom: a lab that thinks "I've enabled review, so my rolls
-  will be held for check" sees them auto-upload. The
-  `smart-check` log line spells this out
+- Net: nothing to defer on → Smart Check behaves identically
+  to Auto. No holds.
+- The `smart-check` log line spells this out
   (`... (rotation off — no AI signals) → auto upload`) but
-  operators don't read logs.
-- Recovery for a lab that wanted rolls held: switch reviewMode
-  to Manual (Always). Smart requires at least one of the
-  signal sources — AI rotation OR Perfectly Clear — to have
+  operators don't read logs, so the Smart Check help text in
+  Settings now names this case explicitly.
+- Recovery for a lab that expected rolls held: switch Review
+  Mode to Manual Check. Smart Check needs at least one of the
+  signal sources — AI Rotation OR Perfectly Clear — to have
   anything to reason about.
 
-**What to write in the release notes.** Lead with Changes 1
-and 2 before any other Film Review content, in the operator's
-own language ("Manual review mode", "Auto Assignment", not
-`filmScanReviewMode`). Tell labs to either flip the mode back
-to Auto if they didn't intend the change, or budget operator
-time for the review step. Include the config path — Film
-Scans settings → Review Mode — so an operator can locate the
-setting without searching. Change 3 belongs as a follow-up
-note under Smart mode ("Smart needs at least one signal
-source to hold anything") so a lab in that config doesn't
-mistake silence for a bug.
+**Change 4 — the save-time override that discarded the
+operator's Review Mode selection whenever AI Rotation was off
+is gone.** Quiet fix in the same commit, worth a one-liner in
+the release notes: pre-1.16.3, saving Settings with AI
+Rotation off would silently overwrite the persisted Review
+Mode value back to Auto regardless of what the operator had
+selected (the UI disabler made this normally invisible, but
+combined with any programmatic tick / untick of AI Rotation
+it could destroy an intentional setting). Post-1.16.3 an
+operator's Review Mode choice is persisted as made.
+
+**What to write in the release notes.** Lead with the
+positive framing: "Manual Check and Smart Check now work
+whether Enable AI Rotation is on or off — previously these
+options were greyed out with AI off." Then the recovery note
+for the narrow pre-gating-config case ("If your config was
+edited outside Settings and had one of these modes saved with
+AI off, upgrading will now honour that selection — flip
+Review Mode to Auto in Settings if that's not what you
+want"). Then the Smart-Check-with-no-signals warning as a
+follow-up under Smart Check itself. Include the config path
+— Film Scans settings → Review Mode — so an operator can
+locate the setting without searching. Use the operator's
+language throughout ("Manual Check", "Auto Assignment",
+"Enable AI Rotation" — never `filmScanReviewMode`).
 
 ---
 
