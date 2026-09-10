@@ -437,6 +437,29 @@ while the ⚠ pill is showing. It has unit coverage on the logic but has never b
 in the app, because Manual Crop only opens for `artwork_source === 'manual'` jobs and the
 local test data is all Pixfizz. Needs a manual-source job to confirm.
 
+**Multi-location FTP Copy mode — acceptance test outstanding.** The
+1.16.3 FTP Copy mode + 1.16.4 persistence fix have been confirmed
+in the narrow sense (one lab, one install, files remain on the
+server after download — see the 2026-09-10 field-confirmation note
+in the v1.16.4 CHANGELOG entry). The feature's actual purpose has
+NOT been demonstrated at any lab: two OHD installs at two different
+locations, both polling the same shared FTP folder, an order landing
+in that folder, and both installs successfully downloading the same
+order without either one preventing the other. That is the acceptance
+test the feature exists to pass, and nothing automated can prove it —
+the interesting cases are timing-dependent (both installs polling
+around the same moment, one install mid-download when the other
+starts, one install offline for a stretch and catching up) and
+require two real, independent OHD installs sharing a real FTP folder
+with a real polling cadence. Until that test has been run against a
+real deployment we should describe Copy mode as "shipped and file
+retention confirmed" rather than "multi-location download confirmed".
+The safety property that makes this test survivable — an offline
+location eventually catching up as long as no retention sweep has
+run past its window — is itself contingent on the retention-sweep
+window being set correctly at whichever location enables the sweep,
+which is a further unverified interaction if a lab turns both on.
+
 ---
 
 ## Decisions parked

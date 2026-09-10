@@ -1,5 +1,54 @@
 ## v1.16.4 - 2026-09-09
 
+**Field-confirmed on 2026-09-10: 1.16.4's FTP settings persistence
+fix at one lab.** A lab that had installed 1.16.3 upgraded to 1.16.4,
+ticked **Keep files on the server after downloading** under
+Settings → FTP Server, saved, and files are now being left on the
+FTP server after download.
+
+Confirmed by this single observation:
+
+- The four 1.16.3 FTP setting keys round-trip through Settings on
+  1.16.4 — the persistence defect described below is fixed in the
+  field, not just in the unit-test round-trip.
+- `ftpKeepFilesOnServer` reaches the runtime and suppresses the
+  per-file delete on the success path in
+  `ftp-service.js`'s `_downloadDirectory`
+  (`src/main/services/ftp-service.js:507`).
+
+Deliberately narrow. The following are NOT verified by this
+observation, and each has a distinct failure mode from the one
+that was checked:
+
+- **The feature's real acceptance test.** A second OHD install at
+  a different location downloading an order the first location
+  already took. Files remaining on the server is a precondition,
+  not proof — the actual multi-location claim (both locations
+  reachable, neither preventing the other) has not been exercised
+  by anyone. Tracked in `docs/BACKLOG.md` under "Multi-location
+  FTP Copy mode — acceptance test outstanding".
+- Repeat polls of an unchanged FTP folder skipping locally-held
+  files via `ftp-service.js`'s size + magic-byte check rather than
+  re-downloading them. Copy mode leaves every file on the server
+  every polling cycle, so a break in this check would show up as
+  cyclic re-downloads and re-dispatches — the observation above
+  says nothing about whether that happens.
+- The other two FTP-side suppression sites gated on the same flag:
+  the per-file delete on the "already have it locally, skip"
+  branch (`_downloadDirectory:559`), and the parent-folder `RMD`
+  after a fully successful subfolder walk (`_downloadDirectory:590`).
+  A single-file happy path would not have exercised either.
+- The retention sweep in any form (`ftpRetentionSweepEnabled` on,
+  `ftpRetentionSweepDryRun` on or off, the once-per-24h throttle,
+  the `/`-root refusal, per-file mtime + size checks against local
+  copies before deletion) — the sweep has still never run at any
+  lab, and the sweep-safety design rests entirely on tests.
+- The 1.16.3 modal-close fix (backdrop-click / Escape / drag-off-panel
+  behaviour), which ships in 1.16.4 and remains unverified in the
+  field by anyone.
+
+One lab, one install, one observation. Do not generalise beyond it.
+
 **READ THIS IF YOU INSTALLED 1.16.3.** 1.16.3 shipped the four new FTP
 settings (Keep files on the server, Delete old files retention sweep,
 Retention window days, Dry run) with the UI, the runtime, and the
