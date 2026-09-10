@@ -864,30 +864,66 @@ function resolveRouteForController(job, controllerId) {
     };
   }
 
-  // DPOF + Darkroom Pro + Fuji + Frontline all need a channel mapping for
-  // {productCode, options}. Missing → surface no-channel so the renderer
-  // can chain into the existing Assign Channel modal.
-  const channelMappings = store.get('channelMappings', []);
-  const channelMapping  = channelMappings.find(m =>
-    m.controllerId === controllerId &&
-    m.productCode  === productCode   &&
-    optionsMatch(m.options, options),
-  );
-  if (!channelMapping) {
-    return { type: 'unrouted', reason: 'no-channel', controller };
-  }
-
   // Darkroom Pro reassignment MUST return the same shape as the main
   // resolveRoute darkroompro branch above (lines 522-547) — dispatch reads
   // `route.artworkRootPath` and `route.orderLastNameFormat` directly off
-  // the route object (print-service.js:2573-2574). The prior implementation
-  // fell into the generic DPOF/Darkroom shape below, silently dropping both
-  // fields; a reassigned DP job then dispatched with the emitter's default
-  // orderLastNameFormat ('orderRef_lastName') regardless of the controller's
-  // configured value. Locked by the resolveRoute × resolveRouteForController
-  // parity test in routing-darkroompro-fields.test.js — every field carried
-  // here must stay in sync with the main darkroompro literal.
+  // the route object (print-service.js:2573-2574). Locked by the
+  // resolveRoute × resolveRouteForController parity tests in
+  // routing-darkroompro-fields.test.js — every field carried here must
+  // stay in sync with the main darkroompro literal.
+  //
+  // Also MUST use the same ROUTABILITY rule as the main branch: a channel
+  // mapping is optional; when absent, the controller's sizeTranslations /
+  // mediaTranslations can carry the job (matches resolveRoute's darkroompro
+  // branch at lines 471-548). This block sits AHEAD of the channel-mapping
+  // gate below because that gate requires a mapping and would otherwise
+  // return no-channel for a translations-only DP install — silently making
+  // the rush-reprint picker inert at every such lab and refusing routingHold
+  // reassign for jobs that would dispatch cleanly through the normal path.
+  // Locked by the "translations-only" tripwire in
+  // routing-darkroompro-fields.test.js.
   if (controller.type === 'darkroompro') {
+    const channelMappings = store.get('channelMappings', []);
+
+    // Per-job manual assignment takes priority, matching the main branch
+    // (routing-service.js:478-480).
+    let channelMapping = job._darkroomProChannelMappingId
+      ? channelMappings.find(m => m.id === job._darkroomProChannelMappingId && m.controllerId === controller.id)
+      : null;
+
+    // Fall back to options-based lookup — uses optionsMatchWithIgnore
+    // for parity with the main branch (line 487), so a per-controller
+    // ignored-options list is honoured here too.
+    if (!channelMapping) {
+      channelMapping = channelMappings.find(m =>
+        m.controllerId === controller.id &&
+        m.productCode  === productCode   &&
+        optionsMatchWithIgnore(m.options, options, controller)
+      );
+    }
+
+    // No mapping? Check manual size/media overrides, else translation
+    // tables — identical to the main branch's fallthrough logic at
+    // routing-service.js:494-520.
+    if (!channelMapping) {
+      if (job._darkroomProSize && job._darkroomProMedia) {
+        // Manual override — routable without further checks.
+      } else {
+        const resolvedSize  = resolveSize(job.product_code, controller.sizeTranslations);
+        const resolvedMedia = resolveMedia(
+          job.options || [],
+          controller.mediaOptionKey,
+          controller.mediaTranslations
+        );
+        // mediaOptionKey blank ⇒ media resolution not required (cut-print
+        // pattern where the product code IS the size).
+        const mediaConfigured = !!controller.mediaOptionKey;
+        if (!resolvedSize || (mediaConfigured && !resolvedMedia)) {
+          return { type: 'unrouted', reason: 'no-channel', controller };
+        }
+      }
+    }
+
     return {
       type:                'controller',
       controllerType:      'darkroompro',
@@ -896,7 +932,7 @@ function resolveRouteForController(job, controllerId) {
       outputPath:          controller.outputPath,
       artworkRootPath:     controller.artworkRootPath     || '',
       orderLastNameFormat: controller.orderLastNameFormat || 'orderRef_lastName',
-      channelMappingId:    channelMapping.id,
+      channelMappingId:    channelMapping ? channelMapping.id : null,
       channelNumber:       null,
       printSizeCode:       null,
       bannerSheet:         false,
@@ -907,6 +943,20 @@ function resolveRouteForController(job, controllerId) {
           : null,
       autoSendBatches: controller.autoSendBatches === true,
     };
+  }
+
+  // DPOF + Fuji + Frontline still need a channel mapping — those pipelines
+  // do not have a translations fallback and dispatch reads channelNumber /
+  // printSizeCode directly off the mapping. Surface no-channel so the
+  // renderer can chain into the existing Assign Channel modal.
+  const channelMappings = store.get('channelMappings', []);
+  const channelMapping  = channelMappings.find(m =>
+    m.controllerId === controllerId &&
+    m.productCode  === productCode   &&
+    optionsMatch(m.options, options),
+  );
+  if (!channelMapping) {
+    return { type: 'unrouted', reason: 'no-channel', controller };
   }
 
   // Mirror the Layer 3 return shape from resolveRoute (generic DPOF

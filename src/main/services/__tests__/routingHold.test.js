@@ -183,6 +183,44 @@ test('Edge 3b: resolveRouteForController returns no-controller when the id is un
   assert.equal(route.reason, 'no-controller');
 });
 
+// Edge 3c: the routingHold reassign path is one of the two callers of
+// resolveRouteForController (the other being the rush-reprint picker's
+// listEligibleReprintControllers). Both were affected by the pre-fix
+// requirement that a channel mapping exist for the target controller —
+// a translations-only DP install had reassignment silently refused with
+// no-channel even though the target could dispatch the job cleanly via
+// its sizeTranslations. Fix moved the darkroompro branch ahead of the
+// channel-mapping gate; this test names the routingHold caller explicitly
+// so the audit trail records both callers, not just the picker.
+test('Edge 3c: routingHold reassign to a translations-only DP controller succeeds', () => {
+  __seed({
+    orderControllers: [
+      {
+        id:               'ctrl-dp-translations',
+        name:             'Darkroom',
+        type:             'darkroompro',
+        outputPath:       '/tmp/dp',
+        sizeTranslations: [{ productCodePrefix: '0406', darkroomSize: '4x6' }],
+        // No mediaOptionKey configured → size-alone routing.
+      },
+    ],
+    channelMappings: [],  // DELIBERATELY empty — translations must suffice.
+  });
+
+  const job = { id: 1, product_code: '0406', options: [] };
+  const route = routingService.resolveRouteForController(job, 'ctrl-dp-translations');
+
+  assert.equal(route.type,           'controller',
+    'routingHold reassign must succeed for a translations-only DP target — the ' +
+    'IPC handler at ohd:routing:release-hold gates on route.type === "controller" ' +
+    '(ipc-handlers.js:2167-2174) and would otherwise refuse the release.');
+  assert.equal(route.controllerType, 'darkroompro');
+  assert.equal(route.controllerId,   'ctrl-dp-translations');
+  assert.equal(route.channelMappingId, null,
+    'No channel mapping was matched — the field must be present but null so ' +
+    'downstream reads (dispatch) never see undefined.');
+});
+
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Edge case 4 — reassign overwrites _channelMappingOverride (silent)

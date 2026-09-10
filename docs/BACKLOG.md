@@ -437,6 +437,36 @@ while the ⚠ pill is showing. It has unit coverage on the logic but has never b
 in the app, because Manual Crop only opens for `artwork_source === 'manual'` jobs and the
 local test data is all Pixfizz. Needs a manual-source job to confirm.
 
+**resolveRouteForController's non-darkroompro branch still uses plain
+`optionsMatch` where `resolveRoute` uses `optionsMatchWithIgnore`.** Same
+class of silent divergence as the darkroompro-branch bug fixed in the
+translations-only resolver commit. Every channel-mapping lookup in
+`resolveRoute` runs through `optionsMatchWithIgnore(m.options, options,
+controller)` (routing-service.js:487, :556, :622, :697, :725), which
+strips options whose name is on the controller's `ignoredOptionNames`
+list before matching. That is how controllers configured to ignore
+`layout-options` / `image-enhancement` / other noise-variance options
+match a channel mapping the operator authored without every option
+present. `resolveRouteForController`'s generic branch at ~:956 uses
+plain `optionsMatch(m.options, options)` — meaning a routing-hold
+reassign to a DPOF / Epson / Noritsu / Fuji JobMaker / Fuji PIC Pro /
+Frontline controller with `ignoredOptionNames` configured can be
+refused with `no-channel` for a job the main dispatch path routes
+cleanly. Fixed for darkroompro in the translations-only commit
+because the DP branch there was rewritten in full and used the
+correct helper; the generic branch was left as-is to keep the fix
+scoped to the reported defect.
+
+Consequence today is narrow — Richard's live install has one DP
+controller and no `ignoredOptionNames` on the DPOF ones, so nobody
+has hit this yet — but it is a live footgun. Fix is symmetric to the
+DP one: swap the generic branch's matcher for
+`optionsMatchWithIgnore(m.options, options, controller)`, extend the
+routing-*-fields parity tests to a controller with
+`ignoredOptionNames` configured (the existing fixtures do not exercise
+it), and add a routingHold Edge test that names the DPOF-reassign
+caller. Same three-file test shape as the DP fix.
+
 **Rush-reprint controller attribution has no lasting operator surface.**
 The rush-reprint feature (docs/rush-reprint-controller-selection-
 investigation.md) writes the destination controller name to the reprint

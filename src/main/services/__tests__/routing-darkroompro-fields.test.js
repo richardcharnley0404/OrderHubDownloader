@@ -294,7 +294,7 @@ test('darkroompro three-way parity: all three carry identical values for a confi
 // No-channel — reassignment to a controller with no mapping for the job
 // ═════════════════════════════════════════════════════════════════════════
 
-test('darkroompro forController: no mapping → unrouted no-channel with controller surfaced', () => {
+test('darkroompro forController: no mapping AND no translations → unrouted no-channel with controller surfaced', () => {
   __seed({
     processControllerMappings: [{ process: 'Lab', controllerId: CTRL_ID }],
     orderControllers:          [{
@@ -305,13 +305,152 @@ test('darkroompro forController: no mapping → unrouted no-channel with control
       artworkRootPath:     'Z:\\Art',
       orderLastNameFormat: 'orderRef_lastName',
     }],
-    // No channelMappings for this controller.
+    // No channelMappings for this controller AND no sizeTranslations on it,
+    // so routing genuinely cannot resolve size/media.
     channelMappings: [],
   });
   const route = resolveRouteForController(JOB, CTRL_ID);
   assert.equal(route.type,   'unrouted');
   assert.equal(route.reason, 'no-channel');
   assert.equal(route.controller && route.controller.id, CTRL_ID);
+});
+
+// ═════════════════════════════════════════════════════════════════════════
+// Translations-only — a DP controller with sizeTranslations / mediaTranslations
+// but NO channel mapping. This is the common install shape at labs that use
+// the translation-tables UI; resolveRoute has always treated a matched
+// translation as routable (routing-service.js:471-548), but pre-fix
+// resolveRouteForController required a channel mapping upstream of the DP
+// branch and returned no-channel even when translations covered the job.
+// That silently made the rush-reprint picker inert at every translations-
+// only lab and made routingHold reassign fail for the same jobs. The
+// tripwire below is written first — it fails on pre-fix code (the picker
+// bug's live reproduction) and passes on the fixed branch.
+// ═════════════════════════════════════════════════════════════════════════
+
+function seedTranslationsOnlyDp(controllerOverrides = {}) {
+  const controller = {
+    id:                  CTRL_ID,
+    name:                'Darkroom',
+    type:                'darkroompro',
+    outputPath:          'C:\\dp\\hot',
+    artworkRootPath:     'Z:\\Pixfizz\\Artwork',
+    orderLastNameFormat: 'orderRef_lastName',
+    checkOrderStatus:    true,
+    // Translations resolve the size for PRODUCT; mediaOptionKey blank so
+    // media resolution is not required (matches the "cut prints where the
+    // product code IS the size" case documented in routing-service.js:509).
+    sizeTranslations:    [{ productCodePrefix: PRODUCT, darkroomSize: '4x6' }],
+    mediaOptionKey:      '',
+    mediaTranslations:   [],
+    ...controllerOverrides,
+  };
+  __seed({
+    processControllerMappings: [{ process: 'Lab', controllerId: CTRL_ID }],
+    orderControllers:          [controller],
+    channelMappings:           [],  // DELIBERATELY empty — this is the point
+  });
+  return controller;
+}
+
+test('TRIPWIRE (translations-only): DP job resolves via BOTH resolveRoute and resolveRouteForController when a matched sizeTranslation covers it', () => {
+  seedTranslationsOnlyDp();
+  const viaJob  = resolveRoute(JOB);
+  const viaCtrl = resolveRouteForController(JOB, CTRL_ID);
+
+  assert.equal(viaJob.type,           'controller',
+    'resolveRoute must route the translations-only DP job (it always has — pre- and post-fix)');
+  assert.equal(viaCtrl.type,          'controller',
+    'resolveRouteForController must also route it. This is the load-bearing invariant: ' +
+    'the picker and routingHold reassign call resolveRouteForController, and treating ' +
+    'a translations-only DP as unrouted here makes the picker inert and reassign refuse ' +
+    'jobs that would dispatch cleanly through the normal path.');
+  assert.equal(viaJob.controllerType,  'darkroompro');
+  assert.equal(viaCtrl.controllerType, 'darkroompro');
+});
+
+test('translations-only DP: BOTH resolvers produce the same key set', () => {
+  seedTranslationsOnlyDp();
+  const viaJob  = resolveRoute(JOB);
+  const viaCtrl = resolveRouteForController(JOB, CTRL_ID);
+  assert.deepEqual(
+    Object.keys(viaCtrl).sort(),
+    Object.keys(viaJob).sort(),
+    'shape parity must hold on the translations-only path too — otherwise a future ' +
+    'field added to one branch (the parity test above only covers the channel-mapping ' +
+    'path) would silently diverge here.',
+  );
+});
+
+test('translations-only DP: BOTH resolvers produce channelMappingId === null (no mapping is optional)', () => {
+  seedTranslationsOnlyDp();
+  const viaJob  = resolveRoute(JOB);
+  const viaCtrl = resolveRouteForController(JOB, CTRL_ID);
+  assert.equal(viaJob.channelMappingId,  null);
+  assert.equal(viaCtrl.channelMappingId, null,
+    'The channelMappingId field must be present but null — a channel mapping is optional ' +
+    'when translations cover the job. resolveRoute has always done this; ' +
+    'resolveRouteForController must match.');
+});
+
+test('translations-only DP with mediaOptionKey configured AND matching translation → BOTH resolve', () => {
+  seedTranslationsOnlyDp({
+    mediaOptionKey:    'finish',
+    mediaTranslations: [{ from: 'Lustre', to: 'Thick Luster' }],
+  });
+  const jobWithFinish = { ...JOB, options: [{ name: 'finish', value: 'Lustre' }] };
+  const viaJob  = resolveRoute(jobWithFinish);
+  const viaCtrl = resolveRouteForController(jobWithFinish, CTRL_ID);
+  assert.equal(viaJob.type,  'controller');
+  assert.equal(viaCtrl.type, 'controller');
+});
+
+test('translations-only DP with mediaOptionKey but NO matching media translation → BOTH surface no-channel', () => {
+  seedTranslationsOnlyDp({
+    mediaOptionKey:    'finish',
+    mediaTranslations: [{ from: 'Lustre', to: 'Thick Luster' }],
+  });
+  const jobWithMissingFinish = { ...JOB, options: [{ name: 'finish', value: 'Metallic' }] };
+  const viaJob  = resolveRoute(jobWithMissingFinish);
+  const viaCtrl = resolveRouteForController(jobWithMissingFinish, CTRL_ID);
+  assert.equal(viaJob.type,   'unrouted');
+  assert.equal(viaJob.reason, 'no-channel');
+  assert.equal(viaCtrl.type,   'unrouted',
+    'When mediaOptionKey is set and translations cannot resolve media, ' +
+    'resolveRouteForController must surface no-channel — matching resolveRoute.');
+  assert.equal(viaCtrl.reason, 'no-channel');
+});
+
+test('translations-only DP with sizeTranslations that cannot resolve THIS product → BOTH surface no-channel', () => {
+  seedTranslationsOnlyDp({
+    sizeTranslations: [{ productCodePrefix: 'DIFFERENT-PRODUCT', darkroomSize: '8x10' }],
+  });
+  const viaJob  = resolveRoute(JOB);
+  const viaCtrl = resolveRouteForController(JOB, CTRL_ID);
+  assert.equal(viaJob.type,   'unrouted');
+  assert.equal(viaJob.reason, 'no-channel');
+  assert.equal(viaCtrl.type,   'unrouted',
+    'When translations cannot resolve size, both resolvers surface no-channel. ' +
+    'The picker\'s eligibility filter (listEligibleReprintControllers) depends ' +
+    'on this so a controller that would fail dispatch is not offered.');
+  assert.equal(viaCtrl.reason, 'no-channel');
+});
+
+// ═════════════════════════════════════════════════════════════════════════
+// Three-way parity — extended to the translations-only configuration
+// ═════════════════════════════════════════════════════════════════════════
+
+test('three-way parity extends to translations-only: main / _channelMappingOverride / forController agree on key set', () => {
+  // The _channelMappingOverride branch inside resolveRoute is not exercised
+  // when no mapping exists (it needs an override id to look up), so this
+  // three-way asserts the two paths that ARE reachable — main and
+  // forController — carry identical shape when routing is done by
+  // translations alone. Written to cover the configuration the earlier
+  // three-way test did not: no channel mappings at all.
+  seedTranslationsOnlyDp();
+  const viaMain = resolveRoute(JOB);
+  const viaCtrl = resolveRouteForController(JOB, CTRL_ID);
+  assert.deepEqual(Object.keys(viaCtrl).sort(), Object.keys(viaMain).sort());
 });
 
 test.after(() => { Module.prototype.require = __originalRequire; });

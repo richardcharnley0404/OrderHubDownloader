@@ -230,4 +230,106 @@ test('every controller returned by listEligibleReprintControllers resolves to a 
   }
 });
 
+// ═════════════════════════════════════════════════════════════════════════
+// Translations-only — the picker-inert-at-every-lab regression
+// ═════════════════════════════════════════════════════════════════════════
+//
+// The rush-reprint feature shipped with a subtle bug: listEligibleReprint-
+// Controllers derives its list from resolveRouteForController, which
+// pre-fix required a channel mapping upstream of the darkroompro branch.
+// A translations-only DP install (the common case at labs using the
+// translation-tables UI) therefore returned an EMPTY list, the chevron
+// never rendered, and the picker was inert everywhere. All the earlier
+// list-eligible fixtures supplied a channel mapping, so the suite passed.
+// Fixed by moving the darkroompro branch ahead of the mapping gate and
+// giving it resolveRoute's routability rule. These tests cover the
+// configuration the earlier fixtures did not.
+
+function dpTranslationsOnly(id, name, extra = {}) {
+  return {
+    id, name,
+    type:                'darkroompro',
+    outputPath:          `C:\\dp\\${id}\\out`,
+    artworkRootPath:     'Z:\\Art',
+    orderLastNameFormat: 'orderRef_lastName',
+    checkOrderStatus:    true,
+    sizeTranslations:    [{ productCodePrefix: PRODUCT, darkroomSize: '4x6' }],
+    mediaOptionKey:      '',
+    mediaTranslations:   [],
+    ...extra,
+  };
+}
+
+test('translations-only: single DP controller with a matched sizeTranslation is ELIGIBLE (was empty pre-fix)', () => {
+  __seed({
+    processControllerMappings: [{ process: 'Lab', controllerId: 'dp-1' }],
+    orderControllers:          [dpTranslationsOnly('dp-1', 'Darkroom')],
+    channelMappings:           [],  // DELIBERATELY empty
+  });
+  const eligible = listEligibleReprintControllers(JOB);
+  assert.equal(eligible.length, 1,
+    'A translations-only DP controller with a size translation that resolves ' +
+    'this product must appear in the eligible list. Pre-fix this returned [] ' +
+    'because resolveRouteForController required a channel mapping — that ' +
+    'defect made the rush-reprint chevron inert at every translations-only lab.');
+  assert.equal(eligible[0].id,   'dp-1');
+  assert.equal(eligible[0].name, 'Darkroom');
+  assert.equal(eligible[0].isParentRoute, true);
+});
+
+test('translations-only: two DP siblings both eligible when translations resolve for both', () => {
+  __seed({
+    processControllerMappings: [{ process: 'Lab', controllerId: 'dp-650' }],
+    orderControllers:          [
+      dpTranslationsOnly('dp-650', 'DP-650'),
+      dpTranslationsOnly('dp-400', 'DP-400'),
+    ],
+    channelMappings:           [],
+  });
+  const eligible = listEligibleReprintControllers(JOB);
+  assert.equal(eligible.length, 2);
+  const byId = Object.fromEntries(eligible.map(e => [e.id, e]));
+  assert.equal(byId['dp-650'].isParentRoute, true);
+  assert.equal(byId['dp-400'].isParentRoute, false);
+});
+
+test('translations-only: DP sibling whose translations cannot resolve THIS product is EXCLUDED', () => {
+  __seed({
+    processControllerMappings: [{ process: 'Lab', controllerId: 'dp-650' }],
+    orderControllers:          [
+      dpTranslationsOnly('dp-650', 'DP-650'),
+      // DP-400 translations don't cover PRODUCT.
+      dpTranslationsOnly('dp-400', 'DP-400', {
+        sizeTranslations: [{ productCodePrefix: 'DIFFERENT-PRODUCT', darkroomSize: '8x10' }],
+      }),
+    ],
+    channelMappings:           [],
+  });
+  const eligible = listEligibleReprintControllers(JOB);
+  assert.equal(eligible.length, 1,
+    'Only DP-650 (whose translations resolve THIS product) should be eligible. ' +
+    'DP-400 having translations for a different product must not smuggle it into ' +
+    'the picker — a dispatch would fail no-channel and the picker\'s job is to ' +
+    'make that dead-end unreachable by construction.');
+  assert.equal(eligible[0].id, 'dp-650');
+});
+
+test('translations-only + one sibling with a mapping: BOTH eligible (mixed configuration)', () => {
+  // Real-world variant: one lab controller is configured via translations,
+  // another via a channel mapping. Both must appear in the picker.
+  __seed({
+    processControllerMappings: [{ process: 'Lab', controllerId: 'dp-650' }],
+    orderControllers:          [
+      dpTranslationsOnly('dp-650', 'DP-650'),
+      dpTranslationsOnly('dp-400', 'DP-400'),  // reuses same translations shape
+    ],
+    channelMappings: [
+      // Explicit mapping ONLY for DP-400. DP-650 relies on its translations.
+      dpMapping('cm-400', 'dp-400'),
+    ],
+  });
+  const eligible = listEligibleReprintControllers(JOB);
+  assert.equal(eligible.length, 2);
+});
+
 test.after(() => { Module.prototype.require = __originalRequire; });

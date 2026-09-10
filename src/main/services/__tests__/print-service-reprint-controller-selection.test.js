@@ -301,7 +301,7 @@ test('sendReprint with a controllerId does NOT mutate the parent job object', as
 // Stale-mapping failure path
 // ═════════════════════════════════════════════════════════════════════════
 
-test('sendReprint with a controllerId whose channel mapping no longer exists fails cleanly with a specific message', async () => {
+test('sendReprint with a controllerId whose routing configuration was invalidated after the picker rendered fails cleanly with a specific message', async () => {
   const hot650 = fs.mkdtempSync(path.join(os.tmpdir(), 'ohd-hot650-f-'));
   const hot400 = fs.mkdtempSync(path.join(os.tmpdir(), 'ohd-hot400-f-'));
 
@@ -313,16 +313,25 @@ test('sendReprint with a controllerId whose channel mapping no longer exists fai
   seedTwoDpControllers({ hot650, hot400 });
 
   // Simulate: between the operator picking DP-400 and their click reaching
-  // dispatch, another user (or the operator in another window) removed
-  // the DP-400 mapping for this product. This is the exact race the picker
-  // cannot prevent by construction — the failure must be a clean error,
-  // not a fall-through to DP-650 or a silent no-op.
-  const mappings = __storeData.channelMappings.filter(m => m.controllerId !== CTRL_ID_400);
-  __storeData.channelMappings = mappings;
+  // dispatch, another user (or the operator in another window) invalidated
+  // DP-400's routing for this product. Both routing paths must be broken
+  // (mapping AND translations) — otherwise the fallback rule
+  // resolveRouteForController shares with resolveRoute will still route
+  // the job via translations, which is the correct behaviour for a
+  // translations-only install (see routing-darkroompro-fields.test.js
+  // "translations-only" block for the routability rule). This is the
+  // exact race the picker cannot prevent by construction — the failure
+  // must be a clean error, not a fall-through to DP-650 or a silent no-op.
+  __storeData.channelMappings = __storeData.channelMappings.filter(m => m.controllerId !== CTRL_ID_400);
+  __storeData.orderControllers = __storeData.orderControllers.map(c =>
+    c.id === CTRL_ID_400
+      ? { ...c, sizeTranslations: [], mediaTranslations: [] }
+      : c
+  );
 
   const result = await printService.sendReprint(PARENT, reprintPath, 'r1', reprintImages, CTRL_ID_400);
 
-  assert.equal(result.success, false, 'stale-mapping dispatch must fail, not fall back to another controller');
+  assert.equal(result.success, false, 'invalidated-config dispatch must fail, not fall back to another controller');
   assert.match(
     result.error || '',
     /no.*channel|channel.*mapping|no longer.*take/i,
