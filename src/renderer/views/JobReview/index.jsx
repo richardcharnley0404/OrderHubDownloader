@@ -5,6 +5,7 @@ import {
   REPRINT_PICKER_HEADER,
   REPRINT_PICKER_DEFAULT_SUFFIX,
 } from './reprintPickerStrings.js';
+import { shouldDeferEscapeToInner } from './drawerKeyPolicy.js';
 import { ThumbnailGrid } from './ThumbnailGrid.jsx';
 import { ControlSidebar } from './ControlPanel.jsx';
 import { CropEditor } from './CropEditor.jsx';
@@ -67,6 +68,8 @@ function DrawerTopBar({
   onClose,
   eligibleControllers,
   onRefreshEligible,
+  reprintPickerOpen,
+  onReprintPickerOpenChange,
 }) {
   const totalPrints   = images.reduce((s, i) => s + i.qtyCurrent, 0);
   const modifiedCount = images.filter(img =>
@@ -113,6 +116,8 @@ function DrawerTopBar({
           onDismissToast={onDismissReprintToast}
           eligibleControllers={eligibleControllers}
           onRefreshEligible={onRefreshEligible}
+          pickerOpen={reprintPickerOpen}
+          onPickerOpenChange={onReprintPickerOpenChange}
         />
       </div>
 
@@ -204,8 +209,16 @@ function SendReprintAction({
   onDismissToast,
   eligibleControllers,
   onRefreshEligible,
+  // pickerOpen state is OWNED BY JobReviewDrawer, not this component —
+  // the drawer's document-level Escape handler needs to consult it to
+  // avoid closing the whole drawer when the operator hits Escape to
+  // dismiss the picker (see docs/rush-reprint-controller-selection-
+  // investigation.md and drawerKeyPolicy.shouldDeferEscapeToInner).
+  // A local useState here would put the truth in two places.
+  pickerOpen,
+  onPickerOpenChange,
 }) {
-  const [pickerOpen, setPickerOpen] = useState(false);
+  const setPickerOpen = onPickerOpenChange;
 
   // Nothing flagged AND no recent dispatch state to show → render nothing.
   if (
@@ -496,6 +509,13 @@ function PreviewArea({ selected, jobPath }) {
 
 export function JobReviewDrawer({ jobId, jobPath, ohJobId, onClose }) {
   const [visible, setVisible] = useState(false);
+
+  // Lifted from SendReprintAction so the drawer's document-level Escape
+  // handler can see whether the reprint destination picker owns Escape
+  // right now. Without this, both handlers fire together and Escape
+  // dismisses the picker AND closes the drawer, discarding the
+  // operator's in-progress flagging. See drawerKeyPolicy.js.
+  const [reprintPickerOpen, setReprintPickerOpen] = useState(false);
   useEffect(() => {
     const raf = requestAnimationFrame(() => {
       requestAnimationFrame(() => setVisible(true));
@@ -618,11 +638,20 @@ export function JobReviewDrawer({ jobId, jobPath, ohJobId, onClose }) {
   // mode, ManualCropMode owns [ / ] (prev/next), R / L (rotation),
   // ArrowLeft / ArrowRight (rotation aliases), and Enter (approve +
   // advance) via its own document-level listener. We defer to it by
-  // early-returning when inBatchMode is true. Escape stays drawer-owned
-  // in both modes (closes the drawer; ManualCropMode doesn't bind Esc).
+  // early-returning when inBatchMode is true.
+  //
+  // Escape: consults shouldDeferEscapeToInner() so a document-level
+  // Escape handler owned by an INNER surface (today: the reprint
+  // destination picker in ReprintSplitButton) can dismiss its own state
+  // without also closing the drawer and discarding the operator's
+  // in-progress reprint flagging. Both listeners are on `document`, so
+  // stopPropagation cannot reliably separate them — the defer rule is
+  // the reliable fix. See drawerKeyPolicy.js for the predicate and
+  // drawerKeyPolicy.test.js for the invariant.
   useEffect(() => {
     function onKey(e) {
       if (e.key === 'Escape') {
+        if (shouldDeferEscapeToInner({ reprintPickerOpen })) return;
         handleClose();
         return;
       }
@@ -639,7 +668,7 @@ export function JobReviewDrawer({ jobId, jobPath, ohJobId, onClose }) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [images, selectedId, inBatchMode]);
+  }, [images, selectedId, inBatchMode, reprintPickerOpen]);
 
   const handleClose = useCallback(async () => {
     if (isDirty) {
@@ -669,6 +698,8 @@ export function JobReviewDrawer({ jobId, jobPath, ohJobId, onClose }) {
         onClose={handleClose}
         eligibleControllers={eligibleControllers}
         onRefreshEligible={refreshEligibleControllers}
+        reprintPickerOpen={reprintPickerOpen}
+        onReprintPickerOpenChange={setReprintPickerOpen}
       />
 
       {isLoading ? (
