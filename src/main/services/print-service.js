@@ -2494,10 +2494,30 @@ class PrintService {
    * Darkroom Pro pipeline for controllers configured via the new routing system.
    *
    * Reads the job manifest, builds a structured job object for the generator,
-   * and writes {orderRef}.txt to controller.outputPath.
+   * and writes {job_name}.txt (or {orderRef}.txt as a fallback) to
+   * controller.outputPath.
    *
-   * Images are referenced by absolute path (artworkRootPath\{orderRef}\Darkroom\{filename})
-   * and are NOT copied. Size and Media come from the matched channel mapping's options.
+   * Images are referenced by absolute path — the emitter's `Filepath=` line
+   * (darkroom-pro-output.js:317) uses `image.sourcePath`, which is built by
+   * this method from `configService.get('downloadDirectory')` +
+   * `${order_number}_${order_id}` + the manifest-relative filename (see
+   * :2508-2511 and the imageFiles construction below). Files are NOT copied
+   * to the controller.
+   *
+   * NOTE on `route.artworkRootPath`: the field is carried on the route for
+   * shape parity with `resolveRouteForController` (locked by
+   * routing-darkroompro-fields.test.js) and passed into the emitter's
+   * `controller` argument below for parity with the docstring at
+   * darkroom-pro-output.js:173 — but no emitter today reads it. Do NOT
+   * "helpfully" wire it into the Filepath= construction on the assumption
+   * it's meant to; the two routers currently produce byte-identical output
+   * (locked by routing-darkroompro-txt-byte-equality.test.js) and only
+   * because the field is unused. If you have a genuine need for a
+   * per-controller artwork root (e.g. the Fuji `fujiImageRoot` M1.16.1
+   * pattern), add the emitter code AND the corresponding parity coverage
+   * in the same change.
+   *
+   * Size and Media come from the matched channel mapping's options.
    */
   async _sendViaDarkroomProRouted(job, route) {
     const downloadDirectory = configService.get('downloadDirectory');

@@ -877,10 +877,41 @@ function resolveRouteForController(job, controllerId) {
     return { type: 'unrouted', reason: 'no-channel', controller };
   }
 
-  // Mirror the Layer 3 return shape from resolveRoute (DPOF / Darkroom Pro
-  // both consume this same shape downstream). Frontline / Fuji reassignment
-  // can be added later if the use case emerges — v1.7.8 ships with the
-  // generic DPOF/Darkroom shape since that's the Lab use case.
+  // Darkroom Pro reassignment MUST return the same shape as the main
+  // resolveRoute darkroompro branch above (lines 522-547) — dispatch reads
+  // `route.artworkRootPath` and `route.orderLastNameFormat` directly off
+  // the route object (print-service.js:2573-2574). The prior implementation
+  // fell into the generic DPOF/Darkroom shape below, silently dropping both
+  // fields; a reassigned DP job then dispatched with the emitter's default
+  // orderLastNameFormat ('orderRef_lastName') regardless of the controller's
+  // configured value. Locked by the resolveRoute × resolveRouteForController
+  // parity test in routing-darkroompro-fields.test.js — every field carried
+  // here must stay in sync with the main darkroompro literal.
+  if (controller.type === 'darkroompro') {
+    return {
+      type:                'controller',
+      controllerType:      'darkroompro',
+      controllerId:        controller.id,
+      controllerName:      controller.name,
+      outputPath:          controller.outputPath,
+      artworkRootPath:     controller.artworkRootPath     || '',
+      orderLastNameFormat: controller.orderLastNameFormat || 'orderRef_lastName',
+      channelMappingId:    channelMapping.id,
+      channelNumber:       null,
+      printSizeCode:       null,
+      bannerSheet:         false,
+      checkOrderStatus:    controller.checkOrderStatus !== false,
+      maxPrintsPerJob:
+        Number.isFinite(controller.maxPrintsPerJob) && controller.maxPrintsPerJob > 0
+          ? controller.maxPrintsPerJob
+          : null,
+      autoSendBatches: controller.autoSendBatches === true,
+    };
+  }
+
+  // Mirror the Layer 3 return shape from resolveRoute (generic DPOF
+  // downstream consumes this shape). Frontline / Fuji reassignment can be
+  // added later if the use case emerges.
   const shape = {
     type:             'controller',
     controllerType:   controller.type || 'dpof',
@@ -899,21 +930,16 @@ function resolveRouteForController(job, controllerId) {
     checkOrderStatus: controller.checkOrderStatus !== false,
     includeCustomerInFolder: controller.includeCustomerInFolder !== false,
   };
-  // Batch-splitting cap — Darkroom Pro (v1.10) and Epson (M5 of
-  // docs/epson-batch-splitting-brief.md). Kept off noritsu and
-  // untyped-dpof deliberately — no splitter behaviour for those types
-  // yet, and advertising the field would let holdForReview raise a
-  // reason a downstream dispatcher can't act on.
-  if (controller.type === 'darkroompro' || controller.type === 'epson') {
+  // Batch-splitting cap — Epson (M5 of docs/epson-batch-splitting-brief.md).
+  // Darkroom Pro has its own dedicated branch above; noritsu and untyped-dpof
+  // deliberately do not carry these fields — no splitter behaviour there yet,
+  // and advertising the field would let holdForReview raise a reason a
+  // downstream dispatcher can't act on.
+  if (controller.type === 'epson') {
     shape.maxPrintsPerJob =
       Number.isFinite(controller.maxPrintsPerJob) && controller.maxPrintsPerJob > 0
         ? controller.maxPrintsPerJob
         : null;
-    // M2 (2026-08-15) DP + M5 epson: mirror the two resolveRoute
-    // literals so a reassignment-time route carries the same shape
-    // as one resolved through the normal path. Drift on any branch
-    // would silently split-and-hold jobs the operator opted OUT of
-    // reviewing.
     shape.autoSendBatches = controller.autoSendBatches === true;
   }
   return shape;
