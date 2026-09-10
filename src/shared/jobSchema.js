@@ -39,6 +39,18 @@
  *     outputWidth           4× source dims (after upscale)
  *     outputHeight
  *
+ * Optional top-level attribution field (rush-reprint controller selection):
+ *
+ *     reprintDispatchedToControllerName  string, present ONLY on REPRINT
+ *       sidecars (`reprintOf !== null`) after a successful dispatch. Written
+ *       by the ohd:reprint:create IPC handler in ipc-handlers.js so the Jobs
+ *       grid can attribute the reprint to a specific controller — the field
+ *       is minimal (name only, no id) because operators need the friendly
+ *       label and nothing more. Absent on legacy reprint sidecars and on
+ *       any reprint whose dispatch predates this feature; renderer treats
+ *       absence as "no attribution known" and hides the chip. Written best-
+ *       effort — a failure to stamp does not fail the reprint.
+ *
  * Customer-originals fields (Customer Originals Phase 1, schema-bumped here
  * with the Phase 2 fields so we only mutate the shape once):
  *

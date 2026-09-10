@@ -437,6 +437,33 @@ while the ⚠ pill is showing. It has unit coverage on the logic but has never b
 in the app, because Manual Crop only opens for `artwork_source === 'manual'` jobs and the
 local test data is all Pixfizz. Needs a manual-source job to confirm.
 
+**Rush-reprint controller attribution has no lasting operator surface.**
+The rush-reprint feature (docs/rush-reprint-controller-selection-
+investigation.md) writes the destination controller name to the reprint
+sidecar as `reprintDispatchedToControllerName` and shows it once in the
+transient "sent" pill inside the Job Review drawer. Both of those are
+gone by the next drawer open — the pill is auto-dismissed on the next
+send, and the sidecar sits on disk unread by any UI. So the day after
+a rush, an operator with two DP controllers cannot tell which of the
+morning's reprints went to the fast printer without opening a reprint
+sidecar file by hand and looking for the field.
+
+The natural home is a per-job reprint history panel — a list of the
+parent job's reprints with `{jobId}-r{n}` and the destination
+controller name for each. The sidecar field already exists for it to
+read, and every reprint dispatched since the feature landed carries it.
+It is a separate build: the current work delivered the mechanism
+(dispatch to a chosen controller + persistent attribution field), not
+the historical surface. See docs/rush-reprint-controller-selection-
+investigation.md §Q5 for the fuller shape of the attribution gap.
+
+Documentation correction: an earlier draft of that investigation doc
+claimed reprints appear as their own rows in the Jobs grid, which is
+wrong — reprints are local job folders, not API jobs, and
+`renderJobTable` never receives them. Nobody should design a future
+attribution surface against a "reprint row" that does not exist. The
+grid does not surface reprints in any form today.
+
 **Multi-location FTP Copy mode — acceptance test outstanding.** The
 1.16.3 FTP Copy mode + 1.16.4 persistence fix have been confirmed
 in the narrow sense (one lab, one install, files remain on the

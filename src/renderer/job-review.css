@@ -1246,6 +1246,87 @@
   max-width: 320px;
 }
 
+/* ─── Rush-reprint destination picker (Option A) ─────────────────────────
+ * Split button: the primary button carries today's label and dispatches
+ * to the parent's default route (byte-identical to the pre-picker
+ * behaviour — locked by print-service-reprint-controller-selection.test.js).
+ * A separate chevron button opens the menu of eligible controllers.
+ * Rendered ONLY when the eligible list has more than one entry — single-
+ * controller labs never see the chevron.
+ */
+.jr-send-splitbutton {
+  display: inline-flex;
+  align-items: stretch;
+  position: relative;
+  z-index: 1;
+}
+.jr-btn-send--split-primary {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  /* Divider between primary and chevron — 1px inset via box-shadow so it
+     tracks the button's background regardless of theme. */
+  box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.25);
+}
+.jr-btn-send--split-chevron {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  padding: 7px 10px;
+  font-size: 12px;
+  /* The chevron glyph itself carries the visual weight; no letter-spacing
+     to keep the arrow tight in its cell. */
+  letter-spacing: 0;
+}
+
+.jr-send-picker {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 220px;
+  background: var(--app-panel, #fff);
+  border: 1px solid var(--app-border, rgba(0,0,0,0.15));
+  border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+  padding: 4px 0;
+  z-index: 20;
+  font-family: var(--app-mono);
+  font-size: 12px;
+}
+.jr-send-picker__header {
+  padding: 6px 12px 4px;
+  color: var(--app-muted, #888);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.jr-send-picker__item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 7px 12px;
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+.jr-send-picker__item:hover:not(:disabled),
+.jr-send-picker__item:focus-visible {
+  background: var(--app-hover, rgba(0,0,0,0.06));
+  outline: none;
+}
+.jr-send-picker__item:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.jr-send-picker__item-default {
+  color: var(--app-muted, #888);
+  font-size: 11px;
+  font-style: italic;
+}
+
 /* ─── Sending-reprint overlay (full drawer, blocking) ──────────────────── */
 /*
  * Shown while the reprintCreate IPC is in flight. Sits above the body and

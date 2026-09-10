@@ -1135,10 +1135,11 @@ class PrintService {
     });
 
     return {
-      success:    true,
-      method:     'dpof-reprint',
-      destPath:   writeResult.folderPath,
-      folderName: writeResult.folderName
+      success:        true,
+      method:         'dpof-reprint',
+      destPath:       writeResult.folderPath,
+      folderName:     writeResult.folderName,
+      controllerName: route.controllerName,
     };
   }
 
@@ -1173,13 +1174,61 @@ class PrintService {
    * @param {string} reprintSuffix   - 'r1', 'r2', …
    * @param {Array}  reprintImages   - Array from the reprint sidecar.images
    *                                   ({ filename, qtyCurrent, corrections })
+   * @param {string} [controllerId]  - OPTIONAL. Rush-reprint destination:
+   *   when supplied, the reprint is resolved via
+   *   `resolveRouteForController(parent, controllerId)` and dispatched to
+   *   THAT controller instead of the parent's default route. One-shot —
+   *   nothing about the parent job's routing state is persisted (see
+   *   docs/rush-reprint-controller-selection-investigation.md §Q3). The
+   *   picker in the Job Review drawer only offers controllers with a
+   *   valid channel mapping for the parent's product+options, but the
+   *   mapping can change between menu-render and click (see the
+   *   stale-mapping tests in
+   *   print-service-reprint-controller-selection.test.js), so unrouted
+   *   / no-channel / no-controller results from the resolver surface
+   *   here as clean errors rather than a fall-through to the parent
+   *   route.
    * @returns {Promise<{success:boolean, method?:string, destPath?:string, error?:string}>}
    */
-  async sendReprint(parentJob, reprintJobPath, reprintSuffix, reprintImages) {
-    const { resolveRoute } = require('./routing-service');
-    const route = resolveRoute(parentJob);
+  async sendReprint(parentJob, reprintJobPath, reprintSuffix, reprintImages, controllerId = null) {
+    const { resolveRoute, resolveRouteForController } = require('./routing-service');
+
+    // When the operator picked a specific rush destination, bypass the
+    // parent's route and resolve as-if the job was routed to that
+    // controller. resolveRouteForController returns the same shape for
+    // darkroompro as the main resolveRoute branch (locked by
+    // routing-darkroompro-fields.test.js + routing-darkroompro-txt-byte-
+    // equality.test.js), so everything downstream — including
+    // _sendReprintViaDarkroomPro's own reads off `route` — is
+    // indifferent to which resolver produced the route.
+    const route = controllerId
+      ? resolveRouteForController(parentJob, controllerId)
+      : resolveRoute(parentJob);
 
     if (route.type === 'unrouted') {
+      // When a specific controller was requested, phrase the error in
+      // terms of THAT controller so the operator sees a clear reason
+      // (typical case: the picker offered DP-400 as eligible, then
+      // between menu-render and click someone removed its channel
+      // mapping for this product).
+      if (controllerId) {
+        if (route.reason === 'no-channel') {
+          return {
+            success: false,
+            error: `Chosen controller can no longer take this job — its channel mapping was removed after the picker rendered. Reopen the reprint menu to see the current list.`,
+          };
+        }
+        if (route.reason === 'no-controller') {
+          return {
+            success: false,
+            error: `Chosen controller no longer exists — it was deleted after the picker rendered. Reopen the reprint menu to see the current list.`,
+          };
+        }
+        return {
+          success: false,
+          error: `Chosen controller cannot take this job (reason: ${route.reason}).`,
+        };
+      }
       return {
         success: false,
         error: `Parent job has no usable route (reason: ${route.reason}). Configure routing in Settings before sending a reprint.`,
@@ -1394,9 +1443,10 @@ class PrintService {
     });
 
     return {
-      success:  true,
-      method:   'darkroompro-reprint',
+      success:        true,
+      method:         'darkroompro-reprint',
       destPath,
+      controllerName: route.controllerName,
     };
   }
 
@@ -1528,10 +1578,11 @@ class PrintService {
     });
 
     return {
-      success:    true,
-      method:     'folder_copy-reprint',
-      sourcePath: workingPath,
-      destPath:   destFolder,
+      success:        true,
+      method:         'folder_copy-reprint',
+      sourcePath:     workingPath,
+      destPath:       destFolder,
+      controllerName: route.controllerName,
     };
   }
 
@@ -1741,10 +1792,11 @@ class PrintService {
     });
 
     return {
-      success:      true,
-      method:       'fujijobmaker-reprint',
-      destPaths:    writeResult.writtenFiles,
-      stagedFolder: writeResult.imageStagingFolder,
+      success:        true,
+      method:         'fujijobmaker-reprint',
+      destPaths:      writeResult.writtenFiles,
+      stagedFolder:   writeResult.imageStagingFolder,
+      controllerName: route.controllerName,
     };
   }
 
@@ -1959,10 +2011,11 @@ class PrintService {
     });
 
     return {
-      success:       true,
-      method:        'fujipicpro-reprint',
-      orderFilePath: writtenPath,
-      stagedFolder:  stageResult.stagingFolder,
+      success:        true,
+      method:         'fujipicpro-reprint',
+      controllerName: route.controllerName,
+      orderFilePath:  writtenPath,
+      stagedFolder:   stageResult.stagingFolder,
       negNumberMap:  stageResult.negNumberMap.map(e => ({
         negNumber:        e.negNumber,
         stagedName:       e.stagedName,
@@ -2114,9 +2167,10 @@ class PrintService {
     });
 
     return {
-      success:  true,
-      method:   'pdf_copy-reprint',
-      destPath: destFolder,
+      success:        true,
+      method:         'pdf_copy-reprint',
+      destPath:       destFolder,
+      controllerName: route.controllerName,
     };
   }
 
@@ -2282,9 +2336,10 @@ class PrintService {
     });
 
     return {
-      success:  true,
-      method:   'frontline-reprint',
-      destPath: writeResult.jobFolderPath,
+      success:        true,
+      method:         'frontline-reprint',
+      destPath:       writeResult.jobFolderPath,
+      controllerName: route.controllerName,
     };
   }
 

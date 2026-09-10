@@ -164,8 +164,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // from /originals/<filename> so re-approves don't crop a previous crop's
   // output. Falls back to /working/ if /originals/ is missing.
   jobCropImage:   (payload) => ipcRenderer.invoke('ohd:job:crop-image',  payload),
+  // reprintCreate payload:  { jobId, jobPath, controllerId? }
+  //   controllerId is the rush-reprint destination — see
+  //   docs/rush-reprint-controller-selection-investigation.md §Q3 and
+  //   print-service.js:sendReprint. Optional; when omitted the reprint
+  //   routes via the parent's default route exactly as before.
   reprintCreate:  (payload) => ipcRenderer.invoke('ohd:reprint:create',  payload),
   reprintCreateSingle: (payload) => ipcRenderer.invoke('ohd:reprint:createSingle', payload),
+
+  // reprintListEligibleControllers powers the "Reprint to…" chevron menu
+  // in Job Review. Returns [{ id, name, isParentRoute }] for controllers
+  // of the same controllerType as the parent's route that can actually
+  // take THIS job (product+options → valid channel mapping). Empty when
+  // the parent has no controller route. The renderer decides the UI
+  // collapse: length === 1 → plain "Send for Reprint" button (today's
+  // shape); length > 1 → split button with the chevron.
+  reprintListEligibleControllers: (payload) =>
+    ipcRenderer.invoke('ohd:reprint:list-eligible-controllers', payload),
 
   // Customer Originals (Phase 1) — open / reveal the customer's uncropped
   // upload in the OS's default viewer / Explorer-Finder. Both take the

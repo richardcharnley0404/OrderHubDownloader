@@ -1,5 +1,10 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useJobReview } from './useJobReview.js';
+import {
+  REPRINT_CHEVRON_TITLE,
+  REPRINT_PICKER_HEADER,
+  REPRINT_PICKER_DEFAULT_SUFFIX,
+} from './reprintPickerStrings.js';
 import { ThumbnailGrid } from './ThumbnailGrid.jsx';
 import { ControlSidebar } from './ControlPanel.jsx';
 import { CropEditor } from './CropEditor.jsx';
@@ -54,11 +59,14 @@ function DrawerTopBar({
   colorDirty,
   isSendingReprint,
   lastReprintSent,
+  lastReprintSentTo,
   reprintError,
   onSave,
   onSendReprints,
   onDismissReprintToast,
   onClose,
+  eligibleControllers,
+  onRefreshEligible,
 }) {
   const totalPrints   = images.reduce((s, i) => s + i.qtyCurrent, 0);
   const modifiedCount = images.filter(img =>
@@ -99,9 +107,12 @@ function DrawerTopBar({
           isSaving={isSaving}
           isSendingReprint={isSendingReprint}
           lastReprintSent={lastReprintSent}
+          lastReprintSentTo={lastReprintSentTo}
           reprintError={reprintError}
           onSendReprints={onSendReprints}
           onDismissToast={onDismissReprintToast}
+          eligibleControllers={eligibleControllers}
+          onRefreshEligible={onRefreshEligible}
         />
       </div>
 
@@ -187,10 +198,15 @@ function SendReprintAction({
   isSaving,
   isSendingReprint,
   lastReprintSent,
+  lastReprintSentTo,
   reprintError,
   onSendReprints,
   onDismissToast,
+  eligibleControllers,
+  onRefreshEligible,
 }) {
+  const [pickerOpen, setPickerOpen] = useState(false);
+
   // Nothing flagged AND no recent dispatch state to show → render nothing.
   if (
     reprintImages.length === 0 &&
@@ -201,8 +217,25 @@ function SendReprintAction({
     return null;
   }
 
-  async function handleSend() {
+  async function handleSendDefault() {
+    setPickerOpen(false);
     try { await onSendReprints(); } catch { /* state already set by hook */ }
+  }
+
+  async function handleSendToController(controllerId) {
+    setPickerOpen(false);
+    try { await onSendReprints({ controllerId }); } catch { /* state already set by hook */ }
+  }
+
+  function handleChevronClick() {
+    // Refresh eligibility every time the menu opens so a mapping change
+    // since the drawer opened is reflected in the list. The stale-mapping
+    // failure path still fires cleanly at dispatch time if the operator
+    // clicks a menu entry that gets removed between menu-render and click.
+    if (!pickerOpen && typeof onRefreshEligible === 'function') {
+      onRefreshEligible();
+    }
+    setPickerOpen(o => !o);
   }
 
   if (isSendingReprint) {
@@ -215,6 +248,15 @@ function SendReprintAction({
   }
 
   if (lastReprintSent) {
+    // Attribution: when the main-side reprint pipeline returned a
+    // controllerName, show it in the pill so an operator running two DP
+    // controllers can see which one their rush reprint went to. Falls
+    // back to today's shape (no destination) when the field is absent
+    // — pre-attribution reprints, non-DP paths that don't populate it,
+    // or a partial-rollout main-side.
+    const label = lastReprintSentTo
+      ? `✓ ${lastReprintSent} sent to ${lastReprintSentTo}`
+      : `✓ ${lastReprintSent} sent`;
     return (
       <span
         className="jr-send-pill jr-send-pill--sent"
@@ -223,7 +265,7 @@ function SendReprintAction({
         tabIndex={0}
         title="Click to dismiss"
       >
-        ✓ {lastReprintSent} sent
+        {label}
       </span>
     );
   }
@@ -233,7 +275,7 @@ function SendReprintAction({
       <span className="jr-send-pill jr-send-pill--error" title={reprintError}>
         <span className="jr-send-pill__error-text">⚠ {reprintError}</span>
         <button
-          onClick={handleSend}
+          onClick={handleSendDefault}
           disabled={isSaving}
           className="jr-btn-send jr-btn-send--inline"
         >
@@ -250,10 +292,119 @@ function SendReprintAction({
     ? `Send ${imageCount} Image${imageCount !== 1 ? 's' : ''} (${printTotal} prints) for Reprint`
     : `Send ${imageCount} Image${imageCount !== 1 ? 's' : ''} for Reprint`;
 
+  // Collapse-by-config: when there is 0 or 1 eligible controller, render
+  // exactly today's plain button. The chevron only appears when there is
+  // a genuine choice to make. Zero eligibles happens when the parent
+  // has no controller route at all — the plain button still tries the
+  // default dispatch, which will fail with a clear error rather than
+  // silently missing.
+  const eligible = Array.isArray(eligibleControllers) ? eligibleControllers : [];
+  if (eligible.length <= 1) {
+    return (
+      <button onClick={handleSendDefault} disabled={isSaving} className="jr-btn-send">
+        {baseLabel}
+      </button>
+    );
+  }
+
+  // Split-button — primary click = parent's default route, chevron opens
+  // the picker with every eligible controller including the default.
   return (
-    <button onClick={handleSend} disabled={isSaving} className="jr-btn-send">
-      {baseLabel}
-    </button>
+    <ReprintSplitButton
+      baseLabel={baseLabel}
+      isSaving={isSaving}
+      pickerOpen={pickerOpen}
+      eligibleControllers={eligible}
+      onSendDefault={handleSendDefault}
+      onChevronClick={handleChevronClick}
+      onSendToController={handleSendToController}
+      onClose={() => setPickerOpen(false)}
+    />
+  );
+}
+
+/**
+ * Split-button + destination-picker for the rush-reprint feature.
+ * Kept as a distinct component so the eligible-list logic and the
+ * outside-click / Escape handling are testable in isolation.
+ *
+ * The menu is a lightweight popover, not a `.pm-modal-overlay` modal —
+ * it holds no editable state, so it does NOT need the openModal()
+ * dirty-check wiring (the JR drawer's own dirty state, guarded on drawer
+ * close, is orthogonal to the picker). Outside-click / Escape close it.
+ */
+function ReprintSplitButton({
+  baseLabel,
+  isSaving,
+  pickerOpen,
+  eligibleControllers,
+  onSendDefault,
+  onChevronClick,
+  onSendToController,
+  onClose,
+}) {
+  const rootRef = useRef(null);
+
+  useEffect(() => {
+    if (!pickerOpen) return undefined;
+    function onDocMouseDown(e) {
+      if (rootRef.current && !rootRef.current.contains(e.target)) {
+        onClose();
+      }
+    }
+    function onKeyDown(e) {
+      if (e.key === 'Escape') onClose();
+    }
+    document.addEventListener('mousedown', onDocMouseDown);
+    document.addEventListener('keydown',   onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onDocMouseDown);
+      document.removeEventListener('keydown',   onKeyDown);
+    };
+  }, [pickerOpen, onClose]);
+
+  return (
+    <span className="jr-send-splitbutton" ref={rootRef}>
+      <button
+        onClick={onSendDefault}
+        disabled={isSaving}
+        className="jr-btn-send jr-btn-send--split-primary"
+      >
+        {baseLabel}
+      </button>
+      <button
+        onClick={onChevronClick}
+        disabled={isSaving}
+        className="jr-btn-send jr-btn-send--split-chevron"
+        aria-haspopup="menu"
+        aria-expanded={pickerOpen}
+        aria-label={REPRINT_CHEVRON_TITLE}
+        title={REPRINT_CHEVRON_TITLE}
+      >
+        ▾
+      </button>
+      {pickerOpen && (
+        <div className="jr-send-picker" role="menu" aria-label={REPRINT_PICKER_HEADER}>
+          <div className="jr-send-picker__header">{REPRINT_PICKER_HEADER}</div>
+          {eligibleControllers.map(entry => (
+            <button
+              key={entry.id}
+              role="menuitem"
+              className="jr-send-picker__item"
+              onClick={() => onSendToController(entry.id)}
+              disabled={isSaving}
+            >
+              <span className="jr-send-picker__item-name">{entry.name}</span>
+              {entry.isParentRoute && (
+                <span className="jr-send-picker__item-default">
+                  {REPRINT_PICKER_DEFAULT_SUFFIX}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+    </span>
   );
 }
 
@@ -383,7 +534,8 @@ export function JobReviewDrawer({ jobId, jobPath, ohJobId, onClose }) {
     images, filenames, selected, selectedId,
     holdCorrection, isDirty, colorDirty, isSaving, isLoading, loadError,
     reprintCount, reprintImages,
-    isSendingReprint, lastReprintSent, reprintError, reprintSendCount, dismissReprintToast,
+    isSendingReprint, lastReprintSent, lastReprintSentTo, reprintError, reprintSendCount, dismissReprintToast,
+    eligibleControllers, refreshEligibleControllers,
     selectImage, updateCorrection, updateQty,
     toggleReprint, flagAllReprints, clearAllReprints,
     toggleHold, resetImage, resetAll,
@@ -509,11 +661,14 @@ export function JobReviewDrawer({ jobId, jobPath, ohJobId, onClose }) {
         colorDirty={colorDirty}
         isSendingReprint={isSendingReprint}
         lastReprintSent={lastReprintSent}
+        lastReprintSentTo={lastReprintSentTo}
         reprintError={reprintError}
         onSave={saveJob}
         onSendReprints={sendReprints}
         onDismissReprintToast={dismissReprintToast}
         onClose={handleClose}
+        eligibleControllers={eligibleControllers}
+        onRefreshEligible={refreshEligibleControllers}
       />
 
       {isLoading ? (

@@ -35,6 +35,17 @@ export function useJobReview(jobId, jobPath, ohJobId = null) {
   // Last successful reprint id ("{jobId}-r{N}"), for the confirmation
   // pill in the top bar after dispatch completes.
   const [lastReprintSent,  setLastReprintSent]  = useState(null);
+  // Destination controller name for the last successful reprint —
+  // surfaced in the "sent ✓" pill so an operator running two DP
+  // controllers (rush-reprint feature) can see which one their reprint
+  // went to. Null when the main-side didn't return a controller name
+  // (older builds, or a reprint dispatched before this field existed).
+  // Note: there is no "reprint row" in the Jobs grid — reprints are local
+  // job folders, not API jobs — so this pill is the operator's only
+  // per-session attribution surface. Also persisted on the reprint
+  // sidecar (reprintDispatchedToControllerName) by the IPC handler for
+  // future post-session surfaces.
+  const [lastReprintSentTo, setLastReprintSentTo] = useState(null);
   // Last reprint dispatch error, surfaced as a retry pill in the top bar.
   const [reprintError,     setReprintError]     = useState(null);
   // Image count for the in-flight "Sending reprint…" overlay. The bundle
@@ -42,6 +53,21 @@ export function useJobReview(jobId, jobPath, ohJobId = null) {
   // to 1. Explicit state (not derived from reprintImages) because the single
   // flow can dispatch an image that isn't in the flagged set.
   const [reprintSendCount, setReprintSendCount] = useState(0);
+
+  // -- Rush-reprint controller picker (Option A per design doc) --------------
+  //
+  // Populated on drawer open + refreshed on picker click so a mapping
+  // change between menu-render and dispatch surfaces at click time rather
+  // than staying invisible. Empty array means "no eligible controllers"
+  // (parent has no controller route at all). Array length === 1 collapses
+  // the SendReprintAction to the plain single-button today's shape;
+  // length > 1 renders the split-button + chevron menu. Collapse is
+  // decided BY CONFIG (the eligible list for THIS job), NOT by
+  // "how many DP controllers exist" — the source-of-truth for the
+  // decision is the same predicate `sendReprint` uses at dispatch time.
+  //
+  // Each entry: { id: string, name: string, isParentRoute: boolean }.
+  const [eligibleControllers, setEligibleControllers] = useState([]);
 
   // -- Crop-to-size state -------------------------------------------------------
 
@@ -161,6 +187,7 @@ export function useJobReview(jobId, jobPath, ohJobId = null) {
         // suffix when the panel is reopened after a previous dispatch.
         setReprintCount(typeof result.reprintCount === 'number' ? result.reprintCount : 0);
         setLastReprintSent(null);
+        setLastReprintSentTo(null);
         setReprintError(null);
         setIsLoading(false);
 
@@ -518,18 +545,65 @@ export function useJobReview(jobId, jobPath, ohJobId = null) {
     }
   }, []);
 
-  const sendReprints = useCallback(async () => {
+  /**
+   * Fetch the eligible-reprint-controllers list for THIS job from the main
+   * process. Called on drawer open (to decide split-button vs plain-button)
+   * and again when the operator opens the chevron menu (to catch mapping
+   * changes since the drawer was opened). See
+   * routing-service.listEligibleReprintControllers for the predicate.
+   */
+  const refreshEligibleControllers = useCallback(async () => {
+    if (!ohJobIdRef.current) return;
+    try {
+      const res = await window.electronAPI.reprintListEligibleControllers({
+        jobId: ohJobIdRef.current,
+      });
+      if (res && res.success && Array.isArray(res.controllers)) {
+        setEligibleControllers(res.controllers);
+      } else {
+        setEligibleControllers([]);
+      }
+    } catch {
+      // Fail-quiet: treat "cannot fetch" as "no eligible list, use today's
+      // single-button behaviour". Any real problem surfaces at dispatch time
+      // via the error pill.
+      setEligibleControllers([]);
+    }
+  }, []);
+
+  // Fetch once on drawer open (after ohJobId settles). The empty deps below
+  // fires this on every drawer mount; ohJobIdRef.current is read inside so
+  // the identity of the callback stays stable.
+  useEffect(() => {
+    refreshEligibleControllers();
+  }, [refreshEligibleControllers, ohJobId]);
+
+  /**
+   * Send reprints — bundle flow.
+   *
+   * @param {object} [opts]
+   * @param {string} [opts.controllerId]  Rush-reprint destination. When
+   *   omitted the reprint routes via the parent job's default route (the
+   *   only shape today's operators have seen). When set, dispatch resolves
+   *   the route via resolveRouteForController(parent, controllerId) — this
+   *   is one-shot; the parent job's routing state is NOT persisted (design
+   *   doc §Q3, print-service-reprint-controller-selection.test.js).
+   */
+  const sendReprints = useCallback(async (opts = {}) => {
+    const controllerId = opts.controllerId || null;
     // Drive the full-panel overlay + reset prior dispatch state. Lifted
     // out of SendReprintAction (2026-05-18) so the spinner can blanket
     // the whole drawer instead of being a button-text change.
     setIsSendingReprint(true);
     setReprintSendCount((sidecarRef.current?.images || []).filter(i => i.reprint).length);
     setReprintError(null);
+    setLastReprintSentTo(null);
     try {
       await saveJob();
       const result = await window.electronAPI.reprintCreate({
-        jobId:   jobIdRef.current,
-        jobPath: jobPathRef.current,
+        jobId:        jobIdRef.current,
+        jobPath:      jobPathRef.current,
+        controllerId,
       });
       if (!result.success) {
         console.error('[OHD] reprintCreate failed:', result.error);
@@ -548,6 +622,7 @@ export function useJobReview(jobId, jobPath, ohJobId = null) {
       });
       setReprintCount(c => c + 1);
       setLastReprintSent(result.reprintJobId);
+      setLastReprintSentTo((result.printResult && result.printResult.controllerName) || null);
       setIsDirty(false);
       return { reprintJobId: result.reprintJobId, reprintJobPath: result.reprintJobPath };
     } catch (err) {
@@ -579,6 +654,7 @@ export function useJobReview(jobId, jobPath, ohJobId = null) {
   // glancing at the confirmation. Errors similarly clear on retry.
   const dismissReprintToast = useCallback(() => {
     setLastReprintSent(null);
+    setLastReprintSentTo(null);
     setReprintError(null);
   }, []);
 
@@ -835,9 +911,11 @@ export function useJobReview(jobId, jobPath, ohJobId = null) {
     reprintImages,
     isSendingReprint,
     lastReprintSent,
+    lastReprintSentTo,
     reprintError,
     reprintSendCount,
     dismissReprintToast,
+    eligibleControllers,
 
     // Actions
     selectImage,
@@ -851,6 +929,7 @@ export function useJobReview(jobId, jobPath, ohJobId = null) {
     resetAll,
     saveJob,
     sendReprints,
+    refreshEligibleControllers,
     refreshSidecar,
     replaceSidecar,
 

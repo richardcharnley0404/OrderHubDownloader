@@ -945,6 +945,64 @@ function resolveRouteForController(job, controllerId) {
   return shape;
 }
 
+/**
+ * List controllers that could take this job as a reprint destination —
+ * used by the Job Review "Reprint to…" picker to make the no-mapping
+ * dead-end unreachable by construction rather than handled after the
+ * fact (design doc: docs/rush-reprint-controller-selection-investigation.md
+ * §Q4). Eligibility is derived from the same predicate `sendReprint`
+ * uses at dispatch time — a controller appears here iff
+ * `resolveRouteForController(job, id)` returns `type: 'controller'` for
+ * this exact job. That predicate reads the LIVE channelMappings /
+ * orderControllers store, so a mapping change between menu-render and
+ * click can still produce a stale entry; dispatch fails cleanly in that
+ * case with the "chosen controller can no longer take this job" error
+ * (locked by print-service-reprint-controller-selection.test.js).
+ *
+ * Filters:
+ *   1. Controllers of the same `controller.type` as the parent's
+ *      resolved route. Cross-type reprints (e.g. DP job → folder_copy)
+ *      are not a defined workflow — the feature exists so that a
+ *      lab with two SIBLING controllers of the same type can steer a
+ *      rush job to the faster one via a different Media= translation.
+ *   2. `resolveRouteForController` returns a controller route (not
+ *      unrouted). This gates on the (productCode, options) channel-
+ *      mapping match, which is the "can actually take this job" test.
+ *
+ * The parent's own route controller is always included when eligible,
+ * and marked `isParentRoute: true` so the renderer can show it as the
+ * default (no chevron pick needed).
+ *
+ * @param {object} job  Parent API job — must carry the fields
+ *   `resolveRoute` reads (product_code, options, process).
+ * @returns {Array<{id: string, name: string, isParentRoute: boolean}>}
+ *   Empty array when the parent has no valid controller route at all
+ *   (in which case the picker should not appear).
+ */
+function listEligibleReprintControllers(job) {
+  const parentRoute = resolveRoute(job);
+  if (!parentRoute || parentRoute.type !== 'controller') {
+    return [];
+  }
+  const parentType = parentRoute.controllerType;
+  const parentId   = parentRoute.controllerId;
+
+  const controllers = store.get('orderControllers', []);
+  const eligible = [];
+  for (const controller of controllers) {
+    if (controller.type !== parentType) continue;
+    const route = resolveRouteForController(job, controller.id);
+    if (route && route.type === 'controller') {
+      eligible.push({
+        id:            controller.id,
+        name:          controller.name,
+        isParentRoute: controller.id === parentId,
+      });
+    }
+  }
+  return eligible;
+}
+
 // ── CRUD helpers ──────────────────────────────────────────────────────────────
 // These are thin wrappers used by the IPC handlers. All validation is the
 // caller's responsibility (IPC handlers receive user input from the renderer).
@@ -1744,6 +1802,7 @@ function backfillFujiPrintSize() {
 module.exports = {
   resolveRoute,
   resolveRouteForController,
+  listEligibleReprintControllers,
   resolvePrintSizeCode,
   isBareWxH,
   optionsMatchWithIgnore,

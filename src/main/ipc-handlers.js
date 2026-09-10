@@ -2974,7 +2974,7 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
 
   /**
    * ohd:reprint:create
-   * Payload:  { jobId, jobPath }
+   * Payload:  { jobId, jobPath, controllerId? }
    * Returns:  { success: true, reprintJobId, reprintJobPath, printResult }
    *
    * Loads the current sidecar from disk (which should have been saved with
@@ -2982,8 +2982,16 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
    * parent directory for existing -r* siblings, creates the reprint job
    * folder, sends it through the full DPOF print pipeline, then clears
    * the reprint flags in the parent sidecar.
+   *
+   * `controllerId` (optional): rush-reprint destination controller id
+   * chosen by the operator from the Job Review "Reprint to…" picker. When
+   * present, the reprint is dispatched via that controller regardless of
+   * the parent's default route. When omitted (the common case), the
+   * reprint routes via the parent's default route exactly as before.
+   * See docs/rush-reprint-controller-selection-investigation.md §Q3 for
+   * one-shot semantics — the parent job's routing state is NOT touched.
    */
-  ipcMain.handle('ohd:reprint:create', async (event, { jobId, jobPath }) => {
+  ipcMain.handle('ohd:reprint:create', async (event, { jobId, jobPath, controllerId }) => {
     try {
       // Load the current sidecar to read reprint flags.
       const { sidecar } = await loadSidecar(jobId, jobPath);
@@ -3035,11 +3043,16 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
       // dispatch fails the folder stays on disk so the operator can fix
       // the routing config and try again (the next attempt will create
       // -r2 / -r3 as the folder-name scan loop sees the orphaned -r1).
+      // controllerId (5th arg) is the rush-reprint destination — when
+      // null/absent, sendReprint routes via the parent's default route
+      // exactly as before (byte-parity locked by
+      // print-service-reprint-controller-selection.test.js TRIPWIRE).
       const printResult = await printService.sendReprint(
         parentJob,
         result.reprintJobPath,
         reprintSuffix,
-        result.reprintSidecar.images
+        result.reprintSidecar.images,
+        controllerId || null,
       );
 
       if (!printResult.success) {
@@ -3068,6 +3081,38 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
         startStatusPolling(windowManager);
       }
 
+      // Stamp the destination controller name on the reprint's OWN sidecar
+      // for attribution — the Jobs grid reads this to show a "sent to X"
+      // chip on the reprint row (design:
+      // docs/rush-reprint-controller-selection-investigation.md §Q5,
+      // paragraph "Attribution"). Minimal — name only, no id: the operator
+      // needs the friendly label and nothing more. The parent sidecar
+      // is untouched by this stamp; one-shot semantics require the parent's
+      // routing state to be preserved.
+      //
+      // Resolve the name at write time from printResult.controllerName
+      // (added to every _sendReprintViaX return shape below); fall back to
+      // an empty string on any downstream missing it, so a partial rollout
+      // never fails the whole reprint. Absence on the sidecar is treated
+      // by the grid as "no attribution known" and hides the chip.
+      const destControllerName = printResult.controllerName || '';
+      if (destControllerName) {
+        try {
+          const updatedReprintSidecar = {
+            ...result.reprintSidecar,
+            reprintDispatchedToControllerName: destControllerName,
+          };
+          await saveSidecar(updatedReprintSidecar, result.reprintJobPath);
+        } catch (attribErr) {
+          // Attribution is best-effort — do NOT fail the reprint if the
+          // stamp write fails. Log for the audit trail.
+          logger.logWarning('Reprint attribution stamp failed (dispatch already succeeded)', {
+            reprintJobId: result.reprintJobId,
+            error:        attribErr.message,
+          });
+        }
+      }
+
       // Clear reprint flags in the parent sidecar after a successful reprint.
       const clearedImages = sidecar.images.map(img => ({
         ...img,
@@ -3079,6 +3124,44 @@ function setupIpcHandlers(pollingService, ftpService, windowManager) {
       return { success: true, ...result, printResult };
     } catch (error) {
       logger.logError('ohd:reprint:create error', error, { jobId });
+      return { success: false, error: error.message };
+    }
+  });
+
+  /**
+   * ohd:reprint:list-eligible-controllers
+   * Payload:  { jobId }
+   * Returns:  { success: true, controllers: Array<{id, name, isParentRoute}> }
+   *           { success: false, error }
+   *
+   * Powers the Job Review "Reprint to…" chevron menu. See
+   * routing-service.listEligibleReprintControllers for the eligibility
+   * predicate. The renderer decides the collapse: length === 1 → plain
+   * button, length > 1 → split button with chevron.
+   *
+   * Reads the parent job from the local job cache so eligibility is
+   * derived from the current (productCode, options) — the same values
+   * dispatch will see. A mapping change between menu render and click
+   * still surfaces as a stale-mapping error at dispatch time (locked by
+   * print-service-reprint-controller-selection.test.js).
+   */
+  ipcMain.handle('ohd:reprint:list-eligible-controllers', async (event, { jobId }) => {
+    try {
+      const { jobs } = jobService.getLocalJobs();
+      const rawJobId = String(jobId);
+      const lastUnderscore = rawJobId.lastIndexOf('_');
+      const apiJobId = lastUnderscore !== -1
+        ? rawJobId.substring(lastUnderscore + 1)
+        : rawJobId;
+
+      const parentJob = jobs.find(j => String(j.id) === apiJobId);
+      if (!parentJob) {
+        return { success: false, error: `Parent job ${jobId} not found in local cache.` };
+      }
+      const controllers = routingService.listEligibleReprintControllers(parentJob);
+      return { success: true, controllers };
+    } catch (error) {
+      logger.logError('ohd:reprint:list-eligible-controllers error', error, { jobId });
       return { success: false, error: error.message };
     }
   });
