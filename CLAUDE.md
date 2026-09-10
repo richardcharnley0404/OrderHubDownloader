@@ -434,6 +434,59 @@ with no visible change, check `git diff --ignore-cr-at-eol` before believing it.
   locked implicitly by every rotation-off record-shape test in
   the same file — a second writer would produce different
   shapes for the same input.
+- **`config-service.js` persists via an explicit per-key list —
+  a new Settings field must be added to the schema, `save()`
+  AND `getAll()`, or the value is silently dropped with no
+  error at any layer.** Save reports success, the Settings
+  dialog closes cleanly, the tick appears to stick in the
+  form; but the runtime reads `undefined` and every feature
+  gated on the value stays inert. This is what shipped as
+  1.16.3's FTP Copy mode + retention sweep and reached a
+  lab that had ticked the boxes, believed the settings were
+  on, and got 1.16.2 behaviour (files still deleted from
+  the shared FTP folder after download; sweep never ran).
+  What let 1.16.3 ship with the hole was that NOTHING
+  round-tripped these keys through the persistence layer —
+  the pre-1.16.3 tests handed `options.keepFilesOnServer`
+  straight into `ftp-service.js`'s `_downloadDirectory`, so
+  the schema / `save()` / `getAll()` triple was never on the
+  wire for these keys. A `configService.save({<key>: true})`
+  → `configService.getAll()` assertion of the shape now in
+  `config-service-settings-round-trip.test.js:87-88` catches
+  this class of defect immediately, and IS the mandatory
+  contract for a new Settings field. The trap to warn
+  about — the reason a "persistence test exists" claim is
+  not enough on its own — is the generic `set(key, value)`
+  / `get(key)` pair (`config-service.js:1354` and `:1361`),
+  which reads and writes the store directly and bypasses
+  the enumerated lists entirely: a test written against
+  that pair round-trips cleanly while the Settings-UI path
+  stays broken. Prove persistence through `save()` +
+  `getAll()`, never through the generic pair. Fixed in
+  1.16.4 by adding
+  the four missing keys — `ftpKeepFilesOnServer`,
+  `ftpRetentionSweepEnabled`, `ftpRetentionSweepDays`,
+  `ftpRetentionSweepDryRun` — to the schema, to `save()`
+  with `Boolean(...)` wraps so `false` explicitly survives
+  and an integer clamp on the days field, and to `getAll()`.
+  Locked by the source-scan tripwire in
+  `src/main/services/__tests__/config-service-settings-round-trip.test.js`:
+  it reads `index.html`, extracts every `name="…"` inside
+  `#settingsForm`, and asserts each name appears in BOTH
+  `this.store.set('<name>', …)` AND `<name>: this.store.get('<name>')`
+  in `config-service.js`. The `NON_PERSISTED` exception list
+  in the same test names the six legitimate UI-to-storage
+  mappings and their targets — `aiQualityHoldAutoPrint` maps
+  to the `aiQualityMode` enum in `renderer.js`, and the five
+  `pc*` toggles are folded into the nested `perfectlyClear`
+  aggregate by `readPerfectlyClearFromUI()`. DO NOT extend
+  that exception list to silence a fresh flag without
+  writing down which storage key the field maps to and
+  where — a blank exception is indistinguishable from the
+  defect this test exists to catch. DO NOT delete the
+  tripwire as noise; the class of bug it prevents is a
+  ticked-and-saved Setting that is inert at runtime with
+  no error signal anywhere.
 
 ## Misnamed / dead code — don't be misled
 
